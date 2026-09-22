@@ -1113,4 +1113,380 @@ mod tests {
         });
         assert!(serde_json::from_value::<IngestEvent>(body).is_err());
     }
+
+    // ─── Redis/DB-backed sweep and reconciliation paths ───────────
+    //
+    // Fault injection: each test clones its own canonical database, so
+    // renaming a table deterministically produces the production 42P01
+    // (missing relation) classification without touching any other test.
+
+    /// Unique per-run tenant ids: derived markers, metering rows and queue
+    /// rows persist, so a repeated invocation of a test must never collide
+    /// with a previous run's data.
+    fn unique_tenant(tag: &str) -> String {
+        let keep = 26usize.saturating_sub(tag.len() + 1).min(12);
+        format!(
+            "{tag}_{}",
+            &Uuid::new_v4().simple().to_string()[..keep.max(4)]
+        )
+    }
+
+    async fn provision_env(tag: &str) -> crate::test_support::TestEnv {
+        crate::test_support::provision(tag)
+            .await
+            .expect("TEST_DATABASE_URL/redis must be configured for this suite")
+    }
+
+    async fn rename_table(pool: &sqlx::PgPool, from: &str, to: &str) {
+        sqlx::query(&format!(r#"ALTER TABLE "{from}" RENAME TO "{to}""#))
+            .execute(pool)
+            .await
+            .expect("rename table");
+    }
+
+    fn yesterday(now: DateTime<Utc>) -> NaiveDate {
+        sweep_target_day(now)
+    }
+
+    async fn seed_sent_queue_row(pool: &sqlx::PgPool, tenant_id: &str, day: NaiveDate) {
+        sqlx::query(
+            r#"
+            INSERT INTO email_queue (tenant_id, from_address, to_addresses, subject, status, sent_at, created_at, updated_at)
+            VALUES ($1, 'noreply@example.com', ARRAY['rcpt@example.com'], 'cov', 'sent',
+                    $2::timestamptz, $2::timestamptz, $2::timestamptz)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(day.and_hms_opt(12, 0, 0).unwrap().and_utc())
+        .execute(pool)
+        .await
+        .expect("seed sent queue row");
+    }
+
+    #[tokio::test]
+    async fn derived_aggregate_zero_quantity_is_marker_only_and_never_double_records() {
+        let owned = provision_env("ingest_zero_marker").await;
+        let pool = &owned.pool;
+        let day = NaiveDate::from_ymd_opt(2026, 8, 20).unwrap();
+        let now = Utc::now();
+        let t_zero = unique_tenant("ing_zero_t");
+
+        // Fresh non-zero aggregate: recorded with event + audit.
+        let fresh = record_derived_daily_aggregate(
+            pool,
+            &t_zero,
+            "emails_delivered",
+            day,
+            SOURCE_EMAIL_DELIVERY,
+            5,
+            now,
+        )
+        .await
+        .expect("fresh aggregate");
+        assert!(fresh);
+
+        // Zero quantity: a marker-only row, no metering event.
+        let marker_only = record_derived_daily_aggregate(
+            pool,
+            &t_zero,
+            "emails_delivered",
+            day,
+            SOURCE_WEBHOOK_EVENTS,
+            0,
+            now,
+        )
+        .await
+        .expect("marker-only aggregate");
+        assert!(!marker_only, "zero quantity records a marker only");
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = 'ing_zero_t' AND event_type = 'webhooks_delivered'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count");
+        assert_eq!(events, 0, "marker-only rows never meter");
+
+        // Duplicate marker: the idempotency gate rolls back and reports no.
+        let duplicate = record_derived_daily_aggregate(
+            pool,
+            &t_zero,
+            "emails_delivered",
+            day,
+            SOURCE_EMAIL_DELIVERY,
+            5,
+            now,
+        )
+        .await
+        .expect("duplicate aggregate");
+        assert!(!duplicate, "the marker gate makes re-runs idempotent");
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_sources_whose_backing_tables_are_missing() {
+        let owned = provision_env("ingest_sweep_skip").await;
+        let pool = &owned.pool;
+        rename_table(pool, "email_queue", "email_queue_gone").await;
+        rename_table(pool, "webhook_events", "webhook_events_gone").await;
+        rename_table(pool, "dedicated_ips", "dedicated_ips_gone").await;
+        rename_table(pool, "tenant_costs", "tenant_costs_gone").await;
+
+        let now = Utc::now();
+        let result = sweep_derived_usage(pool, now).await.expect("sweep runs");
+        let mut skipped = result.skipped_sources.clone();
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            vec![
+                "dedicated_ips".to_string(),
+                "email_queue".to_string(),
+                "tenant_costs".to_string(),
+                "webhook_events".to_string(),
+            ]
+        );
+        assert_eq!(result.emails_delivered, 0);
+        assert_eq!(result.webhooks_delivered, 0);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn emails_delivered_falls_back_to_queue_only_when_delivery_log_is_missing() {
+        let owned = provision_env("ingest_queue_only_fallback").await;
+        let pool = &owned.pool;
+        // The combined derivation reads email_delivery_log first; without
+        // that table the sweep must derive from the queue alone.
+        rename_table(pool, "email_delivery_log", "email_delivery_log_gone").await;
+
+        let day = yesterday(Utc::now());
+        let t_qfb = unique_tenant("ing_q_fallback_tenant");
+        crate::test_support::seed_tenant(pool, &t_qfb, "growth").await;
+        seed_sent_queue_row(pool, &t_qfb, day).await;
+
+        let result = sweep_derived_usage(pool, Utc::now()).await.expect("sweep");
+        assert_eq!(result.emails_delivered, 1, "one sent queue row derived");
+        assert!(
+            result.skipped_sources.is_empty(),
+            "queue-only derive is not a skip: {:?}",
+            result.skipped_sources
+        );
+
+        // Re-running derives nothing new (marker idempotency).
+        let rerun = sweep_derived_usage(pool, Utc::now()).await.expect("rerun");
+        assert_eq!(rerun.emails_delivered, 0);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn full_sweep_derives_every_source_and_reconciles_with_candidates() {
+        let owned = provision_env("ingest_full_sweep").await;
+        let pool = &owned.pool;
+        let tenant = &unique_tenant("ing_full_t");
+        crate::test_support::seed_tenant(pool, tenant, "growth").await;
+        let t_full_q = unique_tenant("ing_full_q_tenant");
+        crate::test_support::seed_tenant(pool, &t_full_q, "growth").await;
+        let day = yesterday(Utc::now());
+        let (day_start, _day_end) = day_bounds(day);
+
+        // Reserved ≫ delivered: 100 reserved sends vs 10 delivered.
+        for (event_type, quantity) in [("emails_sent", 100), ("emails_delivered", 10)] {
+            sqlx::query(
+                r#"
+                INSERT INTO metering_events (id, tenant_id, event_type, quantity, "timestamp", metadata)
+                VALUES ($1, $2, $3, $4, $5, '{}')
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(event_type)
+            .bind(quantity)
+            .bind(day_start + chrono::Duration::hours(5))
+            .execute(pool)
+            .await
+            .expect("seed metering");
+        }
+        // One delivered queue row (derived) + bounce + complaint rows.
+        seed_sent_queue_row(pool, &t_full_q, day).await;
+        sqlx::query(
+            r#"
+            INSERT INTO bounce_analytics_daily (id, tenant_id, date, total_bounces, hard_bounces, soft_bounces, transient_bounces, created_at, updated_at)
+            VALUES (gen_random_uuid(), $1, $2, 5, 2, 3, 0, now(), now())
+            "#,
+        )
+        .bind(tenant)
+        .bind(day)
+        .execute(pool)
+        .await
+        .expect("seed bounce");
+        sqlx::query(
+            r#"
+            INSERT INTO complaints (id, tenant_id, recipient, created_at)
+            VALUES (gen_random_uuid(), $1, 'rcpt@example.com', $2)
+            "#,
+        )
+        .bind(tenant)
+        .bind(day_start + chrono::Duration::hours(6))
+        .execute(pool)
+        .await
+        .expect("seed complaint");
+
+        let now = Utc::now();
+        let sweep = sweep_derived_usage(pool, now).await.expect("sweep");
+        assert_eq!(sweep.emails_delivered, 1);
+        assert!(sweep.skipped_sources.is_empty());
+
+        let summary = reconcile_daily_deliveries(pool, now)
+            .await
+            .expect("reconciliation");
+        assert_eq!(summary.day, day.to_string());
+        assert!(summary.tenants_compared >= 1);
+        assert_eq!(summary.reports_written, 1);
+        assert_eq!(summary.overage_candidates, 1, "reserved≫delivered flags");
+        assert!(summary.skipped_sources.is_empty());
+
+        // Re-running rewrites the same idempotent report row, so no new
+        // writes are counted.
+        let rerun = reconcile_daily_deliveries(pool, now).await.expect("rerun");
+        assert_eq!(rerun.reports_written, 0);
+        assert_eq!(rerun.overage_candidates, 0);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn reconciliation_degrades_to_queue_and_self_hosted_sources_when_tables_are_missing() {
+        let owned = provision_env("ingest_recon_degrade").await;
+        let pool = &owned.pool;
+        let t_degrade_b = unique_tenant("ing_degrade_bounced_t");
+        let t_degrade = unique_tenant("ing_degrade_t");
+        crate::test_support::seed_tenant(pool, &t_degrade_b, "growth").await;
+        crate::test_support::seed_tenant(pool, &t_degrade, "growth").await;
+        let day = yesterday(Utc::now());
+        let (day_start, day_end) = day_bounds(day);
+
+        // Phase 1: complaints missing, self-hosted feed present — the
+        // complaint collector falls back to self_hosted_complaints.
+        rename_table(pool, "complaints", "complaints_gone").await;
+        sqlx::query(
+            r#"
+            INSERT INTO self_hosted_complaints (id, tenant_id, source_ip, complaint_type, recipient, received_at)
+            VALUES (gen_random_uuid(), $1, '127.0.0.1', 'abuse', 'rcpt@example.com', $2)
+            "#,
+        )
+        .bind(&t_degrade)
+        .bind(day_start + chrono::Duration::hours(1))
+        .execute(pool)
+        .await
+        .expect("seed self-hosted complaint");
+        let complaints = collect_complaint_counts(pool, day_start, day_end)
+            .await
+            .expect("complaint fallback works");
+        assert_eq!(complaints.get(&t_degrade), Some(&1));
+
+        // Phase 2: the bounce aggregate table is present but EMPTY for the
+        // day — the collector falls back to terminal-bounced queue rows.
+        sqlx::query(
+            r#"
+            INSERT INTO email_queue (tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+            VALUES ($1, 'noreply@example.com', ARRAY['rcpt@example.com'], 'cov', 'bounced',
+                    $2::timestamptz, $2::timestamptz)
+            "#,
+        )
+        .bind(&t_degrade_b)
+        .bind(day_start + chrono::Duration::hours(9))
+        .execute(pool)
+        .await
+        .expect("seed bounced queue row");
+        let bounces = collect_bounce_counts(pool, day)
+            .await
+            .expect("bounce fallback works");
+        assert_eq!(bounces.get(&t_degrade_b), Some(&1));
+
+        // Phase 3: with both aggregate tables (and the complaint fallback)
+        // gone, the reconciliation summary reports every skipped source and
+        // still completes.
+        rename_table(
+            pool,
+            "bounce_analytics_daily",
+            "bounce_analytics_daily_gone",
+        )
+        .await;
+        rename_table(
+            pool,
+            "self_hosted_complaints",
+            "self_hosted_complaints_gone",
+        )
+        .await;
+        let now = Utc::now();
+        let summary = reconcile_daily_deliveries(pool, now)
+            .await
+            .expect("reconciliation with missing optional tables");
+        let mut skipped = summary.skipped_sources.clone();
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            vec![
+                "bounce_analytics_daily".to_string(),
+                "complaints".to_string()
+            ],
+            "both missing aggregates are reported as skipped"
+        );
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn reconciliation_fails_loudly_when_bounce_or_complaint_queries_break() {
+        let owned = provision_env("ingest_recon_hard_fail").await;
+        let pool = &owned.pool;
+
+        // Recreate the aggregated tables with the WRONG shape: queries now
+        // fail with a non-42P01 error, which must NOT be swallowed as a
+        // skip — the sweep fails loudly instead.
+        rename_table(
+            pool,
+            "bounce_analytics_daily",
+            "bounce_analytics_daily_real",
+        )
+        .await;
+        sqlx::query("CREATE TABLE bounce_analytics_daily (unrelated integer)")
+            .execute(pool)
+            .await
+            .expect("break bounce table");
+        let broke_bounces = reconcile_daily_deliveries(pool, Utc::now()).await;
+        assert!(
+            matches!(&broke_bounces, Err(message) if message.contains("bounce")),
+            "unexpected: {broke_bounces:?}"
+        );
+        // Restore and break complaints the same way.
+        sqlx::query("DROP TABLE bounce_analytics_daily")
+            .execute(pool)
+            .await
+            .expect("drop broken bounce table");
+        rename_table(
+            pool,
+            "bounce_analytics_daily_real",
+            "bounce_analytics_daily",
+        )
+        .await;
+
+        rename_table(pool, "complaints", "complaints_real").await;
+        sqlx::query("CREATE TABLE complaints (unrelated integer)")
+            .execute(pool)
+            .await
+            .expect("break complaints table");
+        sqlx::query("DROP TABLE self_hosted_complaints")
+            .execute(pool)
+            .await
+            .expect("drop complaint fallback");
+        let broke_complaints = reconcile_daily_deliveries(pool, Utc::now()).await;
+        assert!(
+            matches!(&broke_complaints, Err(message) if message.contains("complaint")),
+            "unexpected: {broke_complaints:?}"
+        );
+
+        owned.finish().await;
+    }
 }

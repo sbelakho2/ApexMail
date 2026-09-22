@@ -578,9 +578,10 @@ impl EventProcessor {
 
         drop(conn);
 
-        if raw.is_empty() {
-            return Ok(());
-        }
+        // Note: `raw` can only be empty when `llen` was > 0 but a concurrent
+        // consumer drained the list between LLEN and the atomic drain. The
+        // `events.is_empty()` guard below covers that shape (parsing nothing
+        // yields nothing), so no separate early return is needed here.
 
         let events: Vec<TrackingEvent> = parse_wal_entries(&raw);
         if events.is_empty() {

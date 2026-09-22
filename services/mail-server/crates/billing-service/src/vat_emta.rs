@@ -281,9 +281,11 @@ impl EmtaClient {
         soap_envelope: &str,
         idempotency_key: &str,
     ) -> Result<String, EmtaError> {
-        let mut last_transport_error = None;
-
-        for attempt in 0..EMTA_MAX_SUBMISSION_ATTEMPTS {
+        // A `loop` (no break) has type `!`: every arm either returns the final
+        // outcome or retries, so the function needs no unreachable tail after
+        // the loop. `attempt` counts the retries performed so far.
+        let mut attempt = 0usize;
+        loop {
             let response = self
                 .http
                 .post(url)
@@ -319,6 +321,7 @@ impl EmtaClient {
                             "retrying transient EMTA submission failure"
                         );
                         sleep(delay).await;
+                        attempt += 1;
                         continue;
                     }
 
@@ -338,8 +341,8 @@ impl EmtaClient {
                             idempotency_key = %idempotency_key,
                             "retrying EMTA submission after transport error"
                         );
-                        last_transport_error = Some(error.to_string());
                         sleep(delay).await;
+                        attempt += 1;
                         continue;
                     }
 
@@ -347,11 +350,6 @@ impl EmtaClient {
                 }
             }
         }
-
-        Err(EmtaError::Http(format!(
-            "Request failed after {EMTA_MAX_SUBMISSION_ATTEMPTS} attempts: {}",
-            last_transport_error.unwrap_or_else(|| "unknown transport error".into())
-        )))
     }
 
     fn submission_idempotency_key(kmd_id: Uuid) -> String {
@@ -445,7 +443,14 @@ impl EmtaClient {
                 };
                 format!("{:04}-02-{:02}", kmd.tax_year, feb_days)
             }
-            _ => unreachable!("tax_month must be 1–12"),
+            // A KMD row outside 1–12 is a data bug: fail the build with an
+            // honest error instead of panicking at filing time.
+            _ => {
+                return Err(EmtaError::XmlBuild(format!(
+                    "KMD tax month {} is outside 1–12",
+                    kmd.tax_month
+                )))
+            }
         };
 
         // Extract rate buckets
@@ -1112,5 +1117,488 @@ mod tests {
         let config = EmtaConfig::from_env();
         // In test environment, env vars won't be set, so defaults apply.
         assert!(!config.enabled);
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage residuals: every EmtaError arm, every config/TLS arm, the
+    // retry ladder and the status-check client — driven against loopback
+    // TCP mocks (no real network). `start_paused` makes the production
+    // 250ms/500ms backoff sleeps advance instantly on tokio's virtual
+    // clock, so the retry tests stay deterministic and fast.
+    // ------------------------------------------------------------------
+
+    const FIXTURE_CERT_PEM: &str = include_str!("test_fixtures/emta_test_cert.pem");
+    const FIXTURE_KEY_PEM: &str = include_str!("test_fixtures/emta_test_key.pem");
+
+    /// Write the two PEM halves to distinct temp files (unique per caller via
+    /// `tag`) and return their paths. Uses the configured temp dir, not the
+    /// repository, so parallel test runs never collide.
+    fn write_tls_fixtures(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir();
+        let cert_path = dir.join(format!("emta_cov_cert_{tag}.pem"));
+        let key_path = dir.join(format!("emta_cov_key_{tag}.pem"));
+        std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert fixture");
+        std::fs::write(&key_path, FIXTURE_KEY_PEM).expect("write key fixture");
+        (cert_path, key_path)
+    }
+
+    fn enabled_config(base_url: &str, cert: &str, key: &str) -> EmtaConfig {
+        EmtaConfig {
+            api_base_url: base_url.to_string(),
+            client_cert_path: cert.to_string(),
+            client_key_path: key.to_string(),
+            company_registry_code: "12345678".into(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn emta_error_display_covers_every_variant() {
+        assert_eq!(
+            EmtaError::Config("c".into()).to_string(),
+            "EMTA config error: c"
+        );
+        assert_eq!(
+            EmtaError::Http("h".into()).to_string(),
+            "EMTA HTTP error: h"
+        );
+        assert_eq!(
+            EmtaError::Api {
+                status: 418,
+                body: "b".into()
+            }
+            .to_string(),
+            "EMTA API error (HTTP 418): b"
+        );
+        assert_eq!(
+            EmtaError::ResponseParse("p".into()).to_string(),
+            "EMTA response parse error: p"
+        );
+        assert_eq!(
+            EmtaError::XmlBuild("x".into()).to_string(),
+            "EMTA XML build error: x"
+        );
+        assert_eq!(EmtaError::Tls("t".into()).to_string(), "EMTA TLS error: t");
+        // std::error::Error is implemented (no custom source chains).
+        let _: &dyn std::error::Error = &EmtaError::Config("c".into());
+    }
+
+    #[test]
+    fn from_config_reports_each_missing_config_field() {
+        // Empty base URL.
+        let err = match EmtaClient::from_config(enabled_config("  ", "/c.pem", "/k.pem")) {
+            Err(err) => err,
+            Ok(_) => panic!("empty base url must be refused"),
+        };
+        assert!(matches!(err, EmtaError::Config(ref m) if m.contains("EMTA_API_BASE_URL")));
+        // Empty registry code.
+        let err = match EmtaClient::from_config(EmtaConfig {
+            api_base_url: "https://xroad.ee".into(),
+            client_cert_path: "/c.pem".into(),
+            client_key_path: "/k.pem".into(),
+            company_registry_code: " ".into(),
+            enabled: true,
+        }) {
+            Err(err) => err,
+            Ok(_) => panic!("empty registry code must be refused"),
+        };
+        assert!(
+            matches!(err, EmtaError::Config(ref m) if m.contains("EMTA_COMPANY_REGISTRY_CODE"))
+        );
+        // Empty key path (the cert path arm is covered by the pre-existing
+        // requires_tls_paths test).
+        let err = match EmtaClient::from_config(enabled_config("https://xroad.ee", "/c.pem", "")) {
+            Err(err) => err,
+            Ok(_) => panic!("empty key path must be refused"),
+        };
+        assert!(matches!(err, EmtaError::Config(ref m) if m.contains("EMTA_CLIENT_KEY_PATH")));
+    }
+
+    #[test]
+    fn from_config_reports_missing_key_file_and_unparsable_pem() {
+        let dir = std::env::temp_dir();
+        let cert_path = dir.join("emta_cov_ok_cert.pem");
+        std::fs::write(&cert_path, FIXTURE_CERT_PEM).expect("write cert");
+        // Cert exists, key path does not → key read arm.
+        let err = match EmtaClient::from_config(enabled_config(
+            "https://xroad.ee",
+            cert_path.to_str().unwrap(),
+            &dir.join("emta_cov_missing_key.pem").to_string_lossy(),
+        )) {
+            Err(err) => err,
+            Ok(_) => panic!("missing key file must be refused"),
+        };
+        assert!(matches!(err, EmtaError::Tls(ref m) if m.contains("private key")));
+
+        // Both files exist but are not parseable PEM → Identity::from_pem arm.
+        let bad_cert = dir.join("emta_cov_bad_cert.pem");
+        let bad_key = dir.join("emta_cov_bad_key.pem");
+        std::fs::write(&bad_cert, "not a certificate\n").unwrap();
+        std::fs::write(&bad_key, "not a key\n").unwrap();
+        let err = match EmtaClient::from_config(enabled_config(
+            "https://xroad.ee",
+            bad_cert.to_str().unwrap(),
+            bad_key.to_str().unwrap(),
+        )) {
+            Err(err) => err,
+            Ok(_) => panic!("unparsable pem must be refused"),
+        };
+        assert!(matches!(err, EmtaError::Tls(ref m) if m.contains("parse")));
+    }
+
+    #[test]
+    fn from_config_builds_an_mtls_client_from_valid_pem_files() {
+        let (cert, key) = write_tls_fixtures("valid");
+        let client = EmtaClient::from_config(enabled_config(
+            "https://xroad.ee",
+            cert.to_str().unwrap(),
+            key.to_str().unwrap(),
+        ))
+        .expect("valid pem pair builds an mTLS client");
+        assert!(client.is_ready());
+    }
+
+    #[test]
+    fn is_ready_rejects_each_incomplete_config() {
+        // Enabled but empty base URL.
+        let client = EmtaClient::new(
+            EmtaConfig {
+                api_base_url: String::new(),
+                client_cert_path: "/c.pem".into(),
+                client_key_path: "/k.pem".into(),
+                company_registry_code: "12345678".into(),
+                enabled: true,
+            },
+            HttpClient::new(),
+        );
+        assert!(!client.is_ready());
+        // Enabled, complete URL, but no cert/key paths.
+        let client = EmtaClient::new(
+            EmtaConfig {
+                api_base_url: "https://xroad.ee".into(),
+                client_cert_path: String::new(),
+                client_key_path: String::new(),
+                company_registry_code: "12345678".into(),
+                enabled: true,
+            },
+            HttpClient::new(),
+        );
+        assert!(!client.is_ready());
+    }
+
+    #[tokio::test]
+    async fn submit_kmd_return_refuses_when_not_ready() {
+        let client = EmtaClient::new(
+            EmtaConfig {
+                api_base_url: String::new(),
+                client_cert_path: String::new(),
+                client_key_path: String::new(),
+                company_registry_code: String::new(),
+                enabled: false,
+            },
+            HttpClient::new(),
+        );
+        let err = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("disabled client must refuse to file");
+        assert!(matches!(err, EmtaError::Config(m) if m.contains("EMTA is disabled")));
+    }
+
+    // ---------------- loopback TCP mock ----------------
+
+    /// One scripted behaviour per connection, executed in order. `Drop` on a
+    /// fresh connection without bytes simulates a transport failure; a
+    /// `SendBytes` script writes a raw HTTP response (optionally truncating
+    /// the body vs Content-Length to force a body-read error).
+    enum MockStep {
+        /// Accept and immediately close: reqwest sees a transport error.
+        CloseWithoutResponse,
+        /// Send a complete HTTP response with this status and body.
+        Respond(u16, String),
+        /// Send Content-Length larger than the actual body, then close:
+        /// reqwest's body read fails while the request itself succeeded.
+        TruncatedBody(u16, String),
+    }
+
+    /// Spawn a loopback mock serving `steps` in strict order; returns the
+    /// base URL. Excess connections get a 500 so test assertions on call
+    /// counts stay meaningful.
+    async fn spawn_sequenced_mock(steps: Vec<MockStep>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback mock");
+        let addr = listener.local_addr().expect("addr");
+        let steps = std::sync::Arc::new(std::sync::Mutex::new(steps));
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let step = {
+                    let mut guard = steps.lock().expect("mock steps lock");
+                    if guard.is_empty() {
+                        None
+                    } else {
+                        Some(guard.remove(0))
+                    }
+                };
+                let _ = handle_mock_connection(socket, step).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    async fn handle_mock_connection(
+        mut socket: tokio::net::TcpStream,
+        step: Option<MockStep>,
+    ) -> std::io::Result<()> {
+        // Drain the request head (best effort) so the client can finish
+        // writing before we respond/close.
+        let mut buf = [0u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+        match step {
+            Some(MockStep::CloseWithoutResponse) | None => {
+                // Drop without responding (None: steps exhausted).
+                Ok(())
+            }
+            Some(MockStep::Respond(status, body)) => {
+                write_http_response(&mut socket, status, body.as_bytes(), body.len()).await
+            }
+            Some(MockStep::TruncatedBody(status, body)) => {
+                // Claim far more bytes than we send, then hang up mid-body.
+                write_http_response(&mut socket, status, body.as_bytes(), 10_000).await
+            }
+        }
+    }
+
+    async fn write_http_response(
+        socket: &mut tokio::net::TcpStream,
+        status: u16,
+        body: &[u8],
+        content_length: usize,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let reason = match status {
+            200 => "OK",
+            404 => "Not Found",
+            500 => "Internal Server Error",
+            429 => "Too Many Requests",
+            _ => "Unknown",
+        };
+        let head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: text/xml\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n");
+        socket.write_all(head.as_bytes()).await?;
+        socket.write_all(body).await?;
+        socket.flush().await
+    }
+
+    fn ready_client(base_url: &str) -> EmtaClient {
+        EmtaClient::new(
+            enabled_config(base_url, "/certs/cert.pem", "/certs/key.pem"),
+            HttpClient::new(),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn submit_retries_transient_500_then_succeeds() {
+        let base = spawn_sequenced_mock(vec![
+            MockStep::Respond(500, "<error/>".into()),
+            MockStep::Respond(200, "<xrd:accepted>true</xrd:accepted>".into()),
+        ])
+        .await;
+        let client = ready_client(&base);
+        let result = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect("second attempt succeeds after one transient 500");
+        assert!(result.accepted);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn submit_gives_up_on_persistent_500_with_api_error() {
+        let base = spawn_sequenced_mock(vec![
+            MockStep::Respond(429, "slow down".into()),
+            MockStep::Respond(429, "slow down".into()),
+            MockStep::Respond(500, "still broken".into()),
+        ])
+        .await;
+        let client = ready_client(&base);
+        let err = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("all three attempts fail");
+        assert!(matches!(err, EmtaError::Api { status: 500, .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn submit_does_not_retry_non_retryable_400() {
+        let base = spawn_sequenced_mock(vec![MockStep::Respond(400, "bad request".into())]).await;
+        let client = ready_client(&base);
+        let err = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("400 must fail immediately");
+        assert!(matches!(err, EmtaError::Api { status: 400, .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn submit_retries_transport_failures_then_fails_after_max_attempts() {
+        // Three connection drops: two retried, the third surfaces as Http.
+        let base = spawn_sequenced_mock(vec![
+            MockStep::CloseWithoutResponse,
+            MockStep::CloseWithoutResponse,
+            MockStep::CloseWithoutResponse,
+        ])
+        .await;
+        let client = ready_client(&base);
+        let err = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("every attempt drops the connection");
+        assert!(
+            matches!(err, EmtaError::Http(ref m) if m.contains("Request failed:")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn submit_maps_a_truncated_200_body_to_a_transport_error() {
+        let base = spawn_sequenced_mock(vec![MockStep::TruncatedBody(
+            200,
+            "<partial>this body is far shorter than its Content-Length".into(),
+        )])
+        .await;
+        let client = ready_client(&base);
+        let err = client
+            .submit_kmd_return(&sample_kmd_result(), &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("truncated body must surface as Http");
+        assert!(
+            matches!(err, EmtaError::Http(ref m) if m.contains("Failed to read response body")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn check_submission_status_covers_success_api_and_transport_arms() {
+        // Success body.
+        let base =
+            spawn_sequenced_mock(vec![MockStep::Respond(200, "<status>ok</status>".into())]).await;
+        let client = ready_client(&base);
+        let body = client
+            .check_submission_status("REF-1")
+            .await
+            .expect("status check succeeds");
+        assert!(body.contains("<status>ok</status>"));
+
+        // Non-success status → Api error.
+        let base =
+            spawn_sequenced_mock(vec![MockStep::Respond(404, "no such filing".into())]).await;
+        let client = ready_client(&base);
+        let err = client
+            .check_submission_status("REF-2")
+            .await
+            .expect_err("404 surfaces as Api");
+        assert!(matches!(err, EmtaError::Api { status: 404, .. }));
+
+        // Disabled/unconfigured client → Config error before any request.
+        let disabled = EmtaClient::new(
+            EmtaConfig {
+                api_base_url: String::new(),
+                client_cert_path: String::new(),
+                client_key_path: String::new(),
+                company_registry_code: String::new(),
+                enabled: false,
+            },
+            HttpClient::new(),
+        );
+        let err = disabled
+            .check_submission_status("REF-3")
+            .await
+            .expect_err("disabled client refuses status checks");
+        assert!(matches!(err, EmtaError::Config(_)));
+
+        // Dead local port → transport Http error.
+        let dead = ready_client("http://127.0.0.1:1");
+        let err = dead
+            .check_submission_status("REF-4")
+            .await
+            .expect_err("dead port surfaces as Http");
+        assert!(matches!(err, EmtaError::Http(m) if m.contains("Status check failed")));
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_a_kmd_row_with_an_out_of_range_tax_month() {
+        let client = ready_client("http://127.0.0.1:1"); // never reached
+        let mut kmd = sample_kmd_result();
+        kmd.tax_month = 13;
+        let err = client
+            .submit_kmd_return(&kmd, &sample_breakdown(), Uuid::new_v4())
+            .await
+            .expect_err("tax month 13 must fail the XML build");
+        assert!(
+            matches!(err, EmtaError::XmlBuild(ref m) if m.contains("outside 1–12")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn kmd_period_end_handles_leap_and_non_leap_february() {
+        let client = ready_client("https://xroad.ee");
+        let mut kmd = sample_kmd_result();
+
+        kmd.tax_year = 2026;
+        kmd.tax_month = 2;
+        let xml = client.build_kmd_inf_xml(&kmd, &sample_breakdown()).unwrap();
+        assert!(
+            xml.contains("<PeriodEnd>2026-02-28</PeriodEnd>"),
+            "non-leap"
+        );
+
+        kmd.tax_year = 2024;
+        let xml = client.build_kmd_inf_xml(&kmd, &sample_breakdown()).unwrap();
+        assert!(xml.contains("<PeriodEnd>2024-02-29</PeriodEnd>"), "leap");
+
+        // A 31-day month and a 30-day month (the ladder's other arms).
+        kmd.tax_month = 1;
+        let xml = client.build_kmd_inf_xml(&kmd, &sample_breakdown()).unwrap();
+        assert!(xml.contains("<PeriodEnd>2024-01-31</PeriodEnd>"));
+        kmd.tax_month = 11;
+        let xml = client.build_kmd_inf_xml(&kmd, &sample_breakdown()).unwrap();
+        assert!(xml.contains("<PeriodEnd>2024-11-30</PeriodEnd>"));
+    }
+
+    #[test]
+    fn parse_acknowledgment_falls_back_to_a_snippet_for_unparsed_bodies() {
+        let client = ready_client("https://xroad.ee");
+
+        // Short unparsable body: the whole body is echoed.
+        let short = "<html>nope</html>";
+        let result = client
+            .parse_acknowledgment(short, Uuid::nil())
+            .expect("parse never hard-fails");
+        assert_eq!(
+            result.status_message,
+            format!("Received (unparsed): {short}")
+        );
+        assert!(!result.accepted);
+        assert_eq!(result.filing_reference, None);
+
+        // Long unparsable body: truncated to the first 200 chars.
+        let long: String = "x".repeat(500);
+        let result = client
+            .parse_acknowledgment(&long, Uuid::nil())
+            .expect("parse never hard-fails");
+        assert_eq!(
+            result.status_message,
+            format!("Received (unparsed): {}", &long[..200])
+        );
+
+        // accepted=="TRUE" (any casing) counts as accepted.
+        let upper = "<Accepted>TRUE</Accepted>";
+        let result = client
+            .parse_acknowledgment(upper, Uuid::nil())
+            .expect("parse never hard-fails");
+        assert!(result.accepted);
     }
 }

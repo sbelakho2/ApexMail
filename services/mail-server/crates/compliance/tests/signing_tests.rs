@@ -1343,3 +1343,100 @@ fn check_verdict_helpers_behave() {
         "y failed (boom)"
     );
 }
+
+/// A TSA stand-in with fully controlled HTTP status, content type and body
+/// size — drives the transport's response-shape guard arms.
+async fn spawn_raw_tsa_server(status: u16, content_type: String, body: Vec<u8>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let read = socket.read(&mut chunk).await.expect("read");
+            if read == 0 {
+                return;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if find_header_end(&buffer).is_none() {
+                continue;
+            }
+            let head = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.expect("write head");
+            socket.write_all(&body).await.expect("write body");
+            socket.shutdown().await.ok();
+            return;
+        }
+    });
+    format!("http://127.0.0.1:{port}/tsa")
+}
+
+/// A non-200 TSA answer maps to `HttpStatus` (with the code preserved).
+#[tokio::test]
+async fn transport_maps_a_non_200_tsa_answer_to_http_status() {
+    let url = spawn_raw_tsa_server(500, "application/timestamp-reply".into(), Vec::new()).await;
+    let config = compliance::signing::timestamp::TsaConfig::new(url)
+        .expect("config")
+        .with_timeout_secs(5);
+    let client = TimeStampClient::new(config).expect("client");
+    let err = client
+        .timestamp_at(FIXTURE_DOCUMENT, HashAlgorithm::Sha256, fixture_now())
+        .await
+        .expect_err("500 must be an error");
+    match err {
+        TimeStampError::HttpStatus { status } => assert_eq!(status, 500),
+        other => panic!("expected HttpStatus, got {other:?}"),
+    }
+}
+
+/// A 200 answer with the wrong content type maps to `WrongContentType`.
+#[tokio::test]
+async fn transport_rejects_a_wrong_content_type() {
+    let url = spawn_raw_tsa_server(
+        200,
+        "text/html".into(),
+        b"<html>not a timestamp</html>".to_vec(),
+    )
+    .await;
+    let config = compliance::signing::timestamp::TsaConfig::new(url)
+        .expect("config")
+        .with_timeout_secs(5);
+    let client = TimeStampClient::new(config).expect("client");
+    let err = client
+        .timestamp_at(FIXTURE_DOCUMENT, HashAlgorithm::Sha256, fixture_now())
+        .await
+        .expect_err("wrong content type must be an error");
+    match err {
+        TimeStampError::WrongContentType { content_type } => {
+            assert_eq!(content_type.as_deref(), Some("text/html"));
+        }
+        other => panic!("expected WrongContentType, got {other:?}"),
+    }
+}
+
+/// A 200 timestamp-reply larger than the configured cap maps to
+/// `ResponseTooLarge` — never an unbounded read.
+#[tokio::test]
+async fn transport_rejects_an_oversized_response() {
+    let url =
+        spawn_raw_tsa_server(200, "application/timestamp-reply".into(), vec![0xAB; 4096]).await;
+    let config = compliance::signing::timestamp::TsaConfig::new(url)
+        .expect("config")
+        .with_max_response_bytes(1024)
+        .with_timeout_secs(5);
+    let client = TimeStampClient::new(config).expect("client");
+    let err = client
+        .timestamp_at(FIXTURE_DOCUMENT, HashAlgorithm::Sha256, fixture_now())
+        .await
+        .expect_err("oversized response must be an error");
+    match err {
+        TimeStampError::ResponseTooLarge { limit } => assert_eq!(limit, 1024),
+        other => panic!("expected ResponseTooLarge, got {other:?}"),
+    }
+}

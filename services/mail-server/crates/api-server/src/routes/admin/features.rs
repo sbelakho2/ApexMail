@@ -446,4 +446,287 @@ mod tests {
             "rolled-back changes must not be audited as applied"
         );
     }
+
+    // ── Coverage residuals: the full create / list / update surface ──
+
+    fn flag_name() -> String {
+        format!("cov-flag-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// list_features executes both paged statements and returns the flag
+    /// rows plus the raw override JSON; offset paging skips seeded rows.
+    #[tokio::test]
+    async fn list_features_returns_flags_and_overrides() {
+        let Some(pool) = crate::test_db::canonical_pool("features_list").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let name = flag_name();
+        sqlx::query(
+            "INSERT INTO feature_flags (id, name, description, enabled, created_at, updated_at)
+             VALUES ($1, $2, 'listed', true, NOW(), NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&name)
+        .execute(&pool)
+        .await
+        .expect("seed flag");
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (flag_key, tenant_id, tenant_name, value)
+             VALUES ($1, 'ten_ovr', 'Override Tenant', 'false'::jsonb)",
+        )
+        .bind(&name)
+        .execute(&pool)
+        .await
+        .expect("seed override");
+
+        // Default limit (the serde default arms the LIMIT 50 path) with
+        // offset 0.
+        let response = list_features(
+            State(state.clone()),
+            admin_auth(),
+            Query(FeatureListQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await
+        .expect("list features");
+        let mine = response
+            .flags
+            .iter()
+            .find(|f| f.name == name)
+            .expect("seeded flag listed");
+        assert!(mine.enabled);
+        assert_eq!(mine.description.as_deref(), Some("listed"));
+        let override_row = response
+            .overrides
+            .iter()
+            .find(|o| o["flag_key"] == name.as_str())
+            .expect("seeded override listed");
+        assert_eq!(override_row["value"], serde_json::json!(false));
+
+        // The overridden flag is invisible on the second page.
+        let paged = list_features(
+            State(state.clone()),
+            admin_auth(),
+            Query(FeatureListQuery {
+                limit: 1,
+                offset: 999,
+            }),
+        )
+        .await
+        .expect("paged list");
+        assert!(
+            !paged.flags.iter().any(|f| f.name == name),
+            "offset beyond the seeded rows returns an empty page"
+        );
+        // Limit clamps to at most 200.
+        let clamped = list_features(
+            State(state.clone()),
+            admin_auth(),
+            Query(FeatureListQuery {
+                limit: 9_999,
+                offset: 0,
+            }),
+        )
+        .await
+        .expect("clamped list");
+        assert!(clamped.flags.len() <= 200);
+
+        // A customer tenant (even with the wildcard scope) is refused.
+        let customer = AuthUser {
+            tenant_id: "ten_customer".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let refused = list_features(
+            State(state.clone()),
+            customer,
+            Query(FeatureListQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await;
+        assert!(matches!(refused, Err(ApiError::Forbidden(_))));
+
+        // A caller without the wildcard scope is refused before the gate.
+        let scopeless = AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["features:read".into()],
+        };
+        let denied = list_features(
+            State(state),
+            scopeless,
+            Query(FeatureListQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err(ApiError::Forbidden(_))));
+    }
+
+    /// create_feature persists the row, invalidates the evaluation cache,
+    /// audits itself, and enforces the 1-100 character name policy.
+    #[tokio::test]
+    async fn create_feature_persists_audits_and_validates() {
+        let Some(pool) = crate::test_db::canonical_pool("features_create").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let name = flag_name();
+
+        let (status, created) = create_feature(
+            State(state.clone()),
+            admin_auth(),
+            Json(CreateFeatureRequest {
+                name: name.clone(),
+                description: Some("created by coverage".into()),
+                enabled: true,
+            }),
+        )
+        .await
+        .expect("create feature");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.name, name);
+        assert!(created.enabled);
+
+        let row: (bool, Option<String>) =
+            sqlx::query_as("SELECT enabled, description FROM feature_flags WHERE id = $1")
+                .bind(created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("created row");
+        assert!(row.0);
+        assert_eq!(row.1.as_deref(), Some("created by coverage"));
+
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs
+             WHERE action = 'control_plane.feature.created' AND resource_id = $1",
+        )
+        .bind(created.id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit log");
+        assert_eq!(audits, 1, "creation is actor-attributed in the audit log");
+
+        // A 101-character name is refused; the empty name too.
+        for bad in ["x".repeat(101), String::new()] {
+            let refused = create_feature(
+                State(state.clone()),
+                admin_auth(),
+                Json(CreateFeatureRequest {
+                    name: bad.clone(),
+                    description: None,
+                    enabled: false,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(refused, Err(ApiError::Validation(_))),
+                "name {:?} must be refused",
+                bad.len()
+            );
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM feature_flags WHERE name = $1")
+                .bind("x".repeat(101))
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "invalid names never reach the database");
+    }
+
+    /// The successful batch update path: changes are committed, the cache
+    /// is invalidated only after the commit, and every non-empty change is
+    /// audited — while a no-op update (all fields omitted) is audited as
+    /// nothing.
+    #[tokio::test]
+    async fn update_feature_success_commits_invalidates_and_audits() {
+        let Some(pool) = crate::test_db::canonical_pool("features_update_success").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let with_changes = seed_flag(&pool, false).await;
+        let no_op = seed_flag(&pool, true).await;
+
+        let status = update_feature(
+            State(state.clone()),
+            admin_auth(),
+            Json(FeatureUpdatePayload::Batch(BatchUpdateFeatureRequest {
+                updates: vec![
+                    UpdateFeatureRequest {
+                        id: with_changes,
+                        enabled: Some(true),
+                        description: Some("flipped".into()),
+                    },
+                    // All fields omitted: the row updates `updated_at` but
+                    // produces an empty change set → no audit record.
+                    UpdateFeatureRequest {
+                        id: no_op,
+                        enabled: None,
+                        description: None,
+                    },
+                ],
+            })),
+        )
+        .await
+        .expect("batch update");
+        assert_eq!(status, StatusCode::OK);
+
+        let (enabled, description): (bool, Option<String>) =
+            sqlx::query_as("SELECT enabled, description FROM feature_flags WHERE id = $1")
+                .bind(with_changes)
+                .fetch_one(&pool)
+                .await
+                .expect("changed flag");
+        assert!(enabled);
+        assert_eq!(description.as_deref(), Some("flipped"));
+
+        let changed_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs
+             WHERE action = 'control_plane.feature.updated' AND resource_id = $1",
+        )
+        .bind(with_changes.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit count");
+        assert_eq!(changed_audits, 1, "the described change is audited once");
+
+        let noop_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs
+             WHERE action = 'control_plane.feature.updated' AND resource_id = $1",
+        )
+        .bind(no_op.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("noop audit count");
+        assert_eq!(noop_audits, 0, "a field-less update audits nothing");
+    }
+
+    /// An empty updates payload is a validation error before any
+    /// transaction is opened.
+    #[tokio::test]
+    async fn update_feature_refuses_an_empty_batch() {
+        let Some(pool) = crate::test_db::canonical_pool("features_empty_batch").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let refused = update_feature(
+            State(state),
+            admin_auth(),
+            Json(FeatureUpdatePayload::Batch(BatchUpdateFeatureRequest {
+                updates: vec![],
+            })),
+        )
+        .await;
+        assert!(matches!(refused, Err(ApiError::Validation(_))));
+    }
 }

@@ -1485,3 +1485,302 @@ mod tests {
         assert_eq!(normalize_domain(&"x".repeat(300)), None);
     }
 }
+
+/// Residual-arm coverage: pure helpers, `with_retry`, the waterfall's
+/// persistence/projection happy path, all-providers-failed reporting, provider
+/// routing statistics and the request-field union.
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    use crate::enrichment::providers::mock::{MockEnrichmentProvider, MOCK_PROVIDER_ID};
+    use crate::enrichment::providers::research::ResearchEnrichmentProvider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    async fn live_pool() -> Option<PgPool> {
+        crate::test_db::canonical_test_pool("enrichment_residual").await
+    }
+
+    /// A provider that fails every call with a named error.
+    #[derive(Debug)]
+    struct DownProvider;
+
+    #[async_trait::async_trait]
+    impl EnrichmentProvider for DownProvider {
+        fn id(&self) -> ProviderId {
+            ProviderId("down")
+        }
+
+        fn fields(&self) -> &[&'static str] {
+            &[fields::COMPANY_NAME, fields::INDUSTRY]
+        }
+
+        fn cost_eur(&self) -> f64 {
+            0.25
+        }
+
+        async fn fetch(
+            &self,
+            _request: &EnrichmentRequest<'_>,
+        ) -> Result<ProviderPayload, EnrichmentError> {
+            Err(EnrichmentError::Unavailable("simulated outage".into()))
+        }
+    }
+
+    #[test]
+    fn pure_helpers_cover_their_branches() {
+        // Field TTLs: known long-TTL fields vs the 90-day default.
+        assert_eq!(default_ttl_days(fields::DESCRIPTION), Some(365));
+        assert_eq!(default_ttl_days(fields::CONTACT_JOB_TITLE), Some(365));
+        assert_eq!(default_ttl_days("something_made_up"), Some(90));
+
+        // Truncation and capitalisation.
+        assert_eq!(truncate_chars("abcdef", 3), "abc…");
+        assert_eq!(truncate_chars("ab", 5), "ab");
+        assert_eq!(capitalize("acme corp"), "Acme corp");
+        assert_eq!(capitalize(""), "");
+
+        // Value helpers.
+        assert_eq!(compact_json(&serde_json::json!({"a": 1})), r#"{"a":1}"#);
+        assert_eq!(SubjectType::Account.as_str(), "account");
+        assert_eq!(SubjectType::Contact.as_str(), "contact");
+        assert_eq!(SubjectType::ContactPoint.as_str(), "contact_point");
+        assert_eq!(ProviderId("p").to_string(), "p");
+
+        // A raw fact keeps its value and confidence.
+        let raw = RawFact::new(serde_json::json!("Acme"), 0.9);
+        assert_eq!(raw.value, serde_json::json!("Acme"));
+        assert!((raw.confidence - 0.9).abs() < f32::EPSILON);
+
+        // Error mapping: InvalidInput and RateLimited map to the matching
+        // SalesError variants; everything else folds into EnrichmentFailed.
+        assert!(matches!(
+            SalesError::from(EnrichmentError::InvalidInput("bad".into())),
+            SalesError::InvalidInput(_)
+        ));
+        assert!(matches!(
+            SalesError::from(EnrichmentError::RateLimited("slow".into())),
+            SalesError::RateLimited(_)
+        ));
+        assert!(matches!(
+            SalesError::from(EnrichmentError::NotFound("gone".into())),
+            SalesError::EnrichmentFailed(_)
+        ));
+
+        // An empty provider payload is empty and reports no length.
+        let payload =
+            ProviderPayload::new().with(fields::COMPANY_NAME, serde_json::json!("Acme"), 0.9);
+        assert!(!payload.is_empty());
+        assert_eq!(payload.len(), 1);
+        assert!(ProviderPayload::new().is_empty());
+        assert_eq!(ProviderPayload::new().len(), 0);
+        // An outcome with no requested fields reports full coverage.
+        let outcome = EnrichmentOutcome {
+            facts: Vec::new(),
+            requested_fields: Vec::new(),
+            missing_fields: Vec::new(),
+            provider_failures: Vec::new(),
+            provider_calls: 0,
+        };
+        assert_eq!(outcome.coverage_ratio(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn with_retry_succeeds_after_transient_failures_and_then_exhausts() {
+        // Fails once, then succeeds.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let value: Result<u32, String> = with_retry(move || {
+            let counter = counter.clone();
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("transient".to_string())
+                } else {
+                    Ok(7)
+                }
+            }
+        })
+        .await;
+        assert_eq!(value.expect("recovers"), 7);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        // Never succeeds: the LAST error surfaces after MAX_RETRIES attempts.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let value: Result<u32, String> = with_retry(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<u32, _>("always broken".to_string())
+            }
+        })
+        .await;
+        assert_eq!(value.expect_err("exhausts"), "always broken");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            MAX_RETRIES as usize,
+            "exactly MAX_RETRIES attempts are made"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_waterfall_persists_facts_account_and_projection() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("enrich-ok");
+        let service = EnrichmentService::from_providers(vec![
+            Arc::new(MockEnrichmentProvider),
+            Arc::new(ResearchEnrichmentProvider::new()),
+        ]);
+        assert_eq!(service.provider_count(), 2);
+
+        let persisted = service
+            .enrich_persisted(&db, &tenant, "acme.com", Some("ada@acme.com"), Some("Acme"))
+            .await
+            .expect("the waterfall fills acme.com");
+        assert!(!persisted.outcome.facts.is_empty());
+        // The research leg declares fields the mock does not supply; only the
+        // requested-but-unfilled tail may be missing, never a filled one.
+        assert!(persisted.outcome.provider_failures.is_empty());
+        assert!(persisted.outcome.coverage_ratio() >= 0.5);
+        assert_eq!(persisted.company.domain, "acme.com");
+        assert_eq!(persisted.company.name, "Acme Corp");
+
+        // The account was found-or-created and the facts persisted with
+        // provenance.
+        let account_row: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM sales_accounts WHERE tenant_id = $1 AND domain = 'acme.com'",
+        )
+        .bind(&tenant)
+        .fetch_optional(&db)
+        .await
+        .expect("account");
+        assert_eq!(account_row, Some(persisted.account_id));
+        let fact_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_enrichment_facts \
+             WHERE tenant_id = $1 AND subject_type = 'account' AND subject_id = $2",
+        )
+        .bind(&tenant)
+        .bind(persisted.account_id)
+        .fetch_one(&db)
+        .await
+        .expect("facts");
+        assert!(fact_rows >= 5, "every mock fact is persisted: {fact_rows}");
+        let projection: Option<String> = sqlx::query_scalar(
+            "SELECT company_name FROM enriched_companies WHERE tenant_id = $1 AND domain = 'acme.com'",
+        )
+        .bind(&tenant)
+        .fetch_optional(&db)
+        .await
+        .expect("projection");
+        assert_eq!(projection.as_deref(), Some("Acme Corp"));
+
+        // Provider stats recorded the fills for routing.
+        let fills: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(fills), 0)::bigint FROM sales_provider_stats \
+             WHERE tenant_id = $1 AND provider = $2",
+        )
+        .bind(&tenant)
+        .bind(MOCK_PROVIDER_ID.as_str())
+        .fetch_one(&db)
+        .await
+        .expect("stats");
+        assert!(fills > 0, "fills are recorded for routing: {fills}");
+
+        // Routing chooses the provider with the best recorded coverage for a
+        // field, and degrades to priority order on a stats failure.
+        let candidates: Vec<&dyn EnrichmentProvider> = service
+            .providers
+            .iter()
+            .map(|provider| provider.as_ref())
+            .collect();
+        let chosen = router::choose_provider(&db, &tenant, fields::COMPANY_NAME, &candidates)
+            .await
+            .expect("routing works");
+        assert_eq!(chosen.map(|choice| choice.provider), Some(MOCK_PROVIDER_ID));
+
+        // Re-running the SAME domain is idempotent (facts upsert, one account).
+        service
+            .enrich_persisted(&db, &tenant, "acme.com", None, None)
+            .await
+            .expect("idempotent re-run");
+        let accounts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_accounts WHERE tenant_id = $1 AND domain = 'acme.com'",
+        )
+        .bind(&tenant)
+        .fetch_one(&db)
+        .await
+        .expect("accounts");
+        assert_eq!(accounts, 1);
+    }
+
+    #[tokio::test]
+    async fn an_all_providers_failed_waterfall_is_reported_not_silent() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("enrich-down");
+        let service = EnrichmentService::from_providers(vec![Arc::new(DownProvider)]);
+        let error = service
+            .enrich_persisted(&db, &tenant, "acme.com", None, None)
+            .await
+            .expect_err("every provider is down");
+        let message = error.to_string();
+        assert!(
+            message.contains("all providers failed") && message.contains("simulated outage"),
+            "{message}"
+        );
+
+        // The failures were recorded as provider errors (not fills).
+        let errors: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(errors), 0)::bigint FROM sales_provider_stats \
+             WHERE tenant_id = $1 AND provider = 'down'",
+        )
+        .bind(&tenant)
+        .fetch_one(&db)
+        .await
+        .expect("stats");
+        assert!(errors > 0, "error stats drive routing away: {errors}");
+    }
+
+    #[tokio::test]
+    async fn requested_fields_are_trimmed_deduped_and_capped() {
+        let service = EnrichmentService::new(Arc::new(MockEnrichmentProvider));
+        let mut request = EnrichmentRequest::new("t", "acme.com")
+            .with_email("ada@acme.com")
+            .with_company_name("Acme")
+            .with_fields([
+                " industry ".to_string(),
+                "industry".to_string(),
+                "".to_string(),
+                "x".repeat(100),
+                fields::REVENUE_BAND.to_string(),
+            ]);
+        assert_eq!(request.domain, "acme.com");
+        assert_eq!(request.email, Some("ada@acme.com"));
+        assert_eq!(request.company_name, Some("Acme"));
+        let union = service.requested_fields(&request);
+        assert_eq!(
+            union,
+            vec![
+                fields::INDUSTRY.to_string(),
+                fields::REVENUE_BAND.to_string()
+            ],
+            "trimmed, deduped, over-long dropped"
+        );
+        // An explicit field list stops the provider-declared union.
+        request.requested_fields.clear();
+        let union = service.requested_fields(&request);
+        assert_eq!(
+            union,
+            service
+                .providers
+                .iter()
+                .flat_map(|provider| provider.fields().iter().copied())
+                .map(|field| field.to_string())
+                .collect::<Vec<_>>(),
+            "the provider-declared union in priority order"
+        );
+    }
+}

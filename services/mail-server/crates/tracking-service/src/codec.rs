@@ -400,30 +400,26 @@ impl TrackingCodec {
 // ── Key derivation ────────────────────────────────────────────────────────────
 
 /// Returns HMAC-SHA-256(secret, info) truncated to `len` bytes.
+///
+/// `Hmac::new_from_slice` accepts ANY key length — the `Err` arm is
+/// uninhabited for HMAC — so the previous "degrade to an empty key" fallback
+/// was dead code that, if it ever COULD run, would have silently made every
+/// derived key identical. The invariant is asserted instead.
 fn derive_key_hmac(secret: &[u8], info: &[u8], len: usize) -> Zeroizing<Vec<u8>> {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = match <HmacSha256 as Mac>::new_from_slice(secret) {
-        Ok(mac) => mac,
-        Err(error) => {
-            tracing::error!(?error, "Failed to initialize derive_key_hmac HMAC");
-            return Zeroizing::new(Vec::new());
-        }
-    };
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(secret).expect("HMAC-SHA-256 accepts any key length");
     mac.update(info);
     let result = mac.finalize().into_bytes();
     Zeroizing::new(result[..len].to_vec())
 }
 
 /// HMAC-SHA-256 of `data` under `key`; returns the full 32-byte digest.
+/// Same infallibility argument as [`derive_key_hmac`].
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     type HmacSha256 = Hmac<Sha256>;
-    let mut mac = match <HmacSha256 as Mac>::new_from_slice(key) {
-        Ok(mac) => mac,
-        Err(error) => {
-            tracing::error!(?error, "Failed to initialize hmac_sha256 HMAC");
-            return [0; 32];
-        }
-    };
+    let mut mac =
+        <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC-SHA-256 accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -997,5 +993,119 @@ mod tests {
         let mut forged_trunc = payload.to_vec();
         forged_trunc.extend_from_slice(&wrong[..16]);
         assert!(codec.try_legacy_hmac_verify(&forged_trunc).is_none());
+    }
+
+    /// Hostile-token matrix for the UNSUBSCRIBE verifier: length gates, the
+    /// ciphertext-size gate, v2 expiry, and every legacy parse `None` arm.
+    #[test]
+    fn verify_unsubscribe_token_rejects_every_hostile_shape() {
+        let codec = make_codec();
+
+        // Below the 10-char floor / above the 4096 ceiling.
+        assert!(codec.verify_unsubscribe_token("short", None).is_none());
+        let huge = "A".repeat(4097);
+        assert!(codec.verify_unsubscribe_token(&huge, None).is_none());
+
+        // Decodes, but fewer bytes than IV + tag + 1 can ever be a frame.
+        let tiny_cipher = URL_SAFE_NO_PAD.encode([0u8; 8]);
+        assert!(codec.verify_unsubscribe_token(&tiny_cipher, None).is_none());
+
+        // A fresh v2 token is fine now — and expired once a moment has
+        // passed under a zero-day window (the age gate compares against the
+        // mint time, so advance past it before asserting).
+        let token = codec
+            .generate_unsubscribe_token("tenant_x", "u@x.test")
+            .expect("generate v2 token");
+        assert!(codec.verify_unsubscribe_token(&token, Some(90)).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(
+            codec.verify_unsubscribe_token(&token, Some(0)).is_none(),
+            "a zero-day max age must expire the fresh token"
+        );
+
+        // Legacy payloads, each shape rejected by a different parser arm.
+        let legacy = |payload: &str| {
+            let mut combined = payload.as_bytes().to_vec();
+            combined.extend_from_slice(&hmac_sha256(&codec.sig_key.0, payload.as_bytes()));
+            URL_SAFE_NO_PAD.encode(&combined)
+        };
+        // No separator at all (the `prefix.find(':')` arm).
+        assert!(codec
+            .verify_unsubscribe_token(&legacy("noseparator"), None)
+            .is_none());
+        // Non-numeric trailing timestamp.
+        assert!(codec
+            .verify_unsubscribe_token(&legacy("tenant:u@x.test:notdigits"), None)
+            .is_none());
+        // Empty tenant segment.
+        assert!(codec
+            .verify_unsubscribe_token(&legacy(":u@x.test:1700000000000"), None)
+            .is_none());
+        // Empty recipient segment.
+        assert!(codec
+            .verify_unsubscribe_token(&legacy("tenant::1700000000000"), None)
+            .is_none());
+        // Validly signed but ancient (the age gate arm).
+        assert!(codec
+            .verify_unsubscribe_token(&legacy("tenant:u@x.test:1000"), None)
+            .is_none());
+        // …and the same token verifies when the window is wide enough.
+        assert!(codec
+            .verify_unsubscribe_token(&legacy("tenant:u@x.test:1000"), Some(1_000_000))
+            .is_some());
+    }
+
+    /// Tracking-data deserializer: empty required fields are rejected in
+    /// every version, and a v3 empty link/url decodes to `None` fields.
+    #[test]
+    fn deserialize_tracking_data_rejects_empty_required_fields() {
+        // v2 with an empty tenant_id → rejected.
+        let mut buf = vec![2u8];
+        for field in ["", "msg", "usr"] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        assert!(deserialize_tracking_data(&buf).is_none());
+
+        // v2 with an empty message_id → rejected.
+        let mut buf = vec![2u8];
+        for field in ["ten", "", "usr"] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        assert!(deserialize_tracking_data(&buf).is_none());
+
+        // v2 with an empty recipient → rejected.
+        let mut buf = vec![2u8];
+        for field in ["ten", "msg", ""] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        assert!(deserialize_tracking_data(&buf).is_none());
+
+        // v3 with an EMPTY url field still decodes (url is optional).
+        let mut buf = vec![3u8];
+        for field in ["ten", "msg", "usr", "lnk", ""] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        let data = deserialize_tracking_data(&buf).expect("empty url is allowed");
+        assert_eq!(data.original_url, None);
+        assert_eq!(data.link_id.as_deref(), Some("lnk"));
+    }
+
+    /// The v2 unsubscribe payload parser rejects an empty-field frame.
+    #[test]
+    fn v2_unsubscribe_payload_rejects_empty_fields() {
+        let mut buf = UNSUB_PAYLOAD_V2_MAGIC.to_vec();
+        for field in ["", "u@x.test", "msg"] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        buf.extend_from_slice(b"1700000000000");
+        assert!(
+            parse_unsub_payload_v2(&buf).is_none(),
+            "empty tenant rejected"
+        );
     }
 }

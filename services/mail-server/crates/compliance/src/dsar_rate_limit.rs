@@ -478,4 +478,57 @@ mod tests {
         assert_eq!(config.tenant_window_secs, 86400);
         assert_eq!(config.verify_window_secs, 3600);
     }
+
+    /// Redis-backed paths: with a live Redis the limiter PEeks, INCRs and
+    /// TTL-repairs the shared counters; over the quota it reports Limited;
+    /// with Redis down it falls back to the in-memory window.
+    #[tokio::test]
+    async fn redis_backed_quota_checks_peek_consume_and_repair() {
+        let Some(redis) = crate::test_support::configured_redis() else {
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let cfg = DsarRateLimitConfig {
+            per_user: 1,
+            user_window_secs: 86400,
+            per_tenant: 100,
+            tenant_window_secs: 86400,
+            verify_attempts: 5,
+            verify_window_secs: 3600,
+        };
+        let limiter = DsarRateLimiter::new(cfg.clone(), Some(redis.clone()));
+        let email = format!("redis-quota-{}@example.test", std::process::id());
+        let tenant = format!("t-redis-{}", std::process::id());
+
+        let is_allowed = |s: &DsarRateLimitStatus| matches!(s, DsarRateLimitStatus::Allowed);
+        let is_limited = |s: &DsarRateLimitStatus| !matches!(s, DsarRateLimitStatus::Allowed);
+
+        // Fresh state: allowed (a read-only peek over Redis).
+        assert!(
+            is_allowed(&limiter.check_submission(&email, &tenant).await),
+            "fresh state must be allowed"
+        );
+
+        // Consume the (per_user = 1) quota: the second check is limited.
+        limiter.record_submission_success(&email, &tenant).await;
+        let second = limiter.check_submission(&email, &tenant).await;
+        assert!(
+            is_limited(&second),
+            "over the user quota must be limited, got {second:?}"
+        );
+
+        // Verification attempts: bounded window over Redis, all allowed.
+        let token_hash = format!("tok-{}", std::process::id());
+        for _ in 0..3 {
+            let status = limiter.check_verification(&token_hash).await;
+            assert!(is_allowed(&status), "verification allowed, got {status:?}");
+        }
+
+        // A dead Redis falls back to the in-memory window without failing.
+        let broken = DsarRateLimiter::new(cfg, None);
+        let fallback = broken
+            .check_submission("fallback@example.test", &tenant)
+            .await;
+        assert!(is_allowed(&fallback), "fallback allowed, got {fallback:?}");
+    }
 }

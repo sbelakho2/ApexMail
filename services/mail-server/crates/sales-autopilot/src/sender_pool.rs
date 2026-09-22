@@ -1270,3 +1270,160 @@ mod tests {
         cleanup_senders(&pool, &tenant).await;
     }
 }
+
+/// Residual-arm coverage: the fallback ladder, the unrecognized-pool refusal,
+/// the by-id lookup miss, and the env opt-in parser.
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+
+    async fn live_pool() -> Option<PgPool> {
+        canonical_test_pool("sender_pool_residual").await
+    }
+
+    async fn insert_identity(
+        pool: &PgPool,
+        tenant: &str,
+        sender_pool: &str,
+        daily_limit: i32,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        let domain = format!(
+            "sp-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query_scalar(
+            "INSERT INTO sales_sender_identities \
+                 (id, tenant_id, pool, from_email, from_name, domain, status, daily_limit) \
+             VALUES ($1, $2, $3, $4, 'Residual Sender', $5, 'active', $6) RETURNING id",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(sender_pool)
+        .bind(format!("sales@{domain}"))
+        .bind(&domain)
+        .bind(daily_limit)
+        .fetch_one(pool)
+        .await
+        .expect("insert sender identity")
+    }
+
+    #[test]
+    fn fallback_env_parser_accepts_only_the_documented_truthy_values() {
+        // The variable is read per call, so each probe sees exactly what it
+        // set (a unique variable name keeps parallel tests independent).
+        let name = SENDER_POOL_FALLBACK_ENV;
+        for (raw, expected) in [
+            ("1", true),
+            ("true", true),
+            ("Yes", true),
+            (" on ", true),
+            ("0", false),
+            ("off", false),
+            ("", false),
+            ("truthy", false),
+        ] {
+            std::env::set_var(name, raw);
+            assert_eq!(fallback_allowed(), expected, "input {raw:?}");
+        }
+        std::env::remove_var(name);
+        assert!(!fallback_allowed(), "unset means production: no fallback");
+    }
+
+    #[tokio::test]
+    async fn the_fallback_ladder_never_crosses_class_and_names_missing_pools() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sp-resid");
+
+        // No identities at all: without fallback the error names ONLY the
+        // preferred pool.
+        let error =
+            reserve_sales_sender_with_fallback(&db, &tenant, SenderPool::SalesOutbound, false)
+                .await
+                .expect_err("nothing provisioned");
+        assert!(
+            error.to_string().contains("pool 'sales_outbound'"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("fallback pool"), "{error}");
+
+        // With fallback allowed and STILL nothing anywhere: both pools named.
+        let error =
+            reserve_sales_sender_with_fallback(&db, &tenant, SenderPool::SalesOutbound, true)
+                .await
+                .expect_err("still nothing provisioned");
+        assert!(
+            error
+                .to_string()
+                .contains("'sales_outbound' or fallback pool 'sales_warmup'"),
+            "{error}"
+        );
+
+        // A warmup identity exists but the preferred pool is empty: with
+        // fallback OFF the send is refused (never cross classes silently).
+        insert_identity(&db, &tenant, "sales_warmup", 100).await;
+        let error =
+            reserve_sales_sender_with_fallback(&db, &tenant, SenderPool::SalesOutbound, false)
+                .await
+                .expect_err("fallback disabled");
+        assert!(error.to_string().contains("sales_outbound"), "{error}");
+
+        // With fallback ON the warmup identity is used and reserved.
+        let identity =
+            reserve_sales_sender_with_fallback(&db, &tenant, SenderPool::SalesOutbound, true)
+                .await
+                .expect("the fallback pool serves the send");
+        assert_eq!(identity.pool, SenderPool::SalesWarmup);
+
+        // A sales path asking for a TRANSACTIONAL pool is a caller bug:
+        // refused before any database work, whatever the fallback setting.
+        let error = reserve_sales_sender_with_fallback(
+            &db,
+            &tenant,
+            SenderPool::TransactionalCustomer,
+            true,
+        )
+        .await
+        .expect_err("non-sales pool");
+        assert!(error.to_string().contains("is not a sales pool"), "{error}");
+    }
+
+    // NOTE on the `unrecognized pool '<text>'` PolicyDenied arm in
+    // `SenderIdentityRow::into_sales_identity`: `sales_sender_identities.pool`
+    // carries the canonical CHECK constraint
+    // (`sales_sender_identities_pool_check`), so no row with an unknown pool
+    // text can exist through the schema. The arm is defense-in-depth against
+    // schema drift and is unreachable through the canonical database — no test
+    // can reach it without corrupting the schema itself.
+    #[tokio::test]
+    async fn unknown_identity_ids_are_loud_policy_denials() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sp-denial");
+        insert_identity(&db, &tenant, "sales_outbound", 100).await;
+
+        // An unknown identity id is a PolicyDenied, never a silent default.
+        let error = load_sales_sender(&db, &tenant, Uuid::new_v4())
+            .await
+            .expect_err("unknown id");
+        assert!(
+            error.to_string().contains("not found for tenant"),
+            "{error}"
+        );
+
+        // The existing row resolves, tenant-scoped.
+        let other_tenant = crate::test_db::unique_test_tenant("sp-denial-2");
+        let error = load_sales_sender(&db, &other_tenant, Uuid::new_v4())
+            .await
+            .expect_err("cross-tenant id");
+        assert!(
+            error.to_string().contains("not found for tenant"),
+            "{error}"
+        );
+    }
+}

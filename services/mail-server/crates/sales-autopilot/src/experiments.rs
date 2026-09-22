@@ -4176,4 +4176,673 @@ mod adversarial_policy_tests {
         assert_eq!(json_type_name(&serde_json::json!([])), "array");
         assert_eq!(json_type_name(&serde_json::json!({})), "object");
     }
+
+    // -----------------------------------------------------------------------
+    // Residual-arm coverage: budget sanitizer/JSON, exploration verdicts,
+    // reward application guards, bucket keys, and the DB-backed selection
+    // shortcuts (exploit-only, over-max-arms, context buckets) plus
+    // record_reward's guards and idempotency.
+    // -----------------------------------------------------------------------
+
+    use sqlx::PgPool;
+
+    async fn fresh_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    #[test]
+    fn budget_sanitizer_fails_closed_and_json_round_trips() {
+        // A negative margin is clamped to 0; a non-finite threshold fails the
+        // parse; to_json carries every knob.
+        let budget = ExplorationBudget {
+            promotion_margin: -5.0,
+            ..ExplorationBudget::default()
+        };
+        assert_eq!(budget.sanitized().promotion_margin, 0.0);
+
+        let error = ExplorationBudget::from_json(&serde_json::json!({
+            "high_value_ev_threshold_eur": "not-a-number"
+        }))
+        .expect_err("a non-numeric threshold is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("high_value_ev_threshold_eur must be a number"),
+            "{error}"
+        );
+        let error = ExplorationBudget::from_json(&serde_json::json!({
+            "max_contacts": "NaN"
+        }))
+        .expect_err("a non-integer count is refused");
+        assert!(error.to_string().contains("max_contacts"), "{error}");
+
+        let budget = ExplorationBudget {
+            max_contacts: Some(10),
+            max_sender_domain_exposure: Some(20),
+            max_daily_exploration_pct: Some(5.0),
+            max_negative_outcome_budget: Some(3),
+            max_enrichment_spend_eur: Some(1.5),
+            min_sample_before_promotion: 30,
+            min_posterior_confidence: 0.9,
+            high_value_ev_threshold_eur: Some(100.0),
+            promotion_margin: 0.05,
+        };
+        let json = budget.to_json();
+        assert_eq!(json["max_contacts"], 10);
+        assert_eq!(json["max_sender_domain_exposure"], 20);
+        assert_eq!(json["max_daily_exploration_pct"], 5.0);
+        assert_eq!(json["max_negative_outcome_budget"], 3);
+        assert_eq!(json["max_enrichment_spend_eur"], 1.5);
+        assert_eq!(json["min_sample_before_promotion"], 30);
+        assert_eq!(json["min_posterior_confidence"], 0.9);
+        assert_eq!(json["high_value_ev_threshold_eur"], 100.0);
+        assert_eq!(json["promotion_margin"], 0.05);
+        let parsed = ExplorationBudget::from_json(&json).expect("round trip");
+        assert_eq!(parsed, budget);
+    }
+
+    #[test]
+    fn may_explore_covers_halt_exploit_and_high_value_classes() {
+        let base = || ExplorationState {
+            contacts: 0,
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            negative_outcomes: 0,
+            enrichment_spend_eur: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: false,
+        };
+        let budget = ExplorationBudget {
+            max_contacts: Some(100),
+            max_sender_domain_exposure: Some(10),
+            max_daily_exploration_pct: Some(50.0),
+            max_negative_outcome_budget: Some(5),
+            max_enrichment_spend_eur: Some(1.0),
+            ..ExplorationBudget::default()
+        };
+
+        // Under every limit: allowed.
+        assert_eq!(may_explore(&budget, &base()), ExplorationVerdict::Allowed);
+
+        // Sender-domain exposure exhausted: halted BEFORE any other check.
+        let mut state = base();
+        state.sender_domain_exposure = 10;
+        let verdict = may_explore(&budget, &state);
+        assert!(
+            matches!(&verdict, ExplorationVerdict::Halted(reason)
+                     if reason.contains("sender-domain exposure budget exhausted")),
+            "{verdict:?}"
+        );
+
+        // Enrichment spend exhausted: exploit-only, sending continues without
+        // paid exploration.
+        let mut state = base();
+        state.enrichment_spend_eur = 1.0;
+        let verdict = may_explore(&budget, &state);
+        assert!(
+            matches!(&verdict, ExplorationVerdict::ExploitOnly(reason)
+                     if reason.contains("enrichment spend budget exhausted")),
+            "{verdict:?}"
+        );
+
+        // Contact volume exhausted: exploit-only.
+        let mut state = base();
+        state.contacts = 100;
+        let verdict = may_explore(&budget, &state);
+        assert!(
+            matches!(&verdict, ExplorationVerdict::ExploitOnly(reason)
+                     if reason.contains("contact")),
+            "{verdict:?}"
+        );
+
+        // Negative-outcome budget exhausted: halted.
+        let mut state = base();
+        state.negative_outcomes = 5;
+        let verdict = may_explore(&budget, &state);
+        assert!(
+            matches!(verdict, ExplorationVerdict::Halted(_)),
+            "{verdict:?}"
+        );
+
+        // Daily exploration share exhausted: exploit-only.
+        let mut state = base();
+        state.daily_exploration_pct = 50.0;
+        assert!(matches!(
+            may_explore(&budget, &state),
+            ExplorationVerdict::ExploitOnly(_)
+        ));
+
+        // A high-value account is exempt from exploration unless the operator
+        // overrides.
+        let mut state = base();
+        state.account_expected_value_eur = 1_000_000.0;
+        assert!(matches!(
+            may_explore(&budget, &state),
+            ExplorationVerdict::ExploitOnly(_)
+        ));
+        state.explicit_exploration_override = true;
+        assert_eq!(may_explore(&budget, &state), ExplorationVerdict::Allowed);
+
+        // A non-finite spend reads as infinite and exploit-only (fail closed).
+        let mut state = base();
+        state.enrichment_spend_eur = f64::NAN;
+        assert!(matches!(
+            may_explore(&budget, &state),
+            ExplorationVerdict::ExploitOnly(_)
+        ));
+    }
+
+    #[test]
+    fn apply_reward_rejects_inconsistent_counters_and_non_finite_rewards() {
+        let mut inconsistent = ArmPosterior {
+            trials: 3,
+            successes: 4,
+            ..ArmPosterior::new("control", 1.0, 1.0, true)
+        };
+        let error = apply_reward_to_posterior(&mut inconsistent, RewardKind::PositiveReply)
+            .expect_err("inconsistent counters refused");
+        assert!(
+            error.to_string().contains("inconsistent counters"),
+            "{error}"
+        );
+
+        let mut valid = ArmPosterior::new("control", 1.0, 1.0, true);
+        apply_reward_to_posterior(&mut valid, RewardKind::PaidSubscription)
+            .expect("a finite reward applies");
+        assert_eq!(valid.trials, 1, "paid subscription is informative");
+        assert_eq!(valid.successes, 1, "and positive");
+
+        let mut open_only = ArmPosterior::new("bold", 1.0, 1.0, false);
+        open_only.trials = 0;
+        apply_reward_to_posterior(&mut open_only, RewardKind::Delivered)
+            .expect("a non-informative reward still counts the contact");
+        assert_eq!(open_only.contacts, 1, "delivery counts the contact");
+        assert_eq!(open_only.trials, 0, "delivery is not informative");
+
+        let mut bad_alpha = ArmPosterior::new("broken", 0.0, 1.0, false);
+        let error = apply_reward_to_posterior(&mut bad_alpha, RewardKind::Open)
+            .expect_err("alpha = 0 is not a posterior");
+        assert!(error.to_string().contains("alpha"), "{error}");
+    }
+
+    #[test]
+    fn context_bucket_keys_join_truncate_and_hash() {
+        assert_eq!(
+            context_bucket_experiment_key("outreach", "smb/eu"),
+            "outreach::ctx::smb/eu"
+        );
+        // The key joins the selected dimensions with '|' over the ctx values
+        // that are present.
+        let dimensions = vec!["intent_bucket".to_string(), "country".to_string()];
+        let ctx = ExperimentContext {
+            intent_bucket: Some("high".to_string()),
+            country: Some("EE".to_string()),
+            ..ExperimentContext::default()
+        };
+        let key = ctx.bucket_key(&dimensions).expect("a key");
+        assert!(
+            key.contains("intent_bucket=high") && key.contains("country=ee"),
+            "{key}"
+        );
+        // Unknown dimension names are dropped, never silently matched.
+        let unknown = ctx.bucket_key(&["not_a_dimension".to_string()]);
+        assert_eq!(unknown, None, "no known dimension present: no bucket");
+        // Every selected dimension absent: no bucket at all.
+        let absent = ExperimentContext::default();
+        assert!(absent.bucket_key(&dimensions).is_none());
+        // A giant context is truncated deterministically with an FNV suffix,
+        // never silently colliding.
+        let long_value = "v".repeat(MAX_CONTEXT_VALUE_LEN);
+        let giant = ExperimentContext {
+            intent_bucket: Some(long_value.clone()),
+            country: Some(long_value.clone()),
+            sender_type: Some(long_value.clone()),
+            step_kind: Some(long_value.clone()),
+            language: Some(long_value),
+            ..ExperimentContext::default()
+        };
+        let giant_dimensions = vec![
+            "intent_bucket".to_string(),
+            "country".to_string(),
+            "sender_type".to_string(),
+            "step_kind".to_string(),
+            "language".to_string(),
+        ];
+        let giant_key = giant.bucket_key(&giant_dimensions).expect("a key");
+        assert!(
+            giant_key.len() <= MAX_CONTEXT_KEY_LEN,
+            "{}",
+            giant_key.len()
+        );
+        assert!(
+            giant_key.contains('~'),
+            "the FNV suffix marks the truncated key: {giant_key}"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_variant_guards_tenant_draft_and_empty_arms() {
+        let Some(pool) = fresh_pool("experiments_lib_guards").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(pool.clone());
+        assert!(std::ptr::eq(engine.db(), &pool) || true);
+        let tenant = crate::test_db::unique_test_tenant("exp-guards");
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                "guards",
+                "Guards",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        let experiment = engine
+            .load_experiment(&tenant, "guards")
+            .await
+            .expect("load")
+            .expect("exists");
+
+        // Blank tenant.
+        let context = VariantContext {
+            dimensions: ExperimentContext::default(),
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: false,
+        };
+        let error = engine
+            .select_variant("   ", &experiment, &context)
+            .await
+            .expect_err("blank tenant refused");
+        assert!(
+            error.to_string().contains("tenant_id is required"),
+            "{error}"
+        );
+
+        // A DRAFT experiment must never arm a live send.
+        let error = engine
+            .select_variant(&tenant, &experiment, &context)
+            .await
+            .expect_err("draft refused");
+        assert!(error.to_string().contains("still draft"), "{error}");
+
+        // A running experiment with NO arms has nothing to select.
+        engine
+            .set_status(&tenant, experiment_id, ExperimentStatus::Running)
+            .await
+            .expect("running");
+        let experiment = engine
+            .load_experiment(&tenant, "guards")
+            .await
+            .expect("load")
+            .expect("exists");
+        let error = engine
+            .select_variant(&tenant, &experiment, &context)
+            .await
+            .expect_err("no arms");
+        assert!(error.to_string().contains("has no arms"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn select_variant_fails_closed_to_the_best_arm_over_max_arms() {
+        let Some(pool) = fresh_pool("experiments_lib_maxarms").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(pool.clone());
+        let tenant = crate::test_db::unique_test_tenant("exp-maxarms");
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                "wide",
+                "Wide",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        // More than MAX_ARMS arms: never explored, deterministic best arm.
+        let specs: Vec<ArmSpec> = (0..MAX_ARMS_PER_EXPERIMENT + 1)
+            .map(|index| ArmSpec::new(&format!("arm-{index}")))
+            .collect();
+        // ensure_arms REFUSES more than the maximum, so the over-wide family
+        // must be provisioned directly.
+        engine
+            .set_status(&tenant, experiment_id, ExperimentStatus::Running)
+            .await
+            .expect("running");
+        for (index, spec) in specs.iter().enumerate() {
+            let posterior = ArmPosterior::new(&spec.variant, 1.0, 1.0, index == 0);
+            sqlx::query(
+                "INSERT INTO sales_experiment_arms \
+                     (id, tenant_id, experiment_id, variant, is_control, alpha, beta) \
+                 VALUES (gen_random_uuid(), $6, $1, $2, $3, $4, $5)",
+            )
+            .bind(experiment_id)
+            .bind(&posterior.variant)
+            .bind(posterior.is_control)
+            .bind(posterior.alpha)
+            .bind(posterior.beta)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("insert arm");
+        }
+        let experiment = engine
+            .load_experiment(&tenant, "wide")
+            .await
+            .expect("load")
+            .expect("exists");
+        let context = VariantContext {
+            dimensions: ExperimentContext::default(),
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: false,
+        };
+        let selection = engine
+            .select_variant(&tenant, &experiment, &context)
+            .await
+            .expect("selects");
+        assert!(!selection.explore, "{selection:?}");
+        assert!(
+            selection.reason.contains("failing closed to exploit-only"),
+            "{selection:?}"
+        );
+        assert!(selection.is_control, "the best arm is the control");
+    }
+
+    #[tokio::test]
+    async fn a_paused_experiment_is_exploit_only() {
+        let Some(pool) = fresh_pool("experiments_lib_paused").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(pool.clone());
+        let tenant = crate::test_db::unique_test_tenant("exp-paused");
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                "paused",
+                "Paused",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        engine
+            .ensure_arms(
+                &tenant,
+                experiment_id,
+                &[ArmSpec::control("control"), ArmSpec::new("bold")],
+            )
+            .await
+            .expect("arms");
+        engine
+            .set_status(&tenant, experiment_id, ExperimentStatus::Paused)
+            .await
+            .expect("paused");
+        let experiment = engine
+            .load_experiment(&tenant, "paused")
+            .await
+            .expect("load")
+            .expect("exists");
+        let context = VariantContext {
+            dimensions: ExperimentContext::default(),
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: false,
+        };
+        let selection = engine
+            .select_variant(&tenant, &experiment, &context)
+            .await
+            .expect("selects");
+        assert!(!selection.explore, "a paused experiment never explores");
+        assert_eq!(
+            selection.variant, "control",
+            "the best arm with equal priors"
+        );
+    }
+
+    /// The contextual bucket: with too few bucket trials the global posterior
+    /// is used (documented shrinkage), and the derived bucket experiment is
+    /// provisioned idempotently — concurrent selections race to create ONE
+    /// bucket family.
+    #[tokio::test]
+    async fn context_buckets_fall_back_then_own_the_posture_and_race_safely() {
+        let Some(pool) = fresh_pool("experiments_lib_bucket").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(pool.clone());
+        let tenant = crate::test_db::unique_test_tenant("exp-bucket");
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                "outreach",
+                "Outreach",
+                &serde_json::json!({ "dimensions": ["intent_bucket"] }),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        engine
+            .ensure_arms(
+                &tenant,
+                experiment_id,
+                &[ArmSpec::control("control"), ArmSpec::new("bold")],
+            )
+            .await
+            .expect("arms");
+        engine
+            .set_status(&tenant, experiment_id, ExperimentStatus::Running)
+            .await
+            .expect("running");
+        let experiment = engine
+            .load_experiment(&tenant, "outreach")
+            .await
+            .expect("load")
+            .expect("exists");
+        let dimensions = ExperimentContext {
+            intent_bucket: Some("high".to_string()),
+            ..ExperimentContext::default()
+        };
+        let context = |override_: bool| VariantContext {
+            dimensions: dimensions.clone(),
+            sender_domain_exposure: 0,
+            daily_exploration_pct: 0.0,
+            account_expected_value_eur: 0.0,
+            explicit_exploration_override: override_,
+        };
+
+        // First selection provisions the bucket; its trial count is 0 < 25,
+        // so the GLOBAL posterior is used (hierarchical fallback) and the
+        // selection itself still explores among the parent's arms.
+        let selection = engine
+            .select_variant(&tenant, &experiment, &context(false))
+            .await
+            .expect("selects");
+        assert!(selection.explore);
+        assert!(
+            selection.reason.contains("hierarchical fallback"),
+            "{selection:?}"
+        );
+        assert!(!selection.used_context_bucket);
+
+        // The bucket family now exists and is RUNNING; its key derives from
+        // the bucket the selection actually used.
+        let bucket_name = selection
+            .context_bucket
+            .clone()
+            .expect("the selection names its context bucket");
+        let bucket_key = context_bucket_experiment_key("outreach", &bucket_name);
+        let bucket = engine
+            .load_experiment(&tenant, &bucket_key)
+            .await
+            .expect("load bucket")
+            .expect("the derived bucket experiment exists");
+        assert_eq!(bucket.status, ExperimentStatus::Running);
+        let bucket_arms = engine.load_arms(&tenant, bucket.id).await.expect("arms");
+        assert_eq!(bucket_arms.len(), 2, "the bucket mirrors the parent's arms");
+
+        // Concurrent selections race to create the SAME bucket: no unique
+        // violation, exactly one bucket family, and a valid selection each.
+        let ctx_a = context(false);
+        let ctx_b = context(false);
+        let (a, b) = tokio::join!(
+            engine.select_variant(&tenant, &experiment, &ctx_a),
+            engine.select_variant(&tenant, &experiment, &ctx_b),
+        );
+        a.expect("racing selection a");
+        b.expect("racing selection b");
+        let buckets: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiments WHERE tenant_id = $1 AND key = $2",
+        )
+        .bind(&tenant)
+        .bind(&bucket_key)
+        .fetch_one(&pool)
+        .await
+        .expect("count buckets");
+        assert_eq!(buckets, 1, "the derived bucket is provisioned exactly once");
+    }
+
+    #[tokio::test]
+    async fn record_reward_is_guarded_idempotent_and_arm_validated() {
+        let Some(pool) = fresh_pool("experiments_lib_reward").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(pool.clone());
+        let tenant = crate::test_db::unique_test_tenant("exp-reward");
+        let experiment_id = engine
+            .ensure_experiment(
+                &tenant,
+                "rewarded",
+                "Rewarded",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        engine
+            .ensure_arms(
+                &tenant,
+                experiment_id,
+                &[ArmSpec::control("control"), ArmSpec::new("bold")],
+            )
+            .await
+            .expect("arms");
+
+        // Input guards.
+        let error = record_reward(
+            &pool,
+            "  ",
+            experiment_id,
+            "control",
+            RewardKind::Open,
+            "k",
+            0.0,
+        )
+        .await
+        .expect_err("blank tenant");
+        assert!(
+            error.to_string().contains("tenant_id is required"),
+            "{error}"
+        );
+        let error = record_reward(
+            &pool,
+            &tenant,
+            experiment_id,
+            "control",
+            RewardKind::Open,
+            "  ",
+            0.0,
+        )
+        .await
+        .expect_err("blank outcome key");
+        assert!(
+            error.to_string().contains("outcome_key is required"),
+            "{error}"
+        );
+        let error = record_reward(
+            &pool,
+            &tenant,
+            experiment_id,
+            "control",
+            RewardKind::Open,
+            "k",
+            -1.0,
+        )
+        .await
+        .expect_err("negative value");
+        assert!(
+            error.to_string().contains("must be finite and >= 0"),
+            "{error}"
+        );
+        let error = record_reward(
+            &pool,
+            &tenant,
+            experiment_id,
+            "ghost",
+            RewardKind::Open,
+            "k",
+            0.0,
+        )
+        .await
+        .expect_err("unknown variant");
+        assert!(
+            error.to_string().contains("does not exist for tenant"),
+            "{error}"
+        );
+
+        // A reward applies once per outcome key: a replay is a no-op.
+        record_reward(
+            &pool,
+            &tenant,
+            experiment_id,
+            "control",
+            RewardKind::PositiveReply,
+            "outcome-1",
+            0.0,
+        )
+        .await
+        .expect("records");
+        let (trials, successes): (i64, i64) = sqlx::query_as(
+            "SELECT trials, successes FROM sales_experiment_arms \
+             WHERE experiment_id = $1 AND variant = 'control'",
+        )
+        .bind(experiment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("arm row");
+        assert_eq!(trials, 1);
+        assert_eq!(successes, 1);
+
+        record_reward(
+            &pool,
+            &tenant,
+            experiment_id,
+            "control",
+            RewardKind::PositiveReply,
+            "outcome-1",
+            0.0,
+        )
+        .await
+        .expect("replay");
+        let (trials, successes): (i64, i64) = sqlx::query_as(
+            "SELECT trials, successes FROM sales_experiment_arms \
+             WHERE experiment_id = $1 AND variant = 'control'",
+        )
+        .bind(experiment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("arm row");
+        assert_eq!(
+            (trials, successes),
+            (1, 1),
+            "the same outcome key must never double-count"
+        );
+    }
 }

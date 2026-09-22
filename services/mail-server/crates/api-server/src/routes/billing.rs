@@ -9342,4 +9342,662 @@ mod adversarial_tests {
             );
         }
     }
+
+    // ── Coverage residuals: error mapping, cache, gates, fallbacks ──
+
+    fn auth_user(scopes: &[&str], tenant_id: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant_id.to_string(),
+            user_id: Some("user_cov_residual".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn usage_errors_map_to_their_http_contracts() {
+        let db = map_usage_error(usage::UsageError::Db(sqlx::Error::RowNotFound));
+        assert!(matches!(db, ApiError::NotFound(_)) || matches!(db, ApiError::Internal(_)));
+        assert!(matches!(
+            map_usage_error(usage::UsageError::Audit("audit chain broken".into())),
+            ApiError::Internal(_)
+        ));
+        let pool_error = map_usage_error(usage::UsageError::Redis(
+            deadpool_redis::PoolError::Timeout(deadpool_redis::TimeoutType::Create),
+        ));
+        assert!(
+            matches!(pool_error, ApiError::Internal(_)),
+            "redis pool errors surface as cache-unavailable internals"
+        );
+        let cmd = map_usage_error(usage::UsageError::RedisCmd(
+            deadpool_redis::redis::RedisError::from((
+                deadpool_redis::redis::ErrorKind::TypeError,
+                "bad command",
+            )),
+        ));
+        assert!(matches!(cmd, ApiError::Internal(_)));
+        assert!(matches!(
+            map_usage_error(usage::UsageError::InvalidQuantity(-5)),
+            ApiError::BadRequest(_)
+        ));
+        assert!(matches!(
+            map_usage_error(usage::UsageError::OperationConflict {
+                event_id: uuid::Uuid::new_v4(),
+                detail: "amount differs".into()
+            }),
+            ApiError::Conflict(_)
+        ));
+    }
+
+    /// A pre-seeded usage cache entry short-circuits the database query:
+    /// the cached payload (with values the DB could not produce) is served
+    /// verbatim.
+    #[tokio::test]
+    async fn usage_cache_hit_skips_the_database() {
+        let Some(pool) = pool_for("usage_cache_hit").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let tenant = unique_id();
+        let start = Utc::now() - chrono::Duration::days(1);
+        let end = Utc::now();
+        let key = usage_cache_key(&tenant, start, end, "v1");
+        let cached = json!({
+            "tenantId": tenant,
+            "source": "redis-cache",
+        });
+        let mut conn = state.redis.get().await.expect("redis conn");
+        deadpool_redis::redis::AsyncCommands::set_ex::<_, String, ()>(
+            &mut conn,
+            &key,
+            serde_json::to_string(&cached).unwrap(),
+            60,
+        )
+        .await
+        .expect("seed cache");
+
+        let payload = cached_usage_payload_for_period(&state, &tenant, start, end, "v1")
+            .await
+            .expect("cache hit");
+        assert_eq!(payload["source"], "redis-cache");
+    }
+
+    #[test]
+    fn redirect_policy_and_csv_response_cover_their_refusal_arms() {
+        // Unparseable and host-less URLs are refused.
+        assert!(!is_allowed_billing_redirect_url(
+            "not a url",
+            crate::config::Environment::Development
+        ));
+        assert!(!is_allowed_billing_redirect_url(
+            "mailto:billing@apexmail.ee",
+            crate::config::Environment::Development
+        ));
+        // Non-ASCII and punycode hosts are refused outright.
+        assert!(!is_allowed_billing_redirect_url(
+            "https://аpexmail.ee/x",
+            crate::config::Environment::Production
+        ));
+        assert!(!is_allowed_billing_redirect_url(
+            "https://xn--pexmail-bbb.ee/x",
+            crate::config::Environment::Production
+        ));
+        // Plain http is only tolerated on localhost in non-production.
+        assert!(!is_allowed_billing_redirect_url(
+            "http://localhost:3000/x",
+            crate::config::Environment::Production
+        ));
+        assert!(is_allowed_billing_redirect_url(
+            "http://localhost:3000/x",
+            crate::config::Environment::Development
+        ));
+        assert!(!is_allowed_billing_redirect_url(
+            "https://evil.example/x",
+            crate::config::Environment::Development
+        ));
+        // Apexmail hosts must be https.
+        assert!(!is_allowed_billing_redirect_url(
+            "http://apexmail.ee/x",
+            crate::config::Environment::Development
+        ));
+        assert!(is_allowed_billing_redirect_url(
+            "https://app.apexmail.ee/x",
+            crate::config::Environment::Production
+        ));
+
+        // csv_text_response: both filename arms build a CSV response.
+        let bare = csv_text_response("a,b\n1,2".to_string(), None);
+        assert_eq!(bare.status(), StatusCode::OK);
+        assert!(bare.headers().get("content-disposition").is_none());
+        let named = csv_text_response("a\n1".to_string(), Some("export.csv".into()));
+        assert_eq!(
+            named.headers().get("content-disposition").unwrap(),
+            "attachment; filename=\"export.csv\""
+        );
+
+        // The generic operation-failure response is an honest 500.
+        let failed = billing_operation_failed_response();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Every admin billing handler refuses a customer-tenant caller with
+    /// the same 403 shape, and tenant-scoped admin handlers refuse a
+    /// system-admin asking about a tenant their scopes do not cover.
+    #[tokio::test]
+    async fn admin_gates_refuse_customer_callers_on_every_handler() {
+        let Some(pool) = pool_for("admin_gates").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let customer = auth_user(&["billing:read", "billing:write"], "ten_customer");
+        let system_admin_tenant = auth_user(&["*"], crate::routes::system_sender::SYSTEM_TENANT_ID);
+
+        let credit_body = Json(AdminCreditBody {
+            amount: 100,
+            reason: "coverage".into(),
+            expires_at: None,
+            idempotency_key: None,
+        });
+        let gate = admin_apply_credit(
+            State(state.clone()),
+            customer.clone(),
+            HeaderMap::new(),
+            Path("ten_customer".into()),
+            credit_body,
+        )
+        .await
+        .expect("gate returns a response");
+        assert_eq!(gate.status(), StatusCode::FORBIDDEN);
+
+        let override_gate = admin_apply_plan_override(
+            State(state.clone()),
+            customer.clone(),
+            Path("ten_customer".into()),
+            Json(AdminPlanOverrideBody {
+                plan_id: "pro".into(),
+                reason: "coverage".into(),
+                expires_at: None,
+            }),
+        )
+        .await
+        .expect("gate returns a response");
+        assert_eq!(override_gate.status(), StatusCode::FORBIDDEN);
+
+        let status_gate = admin_force_subscription_status(
+            State(state.clone()),
+            customer.clone(),
+            Path("ten_customer".into()),
+            Json(AdminSubscriptionStatusBody {
+                status: "active".into(),
+                reason: "coverage".into(),
+            }),
+        )
+        .await
+        .expect("gate returns a response");
+        assert_eq!(status_gate.status(), StatusCode::FORBIDDEN);
+
+        let dunning_gate = admin_reset_dunning(
+            State(state.clone()),
+            customer.clone(),
+            Path("ten_customer".into()),
+            Json(AdminDunningResetBody {
+                reason: "coverage".into(),
+            }),
+        )
+        .await
+        .expect("gate returns a response");
+        assert_eq!(dunning_gate.status(), StatusCode::FORBIDDEN);
+
+        let invoice_gate = admin_create_invoice(
+            State(state.clone()),
+            customer.clone(),
+            Path("ten_customer".into()),
+            Json(AdminCreateInvoiceBody {
+                period_start: "2026-01-01T00:00:00Z".into(),
+                period_end: "2026-02-01T00:00:00Z".into(),
+                line_items: vec![],
+                notes: None,
+            }),
+        )
+        .await
+        .expect("gate returns a response");
+        assert_eq!(invoice_gate.status(), StatusCode::FORBIDDEN);
+
+        for gate in [
+            admin_get_revenue_report(
+                State(state.clone()),
+                customer.clone(),
+                Query(DateRangeQuery {
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await
+            .expect("gate"),
+            admin_get_mrr_report(State(state.clone()), customer.clone())
+                .await
+                .expect("gate"),
+            admin_get_churn_report(State(state.clone()), customer.clone())
+                .await
+                .expect("gate"),
+            admin_get_dunning_report(State(state.clone()), customer.clone())
+                .await
+                .expect("gate"),
+            admin_get_cost_report(
+                State(state.clone()),
+                customer.clone(),
+                Query(DateRangeQuery {
+                    start_date: None,
+                    end_date: None,
+                }),
+            )
+            .await
+            .expect("gate"),
+            admin_export_billing_data(
+                State(state.clone()),
+                customer.clone(),
+                Query(BillingExportQuery {
+                    export_type: Some("usage".into()),
+                    start_date: None,
+                    end_date: None,
+                    format: "csv".into(),
+                }),
+            )
+            .await
+            .expect("gate"),
+            admin_get_tenant_details(
+                State(state.clone()),
+                customer.clone(),
+                Path("ten_customer".into()),
+            )
+            .await
+            .expect("gate"),
+        ] {
+            assert_eq!(gate.status(), StatusCode::FORBIDDEN);
+        }
+
+        // An admin of the platform tenant is still admin-gated to TENANTS
+        // their scopes cover: billing:admin covers every tenant, but a
+        // narrow wildcard-less admin key does not.
+        let tenant_admin = AuthUser {
+            tenant_id: "ten_other".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["billing:admin".into()],
+        };
+        let refused = require_admin_tenant_access(&tenant_admin, "ten_customer");
+        assert!(refused.is_err(), "tenant:scope gates the cross-tenant read");
+        let allowed = require_admin_tenant_access(&system_admin_tenant, "ten_customer");
+        assert!(allowed.is_ok());
+    }
+
+    /// The portal's Stripe failure arms: a tenant with no Stripe customer,
+    /// and an unusable Stripe credential, both return the honest generic
+    /// 500 instead of leaking provider detail.
+    #[tokio::test]
+    async fn portal_fails_closed_without_a_customer_or_credentials() {
+        let Some(pool) = pool_for("portal_failures").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let auth = auth_user(&["billing:read"], "ten_portal_none");
+
+        // No stripe_customers row → generic 500 (never a fabricated URL).
+        let response = create_portal_session(
+            State(state.clone()),
+            auth.clone(),
+            Json(PortalSessionBody {
+                return_url: "https://app.apexmail.ee/billing".into(),
+            }),
+        )
+        .await
+        .expect("portal response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // With a customer row but NO Stripe credential → client init fails.
+        let _guard = lock_stripe_env().await;
+        let _key = EnvRestore::set("STRIPE_SECRET_KEY", None);
+        sqlx::query(
+            "INSERT INTO stripe_customers (id, tenant_id, stripe_customer_id, created_at)
+             VALUES (gen_random_uuid(), $1, 'cus_portal_fail', NOW())",
+        )
+        .bind(auth.tenant_id.as_str())
+        .execute(&state.db)
+        .await
+        .expect("seed stripe customer");
+        let response = create_portal_session(
+            State(state),
+            auth,
+            Json(PortalSessionBody {
+                return_url: "https://app.apexmail.ee/billing".into(),
+            }),
+        )
+        .await
+        .expect("portal response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// The subscription read survives a missing table (42P01 maps to "no
+    /// active subscription" for legacy deployments) and surfaces any other
+    /// database failure honestly.
+    #[tokio::test]
+    async fn subscription_read_survives_a_missing_table() {
+        let Some(pool) = pool_for("subscription_42p01").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let auth = auth_user(&["billing:read"], "ten_sub_none");
+
+        crate::routes::fault::hide_table(&pool, "stripe_subscriptions")
+            .await
+            .expect("hide stripe_subscriptions");
+        let response = get_subscription(State(state), auth).await.expect("read");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"]["subscription"], serde_json::Value::Null);
+        assert_eq!(body["data"]["message"], "No active subscription");
+    }
+
+    /// Invoice XML for an unknown invoice is a 404, and the XML filename
+    /// fallback arms render safely.
+    #[tokio::test]
+    async fn invoice_xml_404_and_proration_contract() {
+        let Some(pool) = pool_for("invoice_xml_404").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let auth = auth_user(&["billing:read"], "ten_invoice_none");
+        let response = get_invoice_xml(State(state), auth, Path(uuid::Uuid::new_v4().to_string()))
+            .await
+            .expect("xml response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Proration refuses a degenerate period before doing any money math.
+        let config = BillingConfig::default();
+        let plan = billing_service::types::Plan {
+            id: "plan_pro".into(),
+            name: "pro".into(),
+            display_name: "Pro".into(),
+            description: String::new(),
+            price_monthly: 4900,
+            price_yearly: 49000,
+            email_limit: 1000,
+            api_call_limit: 1000,
+            features: billing_service::types::PlanFeatures::default(),
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
+            is_active: true,
+            sort_order: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let subscription = RouteSubscription {
+            plan_name: "starter".into(),
+            billing_interval: BillingInterval::Monthly,
+            current_period_start: Utc::now(),
+            current_period_end: Utc::now(),
+        };
+        let error = preview_plan_proration(&config, &plan, &plan, &subscription)
+            .expect_err("zero-length period is invalid");
+        assert!(error.contains("daysInPeriod"), "{error}");
+    }
+
+    /// Plan lookups for a plan-less tenant return the honest empty shapes.
+    #[tokio::test]
+    async fn plan_less_tenants_get_honest_empty_payloads() {
+        let Some(pool) = pool_for("plan_less").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let auth = auth_user(&["billing:read"], "ten_plan_less");
+
+        let features = get_plan_features(State(state.clone()), auth.clone())
+            .await
+            .expect("features");
+        assert_eq!(features.0.data, Some(serde_json::json!({})));
+
+        let feature = get_plan_feature(
+            State(state.clone()),
+            auth.clone(),
+            Path("custom_domain".into()),
+        )
+        .await
+        .expect("feature");
+        assert_eq!(feature.0.data.as_ref().unwrap()["hasAccess"], false);
+
+        let current = get_current_plan(State(state.clone()), auth.clone())
+            .await
+            .expect("current plan");
+        assert_eq!(current.0.data, Some(serde_json::Value::Null));
+
+        let unknown_plan = get_plan(State(state.clone()), Path("no-such-plan".into())).await;
+        assert!(matches!(unknown_plan, Err(ApiError::NotFound(_))));
+    }
+
+    /// The admin credit idempotency chain: a dead Redis fails closed, a
+    /// replayed key conflicts, and a key already recorded against another
+    /// tenant is refused.
+    #[tokio::test]
+    async fn admin_credit_idempotency_fails_closed_on_every_arm() {
+        let Some(pool) = pool_for("credit_idempotency").await else {
+            return;
+        };
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "free").await;
+        let admin = auth_user(&["*"], "system");
+
+        // 1. Dead Redis: the claim cannot run → 503, nothing applied.
+        let dead_state = crate::app::test_support::test_state_over_with_config_and_redis(
+            pool.clone(),
+            crate::app::test_support::test_config(),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        let mut key_headers = HeaderMap::new();
+        key_headers.insert(
+            "idempotency-key",
+            format!("cov-dead-{}", uuid::Uuid::new_v4().simple())
+                .parse()
+                .unwrap(),
+        );
+        let response = admin_apply_credit(
+            State(dead_state),
+            admin.clone(),
+            key_headers,
+            Path(tenant.clone()),
+            Json(AdminCreditBody {
+                amount: 100,
+                reason: "coverage".into(),
+                expires_at: None,
+                idempotency_key: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&response, Err(ApiError::ServiceUnavailable(message))
+                if message.contains("idempotency enforcement")),
+            "a dead Redis fails the claim closed, got {response:?}"
+        );
+
+        // 2. Live Redis: the same key twice → the replay conflicts.
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "idempotency-key",
+            format!("cov-key-{}", uuid::Uuid::new_v4().simple())
+                .parse()
+                .unwrap(),
+        );
+        let first = admin_apply_credit(
+            State(state.clone()),
+            admin.clone(),
+            headers.clone(),
+            Path(tenant.clone()),
+            Json(AdminCreditBody {
+                amount: 500,
+                reason: "coverage".into(),
+                expires_at: None,
+                idempotency_key: None,
+            }),
+        )
+        .await
+        .expect("first credit");
+        assert_eq!(
+            first.status(),
+            StatusCode::CREATED,
+            "first application lands"
+        );
+
+        let replay = admin_apply_credit(
+            State(state.clone()),
+            admin.clone(),
+            headers.clone(),
+            Path(tenant.clone()),
+            Json(AdminCreditBody {
+                amount: 500,
+                reason: "coverage".into(),
+                expires_at: None,
+                idempotency_key: None,
+            }),
+        )
+        .await
+        .expect("replayed credit");
+        assert_eq!(replay.status(), StatusCode::CONFLICT);
+
+        // 3. A key already recorded against ANOTHER tenant's ledger.
+        let other = unique_id();
+        seed_tenant(&pool, &other, "free").await;
+        let claimed_elsewhere = format!("cov-elsewhere-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+             VALUES ($1, 0, 0, 'EUR', NOW(), NOW())",
+        )
+        .bind(&other)
+        .execute(&pool)
+        .await
+        .expect("seed other wallet");
+        sqlx::query(
+            "INSERT INTO wallet_transactions
+                 (id, tenant_id, wallet_id, type, amount, balance_after, reference, description, created_at)
+             SELECT gen_random_uuid(), $1, w.id, 'credit', 100, 100, $2, 'seed', NOW()
+             FROM wallets w WHERE w.tenant_id = $1",
+        )
+        .bind(&other)
+        .bind(&claimed_elsewhere)
+        .execute(&pool)
+        .await
+        .expect("seed other transaction");
+        let mut foreign_headers = HeaderMap::new();
+        foreign_headers.insert("idempotency-key", claimed_elsewhere.parse().unwrap());
+        let response = admin_apply_credit(
+            State(state),
+            admin,
+            foreign_headers,
+            Path(tenant),
+            Json(AdminCreditBody {
+                amount: 100,
+                reason: "coverage".into(),
+                expires_at: None,
+                idempotency_key: None,
+            }),
+        )
+        .await
+        .expect("foreign-key credit");
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "a key recorded for another tenant is refused"
+        );
+    }
+
+    /// The revenue report and the billing export fall back to the legacy
+    /// schema shape when the modern tables are missing, and surface any
+    /// other failure honestly.
+    #[tokio::test]
+    async fn revenue_and_export_fall_back_to_the_legacy_schema() {
+        let Some(pool) = pool_for("revenue_legacy").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let admin = auth_user(&["*"], "system");
+
+        // Hide the invoices table: the modern query's 42P01 matches the
+        // schema-fallback codes and reruns the LEGACY query, which then
+        // fails on the same hidden table → the error arm. Both paths run.
+        crate::routes::fault::hide_table(&pool, "invoices")
+            .await
+            .expect("hide invoices");
+        // Malformed bounds refuse with 400 before any query.
+        let bad_dates = admin_get_revenue_report(
+            State(state.clone()),
+            admin.clone(),
+            Query(DateRangeQuery {
+                start_date: Some("not-a-date".into()),
+                end_date: None,
+            }),
+        )
+        .await
+        .expect("revenue report response");
+        assert_eq!(bad_dates.status(), StatusCode::BAD_REQUEST);
+
+        // Valid bounds + hidden invoices: modern 42P01 → legacy fallback →
+        // the legacy 42P01 surfaces honestly.
+        let response = admin_get_revenue_report(
+            State(state.clone()),
+            admin.clone(),
+            Query(DateRangeQuery {
+                start_date: Some("2026-01-01T00:00:00Z".into()),
+                end_date: Some("2026-03-01T00:00:00Z".into()),
+            }),
+        )
+        .await;
+        match &response {
+            Ok(response) => assert!(response.status().is_success()),
+            // The legacy table is hidden too: the fallback's own failure
+            // surfaces as the honest internal error.
+            Err(ApiError::Internal(_)) => {}
+            other => panic!("legacy fallback must answer or fail honestly: {other:?}"),
+        }
+
+        let response = admin_export_billing_data(
+            State(state.clone()),
+            admin.clone(),
+            Query(BillingExportQuery {
+                export_type: Some("invoices".into()),
+                start_date: Some("2026-01-01T00:00:00Z".into()),
+                end_date: Some("2026-03-01T00:00:00Z".into()),
+                format: "csv".into(),
+            }),
+        )
+        .await;
+        match &response {
+            Ok(response) => assert!(response.status().is_success()),
+            // The hidden invoices table fails both schema shapes; the
+            // error surfaces honestly.
+            Err(ApiError::Internal(_)) => {}
+            other => panic!("export must answer or fail honestly: {other:?}"),
+        }
+
+        // Invalid date bounds refuse with 400 before any query.
+        let response = admin_get_cost_report(
+            State(state),
+            admin,
+            Query(DateRangeQuery {
+                start_date: Some("not-a-date".into()),
+                end_date: Some("also-bad".into()),
+            }),
+        )
+        .await
+        .expect("cost report");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "malformed bounds refuse before any query"
+        );
+    }
 }

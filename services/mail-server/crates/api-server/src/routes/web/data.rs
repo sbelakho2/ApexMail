@@ -6760,3 +6760,150 @@ mod coverage_loader_tests {
         assert!(missing_required_console_schema(&dead.db).await.is_err());
     }
 }
+
+/// Coverage residuals: loader failure arms + campaign page edges.
+#[cfg(test)]
+mod coverage_residual_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct CovSqlStateError(&'static str);
+
+    impl std::fmt::Display for CovSqlStateError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "db error {}", self.0)
+        }
+    }
+    impl std::error::Error for CovSqlStateError {}
+    impl sqlx::error::DatabaseError for CovSqlStateError {
+        fn message(&self) -> &str {
+            "fake"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    #[tokio::test]
+    async fn required_loader_failure_is_unavailable_with_flag() {
+        let fake = sqlx::Error::Database(Box::new(CovSqlStateError("42P01")));
+        assert!(is_schema_error(&fake));
+        let fake_other = sqlx::Error::Database(Box::new(CovSqlStateError("23505")));
+        assert!(!is_schema_error(&fake_other));
+        let boxed = CovSqlStateError("23505");
+        use sqlx::error::DatabaseError;
+        assert_eq!(boxed.to_string(), "db error 23505");
+        assert_eq!(DatabaseError::message(&boxed), "fake");
+        assert_eq!(DatabaseError::code(&boxed).as_deref(), Some("23505"));
+        assert!(matches!(
+            DatabaseError::kind(&boxed),
+            sqlx::error::ErrorKind::Other
+        ));
+        let transient: &(dyn std::error::Error + Send + Sync + 'static) = &boxed;
+        assert!(transient.is::<CovSqlStateError>());
+
+        // A required query that fails lands the dataset in Unavailable.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy pool");
+        let state = load_query("cov-fail", "corr-fail", async {
+            let _row: (i64,) = sqlx::query_as("SELECT id FROM campaign_jobs WHERE false")
+                .fetch_one(&pool)
+                .await?;
+            Ok(())
+        })
+        .await;
+        assert!(matches!(state, LoadState::Unavailable));
+    }
+
+    #[test]
+    fn campaign_detail_page_covers_audience_and_filter_edges() {
+        let actions = vec![
+            ("Start".to_string(), "/campaigns/x/start".to_string(), true),
+            ("Pause".to_string(), "/campaigns/x/pause".to_string(), false),
+        ];
+        let wired_zero = CampaignDetailData {
+            id: "c1".into(),
+            name: "Wired".into(),
+            subject: "s".into(),
+            status: "draft".into(),
+            scheduled_at: None,
+            list_id: Some("list-1".into()),
+            list_name: Some("Newsletter".into()),
+            recipient_count: 0,
+            actions: actions.clone(),
+            lists: vec![("list-1".into(), "Newsletter".into(), true)],
+        };
+        let page = wired_zero.to_list_page();
+        let audience = page
+            .kpis
+            .iter()
+            .find(|k| k.label == "Audience")
+            .expect("audience kpi");
+        assert_eq!(audience.value, "wired — Newsletter (0 subscribed)");
+        assert!(!page.filters.is_empty(), "the list select renders");
+        assert_eq!(
+            page.primary_action.as_ref().map(|a| a.0.clone()),
+            Some("Start".into())
+        );
+
+        let unwired = CampaignDetailData {
+            id: "c2".into(),
+            name: "Unwired".into(),
+            subject: "s".into(),
+            status: "draft".into(),
+            scheduled_at: None,
+            list_id: None,
+            list_name: None,
+            recipient_count: 0,
+            actions: actions.clone(),
+            lists: vec![],
+        };
+        let page = unwired.to_list_page();
+        let audience = page
+            .kpis
+            .iter()
+            .find(|k| k.label == "Audience")
+            .expect("audience kpi");
+        assert_eq!(audience.value, "no recipients wired");
+        assert!(page.filters.is_empty(), "no lists → no list select filter");
+    }
+
+    #[test]
+    fn missing_columns_are_reported_pairwise() {
+        use std::collections::HashSet;
+        let present: HashSet<(String, String)> = [
+            ("invoices".to_string(), "total".to_string()),
+            ("invoices".to_string(), "currency".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let required: &[(&str, &[&str])] = &[("invoices", &["total", "currency", "status"])];
+        let missing: Vec<String> = required
+            .iter()
+            .flat_map(|(table, columns)| {
+                columns
+                    .iter()
+                    .filter(|column| {
+                        !present.contains(&((*table).to_string(), (**column).to_string()))
+                    })
+                    .map(|column| format!("{table}.{column}"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(missing, vec!["invoices.status".to_string()]);
+    }
+}

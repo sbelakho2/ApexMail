@@ -610,6 +610,9 @@ mod tests {
     #[test]
     fn test_local_conn_counter_enforces_cap() {
         let tenant = format!("tenant_local_cap_test_{}", std::process::id());
+        // Seed residue deliberately, so the drain below runs for real (this
+        // is exactly the "previous failed run" state it exists to clear).
+        local_conn_inc(&tenant);
         // Drain any residue from a previous (failed) run of this test.
         while LOCAL_CONN_COUNTS
             .lock()
@@ -689,6 +692,168 @@ mod tests {
             "Bearer   ".parse().unwrap(),
         );
         assert!(extract_bearer_token(&headers).is_none());
+    }
+
+    /// Decrementing a window that still has occupants keeps the entry (the
+    /// tenant is still connected), and decrementing an unknown tenant is a
+    /// no-op — neither may panic nor resurrect a removed entry.
+    #[test]
+    fn local_conn_dec_survives_partial_windows_and_absent_tenants() {
+        let tenant = format!("tenant_dec_partial_{}", std::process::id());
+        local_conn_inc(&tenant);
+        local_conn_inc(&tenant);
+        local_conn_dec(&tenant);
+        assert!(
+            LOCAL_CONN_COUNTS
+                .lock()
+                .expect("local conn-counts lock")
+                .contains_key(&tenant),
+            "a window with occupants must survive a single decrement"
+        );
+        local_conn_dec(&tenant);
+        assert!(
+            !LOCAL_CONN_COUNTS
+                .lock()
+                .expect("local conn-counts lock")
+                .contains_key(&tenant),
+            "the window must be removed once empty"
+        );
+        // Unknown tenant: no entry to touch — must be a no-op.
+        local_conn_dec(&format!("tenant_never_seen_{}", std::process::id()));
+    }
+
+    /// Both `ConnSlot::release` arms decrement their counters, and the
+    /// guard's explicit async release path runs exactly once (the subsequent
+    /// implicit drop is a no-op).
+    #[tokio::test]
+    async fn conn_slot_release_paths_decrement_both_counter_kinds() {
+        // Local slot: the in-process counter must return to zero.
+        let tenant = format!("tenant_release_local_{}", std::process::id());
+        let local_slot = acquire_local_conn_slot(&tenant).expect("local slot");
+        let guard = ConnCountGuard::new(local_slot);
+        guard.release().await;
+        assert!(
+            !LOCAL_CONN_COUNTS
+                .lock()
+                .expect("local conn-counts lock")
+                .contains_key(&tenant),
+            "the async release must free the local slot immediately"
+        );
+
+        // Redis slot: release must reach the DECR (a dead pool is fine — the
+        // decrement swallows its own error; the arm still runs).
+        let redis_slot = ConnSlot::Redis {
+            pool: dead_redis_pool_for_sse(),
+            key: format!("sse:conns:release_test_{}", std::process::id()),
+        };
+        redis_slot.release().await;
+        // Local release through the same method, for the Local arm.
+        ConnSlot::Local {
+            tenant_id: format!("tenant_release_local2_{}", std::process::id()),
+        }
+        .release()
+        .await;
+    }
+
+    /// A guard dropped WITHOUT a runtime (e.g. a stream body moved to a plain
+    /// thread) must still release synchronously — the warn path for the
+    /// async-only Redis decrement included.
+    #[test]
+    fn guard_drop_outside_a_runtime_releases_synchronously() {
+        // A REDIS slot: its synchronous drop path cannot await the DECR and
+        // must fall back to the warn (no runtime on this thread).
+        let slot = ConnSlot::Redis {
+            pool: dead_redis_pool_for_sse(),
+            key: format!("sse:conns:drop_no_rt_{}", std::process::id()),
+        };
+        let handle = std::thread::spawn(move || {
+            let guard = ConnCountGuard::new(slot);
+            drop(guard);
+        });
+        handle.join().expect("drop thread");
+
+        // The LOCAL slot is synchronously releasable from any thread.
+        let tenant = format!("tenant_drop_no_rt_{}", std::process::id());
+        let slot = acquire_local_conn_slot(&tenant).expect("local slot");
+        let handle = std::thread::spawn(move || {
+            let guard = ConnCountGuard::new(slot);
+            drop(guard);
+        });
+        handle.join().expect("drop thread");
+        assert!(
+            !LOCAL_CONN_COUNTS
+                .lock()
+                .expect("local conn-counts lock")
+                .contains_key(&tenant),
+            "the synchronous drop path must free the local slot"
+        );
+    }
+
+    /// A Redis INCR that cannot succeed (wrong-type counter key) must fall
+    /// back to the bounded in-process counter, not fail-open.
+    #[tokio::test]
+    async fn redis_incr_failure_falls_back_to_the_local_cap() {
+        let Some((state, redis)) = crate::routes::test_support::live_redis_state(&[]).await else {
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let tenant = format!("tenant_wrongtype_{}", std::process::id());
+        let conn_key = format!("sse:conns:{tenant}");
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            redis::cmd("SET")
+                .arg(&conn_key)
+                .arg("not-a-number")
+                .query_async::<()>(&mut *conn)
+                .await
+                .expect("seed wrong-type counter");
+        }
+        // INCR on a string key errors → the in-process fallback grants the
+        // slot instead of failing open.
+        let slot = acquire_conn_slot(&state, &tenant, &conn_key)
+            .await
+            .expect("fallback local slot");
+        assert!(
+            matches!(slot, ConnSlot::Local { .. }),
+            "local fallback used"
+        );
+        assert!(
+            LOCAL_CONN_COUNTS
+                .lock()
+                .expect("local conn-counts lock")
+                .contains_key(&tenant),
+            "the fallback counter tracks the tenant"
+        );
+        // Cleanup.
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&conn_key)
+                .query_async(&mut *conn)
+                .await;
+        }
+        if let Some(counts) = LOCAL_CONN_COUNTS
+            .lock()
+            .expect("local conn-counts lock")
+            .get(&tenant)
+            .cloned()
+        {
+            for _ in 0..counts {
+                local_conn_dec(&tenant);
+            }
+        }
+    }
+
+    /// A deadpool wired to a port with no Redis — for release paths whose
+    /// decrement errors are swallowed.
+    fn dead_redis_pool_for_sse() -> deadpool_redis::Pool {
+        deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .builder()
+            .expect("dead redis builder")
+            .max_size(1)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .expect("dead redis pool")
     }
 
     #[cfg(test)]

@@ -118,10 +118,10 @@ async fn claim_usage_operation_in_tx(
         Some((hash, original_timestamp)) if hash == payload_hash => {
             Ok(UsageOperationClaim::Replay { original_timestamp })
         }
-        Some(_) => Ok(UsageOperationClaim::Conflict),
-        // Unreachable without concurrent deletion; treat conservatively as
-        // a conflict so nothing is double-counted.
-        None => Ok(UsageOperationClaim::Conflict),
+        // Different payload hash — or no row at all any more (a concurrent
+        // delete raced between our conflict-check and this select). Both are
+        // treated conservatively as a conflict so nothing is double-counted.
+        Some(_) | None => Ok(UsageOperationClaim::Conflict),
     }
 }
 
@@ -234,22 +234,15 @@ pub fn month_period_for_tz(
                 .map_err(|_| format!("Unknown timezone: {name}"))?;
             let local_now = now.with_timezone(&tz);
 
-            let mut year = local_now.year();
-            let mut month = local_now.month();
-            let mut period_start = local_midnight(&tz, year, month)?;
-
-            // The current instant may still belong to the previous local
-            // month's billing period if the local day is the 1st but the
-            // local time is before midnight (impossible by construction —
-            // period_start is the 1st 00:00), so a single boundary is enough.
-            if local_now < period_start {
-                month = month.saturating_sub(1);
-                if month == 0 {
-                    month = 12;
-                    year -= 1;
-                }
-                period_start = local_midnight(&tz, year, month)?;
-            }
+            let year = local_now.year();
+            let month = local_now.month();
+            // period_start is, by construction, the FIRST instant whose
+            // local wall date falls on the 1st of local_now's month: a
+            // midnight-in-a-DST-gap recovers forward to the first existing
+            // wall time, an ambiguous midnight takes the earliest instant.
+            // No instant with that wall date can precede it, so a single
+            // boundary is enough — no second walk-back is needed.
+            let period_start = local_midnight(&tz, year, month)?;
 
             let (next_year, next_month) = if month == 12 {
                 (year + 1, 1)
@@ -1937,9 +1930,571 @@ mod tests {
             usage_operation_key("tenant-2", "emails_sent", id),
             usage_operation_key("tenant-1", "emails_sent", id)
         );
-        assert_ne!(
-            usage_operation_key("tenant-1", "api_calls", id),
-            usage_operation_key("tenant-1", "emails_sent", id)
+    }
+
+    // ─── DST / timezone boundary arms ─────────────────────────────
+
+    #[test]
+    fn month_period_for_tz_recovers_from_a_midnight_dst_gap() {
+        // America/Havana starts DST on the second Sunday of March at
+        // midnight local — midnight does not exist on 2024-03-10, so the
+        // period boundary recovers to the first existing wall time (01:00).
+        let now = DateTime::parse_from_rfc3339("2024-03-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = month_period_for_tz(now, Some("America/Havana")).expect("gap period");
+        assert_eq!(start.to_rfc3339(), "2024-03-01T05:00:00+00:00");
+        // April starts one wall-hour EARLIER in UTC (EDT): the gap month is
+        // genuinely 31 wall days but 1 instant-hour shorter than March.
+        assert_eq!(end.to_rfc3339(), "2024-04-01T04:00:00+00:00");
+        // April (no midnight transition) stays at plain local midnight.
+        let now = DateTime::parse_from_rfc3339("2024-04-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, _) = month_period_for_tz(now, Some("America/Havana")).expect("plain period");
+        assert_eq!(start.to_rfc3339(), "2024-04-01T04:00:00+00:00");
+    }
+
+    #[test]
+    fn month_period_for_tz_takes_the_earliest_ambiguous_midnight() {
+        // Havana ends DST on the first Sunday of November: 2024-11-03 has
+        // midnight twice — the boundary takes the earliest instant.
+        let now = DateTime::parse_from_rfc3339("2024-11-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) =
+            month_period_for_tz(now, Some("America/Havana")).expect("ambiguous period");
+        assert_eq!(start.to_rfc3339(), "2024-11-01T04:00:00+00:00");
+        assert!(end > start);
+    }
+
+    #[test]
+    fn month_period_for_tz_utc_december_rollover() {
+        let now = DateTime::parse_from_rfc3339("2026-12-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (start, end) = month_period_for_tz(now, None).expect("utc");
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2026-12-01");
+        assert_eq!(end.format("%Y-%m-%d").to_string(), "2027-01-01");
+    }
+
+    // ─── Anchored billing-cycle helpers (pure) ────────────────────
+
+    #[test]
+    fn most_recent_anchored_cycle_walks_back_across_the_year_boundary() {
+        let at = DateTime::parse_from_rfc3339("2024-01-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let anchor = chrono::NaiveDate::from_ymd_opt(2023, 6, 15).unwrap();
+        let (year, month, start) = most_recent_anchored_cycle(at, anchor);
+        assert_eq!((year, month), (2023, 12));
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2023-12-15");
+
+        // At exactly the anchor instant the cycle has already started.
+        let at = DateTime::parse_from_rfc3339("2024-03-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let anchor = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let (year, month, start) = most_recent_anchored_cycle(at, anchor);
+        assert_eq!((year, month), (2024, 3));
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2024-03-15");
+    }
+
+    #[test]
+    fn anchored_date_clamps_into_december_and_short_months() {
+        // December reads the month length from the NEXT year.
+        assert_eq!(anchored_date(2024, 12, 31).to_string(), "2024-12-31");
+        // A 31st anchor clamps into a 30-day month.
+        assert_eq!(anchored_date(2024, 4, 31).to_string(), "2024-04-30");
+        // February clamps a 30/31 anchor to the leap-aware length.
+        assert_eq!(anchored_date(2024, 2, 30).to_string(), "2024-02-29");
+        assert_eq!(anchored_date(2025, 2, 30).to_string(), "2025-02-28");
+    }
+
+    #[test]
+    fn usage_counter_keys_use_anchored_labels_only_when_anchored() {
+        let at = DateTime::parse_from_rfc3339("2024-03-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let anchor = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        assert_eq!(
+            usage_counter_key_anchored("t1", MeterEventType::EmailsSent, at, Some(anchor)),
+            "meter:rt:t1:emails_sent:c2024-03"
         );
+        assert_eq!(
+            usage_counter_key_anchored("t1", MeterEventType::EmailsSent, at, None),
+            "meter:rt:t1:emails_sent:2024-03"
+        );
+    }
+
+    // ─── Redis/DB-backed record paths ─────────────────────────────
+
+    /// A unique per-run tenant id: usage counters live in Redis for 40 days
+    /// and metering rows persist, so every run must use fresh keys to stay
+    /// deterministic across repeated invocations.
+    fn unique_tenant(tag: &str) -> String {
+        let keep = 26usize.saturating_sub(tag.len() + 1).min(12);
+        format!(
+            "{tag}_{}",
+            &Uuid::new_v4().simple().to_string()[..keep.max(4)]
+        )
+    }
+
+    async fn provision_env(tag: &str) -> crate::test_support::TestEnv {
+        crate::test_support::provision(tag)
+            .await
+            .expect("TEST_DATABASE_URL/redis must be configured for this suite")
+    }
+
+    #[tokio::test]
+    async fn record_usage_replays_and_conflicts_are_exactly_once() {
+        let owned = provision_env("usage_replay_conflict").await;
+        let env = &owned;
+        let t_replay = unique_tenant("usg_replay");
+        crate::test_support::seed_tenant(&env.pool, &t_replay, "growth").await;
+        let id = Uuid::new_v4();
+
+        let first = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_replay,
+            MeterEventType::EmailsSent,
+            5,
+            Some(id),
+            None,
+        )
+        .await
+        .expect("first record");
+        assert!(first);
+
+        // Same id, same content: durable ledger replay — never re-counted.
+        let replay = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_replay,
+            MeterEventType::EmailsSent,
+            5,
+            Some(id),
+            None,
+        )
+        .await
+        .expect("replay is Ok(false)");
+        assert!(!replay);
+
+        // Same id, different payload: rejected as an operation conflict.
+        let conflict = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_replay,
+            MeterEventType::EmailsSent,
+            9,
+            Some(id),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(conflict, Err(UsageError::OperationConflict { event_id, .. }) if event_id == id),
+            "expected OperationConflict, got {conflict:?}"
+        );
+
+        // Non-positive quantities are refused outright.
+        let zero = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_replay,
+            MeterEventType::EmailsSent,
+            0,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(zero, Err(UsageError::InvalidQuantity(0))));
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn record_usage_compensates_redis_when_the_counter_eval_fails() {
+        let owned = provision_env("usage_eval_failure").await;
+        let env = &owned;
+        let t_eval = unique_tenant("usg_eval");
+        crate::test_support::seed_tenant(&env.pool, &t_eval, "growth").await;
+
+        // Poison the real-time counter with a non-numeric value so the
+        // record EVAL fails after the DB row is durable: the compensation
+        // must run (and its own failure arm with it), then surface Err.
+        let counter_key =
+            enforced_counter_key(&env.pool, &t_eval, MeterEventType::EmailsSent, Utc::now()).await;
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let _: () = redis::cmd("SET")
+            .arg(&counter_key)
+            .arg("not-a-number")
+            .query_async(&mut conn)
+            .await
+            .expect("poison counter");
+        drop(conn);
+
+        let result = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_eval,
+            MeterEventType::EmailsSent,
+            3,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "poisoned counter must surface as Err");
+        // The durable ledger row exists (the DB leg committed first).
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(&t_eval)
+                .fetch_one(&env.pool)
+                .await
+                .expect("count events");
+        assert_eq!(events, 1);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn record_with_quota_check_duplicate_racing_the_db_ledger() {
+        let owned = provision_env("usage_quota_duplicate").await;
+        let env = &owned;
+        let t_dup = unique_tenant("usg_dup");
+        crate::test_support::seed_tenant(&env.pool, &t_dup, "growth").await;
+        let id = Uuid::new_v4();
+
+        let first = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_dup,
+            MeterEventType::EmailsSent,
+            4,
+            Some(id),
+            None,
+        )
+        .await
+        .expect("first gated record");
+        assert!(first.allowed && !first.duplicate);
+
+        // Fast-path duplicate: the dedup key is still present.
+        let fast = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_dup,
+            MeterEventType::EmailsSent,
+            4,
+            Some(id),
+            None,
+        )
+        .await
+        .expect("fast-path duplicate");
+        assert!(fast.duplicate, "dedup key short-circuits");
+
+        // Ledger replay past the fast path: drop the dedup key so the call
+        // reaches the DB claim, which replays and compensates the
+        // reservation without re-counting.
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let _: () = redis::cmd("DEL")
+            .arg(usage_dedup_key(id))
+            .query_async(&mut conn)
+            .await
+            .expect("drop dedup");
+        drop(conn);
+        let slow = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_dup,
+            MeterEventType::EmailsSent,
+            4,
+            Some(id),
+            None,
+        )
+        .await
+        .expect("ledger replay");
+        assert!(slow.duplicate, "ledger replay marks duplicate");
+        let key =
+            enforced_counter_key(&env.pool, &t_dup, MeterEventType::EmailsSent, Utc::now()).await;
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let counter: i64 = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .expect("counter");
+        drop(conn);
+        assert_eq!(counter, 4, "replay never double-counts the reservation");
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn record_with_quota_check_persist_failure_compensates_the_reservation() {
+        let owned = provision_env("usage_persist_failure").await;
+        let env = &owned;
+        let t_persist = unique_tenant("usg_persist");
+        crate::test_support::seed_tenant(&env.pool, &t_persist, "growth").await;
+
+        // Break ONLY the operation ledger (schema fault in the private
+        // clone): the counter reservation succeeds, the persist fails, and
+        // the compensation must bring the counter back to its prior value.
+        sqlx::query("ALTER TABLE usage_operations RENAME TO usage_operations_broken")
+            .execute(&env.pool)
+            .await
+            .expect("break ledger");
+
+        let result = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_persist,
+            MeterEventType::EmailsSent,
+            7,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "broken ledger must surface as Err");
+
+        sqlx::query("ALTER TABLE usage_operations_broken RENAME TO usage_operations")
+            .execute(&env.pool)
+            .await
+            .expect("restore ledger");
+
+        // The counter was compensated — the next clean record starts from 0.
+        let record = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_persist,
+            MeterEventType::EmailsSent,
+            7,
+            None,
+            None,
+        )
+        .await
+        .expect("clean record after repair");
+        assert_eq!(record.current, 7, "counter reflects only the clean record");
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn get_usage_reports_non_email_metrics() {
+        let owned = provision_env("usage_summary").await;
+        let env = &owned;
+        let t_summary = unique_tenant("usg_summary");
+        crate::test_support::seed_tenant(&env.pool, &t_summary, "growth").await;
+
+        record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_summary,
+            MeterEventType::EmailsSent,
+            11,
+            None,
+            None,
+        )
+        .await
+        .expect("record emails");
+        // A non-email/API metric exercises the wildcard summary arm.
+        record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_summary,
+            MeterEventType::WebhooksDelivered,
+            2,
+            None,
+            None,
+        )
+        .await
+        .expect("record webhooks");
+
+        let now = Utc::now();
+        let summary = get_usage(
+            &env.pool,
+            &t_summary,
+            now - chrono::Duration::hours(1),
+            now + chrono::Duration::hours(1),
+        )
+        .await
+        .expect("summary");
+        assert_eq!(summary.emails_sent, 11);
+        assert_eq!(summary.metrics["webhooks_delivered"], 2);
+        assert_eq!(summary.metrics["emails_sent"], 11);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn quota_gate_blocks_at_the_limit_and_reset_clears_both_key_shapes() {
+        let owned = provision_env("usage_quota_reset").await;
+        let env = &owned;
+        let t_gate = unique_tenant("usg_gate");
+        crate::test_support::seed_tenant(&env.pool, &t_gate, "growth").await;
+        // A plan whose email limit (1) is easy to exceed.
+        sqlx::query("UPDATE tenants SET plan = $2 WHERE id = $1")
+            .bind(&t_gate)
+            .bind("plan_gate_tiny")
+            .execute(&env.pool)
+            .await
+            .expect("point tenant at tiny plan");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit)
+             VALUES ('plan_gate_tiny', 'plan_gate_tiny', 'Gate Tiny', 0, 1, 10)
+             ON CONFLICT (name) DO UPDATE SET email_limit = 1",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("seed tiny plan");
+
+        // Seed both counter-key shapes, then reset and verify both are gone.
+        let now = Utc::now();
+        for key in [
+            format!(
+                "meter:rt:{t_gate}:emails_sent:{}-{:02}",
+                now.year(),
+                now.month()
+            ),
+            format!(
+                "meter:rt:{t_gate}:emails_sent:c{}-{:02}",
+                now.year(),
+                now.month()
+            ),
+        ] {
+            let mut conn = env.state.redis.get().await.expect("redis");
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(41i64)
+                .query_async(&mut conn)
+                .await
+                .expect("seed counter");
+            drop(conn);
+        }
+        reset_monthly_counters(&env.state.redis, &t_gate, now.year(), now.month())
+            .await
+            .expect("reset");
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let left: Option<i64> = redis::cmd("GET")
+            .arg(format!(
+                "meter:rt:{t_gate}:emails_sent:{}-{:02}",
+                now.year(),
+                now.month()
+            ))
+            .query_async(&mut conn)
+            .await
+            .expect("get cleared counter");
+        drop(conn);
+        assert_eq!(left, None, "both counter-key shapes cleared");
+
+        // The gate itself: first send passes, second is blocked at limit 1.
+        let first = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_gate,
+            MeterEventType::EmailsSent,
+            1,
+            None,
+            None,
+        )
+        .await
+        .expect("first send");
+        assert!(first.allowed);
+        let second = record_with_quota_check(
+            &env.pool,
+            &env.state.redis,
+            &t_gate,
+            MeterEventType::EmailsSent,
+            1,
+            None,
+            None,
+        )
+        .await
+        .expect("second send is a value, not an error");
+        assert!(!second.allowed, "limit 1 blocks the second send");
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn anchored_cycle_tenants_get_cycle_labeled_counter_keys() {
+        let owned = provision_env("usage_anchored").await;
+        let env = &owned;
+        let t_anchor = unique_tenant("usg_anchor");
+        crate::test_support::seed_tenant(&env.pool, &t_anchor, "growth").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start)
+             VALUES ($1, $2, 'growth', 'active', $3)",
+        )
+        .bind(&t_anchor)
+        .bind(format!("sub_cov_{}", Uuid::new_v4().simple()))
+        .bind(Utc::now() - chrono::Duration::days(3))
+        .execute(&env.pool)
+        .await
+        .expect("seed anchored subscription");
+
+        // An active subscription with a cycle start in the past: the
+        // enforced counter key must carry the cycle label.
+        let key =
+            enforced_counter_key(&env.pool, &t_anchor, MeterEventType::EmailsSent, Utc::now())
+                .await;
+        assert!(
+            key.contains(":c"),
+            "anchored tenant key {key} must use the cycle label"
+        );
+
+        // record_usage flows through the same anchored key.
+        let recorded = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_anchor,
+            MeterEventType::EmailsSent,
+            2,
+            None,
+            None,
+        )
+        .await
+        .expect("anchored record");
+        assert!(recorded);
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let value: Option<i64> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .expect("counter get");
+        drop(conn);
+        assert_eq!(value, Some(2), "the anchored counter key was incremented");
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn usage_metadata_with_subscription_id_is_not_re_enriched() {
+        let owned = provision_env("usage_metadata_shortcircuit").await;
+        let env = &owned;
+        let t_meta = unique_tenant("usg_meta");
+        crate::test_support::seed_tenant(&env.pool, &t_meta, "growth").await;
+
+        let metadata = serde_json::json!({ "subscriptionId": "sub_already_set" });
+        let recorded = record_usage(
+            &env.pool,
+            &env.state.redis,
+            &t_meta,
+            MeterEventType::EmailsSent,
+            1,
+            None,
+            Some(metadata),
+        )
+        .await
+        .expect("record with preset subscription metadata");
+        assert!(recorded);
+
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM metering_events WHERE tenant_id = $1 LIMIT 1")
+                .bind(&t_meta)
+                .fetch_one(&env.pool)
+                .await
+                .expect("metadata");
+        assert_eq!(stored["subscriptionId"], "sub_already_set");
+
+        owned.finish().await;
     }
 }

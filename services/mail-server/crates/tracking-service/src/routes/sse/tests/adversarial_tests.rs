@@ -193,22 +193,6 @@ fn no_query() -> Query<StreamQuery> {
     })
 }
 
-/// Read the next non-empty SSE frame (wire-format chunk) with a bounded
-/// deadline; `None` once the frames stop arriving.
-async fn read_frame(stream: &mut axum::body::BodyDataStream) -> Option<String> {
-    for _ in 0..20 {
-        if let Ok(Some(Ok(bytes))) =
-            tokio::time::timeout(Duration::from_millis(250), stream.next()).await
-        {
-            let s = String::from_utf8_lossy(&bytes).into_owned();
-            if !s.trim().is_empty() {
-                return Some(s);
-            }
-        }
-    }
-    None
-}
-
 async fn redis_int(pool: &deadpool_redis::Pool, cmd: &str, key: &str) -> i64 {
     let Ok(mut conn) = pool.get().await else {
         return -1;
@@ -405,13 +389,15 @@ async fn local_fallback_cap_returns_429_when_redis_is_down() {
     drop(held);
     // The local counter drains on drop of each stream body.
     for _ in 0..100 {
-        let counts = LOCAL_CONN_COUNTS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !counts.contains_key(&tenant) {
+        let drained = {
+            let counts = LOCAL_CONN_COUNTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            !counts.contains_key(&tenant)
+        };
+        if drained {
             break;
         }
-        drop(counts);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
@@ -473,10 +459,8 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
             tokio::time::timeout(Duration::from_millis(2_000), body.next()).await
         {
             let s = String::from_utf8_lossy(&bytes).into_owned();
-            if !s.trim().is_empty() {
-                if tx.send(s).is_err() {
-                    break;
-                }
+            if !s.trim().is_empty() && tx.send(s).is_err() {
+                break;
             }
         }
     });

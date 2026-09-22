@@ -75,34 +75,50 @@ mod tests {
             .collect()
     }
 
+    /// The declaration guard over abstracted directory entries:
+    /// (extension, file stem) pairs. Non-.rs entries and mod.rs itself are
+    /// skipped; anything else missing from `declared` is reported.
+    fn undeclared_files_of(
+        entries: &[(Option<String>, String)],
+        declared: &[String],
+    ) -> Vec<String> {
+        let mut undeclared_files = Vec::new();
+        for (extension, name) in entries {
+            if extension.as_deref() != Some("rs") {
+                continue;
+            }
+            if name == "mod" {
+                continue;
+            }
+            if !declared.contains(name) {
+                undeclared_files.push(name.clone());
+            }
+        }
+        undeclared_files
+    }
+
     #[test]
     fn every_admin_route_file_is_declared() {
         let admin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/routes/admin");
         let entries = fs::read_dir(&admin_dir).expect("failed to read admin route directory");
 
         let declared = declared_modules();
-        let mut undeclared_files = Vec::new();
-
+        let mut disk_entries: Vec<(Option<String>, String)> = Vec::new();
         for entry in entries {
             let entry = entry.expect("failed to read admin route entry");
             let path = entry.path();
-
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
-            }
-            if path.file_name().and_then(|name| name.to_str()) == Some("mod.rs") {
-                continue;
-            }
-
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_string);
             let name = path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("<unknown>")
                 .to_string();
-            if !declared.contains(&name) {
-                undeclared_files.push(name);
-            }
+            disk_entries.push((extension, name));
         }
+        let undeclared_files = undeclared_files_of(&disk_entries, &declared);
 
         assert!(
             undeclared_files.is_empty(),
@@ -112,25 +128,61 @@ mod tests {
         );
     }
 
+    /// The scope-scan decision over abstracted (module, source) pairs:
+    /// every module source must contain the wildcard-scope guard call.
+    fn missing_scope_guards_of(module_sources: &[(String, String)]) -> Vec<String> {
+        module_sources
+            .iter()
+            .filter(|(_, source)| !source.contains("require_scopes(&auth, &[\"*\"])"))
+            .map(|(module, _)| module.clone())
+            .collect()
+    }
+
     #[test]
     fn admin_route_files_enforce_wildcard_scope() {
         let admin_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/routes/admin");
 
-        let mut missing_scope_guards = Vec::new();
-
+        let mut module_sources: Vec<(String, String)> = Vec::new();
         for module in declared_modules() {
             let path = admin_dir.join(format!("{module}.rs"));
             let contents =
                 fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing source for {module}"));
-            if !contents.contains("require_scopes(&auth, &[\"*\"])") {
-                missing_scope_guards.push(module);
-            }
+            module_sources.push((module, contents));
         }
+        let missing_scope_guards = missing_scope_guards_of(&module_sources);
 
         assert!(
             missing_scope_guards.is_empty(),
             "admin route files missing wildcard scope checks: {:?}",
             missing_scope_guards,
         );
+    }
+
+    #[test]
+    fn declaration_and_scope_guards_flag_violations() {
+        let declared = declared_modules();
+        assert!(!declared.is_empty());
+
+        // The abstracted declaration guard: non-.rs entries and mod.rs are
+        // skipped; an undeclared .rs file is reported by stem.
+        let entries = vec![
+            (Some("rs".into()), "audit".into()),
+            (Some("txt".into()), "notes".into()),
+            (Some("rs".into()), "mod".into()),
+            (Some("rs".into()), "totally_new_module".into()),
+        ];
+        let undeclared = undeclared_files_of(&entries, &declared);
+        assert_eq!(undeclared, vec!["totally_new_module".to_string()]);
+
+        // The scope-scan decision: a module source with the wildcard guard
+        // passes; one without is flagged by name.
+        let sources = vec![
+            (
+                "audit".to_string(),
+                "require_scopes(&auth, &[\"*\"])?".to_string(),
+            ),
+            ("evil".to_string(), "fn x() {}".to_string()),
+        ];
+        assert_eq!(missing_scope_guards_of(&sources), vec!["evil".to_string()]);
     }
 }

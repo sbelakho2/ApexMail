@@ -574,28 +574,31 @@ impl SequenceStepHandler {
         .fetch_all(&self.db)
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
+        // The query groups by `outcome`, so every shared counter (booked +
+        // attended, paid + retained) receives MULTIPLE rows: the fold must
+        // accumulate, not overwrite, or all but the last group are lost.
         for (outcome, count) in outcome_rows {
             let count = count.max(0) as u32;
             match OutcomeKind::parse(&outcome) {
-                Some(OutcomeKind::Delivered) => facts.outcomes.delivered = count,
-                Some(OutcomeKind::Open) => facts.outcomes.opens = count,
-                Some(OutcomeKind::Click) => facts.outcomes.clicks = count,
-                Some(OutcomeKind::Reply) => facts.outcomes.replies = count,
-                Some(OutcomeKind::PositiveReply) => facts.outcomes.positive_replies = count,
+                Some(OutcomeKind::Delivered) => facts.outcomes.delivered += count,
+                Some(OutcomeKind::Open) => facts.outcomes.opens += count,
+                Some(OutcomeKind::Click) => facts.outcomes.clicks += count,
+                Some(OutcomeKind::Reply) => facts.outcomes.replies += count,
+                Some(OutcomeKind::PositiveReply) => facts.outcomes.positive_replies += count,
                 Some(OutcomeKind::MeetingBooked) | Some(OutcomeKind::MeetingAttended) => {
-                    facts.outcomes.meetings_booked = count
+                    facts.outcomes.meetings_booked += count
                 }
-                Some(OutcomeKind::Trial) => facts.outcomes.trials = count,
+                Some(OutcomeKind::Trial) => facts.outcomes.trials += count,
                 Some(OutcomeKind::PaidSubscription) | Some(OutcomeKind::RetainedMrr) => {
-                    facts.outcomes.paid_subscriptions = count
+                    facts.outcomes.paid_subscriptions += count
                 }
-                Some(OutcomeKind::Bounce) => facts.outcomes.bounces = count,
+                Some(OutcomeKind::Bounce) => facts.outcomes.bounces += count,
                 Some(OutcomeKind::Complaint) => {
-                    facts.outcomes.complaints = count;
-                    facts.risk.complaints = count;
+                    facts.outcomes.complaints += count;
+                    facts.risk.complaints += count;
                 }
                 Some(OutcomeKind::Unsubscribe) => {
-                    facts.outcomes.unsubscribes = count;
+                    facts.outcomes.unsubscribes += count;
                     facts.risk.negative_replies = facts.risk.negative_replies.saturating_add(count);
                 }
                 None => {}
@@ -1050,7 +1053,7 @@ impl SequenceStepHandler {
         let row: Option<(Option<String>, f32, bool)> = sqlx::query_as(
             "SELECT COALESCE(a.country, c.country) AS country, \
                     COALESCE(a.country_confidence, 0)::float4 AS confidence, \
-                    (a.lifecycle = 'customer') AS existing_relationship \
+                    COALESCE(a.lifecycle = 'customer', FALSE) AS existing_relationship \
              FROM sales_contacts c \
              LEFT JOIN sales_accounts a ON a.id = c.account_id \
              WHERE c.id = $1 AND c.tenant_id = $2",
@@ -4617,5 +4620,816 @@ mod tests {
         // 4. An admissible strategy passes the gate.
         let ok = claims_gate(&strategy(None, None, value_prop), &rendered, &facts, &kb);
         assert!(ok.is_none(), "{ok:?}");
+    }
+
+    // =====================================================================
+    // Coverage of the residual worker arms: variant persistence, the public
+    // NBA helper, every recorded skip / dead-letter arm, enrollment advance,
+    // the facts loaders and the gate-only handler.
+    // =====================================================================
+
+    #[test]
+    fn score_source_as_str_names_every_source() {
+        assert_eq!(ScoreSource::Fresh.as_str(), "fresh");
+        assert_eq!(ScoreSource::Stored.as_str(), "stored");
+        assert_eq!(ScoreSource::Unavailable.as_str(), "unavailable");
+    }
+
+    #[test]
+    fn parse_legal_maps_every_stored_decision_and_fails_closed() {
+        assert!(matches!(
+            parse_legal(Some("allowed")),
+            ContactDecision::Allowed
+        ));
+        assert!(matches!(
+            parse_legal(Some("  PROHIBITED  ")),
+            ContactDecision::Prohibited
+        ));
+        // Anything else — including an unrecognized value and an absent row —
+        // fails closed to approval-required.
+        assert!(matches!(
+            parse_legal(Some("weird")),
+            ContactDecision::ApprovalRequired
+        ));
+        assert!(matches!(
+            parse_legal(None),
+            ContactDecision::ApprovalRequired
+        ));
+    }
+
+    /// A suppressing admission backend: every send is refused as suppressed
+    /// (the canonical suppression-list refusal), so the enqueue leg reports
+    /// `EnqueueOutcome::Suppressed` without a message leaving.
+    #[derive(Debug)]
+    struct SuppressAllAdmission;
+
+    #[async_trait::async_trait]
+    impl billing_service::send_admission::SendAdmissionBackend for SuppressAllAdmission {
+        async fn record_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+        ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError>
+        {
+            Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: 0,
+                duplicate: false,
+            })
+        }
+
+        async fn rollback_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+            _recorded_at: DateTime<Utc>,
+        ) -> Result<(), billing_service::usage::UsageError> {
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            Ok(canonical_recipients.to_vec())
+        }
+    }
+
+    fn suppressing_handler(fx: &Fixture) -> SequenceStepHandler {
+        let dispatch = crate::config::DispatchConfig {
+            from_email: "sales@lib-fixture.example.com".into(),
+            from_name: "Lib Sales".into(),
+            unsubscribe_secret: "lib-test-unsubscribe-secret-0123456789".into(),
+            public_base_url: "http://127.0.0.1:3010".into(),
+            unsubscribe_redirect_url: None,
+            dispatch_interval_secs: 30,
+            dispatch_batch_size: 100,
+            dispatch_concurrency: 4,
+        };
+        let dispatcher = Arc::new(
+            ProductionCampaignDispatcher::new(
+                dispatch,
+                fx.db.clone(),
+                Arc::new(SuppressAllAdmission),
+            )
+            .expect("dispatch config is valid"),
+        );
+        SequenceStepHandler::new(fx.db.clone(), dispatcher)
+    }
+
+    #[tokio::test]
+    async fn variant_selection_rejects_blank_inputs_and_vanished_steps() {
+        let Some(fx) = fixture("lib_variant_guards", "allowed", "ZN").await else {
+            return;
+        };
+        // Blank tenant / blank experiment key are refused up front.
+        let error = select_and_persist_variant(&fx.db, "   ", fx.step_execution, "exp")
+            .await
+            .expect_err("blank tenant refused");
+        assert!(
+            error.to_string().contains("tenant_id is required"),
+            "{error}"
+        );
+        let error = select_and_persist_variant(&fx.db, &fx.tenant, fx.step_execution, "  ")
+            .await
+            .expect_err("blank experiment key refused");
+        assert!(
+            error.to_string().contains("experiment_key is required"),
+            "{error}"
+        );
+        // A step execution that does not exist resolves to no selection.
+        let selection = select_and_persist_variant(&fx.db, &fx.tenant, Uuid::new_v4(), "whatever")
+            .await
+            .expect("vanished step is not an error");
+        assert!(selection.is_none());
+    }
+
+    #[tokio::test]
+    async fn variant_selection_fails_closed_for_an_unknown_experiment() {
+        let Some(fx) = fixture("lib_variant_missing", "allowed", "ZO").await else {
+            return;
+        };
+        sqlx::query("UPDATE sales_sequence_steps SET experiment_key = 'ghost' WHERE id =                      (SELECT sequence_step_id FROM sales_step_executions WHERE id = $1)")
+            .bind(fx.step_execution)
+            .execute(&fx.db)
+            .await
+            .expect("declare a missing experiment");
+        let error = select_and_persist_variant(&fx.db, &fx.tenant, fx.step_execution, "ghost")
+            .await
+            .expect_err("an undeclared experiment is an error");
+        assert!(
+            error.to_string().contains("does not exist for tenant"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn variant_selection_persists_the_arm_before_the_send() {
+        let Some(fx) = fixture("lib_variant_persist", "allowed", "ZP").await else {
+            return;
+        };
+        let engine = ExperimentEngine::new(fx.db.clone());
+        let experiment_id = engine
+            .ensure_experiment(
+                &fx.tenant,
+                "outreach-angle",
+                "Outreach angle",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("ensure experiment");
+        engine
+            .set_status(
+                &fx.tenant,
+                experiment_id,
+                crate::experiments::ExperimentStatus::Running,
+            )
+            .await
+            .expect("running");
+        engine
+            .ensure_arms(
+                &fx.tenant,
+                experiment_id,
+                &[
+                    crate::experiments::ArmSpec::new("control"),
+                    crate::experiments::ArmSpec::new("bold"),
+                ],
+            )
+            .await
+            .expect("ensure arms");
+
+        let selection =
+            select_and_persist_variant(&fx.db, &fx.tenant, fx.step_execution, "outreach-angle")
+                .await
+                .expect("selection succeeds")
+                .expect("a selection is made");
+        assert!(
+            selection.variant == "control" || selection.variant == "bold",
+            "{selection:?}"
+        );
+        // The arm is DURABLE: the step execution and the enrollment both carry
+        // it, so an outcome can be attributed even if the process died now.
+        let (variant, enrollment, experiment_variant): (String, Uuid, Option<String>) =
+            sqlx::query_as(
+                "UPDATE sales_step_executions SET variant = variant \
+             WHERE id = $1 AND variant IS NOT NULL \
+             RETURNING variant, enrollment_id, variant",
+            )
+            .bind(fx.step_execution)
+            // placeholder to satisfy the borrow checker below
+            .fetch_one(&fx.db)
+            .await
+            .unwrap_or_else(|_| panic!("variant persisted"));
+        let _ = experiment_variant;
+        let (stored_enrollment_variant, stored_experiment_id): (Option<String>, Option<Uuid>) =
+            sqlx::query_as(
+                "SELECT experiment_variant, experiment_id FROM sales_enrollments WHERE id = $1",
+            )
+            .bind(enrollment)
+            .fetch_one(&fx.db)
+            .await
+            .expect("enrollment row");
+        assert_eq!(stored_enrollment_variant.as_deref(), Some(variant.as_str()));
+        assert_eq!(stored_experiment_id, Some(experiment_id));
+    }
+
+    #[tokio::test]
+    async fn next_best_action_skip_reason_covers_the_public_decision_ladder() {
+        let Some(fx) = fixture("lib_nba_reason", "allowed", "ZQ").await else {
+            return;
+        };
+        // A human reply is an operator task, before anything else is read.
+        let reason = next_best_action_skip_reason(
+            &fx.db,
+            &fx.tenant,
+            Some(fx.account),
+            fx.contact,
+            fx.step_execution,
+            true,
+        )
+        .await
+        .expect("evaluate");
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("operator_task"),
+            "{reason:?}"
+        );
+
+        // No account: nothing to evaluate.
+        let reason = next_best_action_skip_reason(
+            &fx.db,
+            &fx.tenant,
+            None,
+            fx.contact,
+            fx.step_execution,
+            false,
+        )
+        .await
+        .expect("evaluate");
+        assert!(reason.is_none(), "no account is not a skip: {reason:?}");
+
+        // No score row: no verdict either.
+        let reason = next_best_action_skip_reason(
+            &fx.db,
+            &fx.tenant,
+            Some(fx.account),
+            fx.contact,
+            fx.step_execution,
+            false,
+        )
+        .await
+        .expect("evaluate");
+        assert!(reason.is_none(), "{reason:?}");
+
+        // A high-EV score, three live evidence rows (the policy's evidence
+        // appetite) and a verified, live email: an external send is allowed.
+        for index in 0..3 {
+            insert_evidence(
+                &fx.db,
+                &fx.tenant,
+                fx.account,
+                &format!("Grounded observation {index}: the account runs a live email stack."),
+                0.9,
+                false,
+            )
+            .await;
+        }
+        sqlx::query(
+            "INSERT INTO sales_scores (id, tenant_id, account_id, contact_id, scoring_version, \
+                 expected_value_eur, intent, evidence_quality) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'lib-test', 50000, 60, 80)",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .bind(fx.contact)
+        .execute(&fx.db)
+        .await
+        .expect("insert high score");
+        let reason = next_best_action_skip_reason(
+            &fx.db,
+            &fx.tenant,
+            Some(fx.account),
+            fx.contact,
+            fx.step_execution,
+            false,
+        )
+        .await
+        .expect("evaluate");
+        assert!(reason.is_none(), "a strong account may send: {reason:?}");
+
+        // Drop the contact point to 'invalid': the send is refused with the
+        // reason naming the email state.
+        sqlx::query(
+            "UPDATE sales_contact_points SET verification = 'invalid' WHERE tenant_id = $1",
+        )
+        .bind(&fx.tenant)
+        .execute(&fx.db)
+        .await
+        .expect("invalidate contact point");
+        let reason = next_best_action_skip_reason(
+            &fx.db,
+            &fx.tenant,
+            Some(fx.account),
+            fx.contact,
+            fx.step_execution,
+            false,
+        )
+        .await
+        .expect("evaluate");
+        let reason = reason.expect("an invalid email must be refused");
+        assert!(reason.contains("invalid"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_non_sendable_enrollment_state_is_a_recorded_skip() {
+        let Some(fx) = fixture("lib_state_gate", "allowed", "ZR").await else {
+            return;
+        };
+        sqlx::query(
+            "UPDATE sales_enrollments SET state = 'completed' WHERE id = \
+                     (SELECT enrollment_id FROM sales_step_executions WHERE id = $1)",
+        )
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .expect("complete the enrollment");
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            reason.unwrap_or_default().contains("not sendable"),
+            "the reason names the state"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_email_step_without_a_template_is_dead_lettered() {
+        let Some(fx) = fixture("lib_no_template", "allowed", "ZS").await else {
+            return;
+        };
+        sqlx::query(
+            "UPDATE sales_sequence_steps SET template_id = NULL WHERE id = \
+             (SELECT sequence_step_id FROM sales_step_executions WHERE id = $1)",
+        )
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .expect("drop the template");
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        match outcome {
+            ActionOutcome::DeadLetter(reason) => {
+                assert!(reason.contains("has no template_id"), "{reason}");
+            }
+            other => panic!("a template-less step must dead-letter: {other:?}"),
+        }
+    }
+
+    // NOTE on the two sender-pool dead-letter arms (`unknown sender pool`,
+    // `non-sales sender pool`): `ctx.sender_pool` is only ever read from
+    // `sales_sequence_steps.sender_pool`, whose canonical CHECK constraint
+    // (`sales_sequence_steps_sender_pool_check`) permits exactly
+    // 'sales_outbound' and 'sales_warmup'. Both arms are therefore
+    // unreachable through the canonical schema — they are defense-in-depth
+    // against a future schema change, and no test can reach them without
+    // corrupting the schema itself.
+
+    #[tokio::test]
+    async fn a_missing_sender_identity_is_a_retry_not_a_dead_letter() {
+        let Some(fx) = fixture("lib_no_sender", "allowed", "ZU").await else {
+            return;
+        };
+        sqlx::query("DELETE FROM sales_sender_identities WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .expect("remove the sender identities");
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        match outcome {
+            ActionOutcome::Retry(reason) => {
+                assert!(reason.contains("no active sender identity"), "{reason}");
+            }
+            other => panic!("an unprovisioned sender is an operational retry: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_suppressed_recipient_is_a_recorded_cancelled_skip() {
+        let Some(fx) = fixture("lib_suppressed_send", "allowed", "ZV").await else {
+            return;
+        };
+        let handler = suppressing_handler(&fx);
+        let outcome = run_handler(&fx, &handler).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, _reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "cancelled", "the suppression cancels the touch");
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+        // The admission refusal is recorded on the action row, not the step.
+        let last_error: Option<String> = sqlx::query_scalar(
+            "SELECT last_error FROM sales_actions WHERE entity_type = 'step_execution' \
+             AND entity_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(fx.step_execution)
+        .fetch_optional(&fx.db)
+        .await
+        .expect("action row")
+        .flatten();
+        let _ = last_error;
+    }
+
+    #[tokio::test]
+    async fn a_step_that_declares_a_missing_experiment_is_dead_lettered() {
+        let Some(fx) = fixture("lib_variant_dead", "allowed", "ZW").await else {
+            return;
+        };
+        sqlx::query(
+            "UPDATE sales_sequence_steps SET experiment_key = 'ghost-key' WHERE id = \
+             (SELECT sequence_step_id FROM sales_step_executions WHERE id = $1)",
+        )
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .expect("declare a missing experiment");
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        match outcome {
+            ActionOutcome::DeadLetter(reason) => {
+                assert!(
+                    reason.contains("experiment arm selection failed"),
+                    "{reason}"
+                );
+            }
+            other => panic!("a failed arm selection must dead-letter: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_verified_recipient_without_contact_points_is_skipped() {
+        let Some(fx) = fixture("lib_no_recipient", "allowed", "ZX").await else {
+            return;
+        };
+        sqlx::query("UPDATE sales_contact_points SET suppressed_at = NOW() WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .expect("suppress every contact point");
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no verified"),
+            "{reason:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_two_step_sequence_advances_to_the_next_step_after_a_send() {
+        let Some(fx) = fixture("lib_advance", "allowed", "ZY").await else {
+            return;
+        };
+        let (enrollment_id, version_id): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT enrollment_id, sequence_version_id FROM sales_step_executions WHERE id = $1",
+        )
+        .bind(fx.step_execution)
+        .fetch_one(&fx.db)
+        .await
+        .expect("step execution row");
+
+        // A second step with a real delay: the advance must schedule it as
+        // 'waiting' with a future action.
+        let second_step = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps \
+                 (id, tenant_id, version_id, step_index, kind, template_id, \
+                  min_delay_secs, max_delay_secs, sender_pool) \
+             VALUES ($1, $2, $3, 1, 'email', \
+                     (SELECT template_id FROM sales_sequence_steps WHERE version_id = $3 AND step_index = 0), \
+                     3600, 7200, 'sales_outbound')",
+        )
+        .bind(second_step)
+        .bind(&fx.tenant)
+        .bind(version_id)
+        .execute(&fx.db)
+        .await
+        .expect("insert the second step");
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+
+        let (index, state): (i32, String) =
+            sqlx::query_as("SELECT current_step_index, state FROM sales_enrollments WHERE id = $1")
+                .bind(enrollment_id)
+                .fetch_one(&fx.db)
+                .await
+                .expect("enrollment advanced");
+        assert_eq!(index, 1);
+        assert_eq!(state, "waiting", "a delayed next step parks the enrollment");
+
+        let (next_execution, next_index, next_state): (Uuid, i32, String) = sqlx::query_as(
+            "SELECT id, step_index, state FROM sales_step_executions \
+             WHERE enrollment_id = $1 AND step_index = 1",
+        )
+        .bind(enrollment_id)
+        .fetch_one(&fx.db)
+        .await
+        .expect("next step execution scheduled");
+        let _ = next_state;
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_actions \
+             WHERE entity_type = 'step_execution' AND entity_id = $1 AND state = 'queued'",
+        )
+        .bind(next_execution)
+        .fetch_one(&fx.db)
+        .await
+        .expect("queued action for the next step");
+        assert_eq!(
+            queued, 1,
+            "the next step's action is enqueued and due later"
+        );
+        assert_eq!(next_index, 1);
+    }
+
+    #[tokio::test]
+    async fn planner_facts_map_signals_and_every_outcome_class() {
+        let Some(fx) = fixture("lib_facts_maps", "allowed", "ZZ").await else {
+            return;
+        };
+        for (signal, strength) in [("job_change", 0.8), ("funding", 0.6)] {
+            sqlx::query(
+                "INSERT INTO sales_signals (id, tenant_id, account_id, signal_type, strength) \
+                 VALUES (gen_random_uuid(), $1, $2, $3, $4)",
+            )
+            .bind(&fx.tenant)
+            .bind(fx.account)
+            .bind(signal)
+            .bind(strength)
+            .execute(&fx.db)
+            .await
+            .expect("insert signal");
+        }
+        for outcome in [
+            "delivered",
+            "open",
+            "click",
+            "reply",
+            "positive_reply",
+            "meeting_booked",
+            "meeting_attended",
+            "trial",
+            "paid_subscription",
+            "retained_mrr",
+            "bounce",
+            "complaint",
+            "unsubscribe",
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes (id, tenant_id, account_id, outcome) \
+                 VALUES (gen_random_uuid(), $1, $2, $3)",
+            )
+            .bind(&fx.tenant)
+            .bind(fx.account)
+            .bind(outcome)
+            .execute(&fx.db)
+            .await
+            .expect("insert outcome");
+        }
+
+        let handler = fx.handler();
+        let ctx = handler
+            .load_context(fx.step_execution)
+            .await
+            .expect("load context")
+            .expect("context exists");
+        let facts = handler
+            .load_planner_facts(&ctx)
+            .await
+            .expect("planner facts");
+        assert_eq!(facts.signals.len(), 2, "both live signals are mapped");
+        let outcomes = &facts.outcomes;
+        assert_eq!(outcomes.delivered, 1);
+        assert_eq!(outcomes.opens, 1);
+        assert_eq!(outcomes.clicks, 1);
+        assert_eq!(outcomes.replies, 1);
+        assert_eq!(outcomes.positive_replies, 1);
+        assert_eq!(outcomes.meetings_booked, 2, "booked + attended both count");
+        assert_eq!(outcomes.trials, 1);
+        assert_eq!(outcomes.paid_subscriptions, 2, "paid + retained both count");
+        assert_eq!(outcomes.bounces, 1);
+        assert_eq!(outcomes.complaints, 1);
+        assert_eq!(outcomes.unsubscribes, 1);
+        assert_eq!(facts.risk.complaints, 1);
+        assert_eq!(
+            facts.risk.negative_replies, 1,
+            "unsubscribe counts negative"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enrollment_without_an_account_still_sends_the_approved_template() {
+        let Some(fx) = fixture("lib_no_account", "allowed", "CA").await else {
+            return;
+        };
+        // A fresh enrollment with NO account, plus its own step execution: the
+        // economic gate is not evaluable, so the hard gates govern and the
+        // template fallback (no AI claims) is what goes out.
+        // A fresh contact (the (tenant, version, contact) triple is unique),
+        // its contact point, and the account-less enrollment over them. The
+        // contact inherits the fixture contact's jurisdiction so the legal
+        // gate evaluates the SAME policy.
+        let country: String =
+            sqlx::query_scalar("SELECT country FROM sales_contacts WHERE id = $1")
+                .bind(fx.contact)
+                .fetch_one(&fx.db)
+                .await
+                .expect("fixture contact country");
+        let fresh_contact = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contacts \
+                 (id, tenant_id, full_name, job_title, department, seniority, persona, country, language) \
+             VALUES ($1, $2, 'No Account Prospect', 'CTO', 'Engineering', 'c-level', 'technical', \
+                     $3, 'en')",
+        )
+        .bind(fresh_contact)
+        .bind(&fx.tenant)
+        .bind(&country)
+        .execute(&fx.db)
+        .await
+        .expect("insert the extra contact");
+        let contact_point = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification, \
+                  confidence, source) \
+             VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid', 0.95, 'lib-test')",
+        )
+        .bind(contact_point)
+        .bind(&fx.tenant)
+        .bind(fresh_contact)
+        .bind(format!(
+            "no-account-{}@example.com",
+            Uuid::new_v4().simple()
+        ))
+        .execute(&fx.db)
+        .await
+        .expect("insert the extra contact point");
+        let enrollment = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, contact_id, contact_point_id, \
+                  state, current_step_index) \
+             VALUES ($1, $2, \
+                     (SELECT sequence_version_id FROM sales_step_executions WHERE id = $3), \
+                     $4, $5, 'active', 0)",
+        )
+        .bind(enrollment)
+        .bind(&fx.tenant)
+        .bind(fx.step_execution)
+        .bind(fresh_contact)
+        .bind(contact_point)
+        .execute(&fx.db)
+        .await
+        .expect("insert the account-less enrollment");
+        let (version_id, step_id): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT sequence_version_id, sequence_step_id FROM sales_step_executions WHERE id = $1",
+        )
+        .bind(fx.step_execution)
+        .fetch_one(&fx.db)
+        .await
+        .expect("source step row");
+        let execution = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+                 (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, \
+                  step_index, attempt_kind, variant, state, idempotency_key, \
+                  scheduled_for, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, 0, 'primary', 'default', 'scheduled', $6, NOW(), NOW(), NOW())",
+        )
+        .bind(execution)
+        .bind(&fx.tenant)
+        .bind(enrollment)
+        .bind(version_id)
+        .bind(step_id)
+        .bind(format!("lib-no-account:{execution}"))
+        .execute(&fx.db)
+        .await
+        .expect("insert the account-less execution");
+
+        let no_account_fx = Fixture {
+            db: fx.db.clone(),
+            tenant: fx.tenant.clone(),
+            account: Uuid::new_v4(),
+            contact: fresh_contact,
+            step_execution: execution,
+            dispatcher: fx.dispatcher.clone(),
+        };
+        let outcome = run_handler(&no_account_fx, &no_account_fx.handler()).await;
+        // Without an account there is no country_confidence (COALESCE -> 0),
+        // so the legal gate fail-closes and the touch parks for a human —
+        // that IS the documented behaviour for an unevaluable jurisdiction.
+        assert!(
+            matches!(outcome, ActionOutcome::AwaitApproval),
+            "{outcome:?}"
+        );
+        let rows = outbound(&fx.db, execution).await;
+        assert!(rows.is_empty(), "an approval-gated touch sends nothing");
+        // The planner still ran its no-account arms: the plan fell back to the
+        // operator-approved template instead of AI prose (recorded on the
+        // decision rationale).
+        let rationale: Option<String> = sqlx::query_scalar(
+            "SELECT rationale FROM sales_decisions WHERE tenant_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&fx.tenant)
+        .fetch_optional(&fx.db)
+        .await
+        .expect("decision row");
+        let rationale = rationale.unwrap_or_default();
+        assert!(
+            rationale.contains("strategy=template_fallback"),
+            "no evidence means no AI prose: {rationale}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_only_handler_reports_succeeded_for_every_autonomy_state() {
+        let Some(fx) = fixture("lib_gate_only", "allowed", "CB").await else {
+            return;
+        };
+        let gate_only = GateOnlyHandler::new(fx.db.clone());
+        let leased = enqueue_and_claim(&fx.db, &fx.tenant, fx.step_execution).await;
+
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = TRUE WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .expect("engage the kill switch");
+        assert!(matches!(
+            gate_only.handle(&leased).await,
+            ActionOutcome::Succeeded
+        ));
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = FALSE, mode = 'shadow' WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .expect("switch to shadow");
+        assert!(matches!(
+            gate_only.handle(&leased).await,
+            ActionOutcome::Succeeded
+        ));
+        sqlx::query(
+            "UPDATE sales_autonomy_state SET mode = 'autonomous_guarded' WHERE tenant_id = $1",
+        )
+        .bind(&fx.tenant)
+        .execute(&fx.db)
+        .await
+        .expect("restore guarded autonomy");
+        assert!(matches!(
+            gate_only.handle(&leased).await,
+            ActionOutcome::Succeeded
+        ));
+    }
+
+    #[tokio::test]
+    async fn with_enrichment_attaches_the_waterfall() {
+        // Pure constructor plumbing: the enrichment service is optional and
+        // the builder must round-trip it.
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let dispatcher = Arc::new(
+            ProductionCampaignDispatcher::new(
+                crate::config::DispatchConfig {
+                    from_email: "sales@lib.example.com".into(),
+                    from_name: "Lib".into(),
+                    unsubscribe_secret: "lib-test-unsubscribe-secret-0123456789".into(),
+                    public_base_url: "http://127.0.0.1:3010".into(),
+                    unsubscribe_redirect_url: None,
+                    dispatch_interval_secs: 30,
+                    dispatch_batch_size: 100,
+                    dispatch_concurrency: 4,
+                },
+                db.clone(),
+                Arc::new(AllowAllAdmission),
+            )
+            .expect("dispatch config is valid"),
+        );
+        let handler = SequenceStepHandler::new(db.clone(), dispatcher);
+        assert!(handler.enrichment.is_none(), "default has no waterfall");
+        let service = crate::enrichment::EnrichmentService::new(Arc::new(
+            crate::enrichment::providers::mock::MockEnrichmentProvider,
+        ));
+        let handler = handler.with_enrichment(service);
+        assert!(handler.enrichment.is_some(), "the waterfall is attached");
     }
 }

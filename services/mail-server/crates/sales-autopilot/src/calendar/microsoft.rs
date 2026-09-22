@@ -649,4 +649,447 @@ mod provider_wire_tests {
         assert!(parse_graph_datetime("2031-01-13T08:00:00.0000000").is_some());
         assert!(parse_graph_datetime("garbage").is_none());
     }
+
+    #[tokio::test]
+    async fn user_base_trims_slashes_from_the_user_id() {
+        let build = |user_id: &str| MicrosoftCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            user_id: user_id.into(),
+            access_token: "tok".into(),
+            internal: Arc::new(InternalCalendarProvider::new(
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_lazy("postgres://localhost/unused")
+                    .unwrap(),
+                CalendarConfig::default(),
+            )),
+            config: CalendarConfig::default(),
+        };
+        assert_eq!(
+            build("user-7").user_base(),
+            "http://127.0.0.1:1/user-7",
+            "no slashes to trim"
+        );
+        assert_eq!(
+            build("/user-7/").user_base(),
+            "http://127.0.0.1:1/user-7",
+            "leading and trailing slashes are trimmed"
+        );
+        assert_eq!(
+            build("user-7").events_url(),
+            "http://127.0.0.1:1/user-7/events"
+        );
+    }
+
+    /// The full authority loop: Graph getSchedule MERGES with the internal
+    /// store of record, and only slots free on BOTH calendars are offered.
+    #[tokio::test]
+    async fn availability_merges_graph_busy_with_the_internal_store() {
+        let payload = serde_json::json!({ "value": [
+            { "scheduleItems": [
+                { "status": "busy", "start": { "dateTime": "2031-01-13T08:00:00.0000000Z" }, "end": { "dateTime": "2031-01-13T09:00:00.0000000Z" } }
+            ]}
+        ]});
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/calendar/getSchedule".to_string()),
+            (200, payload),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider(&base).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-avail");
+
+        // An INTERNAL meeting overlapping Graph's busy block: the merged busy
+        // set is the union, so neither source can be bypassed.
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES (gen_random_uuid(), $1, 'internal hold', '{}', $2, $3, 'https://teams')",
+        )
+        .bind(&tenant)
+        .bind("2031-01-13T10:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .bind("2031-01-13T11:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .execute(&pool)
+        .await
+        .expect("insert internal hold");
+
+        let slots = provider
+            .availability(&request(&tenant))
+            .await
+            .expect("availability resolves");
+        assert!(!slots.is_empty(), "a free day must still offer slots");
+        let graph_busy: (DateTime<Utc>, DateTime<Utc>) = (
+            "2031-01-13T08:00:00Z".parse().unwrap(),
+            "2031-01-13T09:00:00Z".parse().unwrap(),
+        );
+        let internal: (DateTime<Utc>, DateTime<Utc>) = (
+            "2031-01-13T10:00:00Z".parse().unwrap(),
+            "2031-01-13T11:00:00Z".parse().unwrap(),
+        );
+        for slot in &slots {
+            let overlaps =
+                |busy: (DateTime<Utc>, DateTime<Utc>)| slot.start < busy.1 && slot.end > busy.0;
+            assert!(
+                !overlaps(graph_busy) && !overlaps(internal),
+                "slot {slot:?} overlaps a busy interval"
+            );
+        }
+    }
+
+    /// The booking happy path END-TO-END: Graph call -> id/joinUrl
+    /// extraction -> internal mirror rows (store of record) -> reschedule ->
+    /// cancel with provider DELETE.
+    #[tokio::test]
+    async fn create_event_books_on_graph_and_mirrors_the_store_of_record() {
+        let payload = serde_json::json!({
+            "id": "AAkALgAAAA...",
+            "onlineMeeting": { "joinUrl": "https://teams.microsoft.com/l/meetup-join/19:meeting" }
+        });
+        let mut routes = HashMap::new();
+        routes.insert(("POST", "/me/events".to_string()), (201, payload));
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider(&base).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-book");
+
+        let req = CreateEventRequest {
+            tenant_id: tenant.clone(),
+            title: "Discovery call".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "microsoft".into(),
+            provider_event_id: None,
+        };
+        let booked = provider
+            .create_event(&req)
+            .await
+            .expect("the booking lands");
+        assert_eq!(booked.provider, "microsoft");
+        assert_eq!(booked.provider_event_id.as_deref(), Some("AAkALgAAAA..."));
+        assert_eq!(
+            booked.conferencing_link,
+            "https://teams.microsoft.com/l/meetup-join/19:meeting"
+        );
+        let mirrored: (String, String, String) = sqlx::query_as(
+            "SELECT provider, provider_event_id, conferencing_link FROM sales_meetings \
+             WHERE tenant_id = $1 AND status = 'booked'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("mirrored meeting");
+        assert_eq!(mirrored.0, "microsoft");
+        assert_eq!(mirrored.1, "AAkALgAAAA...");
+        assert_eq!(
+            mirrored.2,
+            "https://teams.microsoft.com/l/meetup-join/19:meeting"
+        );
+
+        // Reschedule moves BOTH the Graph event and the store of record.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("PATCH", "/me/events/AAkALgAAAA...".to_string()),
+            (200, serde_json::json!({ "id": "AAkALgAAAA..." })),
+        );
+        let (base2, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider_at(&base2, pool).await;
+        let new_start: DateTime<Utc> = "2031-01-13T14:00:00Z".parse().unwrap();
+        let rescheduled = provider
+            .reschedule(&booked.event_id, new_start)
+            .await
+            .expect("reschedule lands");
+        assert_eq!(rescheduled.status, "rescheduled");
+        let moved: (DateTime<Utc>, String) =
+            sqlx::query_as("SELECT start_at, status FROM sales_meetings WHERE id = $1")
+                .bind(Uuid::parse_str(&booked.event_id).unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("moved meeting");
+        assert_eq!(moved.0, new_start);
+        assert_eq!(moved.1, "rescheduled");
+
+        // Cancel deletes the event at Graph and cancels the store of record.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("DELETE", "/me/events/AAkALgAAAA...".to_string()),
+            (204, serde_json::json!({})),
+        );
+        let (base3, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider_at(&base3, pool).await;
+        provider
+            .cancel(&booked.event_id)
+            .await
+            .expect("cancel lands");
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(Uuid::parse_str(&booked.event_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .expect("cancelled meeting");
+        assert_eq!(status, "cancelled");
+    }
+
+    async fn make_provider_at(base_url: &str, pool: PgPool) -> (MicrosoftCalendarProvider, PgPool) {
+        let config = CalendarConfig::default();
+        let internal = Arc::new(InternalCalendarProvider::new(pool.clone(), config.clone()));
+        let provider = MicrosoftCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
+            user_id: "me".into(),
+            access_token: "test-token".into(),
+            internal,
+            config,
+        };
+        (provider, pool)
+    }
+
+    #[tokio::test]
+    async fn create_event_surfaces_transport_http_and_json_failures() {
+        let req = CreateEventRequest {
+            tenant_id: "ms-fail".into(),
+            title: "Demo".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "microsoft".into(),
+            provider_event_id: None,
+        };
+
+        // Transport failure: port 1 on loopback refuses connections.
+        let (provider, _pool) = make_provider("http://127.0.0.1:1").await;
+        let error = provider.create_event(&req).await.expect_err("transport");
+        assert!(error.to_string().contains("insert failed"), "{error}");
+
+        // HTTP failure: a 500 from Graph surfaces, not a booking.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/events".to_string()),
+            (500, serde_json::json!({"error": {"code": "ServerError"}})),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, _pool) = make_provider(&base).await;
+        let error = provider.create_event(&req).await.expect_err("HTTP 500");
+        assert!(error.to_string().contains("HTTP 500"), "{error}");
+
+        // A non-string id cannot be used as a provider id.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/events".to_string()),
+            (200, serde_json::json!({"id": 424242})),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, _pool) = make_provider(&base).await;
+        let error = provider.create_event(&req).await.expect_err("numeric id");
+        assert!(error.to_string().contains("no id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn get_schedule_surfaces_a_transport_failure() {
+        let (provider, _pool) = make_provider("http://127.0.0.1:1").await;
+        let error = provider
+            .busy_from_graph(&request("ms-transport"))
+            .await
+            .expect_err("transport");
+        assert!(error.to_string().contains("getSchedule failed"), "{error}");
+    }
+
+    /// A booking the store of record REJECTS (the slot was taken internally)
+    /// is compensated: the just-created Graph event is deleted again.
+    #[tokio::test]
+    async fn a_rejected_internal_booking_is_compensated_at_the_provider() {
+        let payload = serde_json::json!({ "id": "AAkALgCOMP", "onlineMeetingUrl": "" });
+        let mut routes = HashMap::new();
+        routes.insert(("POST", "/me/events".to_string()), (201, payload));
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider(&base).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-comp");
+
+        // Someone else already holds the slot internally.
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES (gen_random_uuid(), $1, 'taken', '{}', $2, $3, 'https://teams')",
+        )
+        .bind(&tenant)
+        .bind("2031-01-13T09:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .bind("2031-01-13T09:30:00Z".parse::<DateTime<Utc>>().unwrap())
+        .execute(&pool)
+        .await
+        .expect("insert the conflicting hold");
+
+        let req = CreateEventRequest {
+            tenant_id: tenant,
+            title: "Conflicted".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "microsoft".into(),
+            provider_event_id: None,
+        };
+        let error = provider
+            .create_event(&req)
+            .await
+            .expect_err("the slot is unavailable");
+        assert!(matches!(error, CalendarError::SlotUnavailable), "{error}");
+    }
+
+    /// An empty joinUrl means the internal store generates the deterministic
+    /// handle from the real meeting id.
+    #[tokio::test]
+    async fn a_booking_without_a_join_url_gets_the_deterministic_handle() {
+        let payload = serde_json::json!({ "id": "AAkALgLINK" });
+        let mut routes = HashMap::new();
+        routes.insert(("POST", "/me/events".to_string()), (201, payload));
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider(&base).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-nolink");
+        let tenant_for_query = tenant.clone();
+        let req = CreateEventRequest {
+            tenant_id: tenant,
+            title: "No link".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T11:00:00Z".parse().unwrap(),
+            end: "2031-01-13T11:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "microsoft".into(),
+            provider_event_id: None,
+        };
+        let booked = provider
+            .create_event(&req)
+            .await
+            .expect("the booking lands");
+        assert!(
+            booked.conferencing_link.starts_with("apexmail-meeting://"),
+            "the empty joinUrl yields the deterministic internal handle: {}",
+            booked.conferencing_link
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT conferencing_link FROM sales_meetings WHERE tenant_id = $1")
+                .bind(&tenant_for_query)
+                .fetch_one(&pool)
+                .await
+                .expect("mirrored meeting");
+        assert_eq!(stored, booked.conferencing_link);
+    }
+
+    #[tokio::test]
+    async fn reschedule_refuses_a_meeting_without_a_graph_event_id() {
+        let (provider, pool) = make_provider(&graph_mock(HashMap::new()).await.0).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-noid");
+        let event_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_meetings \
+                 (id, tenant_id, provider, provider_event_id, start_at, end_at, timezone, \
+                  conferencing_link, status) \
+             VALUES ($1, $2, 'microsoft', NULL, $3, $4, 'Europe/Tallinn', '', 'booked')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .bind("2031-01-13T09:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .bind("2031-01-13T09:30:00Z".parse::<DateTime<Utc>>().unwrap())
+        .execute(&pool)
+        .await
+        .expect("insert the meeting");
+        let error = provider
+            .reschedule(
+                &event_id.to_string(),
+                "2031-01-13T14:00:00Z".parse().unwrap(),
+            )
+            .await
+            .expect_err("no graph id to patch");
+        assert!(error.to_string().contains("no graph event id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancel_surfaces_a_delete_failure_and_reschedule_a_patch_failure() {
+        let (_provider, pool) = make_provider(&graph_mock(HashMap::new()).await.0).await;
+        let tenant = crate::test_db::unique_test_tenant("mscal-fail");
+        let event_id = Uuid::new_v4();
+        let start: DateTime<Utc> = "2031-01-13T09:00:00Z".parse().unwrap();
+        let end: DateTime<Utc> = "2031-01-13T09:30:00Z".parse().unwrap();
+        sqlx::query(
+            "INSERT INTO sales_meetings \
+                 (id, tenant_id, provider, provider_event_id, start_at, end_at, timezone, \
+                  conferencing_link, status) \
+             VALUES ($1, $2, 'microsoft', 'AAkALgMOVE', $3, $4, 'Europe/Tallinn', '', 'booked')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .bind(start)
+        .bind(end)
+        .execute(&pool)
+        .await
+        .expect("insert the meeting");
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES ($1, $2, 'Move me', '{}', $3, $4, '')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .bind(start)
+        .bind(end)
+        .execute(&pool)
+        .await
+        .expect("insert the availability row");
+
+        // A 500 is not a 404: cancel surfaces it, and the patch fails too.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("DELETE", "/me/events/AAkALgMOVE".to_string()),
+            (500, serde_json::json!({"error": {"code": "ServerError"}})),
+        );
+        let (base_cancel, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider_at(&base_cancel, pool).await;
+        let error = provider
+            .cancel(&event_id.to_string())
+            .await
+            .expect_err("the delete must surface");
+        assert!(error.to_string().contains("HTTP 500"), "{error}");
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("PATCH", "/me/events/AAkALgMOVE".to_string()),
+            (500, serde_json::json!({"error": {"code": "ServerError"}})),
+        );
+        let (base_patch, _server) = graph_mock(routes).await;
+        let (provider, pool) = make_provider_at(&base_patch, pool).await;
+        let error = provider
+            .reschedule(
+                &event_id.to_string(),
+                "2031-01-13T14:00:00Z".parse().unwrap(),
+            )
+            .await
+            .expect_err("the patch must surface");
+        assert!(error.to_string().contains("HTTP 500"), "{error}");
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("meeting row");
+        assert_eq!(status, "booked", "failed provider calls change nothing");
+    }
 }

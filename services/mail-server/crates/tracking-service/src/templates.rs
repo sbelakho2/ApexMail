@@ -326,11 +326,9 @@ mod adversarial_tests {
         // Globally unsubscribed state is surfaced (categories section is
         // replaced by the suppressed notice).
         let suppressed = render_preferences_page(evil, evil, evil, &cats, true);
-        assert!(
-            suppressed.to_lowercase().contains("unsubscrib")
-                || suppressed.to_lowercase().contains("suppress"),
-            "global state shown: {suppressed}"
-        );
+        let lowered = suppressed.to_lowercase();
+        let has_notice = lowered.contains("unsubscrib") || lowered.contains("suppress");
+        assert!(has_notice, "global state shown: {suppressed}");
         assert!(!suppressed.contains("<script>"), "{suppressed}");
     }
 
@@ -352,5 +350,24 @@ mod adversarial_tests {
         assert!(html.contains("marketing") && html.contains("product"));
         assert!(html.contains("checked") || html.contains("CHECKED"));
         assert!(html.contains("u@example.com"));
+    }
+
+    /// Every special character is escaped, including the ampersand and
+    /// single-quote arms.
+    #[test]
+    fn escape_html_covers_every_special_character() {
+        assert_eq!(escape_html("a&b<c>\"d'e"), "a&amp;b&lt;c&gt;&quot;d&#039;e");
+        assert_eq!(escape_html(""), "");
+        assert_eq!(escape_html("no specials"), "no specials");
+    }
+
+    /// A NON-subscribed tenant with NO categories renders the plain
+    /// unsubscribe form without a categories section.
+    #[test]
+    fn preferences_page_renders_plain_form_when_no_categories() {
+        let plain = render_preferences_page("tok", "user@example.com", "/prefs", &[], false);
+        assert!(!plain.contains("Email Categories"), "{plain}");
+        assert!(plain.contains("Unsubscribe"), "{plain}");
+        assert!(plain.contains("user@example.com"), "{plain}");
     }
 }

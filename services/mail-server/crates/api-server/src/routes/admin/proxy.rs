@@ -211,10 +211,38 @@ async fn proxy_request(
             "Private/internal URLs are not allowed".into(),
         ]));
     }
-    let pinned_addr = resolved[0];
 
+    // Everything past this point operates exclusively on the validated,
+    // pinned target — the single seam the SSRF guard guarantees.
+    let target = ValidatedProxyTarget {
+        url: body.url.clone(),
+        host_display: raw_host.to_string(),
+        host_lower,
+        pinned_addr: resolved[0],
+    };
+    forward_validated_proxy_request(&state, &auth, target, &body).await
+}
+
+/// A proxy target that has passed every SSRF gate: the allowlist, the
+/// literal private checks, and resolve-then-pin. Downstream code never
+/// re-resolves and never accepts a different host.
+struct ValidatedProxyTarget {
+    /// The caller's original URL (the pinned client resolves `host_lower`
+    /// to `pinned_addr`, so this URL cannot escape the validation).
+    url: String,
+    /// The host as the caller wrote it — used only for the audit trail.
+    host_display: String,
+    host_lower: String,
+    pinned_addr: SocketAddr,
+}
+
+async fn forward_validated_proxy_request(
+    state: &AppState,
+    auth: &AuthUser,
+    target: ValidatedProxyTarget,
+    body: &ProxyRequest,
+) -> Result<Json<ProxyResponse>, ApiError> {
     let method = body.method.as_deref().unwrap_or("GET").to_uppercase();
-    let host = raw_host.to_string();
 
     // Build a dedicated client that does NOT follow redirects. The SSRF
     // host/IP allowlist checks only run on the initial URL, so following a
@@ -223,7 +251,7 @@ async fn proxy_request(
     // to use here. `.resolve` pins this host to the SSRF-validated address.
     let no_redirect_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(&host_lower, pinned_addr)
+        .resolve(&target.host_lower, target.pinned_addr)
         .build()
         .map_err(|e| {
             tracing::error!("Failed to build no-redirect proxy client: {e}");
@@ -231,11 +259,11 @@ async fn proxy_request(
         })?;
 
     let mut request = match method.as_str() {
-        "GET" => no_redirect_client.get(&body.url),
-        "POST" => no_redirect_client.post(&body.url),
-        "PUT" => no_redirect_client.put(&body.url),
-        "PATCH" => no_redirect_client.patch(&body.url),
-        "DELETE" => no_redirect_client.delete(&body.url),
+        "GET" => no_redirect_client.get(&target.url),
+        "POST" => no_redirect_client.post(&target.url),
+        "PUT" => no_redirect_client.put(&target.url),
+        "PATCH" => no_redirect_client.patch(&target.url),
+        "DELETE" => no_redirect_client.delete(&target.url),
         _ => return Err(ApiError::Validation(vec!["Unsupported HTTP method".into()])),
     };
 
@@ -276,10 +304,10 @@ async fn proxy_request(
 
     let status = response.status().as_u16();
     log_proxy_audit(
-        &state,
-        &auth,
-        &host,
-        build_proxy_audit_metadata(&body, &method, &host, status),
+        state,
+        auth,
+        &target.host_display,
+        build_proxy_audit_metadata(body, &method, &target.host_display, status),
     )
     .await;
 
@@ -640,5 +668,445 @@ mod adversarial_tests {
         assert_eq!(metadata["method"], "POST");
         assert_eq!(metadata["host"], "example.com");
         assert_eq!(metadata["responseStatus"], 200);
+    }
+}
+
+// ─── Coverage residuals: the validated pass-through core ─────────
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+
+    fn admin() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_proxy_cov".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Serialise tests that mutate the proxy allowlist env var (env access
+    /// is process-global; restored on the way out).
+    fn with_allowlist_env<F: FnOnce() -> R, R>(allowlist: &str, body: F) -> R {
+        static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("CONTROL_PLANE_PROXY_ALLOWLIST").ok();
+        std::env::set_var("CONTROL_PLANE_PROXY_ALLOWLIST", allowlist);
+        let result = body();
+        match previous {
+            Some(value) => std::env::set_var("CONTROL_PLANE_PROXY_ALLOWLIST", value),
+            None => std::env::remove_var("CONTROL_PLANE_PROXY_ALLOWLIST"),
+        }
+        result
+    }
+
+    /// A state backed by a real canonical pool so the pass-through's
+    /// audit write lands in the tamper-evident chain.
+    async fn state_with_db(suffix: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::canonical_pool(suffix).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    /// A loopback upstream that observes the forwarded request and can
+    /// be told which response to give. Returns (base_addr, observed-URI
+    /// receiver). The caller builds the proxy's pinned client against
+    /// this address — exactly what `forward_validated_proxy_request`
+    /// does once the SSRF guard has produced a `ValidatedProxyTarget`.
+    struct MockUpstream {
+        addr: SocketAddr,
+        observed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Drop for MockUpstream {
+        fn drop(&mut self) {
+            // Handles are detached; dropping only stops new spawns.
+        }
+    }
+
+    async fn start_mock_upstream(mode: &'static str) -> MockUpstream {
+        let observed: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_for_handler = observed.clone();
+
+        async fn handler(
+            observed: axum::extract::State<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+            mode: axum::Extension<&'static str>,
+            request: axum::extract::Request,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let line = format!("{} {}", request.method(), request.uri());
+            let content_type = request
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let x_request_id = request
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let authorization = request
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+                .await
+                .unwrap_or_default();
+            observed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(format!(
+                    "{line}|ct={content_type}|xreq={x_request_id}|auth={authorization}|body={}",
+                    String::from_utf8_lossy(&bytes)
+                ));
+            match mode.0 {
+                "redirect" => (
+                    axum::http::StatusCode::FOUND,
+                    [("location", "http://169.254.169.254/latest")],
+                )
+                    .into_response(),
+                "text" => (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "text/plain")],
+                    "just text".to_string(),
+                )
+                    .into_response(),
+                _ => axum::Json(serde_json::json!({ "echo": "ok" })).into_response(),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy mock");
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .fallback(handler)
+            .layer(axum::Extension(mode))
+            .with_state(observed_for_handler);
+        let handle = tokio::runtime::Handle::try_current().expect("test runtime");
+        handle.spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        MockUpstream { addr, observed }
+    }
+
+    fn pinned_target(upstream: &MockUpstream, url: String) -> ValidatedProxyTarget {
+        ValidatedProxyTarget {
+            host_lower: "cov-proxy-mock.internal".into(),
+            host_display: "cov-proxy-mock.internal".into(),
+            url,
+            pinned_addr: upstream.addr,
+        }
+    }
+
+    fn request_for(upstream: &MockUpstream, path: &str) -> ProxyRequest {
+        ProxyRequest {
+            url: format!(
+                "http://cov-proxy-mock.internal:{}{path}",
+                upstream.addr.port()
+            ),
+            method: None,
+            headers: None,
+            body: None,
+        }
+    }
+
+    /// The happy pass-through: every supported method is dispatched, only
+    /// allowlisted headers ride along, the JSON body is forwarded, and the
+    /// upstream status/headers/body are mapped back. A successful forward
+    /// is actor-attributed in the audit chain.
+    #[tokio::test]
+    async fn pass_through_forwards_methods_headers_bodies_and_maps_back() {
+        let Some((state, pool)) = state_with_db("proxy_passthrough").await else {
+            return;
+        };
+        let upstream = start_mock_upstream("json").await;
+        let admin = admin();
+
+        // GET (the default method) with an allowlisted and a denied header.
+        let body = ProxyRequest {
+            url: format!(
+                "http://cov-proxy-mock.internal:{}/get?q=1",
+                upstream.addr.port()
+            ),
+            method: None,
+            headers: Some(serde_json::json!({
+                "X-Request-Id": "req-42",
+                "Authorization": "Bearer must-not-forward",
+                "Content-Type": "application/json"
+            })),
+            body: None,
+        };
+        let target = pinned_target(&upstream, body.url.clone());
+        let response = forward_validated_proxy_request(&state, &admin, target, &body)
+            .await
+            .expect("GET forwards");
+        assert_eq!(response.0.status, 200);
+        assert_eq!(response.0.headers["content-type"], "application/json");
+        assert_eq!(response.0.body["echo"], "ok");
+
+        // Every mutation method reaches the upstream with its body.
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            let body = ProxyRequest {
+                url: format!(
+                    "http://cov-proxy-mock.internal:{}/{}",
+                    upstream.addr.port(),
+                    method.to_lowercase()
+                ),
+                method: Some(method.into()),
+                headers: None,
+                body: Some(serde_json::json!({ "n": 1 })),
+            };
+            let target = pinned_target(&upstream, body.url.clone());
+            let response = forward_validated_proxy_request(&state, &admin, target, &body)
+                .await
+                .expect("mutation forwards");
+            assert_eq!(response.0.status, 200, "{method}");
+        }
+
+        let observed = upstream
+            .observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(observed.iter().any(|l| l.starts_with("GET /get?q=1")));
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            assert!(
+                observed
+                    .iter()
+                    .any(|l| l.starts_with(&format!("{method} /"))),
+                "{method} must reach the upstream, got {observed:?}"
+            );
+        }
+        // The allowlisted headers were forwarded; the credential was not.
+        let get_line = observed
+            .iter()
+            .find(|l| l.starts_with("GET /get"))
+            .expect("GET observed");
+        assert!(get_line.contains("xreq=req-42"), "{get_line}");
+        assert!(get_line.contains("auth="), "auth header observed as empty");
+        assert!(!get_line.contains("Bearer"), "credentials never forward");
+        // The JSON body rode the POST.
+        assert!(
+            observed
+                .iter()
+                .any(|l| l.starts_with("POST /") && l.contains(r#""n":1"#)),
+            "forwarded body observed, got {observed:?}"
+        );
+
+        // The success was audited with the mapped status.
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs WHERE action = 'control_plane.proxy.requested'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("audit count");
+        assert!(audits >= 5, "every forwarded request is audited");
+        pool.close().await;
+    }
+
+    /// Non-JSON upstream bodies are surfaced as null (never an error) and
+    /// 3xx responses are refused outright.
+    #[tokio::test]
+    async fn pass_through_maps_text_and_refuses_redirects() {
+        let Some((state, pool)) = state_with_db("proxy_passthrough_text").await else {
+            return;
+        };
+        let admin = admin();
+
+        let upstream = start_mock_upstream("text").await;
+        let body = request_for(&upstream, "/text");
+        let target = pinned_target(&upstream, body.url.clone());
+        let response = forward_validated_proxy_request(&state.clone(), &admin, target, &body)
+            .await
+            .expect("text forwards");
+        assert_eq!(response.0.status, 200);
+        assert_eq!(response.0.headers["content-type"], "text/plain");
+        assert_eq!(response.0.body, serde_json::Value::Null);
+
+        let upstream = start_mock_upstream("redirect").await;
+        let body = request_for(&upstream, "/bounce");
+        let target = pinned_target(&upstream, body.url.clone());
+        let refused = forward_validated_proxy_request(&state, &admin, target, &body).await;
+        assert!(
+            matches!(&refused, Err(ApiError::BadRequest(detail))
+                if detail.contains("does not follow redirects")),
+            "a redirecting upstream is refused, got {refused:?}"
+        );
+        pool.close().await;
+    }
+
+    /// An unsupported method is a validation error raised before any
+    /// socket work, and an unreachable validated address maps to an
+    /// honest internal error.
+    #[tokio::test]
+    async fn pass_through_refuses_bad_methods_and_dead_targets() {
+        let Some((state, pool)) = state_with_db("proxy_passthrough_err").await else {
+            return;
+        };
+        let admin = admin();
+
+        // Validation arm: unsupported method never opens a socket.
+        let upstream = start_mock_upstream("json").await;
+        let mut body = request_for(&upstream, "/trace");
+        body.method = Some("trace".into());
+        let target = pinned_target(&upstream, body.url.clone());
+        let refused = forward_validated_proxy_request(&state.clone(), &admin, target, &body).await;
+        assert!(matches!(refused, Err(ApiError::Validation(_))));
+
+        // Send-failure arm: the validated address refuses the connection.
+        let mut body = request_for(&upstream, "/dead");
+        body.method = None;
+        let dead = ValidatedProxyTarget {
+            host_lower: "cov-proxy-dead.internal".into(),
+            host_display: "cov-proxy-dead.internal".into(),
+            url: "http://cov-proxy-dead.internal/x".into(),
+            pinned_addr: "127.0.0.1:9".parse().expect("dead socket addr"),
+        };
+        let failed = forward_validated_proxy_request(&state, &admin, dead, &body).await;
+        assert!(
+            matches!(failed, Err(ApiError::Internal(_))),
+            "an unreachable target is an internal error, got {failed:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Production refuses plaintext proxy targets.
+    #[tokio::test]
+    async fn production_refuses_plain_http_targets() {
+        let Some((state, _pool)) = state_with_db("proxy_production_https").await else {
+            return;
+        };
+        let mut production = crate::app::test_support::test_config();
+        production.environment = crate::config::Environment::Production;
+        let prod_state =
+            crate::app::test_support::test_state_over_with_config(state.db.clone(), production)
+                .await;
+        let resp = proxy_request(
+            State(prod_state),
+            admin(),
+            Json(ProxyRequest {
+                url: "http://example.com/x".into(),
+                method: None,
+                headers: None,
+                body: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&resp, Err(ApiError::Validation(detail))
+                if detail[0].contains("HTTPS")),
+            "production must refuse http://, got {resp:?}"
+        );
+    }
+
+    /// A host outside the allowlist is refused even when the literal-IP
+    /// guards would pass it.
+    #[tokio::test]
+    async fn hosts_outside_the_allowlist_are_refused() {
+        let Some((state, _pool)) = state_with_db("proxy_allowlist_miss").await else {
+            return;
+        };
+        let resp = with_allowlist_env("allowed.example", || {
+            futures::executor::block_on(proxy_request(
+                State(state.clone()),
+                admin(),
+                Json(ProxyRequest {
+                    url: "https://93.184.216.34/".into(),
+                    method: None,
+                    headers: None,
+                    body: None,
+                }),
+            ))
+        });
+        assert!(
+            matches!(&resp, Err(ApiError::Validation(detail))
+                if detail[0].contains("allowlist")),
+            "non-allowlisted host refused, got {resp:?}"
+        );
+    }
+
+    /// The hosts-file resolver seam resolves deterministically, and a
+    /// garbage hostname fails without leaving a validation hole.
+    #[tokio::test]
+    async fn resolve_host_reads_the_hosts_file_and_fails_honestly() {
+        let resolved = resolve_host("localhost", 80).await;
+        let addrs = resolved.expect("localhost resolves from the hosts file");
+        assert!(
+            addrs
+                .iter()
+                .any(|addr| addr.ip().is_loopback() && addr.port() == 80),
+            "the loopback answer carries the requested port"
+        );
+        // An empty hostname cannot resolve — the error side is surfaced.
+        assert!(resolve_host("", 443).await.is_err());
+    }
+
+    /// 6to4 / Teredo / IPv4-mapped embeddings are inspected, not trusted.
+    #[test]
+    fn embedded_ipv4_forms_are_inspected() {
+        // 6to4 (2002::/16) embedding a loopback address.
+        assert!(is_private_ip(&"2002:7f00:1::".parse::<IpAddr>().unwrap()));
+        // 6to4 embedding a public address is not private.
+        assert!(!is_private_ip(
+            &"2002:0808:0808::".parse::<IpAddr>().unwrap()
+        ));
+        // Teredo (2001:0::/32) embeds the IPv4 XOR-obfuscated: a real
+        // loopback (127.0.0.1) is carried as 80ff:fffe in the last segments.
+        assert!(is_private_ip(
+            &"2001:0000:4136:e378:8000:63bf:80ff:fffe"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        // A non-embedded IPv6 stays public.
+        assert!(!is_private_ip(
+            &"2606:4700::1111".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    /// The audit helper writes the actor-attributed row directly.
+    #[tokio::test]
+    async fn proxy_audit_helper_records_the_row() {
+        let Some((state, pool)) = state_with_db("proxy_audit_helper").await else {
+            return;
+        };
+        log_proxy_audit(
+            &state,
+            &admin(),
+            "audited.example",
+            build_proxy_audit_metadata(
+                &ProxyRequest {
+                    url: "https://audited.example/".into(),
+                    method: Some("GET".into()),
+                    headers: Some(serde_json::json!({"accept": "application/json"})),
+                    body: None,
+                },
+                "GET",
+                "audited.example",
+                204,
+            ),
+        )
+        .await;
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT details->>'method', resource_id FROM audit_logs
+             WHERE action = 'control_plane.proxy.requested'
+               AND resource = 'proxy_request'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("proxy audit row");
+        assert_eq!(row.0, "GET");
+        assert_eq!(row.1.as_deref(), Some("audited.example"));
+        pool.close().await;
     }
 }

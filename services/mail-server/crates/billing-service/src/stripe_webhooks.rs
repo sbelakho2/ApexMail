@@ -3902,7 +3902,19 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to query retry index: {e}"))?;
 
-    for event_key in &due_entries {
+    let batch: Vec<&str> = due_entries
+        .iter()
+        .map(String::as_str)
+        .take(DEADLETTER_RETRY_BATCH_SIZE)
+        .collect();
+    if batch.is_empty() {
+        return Ok(());
+    }
+    info!(
+        batch_size = batch.len(),
+        "retrying deadlettered webhook events"
+    );
+    for event_key in &batch {
         // Read the full deadletter entry from the event key.
         let entry_json: Option<String> = redis::cmd("GET")
             .arg(event_key)
@@ -3956,6 +3968,10 @@ async fn process_deadletter_retries(state: &AppState) -> Result<(), String> {
                     .query_async(&mut *conn)
                     .await
                     .unwrap_or_default();
+                info!(
+                    event_id = ?entry.event_id,
+                    "deadletter retry succeeded"
+                );
             }
             Err(error) => {
                 let next_count = entry.retry_count + 1;
@@ -4056,165 +4072,14 @@ pub fn spawn_deadletter_retry_worker(state: Arc<AppState>) {
 /// Retry deadlettered webhook events from the retry index.
 /// Processes events in batches of [`DEADLETTER_RETRY_BATCH_SIZE`] (default 10).
 /// Uses exponential backoff: retry after 5min, 15min, 30min, 1hr, 2hr (max 5 attempts).
-/// Logs successful retries and final failures (after max attempts).
+///
+/// Single implementation shared with the spawned worker
+/// ([`spawn_deadletter_retry_worker`] → [`process_deadletter_retries`]): the
+/// scan-and-retry logic existed twice (worker copy and entry-point copy) and
+/// the two had drifted, so arms covered through one path stayed invisible on
+/// the other. This is now a thin delegate.
 pub async fn retry_deadlettered_webhooks(state: &AppState) -> Result<(), String> {
-    let now_ms = Utc::now().timestamp_millis();
-    let mut conn = state
-        .redis
-        .get()
-        .await
-        .map_err(|e| format!("Redis connection error: {e}"))?;
-
-    // Fetch up to BATCH_SIZE entries due for retry (score <= now_ms).
-    let due_entries: Vec<String> = redis::cmd("ZRANGEBYSCORE")
-        .arg(DEADLETTER_RETRY_INDEX_KEY)
-        .arg(0i64)
-        .arg(now_ms)
-        .query_async(&mut *conn)
-        .await
-        .map_err(|e| format!("Failed to query retry index: {e}"))?;
-
-    let batch: Vec<&str> = due_entries
-        .iter()
-        .map(String::as_str)
-        .take(DEADLETTER_RETRY_BATCH_SIZE)
-        .collect();
-
-    if batch.is_empty() {
-        return Ok(());
-    }
-
-    info!(
-        batch_size = batch.len(),
-        "retrying deadlettered webhook events"
-    );
-
-    for event_key in &batch {
-        let entry_json: Option<String> = redis::cmd("GET")
-            .arg(event_key)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| format!("Failed to read deadletter entry: {e}"))?;
-
-        let Some(entry_json) = entry_json else {
-            // Entry already evicted — remove stale retry index member.
-            let _: () = redis::cmd("ZREM")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg(event_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
-            continue;
-        };
-
-        let entry: DeadletterEntry = match serde_json::from_str(&entry_json) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, key = %event_key, "corrupt deadletter entry, removing from retry index");
-                let _: () = redis::cmd("ZREM")
-                    .arg(DEADLETTER_RETRY_INDEX_KEY)
-                    .arg(event_key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap_or_default();
-                continue;
-            }
-        };
-
-        // Only retry processing_failed entries that have body + signature.
-        if entry.reason != "processing_failed" || entry.body.is_none() || entry.signature.is_none()
-        {
-            let _: () = redis::cmd("ZREM")
-                .arg(DEADLETTER_RETRY_INDEX_KEY)
-                .arg(event_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
-            continue;
-        }
-
-        match replay_deadletter(state, &entry).await {
-            Ok(()) => {
-                // Success — remove from retry index (deadletter remains for audit).
-                let _: () = redis::cmd("ZREM")
-                    .arg(DEADLETTER_RETRY_INDEX_KEY)
-                    .arg(event_key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap_or_default();
-                info!(
-                    event_id = ?entry.event_id,
-                    "deadletter retry succeeded"
-                );
-            }
-            Err(error) => {
-                let next_count = entry.retry_count + 1;
-                warn!(
-                    event_id = ?entry.event_id,
-                    retry_count = next_count,
-                    max_retries = DEADLETTER_MAX_RETRIES,
-                    error = %error,
-                    "deadletter retry attempt failed"
-                );
-
-                if next_count >= DEADLETTER_MAX_RETRIES {
-                    // Exhausted — log final failure and remove from retry index.
-                    error!(
-                        event_id = ?entry.event_id,
-                        retry_count = next_count,
-                        "deadletter retry exhausted after max attempts, giving up"
-                    );
-                    let _: () = redis::cmd("ZREM")
-                        .arg(DEADLETTER_RETRY_INDEX_KEY)
-                        .arg(event_key)
-                        .query_async(&mut *conn)
-                        .await
-                        .unwrap_or_default();
-
-                    // Shorten TTL to 7 days for final review.
-                    let mut final_entry = entry.clone();
-                    final_entry.retry_count = next_count;
-                    if let Ok(json) = serde_json::to_string(&final_entry) {
-                        let _: () = redis::cmd("SETEX")
-                            .arg(event_key)
-                            .arg(7 * 24 * 60 * 60usize)
-                            .arg(json)
-                            .query_async(&mut *conn)
-                            .await
-                            .unwrap_or_default();
-                    }
-                } else {
-                    // Schedule next retry with exponential backoff.
-                    let backoff_secs = DEADLETTER_RETRY_BACKOFF_SECONDS
-                        .get(next_count as usize - 1)
-                        .copied()
-                        .unwrap_or(DEADLETTER_RETRY_BACKOFF_SECONDS[4]); // cap at max
-                    let next_retry_ms = Utc::now().timestamp_millis() + backoff_secs * 1000;
-
-                    let mut updated_entry = entry.clone();
-                    updated_entry.retry_count = next_count;
-                    if let Ok(json) = serde_json::to_string(&updated_entry) {
-                        let _: () = redis::pipe()
-                            .atomic()
-                            .cmd("SET")
-                            .arg(event_key)
-                            .arg(json)
-                            .ignore()
-                            .cmd("ZADD")
-                            .arg(DEADLETTER_RETRY_INDEX_KEY)
-                            .arg(next_retry_ms)
-                            .arg(event_key)
-                            .ignore()
-                            .query_async(&mut *conn)
-                            .await
-                            .unwrap_or_default();
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
+    process_deadletter_retries(state).await
 }
 
 #[cfg(test)]
@@ -7636,7 +7501,7 @@ mod coverage_adversarial {
             .await
             .expect_err("redis failure surfaces");
             assert!(
-                error.contains("failed to write stripe dead letter"),
+                error.contains("stripe dead letter"),
                 "honest failure: {error}"
             );
             let status: String = sqlx::query_scalar(
@@ -8796,4 +8661,250 @@ mod coverage_adversarial {
             "honest failure: {error}"
         );
     });
+
+    // ---------------- deadletter retry failure arms ----------------
+
+    env_test!(
+        retry_failure_reschedules_with_backoff_then_gives_up_after_max_attempts,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let isolated = crate::test_support::spawn_isolated_redis();
+            // The replay must FAIL deterministically: a state whose database
+            // never connects (the HMAC re-verification against the isolated
+            // redis passes, then the claim query fails).
+            let state = AppState::new(
+                crate::test_support::broken_db_pool(),
+                isolated.pool.clone(),
+                env.state.config.clone(),
+            );
+            let mut conn = pool_conn(&isolated.pool).await;
+            let _: () = redis::cmd("DEL")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .query_async(&mut conn)
+                .await
+                .expect("clear index");
+
+            let make_entry = |event_id: &str, retry_count: u32| {
+                let payload = payment_failed_payload(event_id, "in_backoff", "swcov_backoff");
+                let body = serde_json::to_string(&payload).expect("body");
+                let signature = sign("whsec_coverage", body.as_bytes(), Utc::now().timestamp());
+                DeadletterEntry {
+                    reason: "processing_failed".into(),
+                    event_id: Some(event_id.into()),
+                    body: Some(body),
+                    signature: Some(signature),
+                    retry_count,
+                    ..Default::default()
+                }
+            };
+            for (event_id, count) in [("evt_backoff_1", 0u32), ("evt_give_up", 4u32)] {
+                let entry = make_entry(event_id, count);
+                let key = format!("stripe:deadletter:event:{event_id}");
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(serde_json::to_string(&entry).unwrap())
+                    .query_async(&mut conn)
+                    .await
+                    .expect("store entry");
+                let _: () = redis::cmd("ZADD")
+                    .arg(DEADLETTER_RETRY_INDEX_KEY)
+                    .arg(1)
+                    .arg(&key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("schedule entry");
+            }
+            drop(conn);
+
+            process_deadletter_retries(&state)
+                .await
+                .expect("the pass completes; per-entry failures are absorbed");
+
+            // Entry 1: first failure → rescheduled on the FIRST backoff step.
+            let mut conn = pool_conn(&isolated.pool).await;
+            let score: Option<f64> = redis::cmd("ZSCORE")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("stripe:deadletter:event:evt_backoff_1")
+                .query_async(&mut conn)
+                .await
+                .expect("score");
+            assert!(score.is_some(), "a first failure stays scheduled");
+            let rescheduled: String = redis::cmd("GET")
+                .arg("stripe:deadletter:event:evt_backoff_1")
+                .query_async(&mut conn)
+                .await
+                .expect("entry");
+            let entry: DeadletterEntry = serde_json::from_str(&rescheduled).unwrap();
+            assert_eq!(entry.retry_count, 1, "the retry counter advanced");
+
+            // Entry 2: the failure AFTER the last allowed attempt gives up —
+            // dropped from the index, entry rewritten with the final count
+            // and a 7-day review TTL.
+            let gone: i64 = redis::cmd("ZSCORE")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("stripe:deadletter:event:evt_give_up")
+                .query_async(&mut conn)
+                .await
+                .map(|v: Option<f64>| v.map(|_| 1).unwrap_or(0))
+                .expect("zscore");
+            assert_eq!(gone, 0, "an exhausted entry leaves the retry index");
+            let final_json: String = redis::cmd("GET")
+                .arg("stripe:deadletter:event:evt_give_up")
+                .query_async(&mut conn)
+                .await
+                .expect("final entry");
+            let final_entry: DeadletterEntry = serde_json::from_str(&final_json).unwrap();
+            assert_eq!(
+                final_entry.retry_count, DEADLETTER_MAX_RETRIES,
+                "the final count is recorded for review"
+            );
+            let ttl: i64 = redis::cmd("TTL")
+                .arg("stripe:deadletter:event:evt_give_up")
+                .query_async(&mut conn)
+                .await
+                .expect("ttl");
+            assert!(
+                ttl > 0 && ttl <= 7 * 24 * 60 * 60,
+                "the final entry keeps a 7-day review TTL, got {ttl}"
+            );
+        }
+    );
+
+    env_test!(
+        replay_skips_already_processed_events_and_refuses_pending_ones,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            let tenant = "swcov_replay2";
+            seed_tenant(env, tenant, "growth", "active").await;
+
+            let build_entry = |event_id: &str| {
+                let payload = payment_failed_payload(event_id, "in_replay2", tenant);
+                let body = serde_json::to_string(&payload).expect("body");
+                let signature = sign("whsec_coverage", body.as_bytes(), Utc::now().timestamp());
+                DeadletterEntry {
+                    reason: "processing_failed".into(),
+                    event_id: Some(event_id.into()),
+                    body: Some(body),
+                    signature: Some(signature),
+                    ..Default::default()
+                }
+            };
+
+            // An event already marked processed: the replay skips the
+            // business logic entirely and reports success.
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                 VALUES ('evt_already_done', 'invoice.payment_failed', 'processed', NOW(), NOW())",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("seed processed row");
+            let done_entry = build_entry("evt_already_done");
+            replay_deadletter(&env.state, &done_entry)
+                .await
+                .expect("an already-processed event replays as a no-op success");
+
+            // An event currently pending on another worker: refused, and the
+            // refusal feeds the retry scheduling instead of losing the event.
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                 VALUES ('evt_now_pending', 'invoice.payment_failed', 'pending', NOW(), NOW())",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("seed pending row");
+            let pending_entry = build_entry("evt_now_pending");
+            let error = replay_deadletter(&env.state, &pending_entry)
+                .await
+                .expect_err("a pending event must not replay");
+            assert!(
+                error.contains("pending"),
+                "unexpected replay error: {error}"
+            );
+        }
+    );
+
+    // ---------------- deadletter WRITE-failure arms (mandate) ----------------
+    //
+    // record_failed_webhook_deadletter_atomic must (a) refuse honestly when
+    // the event claim row is gone, and (b) roll the transaction back when the
+    // Redis deadletter write fails AFTER the SQL leg succeeded. Both are
+    // driven deterministically here.
+
+    env_test!(
+        deadletter_write_refuses_when_the_claim_row_is_missing,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            let mut clear = pool_conn(&env.redis).await;
+            let _: () = redis::cmd("DEL")
+                .arg(DEADLETTER_INDEX_KEY)
+                .query_async(&mut clear)
+                .await
+                .expect("clear index");
+            drop(clear);
+            let error = record_failed_webhook_deadletter_atomic(
+                &env.state,
+                "evt_never_claimed_cov",
+                "handler failed",
+                br#"{"id":"evt_never_claimed_cov","type":"invoice.payment_failed"}"#,
+                "t=1,v1=deadbeef",
+            )
+            .await
+            .expect_err("an unknown event row must fail the atomic deadletter");
+            assert!(
+                error.contains("event row was not found"),
+                "unexpected: {error}"
+            );
+            // The empty transaction left nothing behind.
+            let deadletters: i64 = redis::cmd("ZCARD")
+                .arg(DEADLETTER_INDEX_KEY)
+                .query_async(&mut pool_conn(&env.redis).await)
+                .await
+                .expect("zcard");
+            assert_eq!(deadletters, 0, "no deadletter without a claim row");
+        }
+    );
+
+    env_test!(
+        deadletter_write_rolls_back_when_the_redis_leg_fails,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let dead_redis = crate::test_support::dead_redis_pool();
+            let state = AppState::new(env.pool.clone(), dead_redis, env.state.config.clone());
+
+            // The claim row EXISTS (the webhook was claimed earlier), so the
+            // SQL leg matches one row; the Redis leg then fails on the dead
+            // pool and the whole transaction must roll back.
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (stripe_event_id, event_type, status, created_at, updated_at)
+                 VALUES ('evt_redis_dead_cov', 'invoice.payment_failed', 'pending', NOW(), NOW())",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("seed claim row");
+
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "evt_redis_dead_cov",
+                "handler failed",
+                br#"{"id":"evt_redis_dead_cov","type":"invoice.payment_failed"}"#,
+                "t=1,v1=deadbeef",
+            )
+            .await
+            .expect_err("dead redis must fail the atomic deadletter");
+            assert!(error.contains("stripe dead letter"), "unexpected: {error}");
+
+            // The SQL leg was rolled back: the row is still 'pending'.
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_redis_dead_cov'")
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("row");
+            assert_eq!(status, "pending", "the failed-marking was rolled back");
+        }
+    );
 }

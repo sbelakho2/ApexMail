@@ -1777,6 +1777,327 @@ mod tests {
 
     /// A permanently crashing job is failed at the attempt ceiling instead of
     /// being recovered forever; no provider is called for the poisoned claim.
+    /// A source that always fails with a named discovery error.
+    #[derive(Debug)]
+    struct FailingSource {
+        id: &'static str,
+        error: DiscoveryError,
+    }
+
+    #[async_trait::async_trait]
+    impl DiscoverySource for FailingSource {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn allowed_jurisdictions(&self) -> &[&'static str] {
+            &[]
+        }
+
+        async fn discover(
+            &self,
+            _query: &DiscoveryQuery,
+            _cursor: Option<&str>,
+        ) -> Result<DiscoveryPage, DiscoveryError> {
+            Err(self.error.clone())
+        }
+    }
+
+    /// A source with a strict jurisdiction allow-list.
+    #[derive(Debug)]
+    struct JurisdictionalSource {
+        id: &'static str,
+        candidates: Vec<DiscoveredCandidate>,
+    }
+
+    #[async_trait::async_trait]
+    impl DiscoverySource for JurisdictionalSource {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn allowed_jurisdictions(&self) -> &[&'static str] {
+            &["US"]
+        }
+
+        async fn discover(
+            &self,
+            _query: &DiscoveryQuery,
+            _cursor: Option<&str>,
+        ) -> Result<DiscoveryPage, DiscoveryError> {
+            Ok(DiscoveryPage {
+                candidates: self.candidates.clone(),
+                next_cursor: None,
+                cost_eur: 0.5,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn process_job_runs_every_source_and_completes_the_job() {
+        let Some(pool) = live_pool("process_job_completes").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("proc-complete");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source: Arc<dyn DiscoverySource> = Arc::new(RecordingSource::with_candidates(
+            "proc_source",
+            calls.clone(),
+            vec![recording_candidate(
+                "https://proc.example.com",
+                "proc.example.com",
+            )],
+        ));
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![source.clone()]);
+        assert_eq!(runner.source_ids(), vec!["proc_source"]);
+
+        let job = runner
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("create job");
+        let job = runner
+            .run_to_completion(&tenant, job.id)
+            .await
+            .expect("process");
+        assert_eq!(job.status, "completed");
+        assert_eq!(
+            job.imported, 0,
+            "import counts only on promotion, not discovery"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let candidates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_discovery_candidates \
+             WHERE tenant_id = $1 AND job_id = $2",
+        )
+        .bind(&tenant)
+        .bind(job.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(candidates, 1);
+        let runs: Vec<(String, String)> =
+            sqlx::query_as("SELECT source, status FROM sales_source_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            runs,
+            vec![("proc_source".to_string(), "succeeded".to_string())]
+        );
+
+        // Re-processing a COMPLETED job is a no-op that returns the terminal
+        // job unchanged.
+        let job = runner
+            .run_to_completion(&tenant, job.id)
+            .await
+            .expect("a terminal job is returned as-is");
+        assert_eq!(job.status, "completed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no further provider calls");
+
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn process_job_without_sources_and_with_failing_sources_is_recorded() {
+        let Some(pool) = live_pool("process_job_failures").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("proc-fail");
+        // No sources configured: the job cannot run at all.
+        let bare = DiscoveryJobRunner::new(pool.clone(), Vec::new());
+        let job = bare
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("a job with no requested sources is creatable");
+        let error = bare
+            .run_to_completion(&tenant, job.id)
+            .await
+            .expect_err("no sources configured");
+        assert!(
+            error
+                .to_string()
+                .contains("no discovery sources are configured"),
+            "{error}"
+        );
+
+        // A failing source fails the batch; a fully failed run marks the JOB
+        // failed with every source named.
+        let failing: Arc<dyn DiscoverySource> = Arc::new(FailingSource {
+            id: "down_source",
+            error: DiscoveryError::Unavailable("simulated outage".into()),
+        });
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![failing]);
+        let job = runner
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("create job");
+        let job = runner
+            .run_to_completion(&tenant, job.id)
+            .await
+            .expect("the run itself is recorded");
+        assert_eq!(job.status, "failed");
+        let error_text = job.error.expect("the job error names the sources");
+        assert!(
+            error_text.contains("every discovery source failed")
+                && error_text.contains("down_source")
+                && error_text.contains("simulated outage"),
+            "{error_text}"
+        );
+        let run: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT source, status, error FROM sales_source_runs WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(run.0, "down_source");
+        assert_eq!(run.1, "failed");
+        assert!(run.2.unwrap_or_default().contains("simulated outage"));
+
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn jurisdiction_filter_drops_out_of_region_candidates_with_a_visible_note() {
+        let Some(pool) = live_pool("jurisdiction_filter").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("jurisdiction");
+        let mut candidates = vec![
+            recording_candidate("https://us.example.com", "us.example.com"),
+            recording_candidate("https://de.example.com", "de.example.com"),
+        ];
+        candidates[1].jurisdiction = Some("DE".to_string());
+        let source: Arc<dyn DiscoverySource> = Arc::new(JurisdictionalSource {
+            id: "juris_source",
+            candidates,
+        });
+        let runner = DiscoveryJobRunner::new(pool.clone(), vec![source]);
+        let job = runner
+            .create_job(&tenant, &DiscoveryQuery::default(), &[])
+            .await
+            .expect("create job");
+        let job = runner
+            .run_to_completion(&tenant, job.id)
+            .await
+            .expect("process");
+        assert_eq!(job.status, "completed");
+        assert_eq!(job.imported, 0, "import counts only on promotion");
+
+        let note: Option<String> =
+            sqlx::query_scalar("SELECT error FROM sales_source_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(note
+            .unwrap_or_default()
+            .contains("jurisdiction_filter: dropped 1 candidate(s)"));
+        let domains: Vec<String> = sqlx::query_scalar(
+            "SELECT account_domain FROM sales_discovery_candidates WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(domains, vec!["us.example.com".to_string()]);
+
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn promote_candidate_is_grounded_idempotent_and_guarded() {
+        let Some(pool) = live_pool("promote_candidate").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("promote");
+        let job = runner_create_job_helper(&pool, &tenant).await;
+
+        // A usable candidate.
+        let candidate: Uuid = sqlx::query_scalar(
+            "INSERT INTO sales_discovery_candidates \
+                 (id, tenant_id, job_id, source, source_url, company_name, account_domain, \
+                  jurisdiction, jurisdiction_confidence, confidence) \
+             VALUES (gen_random_uuid(), $1, $2, 'test_source', 'https://new.example.com', \
+                     'New Co', 'new.example.com', 'US', 0.9, 0.9) RETURNING id",
+        )
+        .bind(&tenant)
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let account_id = promote_candidate(&pool, &tenant, candidate)
+            .await
+            .expect("promotes");
+        let (domain, lifecycle): (String, String) =
+            sqlx::query_as("SELECT domain, lifecycle FROM sales_accounts WHERE id = $1")
+                .bind(account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(domain, "new.example.com");
+        assert_eq!(lifecycle, "discovered");
+        let imported: i64 =
+            sqlx::query_scalar("SELECT imported FROM sales_discovery_jobs WHERE id = $1")
+                .bind(job)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(imported, 1, "the first promotion counts the import");
+
+        // Idempotent: promoting again returns the SAME account and does not
+        // double-count the import.
+        let again = promote_candidate(&pool, &tenant, candidate)
+            .await
+            .expect("idempotent");
+        assert_eq!(again, account_id);
+        let imported: i64 =
+            sqlx::query_scalar("SELECT imported FROM sales_discovery_jobs WHERE id = $1")
+                .bind(job)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(imported, 1);
+
+        // A candidate with no usable domain is refused.
+        let domainless: Uuid = sqlx::query_scalar(
+            "INSERT INTO sales_discovery_candidates \
+                 (id, tenant_id, job_id, source, company_name, account_domain, confidence) \
+             VALUES (gen_random_uuid(), $1, $2, 'test_source', 'No Domain Co', NULL, 0.5) \
+             RETURNING id",
+        )
+        .bind(&tenant)
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let error = promote_candidate(&pool, &tenant, domainless)
+            .await
+            .expect_err("no domain");
+        assert!(error.to_string().contains("no usable domain"), "{error}");
+
+        // An unknown candidate is refused.
+        let error = promote_candidate(&pool, &tenant, Uuid::new_v4())
+            .await
+            .expect_err("unknown candidate");
+        assert!(error.to_string().contains("not found"), "{error}");
+
+        cleanup_discovery(&pool, &tenant).await;
+    }
+
+    async fn runner_create_job_helper(pool: &PgPool, tenant: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO sales_discovery_jobs (id, tenant_id, status, query, imported) \
+             VALUES (gen_random_uuid(), $1, 'queued', '{}'::jsonb, 0) RETURNING id",
+        )
+        .bind(tenant)
+        .fetch_one(pool)
+        .await
+        .expect("insert job")
+    }
+
     #[tokio::test]
     async fn attempt_ceiling_fails_a_crash_looping_job() {
         let Some(pool) = live_pool("attempt_ceiling").await else {

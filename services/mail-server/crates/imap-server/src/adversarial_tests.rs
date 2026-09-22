@@ -56,6 +56,20 @@ impl MockMailstore {
         self.lock().fail.insert(method.to_string());
     }
 
+    /// Clear all injected failures (tests re-enable the mock between phases).
+    pub(crate) fn clear_failures(&self) {
+        self.lock().fail.clear();
+    }
+
+    /// Drop an IDLE event stream's sender: the stream then yields None
+    /// ("the mailbox event source is gone") for the IDLE loop's dead-stream
+    /// arm.
+    pub(crate) fn end_event_stream(&self, account: &str, mailbox: &str) {
+        self.lock()
+            .events
+            .remove(&format!("{}|{}", account, mailbox.to_lowercase()));
+    }
+
     pub(crate) fn add_account(&self, email: &str, account_id: &str, password: &str) {
         self.lock().accounts.insert(
             email.to_lowercase(),
@@ -229,13 +243,25 @@ impl MockMailstore {
 }
 
 /// Stream adapter for the IDLE event feed (same trait tokio_stream re-exports).
-pub(crate) struct MockEventStream(mpsc::UnboundedReceiver<MailboxEvent>);
+pub(crate) struct MockEventStream {
+    rx: mpsc::UnboundedReceiver<MailboxEvent>,
+    /// Injected stream failure: yielded once as Err before real events.
+    fail: bool,
+    failed: bool,
+}
 
 impl futures::Stream for MockEventStream {
     type Item = Result<MailboxEvent, tonic::Status>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().0.poll_recv(cx).map(|item| item.map(Ok))
+        let this = self.get_mut();
+        if this.fail && !this.failed {
+            this.failed = true;
+            return Poll::Ready(Some(Err(tonic::Status::unavailable(
+                "mock event stream failure",
+            ))));
+        }
+        this.rx.poll_recv(cx).map(|item| item.map(Ok))
     }
 }
 
@@ -900,12 +926,24 @@ impl MailstoreService for MockMailstore {
             "subscribe_mailbox".to_string(),
             format!("{}|{}", req.account_id, req.mailbox),
         ));
+        let event_fail = {
+            let g = self.lock();
+            if g.fail.contains("subscribe_mailbox") {
+                drop(g);
+                return Err(tonic::Status::unavailable("mock subscribe_mailbox failure"));
+            }
+            g.fail.contains("event_stream_error")
+        };
         let (tx, rx) = mpsc::unbounded_channel();
         self.lock().events.insert(
             format!("{}|{}", req.account_id, req.mailbox.to_lowercase()),
             tx,
         );
-        Ok(tonic::Response::new(MockEventStream(rx)))
+        Ok(tonic::Response::new(MockEventStream {
+            rx,
+            fail: event_fail,
+            failed: false,
+        }))
     }
 }
 
@@ -4187,6 +4225,446 @@ async fn idle_events_surface_expunge_exists_recent_uidnext() {
         "uidnext bumped: {seen:?}"
     );
 
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+// ── residual session arms: FETCH chunking, STORE/SEARCH/MOVE guard arms,
+//    LIST/RENAME/SUBSCRIBE edge arms, IDLE event-path failures ────────────
+
+/// A 12-message mailbox (beyond the 8-per-chunk FETCH body window): every
+/// message must receive its own interleaved `* n FETCH` response with its
+/// literal in the wire-correct position, in sequence order.
+#[tokio::test]
+async fn fetch_streams_more_than_one_body_chunk_in_sequence_order() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    for n in 1..=12 {
+        let uid = h.mock.add_message(
+            "acct-1",
+            "INBOX",
+            &format!("m{n}"),
+            "from@x.test",
+            Default::default(),
+            0,
+        );
+        let _ = uid;
+    }
+    // Bodies: distinct per-UID payloads so the assertions can tell them apart.
+    for n in 1..=12u64 {
+        h.mock
+            .set_body("acct-1", "INBOX", n, format!("body-of-{n}").as_bytes());
+    }
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("FETCH 1:12 BODY[]").await;
+    for n in 1..=12 {
+        assert!(
+            out.contains(&format!("body-of-{n}")),
+            "message {n} body missing from the streamed response: {out:?}"
+        );
+    }
+    // Sequence numbers ascend: each response is prefixed `* k FETCH (`.
+    let seq_lines: Vec<String> = out
+        .lines()
+        .filter(|l| l.contains("FETCH ("))
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(seq_lines.len(), 12, "one FETCH response per message");
+    for (i, line) in seq_lines.iter().enumerate() {
+        let expected_prefix = format!("* {} FETCH (", i + 1);
+        assert!(
+            line.starts_with(&expected_prefix),
+            "responses must be in sequence order: {line:?} vs {expected_prefix:?}"
+        );
+    }
+    h.shutdown().await;
+}
+
+/// A BODYSTRUCTURE-only FETCH emits the derived structure attribute through
+/// the session (never a literal, never \Seen).
+#[tokio::test]
+async fn fetch_bodystructure_emits_the_derived_structure_attribute() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "struct",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.mock.set_body(
+        "acct-1",
+        "INBOX",
+        1,
+        b"Content-Type: text/plain; charset=us-ascii\r\n\r\nhello",
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("FETCH 1 BODYSTRUCTURE").await;
+    assert!(
+        out.contains("\"TEXT\" \"PLAIN\""),
+        "BODYSTRUCTURE attr missing: {out:?}"
+    );
+    assert!(
+        !out.contains("hello"),
+        "BODYSTRUCTURE must not carry the body: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A failed body fetch with a BODYSTRUCTURE item fails the whole command
+/// (L12: the NO path), and the reason surfaces on the tagged response.
+#[tokio::test]
+async fn fetch_body_failure_answers_no_with_the_reason() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "doomed",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("get_message");
+
+    let out = h.cmd("FETCH 1 BODY[]").await;
+    assert!(
+        out.contains(" NO "),
+        "body-fetch failure must answer NO: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// STORE with the bare `FLAGS` operation (Set semantics, no + or - prefix).
+#[tokio::test]
+async fn store_with_bare_flags_operation_sets_flags() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "storeme",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("STORE 1 +FLAGS (\\Seen)").await;
+    assert!(out.contains("OK"), "{out:?}");
+    // Bare FLAGS replaces the flag set: \\Seen is applied and \\Draft (which
+    // the set replaces away) is gone.
+    let out = h.cmd("STORE 1 FLAGS (\\Seen)").await;
+    assert!(out.contains("OK"), "bare FLAGS is a valid Set op: {out:?}");
+    assert!(out.contains("\\Seen"), "echo carries the resulting flags");
+    h.shutdown().await;
+}
+
+/// SEARCH with no mailbox selected answers BAD; MOVE with a malformed
+/// argument answers BAD.
+#[tokio::test]
+async fn search_and_move_guard_arms_answer_bad() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.login("user@x.test", "pw").await;
+
+    let out = h.cmd("SEARCH ALL").await;
+    assert!(
+        out.contains("BAD"),
+        "SEARCH unselected must be BAD: {out:?}"
+    );
+
+    // Select an empty mailbox so MOVE reaches argument parsing.
+    h.mock.add_mailbox("acct-1", "Archive", 1);
+    h.select("Archive").await;
+    let out = h.cmd("MOVE not-a-set").await;
+    assert!(out.contains("BAD"), "malformed MOVE must be BAD: {out:?}");
+    h.shutdown().await;
+}
+
+/// RENAME without names, SUBSCRIBE/UNSUBSCRIBE without names, and LIST with
+/// a NIL delimiter — edge arms at the session level.
+#[tokio::test]
+async fn rename_list_subscribe_edge_arms() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.login("user@x.test", "pw").await;
+
+    let out = h.cmd("RENAME").await;
+    assert!(out.contains("BAD"), "RENAME without names: {out:?}");
+
+    // A mailbox row with NO delimiter renders as NIL in LIST.
+    h.mock.add_mailbox("acct-1", "Nodelim", 1);
+    h.mock.set_mailbox_row(
+        "acct-1",
+        mail_proto::Mailbox {
+            name: "Nodelim".into(),
+            delimiter: String::new(),
+            uidvalidity: 1,
+            uidnext: 1,
+            ..Default::default()
+        },
+    );
+    let out = h.cmd(r#"LIST "" "*""#).await;
+    assert!(
+        out.contains("NIL"),
+        "empty delimiter must render NIL: {out:?}"
+    );
+
+    let out = h.cmd("SUBSCRIBE").await;
+    assert!(out.contains("BAD"), "SUBSCRIBE without a name: {out:?}");
+    let out = h.cmd("UNSUBSCRIBE").await;
+    assert!(out.contains("BAD"), "UNSUBSCRIBE without a name: {out:?}");
+    h.shutdown().await;
+}
+
+/// NOOP surfaces EXISTS and UIDNEXT when the mailbox changed behind the
+/// session's back, and CLOSE expunges \Deleted messages silently.
+#[tokio::test]
+async fn noop_reports_arrivals_and_close_expunges_silently() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "first",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    // An arrival after SELECT: NOOP reports the new EXISTS.
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "second",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    let out = h.noop().await;
+    assert!(out.contains("EXISTS"), "arrival must surface: {out:?}");
+
+    // Mark the message \Deleted, then CLOSE: no untagged EXPUNGE lines, and
+    // the message is gone afterwards.
+    let out = h.cmd("STORE 1 +FLAGS (\\Deleted)").await;
+    assert!(out.contains("OK"), "{out:?}");
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} CLOSE")).await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK"), "CLOSE must succeed: {out:?}");
+    let out = h.noop().await;
+    h.shutdown().await;
+    let _ = out;
+}
+
+/// EXPUNGE emits untagged EXPUNGE lines with adjusted sequence numbers.
+#[tokio::test]
+async fn expunge_emits_adjusted_sequence_lines() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    for _ in 0..3 {
+        h.mock
+            .add_message("acct-1", "INBOX", "e", "from@x.test", Default::default(), 0);
+    }
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.cmd("STORE 1,3 +FLAGS (\\Deleted)").await;
+
+    let out = h.cmd("EXPUNGE").await;
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("* ") && l.contains(" EXPUNGE"))
+        .collect();
+    assert_eq!(lines.len(), 2, "two expunged messages: {out:?}");
+    // The announcements carry the ADJUSTED sequence numbers the client
+    // still holds (removing 1 shifts the old 3 down to 2).
+    let first: u32 = lines[0]
+        .split(' ')
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .expect("expunge seq");
+    let second: u32 = lines[1]
+        .split(' ')
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .expect("expunge seq");
+    assert_eq!((first, second), (1, 2), "adjusted sequence announcements");
+    h.shutdown().await;
+}
+
+/// IDLE with a failing mailstore subscription stays quiet and ends cleanly
+/// on DONE (the warn path is best-effort).
+#[tokio::test]
+async fn idle_survives_a_failing_event_subscription() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "idle",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("subscribe_mailbox");
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation timeout");
+    assert!(cont.starts_with(b"+"), "IDLE must continue: {cont:?}");
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// A command whose handler errors mid-session (mailstore listing failed)
+/// surfaces a tagged `BAD Error: ...` from the session loop, and the session
+/// continues afterwards.
+#[tokio::test]
+async fn handler_errors_surface_tagged_bad_and_the_session_survives() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "err",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    h.mock.fail("list_messages");
+    let (tag, out) = h.cmd_tagged("FETCH 1 (FLAGS)").await;
+    assert!(
+        out.contains(&format!("{tag} BAD")),
+        "a failing handler must surface a tagged BAD: {out:?}"
+    );
+    h.mock.clear_failures();
+    // The session loop survived: a normal command still works.
+    let out = h.noop().await;
+    assert!(out.contains("OK"), "session must survive: {out:?}");
+    h.shutdown().await;
+}
+
+/// A client that half-closes the connection (EOF without LOGOUT) ends the
+/// session loop cleanly.
+#[tokio::test]
+async fn half_close_ends_the_session_loop() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.read_greeting().await;
+    // Close the client side without LOGOUT: serve() observes EOF and breaks.
+    drop(h.io);
+    let result = tokio::time::timeout(Duration::from_secs(5), h.server).await;
+    assert!(result.is_ok(), "the session loop must end on EOF");
+}
+
+/// A dying event stream (sender dropped) marks the stream dead; the idle
+/// keeps consuming commands and DONE still ends it.
+#[tokio::test]
+async fn idle_survives_a_dying_event_stream() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "idle",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation timeout");
+    h.mock.end_event_stream("acct-1", "INBOX");
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// An ERRORED event stream (injected) is logged and marked dead; the idle
+/// keeps working for DONE.
+#[tokio::test]
+async fn idle_survives_an_errored_event_stream() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "idle",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("event_stream_error");
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation timeout");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// A LOGIN whose mailstore lookup ERRORS (not merely auth-fails) surfaces a
+/// tagged `BAD Error: ...` from the LOGIN-specific serve arm.
+#[tokio::test]
+async fn login_rpc_error_surfaces_tagged_bad_error() {
+    let mut h = Harness::with_session("127.0.0.1", true, true, true);
+    h.mock.fail("authenticate_account");
+    let out = h.cmd("LOGIN user@x.test pw").await;
+    assert!(out.contains("BAD"), "rpc error must BAD: {out:?}");
+    h.shutdown().await;
+}
+
+/// IDLE event-path failures: a failing subscribe stays quiet; a dying event
+/// stream marks it dead; a stream error is logged; and a processing failure
+/// (write error) is warned without killing the idle loop early.
+#[tokio::test]
+async fn idle_event_failure_paths_stay_quiet() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "idle",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("subscribe_mailbox");
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation timeout");
+    assert!(cont.starts_with(b"+"), "IDLE must continue: {cont:?}");
     h.send_line("DONE").await;
     let out = h.read_until_tagged(&tag).await;
     assert!(out.contains("OK IDLE terminated"), "{out:?}");

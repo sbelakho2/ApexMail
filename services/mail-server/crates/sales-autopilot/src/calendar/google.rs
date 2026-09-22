@@ -731,4 +731,454 @@ mod provider_wire_tests {
             format!("{}/calendars/primary/events", mock.base())
         );
     }
+
+    #[test]
+    fn urlencoding_escapes_every_non_url_character_class() {
+        assert_eq!(urlencoding("a b"), "a%20b");
+        assert_eq!(urlencoding("c/d"), "c%2Fd");
+        assert_eq!(urlencoding("ü"), "%C3%BC");
+        assert_eq!(urlencoding("+&?"), "%2B%26%3F");
+        assert_eq!(urlencoding("-_.~@"), "-_.~@");
+    }
+
+    /// The full authority loop: Google free/busy MERGES with the internal
+    /// store of record, and only slots free on BOTH calendars are offered.
+    #[tokio::test]
+    async fn availability_merges_google_busy_with_the_internal_store() {
+        let payload = serde_json::json!({
+            "calendars": { "primary": { "busy": [
+                { "start": "2031-01-13T08:00:00Z", "end": "2031-01-13T09:00:00Z" }
+            ]}}
+        });
+        let mut routes = HashMap::new();
+        routes.insert(("POST", "/freeBusy".to_string()), (200, payload));
+        let mock = GoogleMock::start(routes).await;
+        let (provider, pool) = make_provider(&mock.base()).await;
+
+        // An INTERNAL meeting overlapping Google's busy block: the merged
+        // busy set is the union, so neither source can be bypassed.
+        let tenant = crate::test_db::unique_test_tenant("gcal-avail");
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES (gen_random_uuid(), $1, 'internal hold', '{}', $2, $3, 'https://meet')",
+        )
+        .bind(&tenant)
+        .bind("2031-01-13T10:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .bind("2031-01-13T11:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .execute(&pool)
+        .await
+        .expect("insert internal hold");
+
+        let slots = provider
+            .availability(&availability_request(&tenant))
+            .await
+            .expect("availability resolves");
+        // The offered slots must never intersect either busy interval.
+        let busy_start: DateTime<Utc> = "2031-01-13T08:00:00Z".parse().unwrap();
+        let internal_end: DateTime<Utc> = "2031-01-13T11:00:00Z".parse().unwrap();
+        assert!(!slots.is_empty(), "a free day must still offer slots");
+        for slot in &slots {
+            let overlaps_google = slot.start < busy_start && slot.end > busy_start;
+            let internal_start: DateTime<Utc> = "2031-01-13T10:00:00Z".parse().unwrap();
+            let overlaps_internal = slot.start < internal_end && slot.end > internal_start;
+            assert!(
+                !(overlaps_google || overlaps_internal),
+                "slot {slot:?} overlaps a busy interval"
+            );
+        }
+    }
+
+    /// The booking happy path END-TO-END: provider call -> provider id/link
+    /// extraction -> internal mirror rows (store of record).
+    #[tokio::test]
+    async fn create_event_books_on_google_and_mirrors_the_store_of_record() {
+        let payload = serde_json::json!({
+            "id": "g_evt_abc123",
+            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+            "status": "confirmed"
+        });
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/calendars/primary/events".to_string()),
+            (200, payload),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, pool) = make_provider(&mock.base()).await;
+        let tenant = crate::test_db::unique_test_tenant("gcal-book");
+
+        let request = CreateEventRequest {
+            tenant_id: tenant.clone(),
+            title: "Discovery call".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "google".into(),
+            provider_event_id: None,
+        };
+        let booked = provider
+            .create_event(&request)
+            .await
+            .expect("the booking lands");
+        assert_eq!(booked.provider, "google");
+        assert_eq!(booked.provider_event_id.as_deref(), Some("g_evt_abc123"));
+        assert_eq!(
+            booked.conferencing_link,
+            "https://meet.google.com/abc-defg-hij"
+        );
+
+        // The store of record: one availability-index row and one meeting row
+        // carrying the real provider id and the Meet link.
+        let mirrored: (String, String, String) = sqlx::query_as(
+            "SELECT m.provider, m.provider_event_id, m.conferencing_link \
+             FROM sales_meetings m WHERE m.tenant_id = $1 AND m.status = 'booked'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("mirrored meeting");
+        assert_eq!(mirrored.0, "google");
+        assert_eq!(mirrored.1, "g_evt_abc123");
+        assert_eq!(mirrored.2, "https://meet.google.com/abc-defg-hij");
+        let indexed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("availability index");
+        assert_eq!(indexed, 1);
+
+        // Reschedule moves BOTH the provider event and the store of record.
+        let mut routes = HashMap::new();
+        routes.insert(
+            (
+                "PATCH",
+                "/calendars/primary/events/g_evt_abc123".to_string(),
+            ),
+            (200, serde_json::json!({"id": "g_evt_abc123"})),
+        );
+        let mock2 = GoogleMock::start(routes).await;
+        let (provider, pool) = make_provider_at(&mock2.base(), pool).await;
+        let new_start: DateTime<Utc> = "2031-01-13T14:00:00Z".parse().unwrap();
+        let rescheduled = provider
+            .reschedule(&booked.event_id, new_start)
+            .await
+            .expect("reschedule lands");
+        assert_eq!(rescheduled.status, "rescheduled");
+        assert_eq!(
+            rescheduled.start, new_start,
+            "duration is preserved from 09:00+30min"
+        );
+        let moved: (DateTime<Utc>, String) =
+            sqlx::query_as("SELECT start_at, status FROM sales_meetings WHERE id = $1")
+                .bind(Uuid::parse_str(&booked.event_id).unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("moved meeting");
+        assert_eq!(moved.0, new_start);
+        assert_eq!(moved.1, "rescheduled");
+
+        // Cancel removes the availability row and marks the store cancelled,
+        // and deletes the event at the provider.
+        let mut routes = HashMap::new();
+        routes.insert(
+            (
+                "DELETE",
+                "/calendars/primary/events/g_evt_abc123".to_string(),
+            ),
+            (204, serde_json::json!({})),
+        );
+        let mock3 = GoogleMock::start(routes).await;
+        let (provider, pool) = make_provider_at(&mock3.base(), pool).await;
+        provider
+            .cancel(&booked.event_id)
+            .await
+            .expect("cancel lands");
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(Uuid::parse_str(&booked.event_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .expect("cancelled meeting");
+        assert_eq!(status, "cancelled");
+        assert_eq!(
+            mock3.last(),
+            "DELETE /calendars/primary/events/g_evt_abc123",
+            "the provider event is deleted"
+        );
+    }
+
+    async fn make_provider_at(base_url: &str, pool: PgPool) -> (GoogleCalendarProvider, PgPool) {
+        let config = CalendarConfig::default();
+        let internal = Arc::new(InternalCalendarProvider::new(pool.clone(), config.clone()));
+        let provider = GoogleCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
+            calendar_id: "primary".into(),
+            access_token: "test-token".into(),
+            internal,
+            config,
+        };
+        (provider, pool)
+    }
+
+    #[tokio::test]
+    async fn create_event_surfaces_transport_http_and_json_failures() {
+        let request = CreateEventRequest {
+            tenant_id: "cal-fail".into(),
+            title: "Demo".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "google".into(),
+            provider_event_id: None,
+        };
+
+        // Transport failure: port 1 on the loopback interface is reserved and
+        // refuses connections — nothing can be listening there.
+        let (provider, _pool) = make_provider("http://127.0.0.1:1").await;
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("transport");
+        assert!(error.to_string().contains("insert failed"), "{error}");
+
+        // HTTP failure: a 500 from the provider surfaces, not a booking.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/calendars/primary/events".to_string()),
+            (500, serde_json::json!({"error": "backend"})),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let error = provider.create_event(&request).await.expect_err("HTTP 500");
+        assert!(error.to_string().contains("HTTP 500"), "{error}");
+
+        // Invalid JSON: the payload cannot be read, so the booking fails.
+        // A bare `notjs` body is not a JSON value (the route mock can only
+        // speak JSON, so this needs a raw socket).
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nnotjs")
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let (provider, _pool) = make_provider(&format!("http://127.0.0.1:{port}")).await;
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("invalid JSON");
+        assert!(error.to_string().contains("invalid JSON"), "{error}");
+
+        // A non-string id cannot be used as a provider id.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/calendars/primary/events".to_string()),
+            (200, serde_json::json!({"id": 12345})),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("numeric id");
+        assert!(error.to_string().contains("no id"), "{error}");
+    }
+
+    /// A booking the store of record REJECTS (the slot was taken internally)
+    /// is compensated: the just-created Google event is deleted again.
+    #[tokio::test]
+    async fn a_rejected_internal_booking_is_compensated_at_the_provider() {
+        let payload = serde_json::json!({ "id": "g_evt_comp", "hangoutLink": "" });
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/calendars/primary/events".to_string()),
+            (200, payload),
+        );
+        // The compensation DELETE may target any URL; answer 204.
+        routes.insert(
+            ("DELETE", "/__any__".to_string()),
+            (204, serde_json::json!({})),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, pool) = make_provider(&mock.base()).await;
+        let tenant = crate::test_db::unique_test_tenant("gcal-comp");
+
+        // Someone else already holds the slot internally.
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES (gen_random_uuid(), $1, 'taken', '{}', $2, $3, 'https://meet')",
+        )
+        .bind(&tenant)
+        .bind("2031-01-13T09:00:00Z".parse::<DateTime<Utc>>().unwrap())
+        .bind("2031-01-13T09:30:00Z".parse::<DateTime<Utc>>().unwrap())
+        .execute(&pool)
+        .await
+        .expect("insert the conflicting hold");
+
+        let request = CreateEventRequest {
+            tenant_id: tenant,
+            title: "Conflicted".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "google".into(),
+            provider_event_id: None,
+        };
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("the slot is unavailable");
+        assert!(matches!(error, CalendarError::SlotUnavailable), "{error}");
+        assert_eq!(
+            mock.last(),
+            "DELETE /calendars/primary/events/g_evt_comp",
+            "the provider event was compensated (deleted)"
+        );
+    }
+
+    /// A provider DELETE answering 404 is tolerated (the event is already
+    /// gone in Google) and the internal record is still cancelled; a 500 is
+    /// surfaced.
+    #[tokio::test]
+    async fn cancel_tolerates_a_404_and_surfaces_a_500_from_the_provider() {
+        let (_provider, pool) =
+            make_provider(&GoogleMock::start(HashMap::new()).await.base()).await;
+        let tenant = crate::test_db::unique_test_tenant("gcal-cancel");
+        let event_id = Uuid::new_v4();
+        let start: DateTime<Utc> = "2031-01-13T09:00:00Z".parse().unwrap();
+        let end: DateTime<Utc> = "2031-01-13T09:30:00Z".parse().unwrap();
+        sqlx::query(
+            "INSERT INTO sales_meetings \
+                 (id, tenant_id, provider, provider_event_id, start_at, end_at, timezone, \
+                  conferencing_link, status) \
+             VALUES ($1, $2, 'google', 'g_evt_gone', $3, $4, 'Europe/Tallinn', \
+                     'https://meet', 'booked')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .bind(start)
+        .bind(end)
+        .execute(&pool)
+        .await
+        .expect("insert the meeting");
+        sqlx::query(
+            "INSERT INTO sales_calendar_events \
+                 (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+             VALUES ($1, $2, 'Move me', '{}', $3, $4, 'https://meet')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .bind(start)
+        .bind(end)
+        .execute(&pool)
+        .await
+        .expect("insert the availability row");
+
+        // 404: tolerated — the internal record is cancelled anyway.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("DELETE", "/calendars/primary/events/g_evt_gone".to_string()),
+            (404, serde_json::json!({"error": "gone"})),
+        );
+        let mock404 = GoogleMock::start(routes).await;
+        let (provider404, _pool) = make_provider_at(&mock404.base(), pool.clone()).await;
+        provider404
+            .cancel(&event_id.to_string())
+            .await
+            .expect("a 404 delete is tolerated");
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("meeting row");
+        assert_eq!(status, "cancelled");
+
+        // 500: surfaced.
+        sqlx::query("UPDATE sales_meetings SET status = 'booked' WHERE id = $1")
+            .bind(event_id)
+            .execute(&pool)
+            .await
+            .expect("re-book");
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("DELETE", "/calendars/primary/events/g_evt_gone".to_string()),
+            (500, serde_json::json!({"error": "backend"})),
+        );
+        let mock500 = GoogleMock::start(routes).await;
+        let (provider500, _pool) = make_provider_at(&mock500.base(), pool.clone()).await;
+        let error = provider500
+            .cancel(&event_id.to_string())
+            .await
+            .expect_err("a 500 delete surfaces");
+        assert!(error.to_string().contains("HTTP 500"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reschedule_surfaces_a_provider_patch_failure() {
+        let (provider, pool) = make_provider(&GoogleMock::start(HashMap::new()).await.base()).await;
+        let tenant = crate::test_db::unique_test_tenant("gcal-resched");
+        let event_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_meetings \
+                 (id, tenant_id, provider, provider_event_id, start_at, end_at, timezone, \
+                  conferencing_link, status) \
+             VALUES ($1, $2, 'google', 'g_evt_move', NOW(), NOW() + interval '30 minutes', \
+                     'Europe/Tallinn', 'https://meet', 'booked')",
+        )
+        .bind(event_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert the meeting");
+        // No route registered: the mock answers 404 -> the patch fails and
+        // the internal record is untouched.
+        let error = provider
+            .reschedule(
+                &event_id.to_string(),
+                "2031-01-13T14:00:00Z".parse().unwrap(),
+            )
+            .await
+            .expect_err("the patch must surface");
+        assert!(error.to_string().contains("HTTP 404"), "{error}");
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("meeting row");
+        assert_eq!(status, "booked", "a failed provider patch changes nothing");
+    }
 }

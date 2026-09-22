@@ -294,4 +294,19 @@ mod tests {
         // Unparseable IPs are not bot IPs (and never panic).
         assert!(!d.is_bot_ip("not-an-ip"));
     }
+
+    /// `Default` is part of the public surface (state builders use it); it
+    /// must produce a working detector, not a half-initialised one.
+    #[test]
+    fn default_detector_matches_new() {
+        let via_default = BotDetector::default();
+        assert!(
+            via_default.is_bot(Some("python-requests/2.31.0"), None),
+            "the default detector classifies known bots"
+        );
+        assert!(
+            !via_default.is_bot(Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"), None),
+            "the default detector admits normal browsers"
+        );
+    }
 }

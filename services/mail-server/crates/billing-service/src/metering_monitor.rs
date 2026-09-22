@@ -451,4 +451,229 @@ mod tests {
             "usize-to-i64 conversion must saturate to i64::MAX on overflow",
         );
     }
+
+    #[test]
+    fn stale_count_bad_timestamp_string_is_skipped() {
+        // A well-formed JSON object whose `timestamp` is not RFC 3339 is
+        // skipped, not counted and not allowed to poison the oldest-age max.
+        let payloads = vec![Some(r#"{"timestamp":"not-a-timestamp"}"#.to_string())];
+        let (count, oldest) = count_stale_events(&payloads, Utc::now());
+        assert_eq!(count, 0);
+        assert_eq!(oldest, 0);
+    }
+
+    // ─── Monitored drain (Redis/DB-backed) ────────────────────────
+    //
+    // The static CONSECUTIVE_DRAIN_ERRORS counter is process-global, so every
+    // test that drives [`monitored_drain_pending_events`] takes the same
+    // module lock and resets the counter before its assertions.
+
+    /// Reset the process-global streak without holding a non-Send guard
+    /// across await points (clippy::await_holding_lock).
+    fn reset_error_streak() {
+        let _guard = CONSECUTIVE_DRAIN_ERRORS_TEST_LOCK.lock().unwrap();
+        CONSECUTIVE_DRAIN_ERRORS.store(0, Ordering::Release);
+    }
+
+    fn read_error_streak() -> u64 {
+        CONSECUTIVE_DRAIN_ERRORS.load(Ordering::Acquire)
+    }
+
+    async fn provision_env(tag: &str) -> crate::test_support::TestEnv {
+        crate::test_support::provision(tag)
+            .await
+            .expect("TEST_DATABASE_URL/redis must be configured for this suite")
+    }
+
+    fn push_consecutive_errors(count: u64) {
+        for _ in 0..count {
+            CONSECUTIVE_DRAIN_ERRORS.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[tokio::test]
+    async fn monitored_drain_counts_a_real_recovery_and_resets_the_error_streak() {
+        reset_error_streak();
+        let owned = provision_env("monitored_drain_success").await;
+        let env = &owned;
+        let _metering_guard =
+            crate::test_support::redis_keys_guard(&owned.admin_url, "metering").await;
+        crate::test_support::seed_tenant(&env.pool, "mtcov_mon_drain", "growth").await;
+
+        // Two pending events (one valid, one malformed) mirror the recovery
+        // semantics the monitor reports: processed=1, discarded=1.
+        let payload = serde_json::json!({
+            "id": "evt_mtcov_mon_0001",
+            "tenantId": "mtcov_mon_drain",
+            "eventType": "email_sent",
+            "quantity": 2,
+            "timestamp": Utc::now().to_rfc3339(),
+            "metadata": {},
+        });
+        let mut conn = env.state.redis.get().await.expect("redis");
+        for (key, value) in [
+            ("meter:pending:evt_mtcov_mon_0001", payload.to_string()),
+            ("meter:pending:evt_mtcov_mon_bad", "not json".to_string()),
+        ] {
+            let _: () = redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .query_async(&mut conn)
+                .await
+                .expect("seed pending");
+        }
+        drop(conn);
+
+        push_consecutive_errors(DRAIN_ERROR_ALERT_THRESHOLD + 3);
+        let result = monitored_drain_pending_events(&env.state, 100)
+            .await
+            .expect("monitored drain succeeds");
+        assert_eq!(result.processed_count, 1);
+        assert_eq!(result.discarded_count, 1);
+        assert_eq!(
+            read_error_streak(),
+            0,
+            "a successful drain resets the consecutive-error streak"
+        );
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn monitored_drain_error_streak_reaches_the_alert_threshold() {
+        reset_error_streak();
+        let owned = provision_env("monitored_drain_errors").await;
+        let env = &owned;
+        // A dead Redis pool makes every drain fail fast (connection refused).
+        let state = crate::test_support::state_with_dead_redis(&env.pool);
+
+        // Each failure bumps the streak: 1..THRESHOLD hits the non-alert
+        // error branch, THRESHOLD and THRESHOLD+1 the alert branch (>=
+        // semantics).
+        for expected in 1..=(DRAIN_ERROR_ALERT_THRESHOLD + 1) {
+            monitored_drain_pending_events(&state, 10)
+                .await
+                .expect_err("dead redis fails the drain");
+            assert_eq!(
+                read_error_streak(),
+                expected,
+                "failure {expected} must leave the streak at exactly {expected}"
+            );
+        }
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn monitored_drain_zero_events_records_success_without_counter_increments() {
+        reset_error_streak();
+        let owned = provision_env("monitored_drain_empty").await;
+        // A PRIVATE redis guarantees the empty-keyspace precondition even
+        // while sibling processes drain the shared instance.
+        let mut isolated = crate::test_support::spawn_isolated_redis();
+        let config = crate::config::BillingConfig {
+            redis_url: "redis://127.0.0.1:1".to_string(),
+            ..owned.state.config.clone()
+        };
+        let state = crate::AppState::new(owned.pool.clone(), isolated.pool.clone(), config);
+
+        let result = monitored_drain_pending_events(&state, 100)
+            .await
+            .expect("empty redis drains cleanly");
+        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.discarded_count, 0);
+        assert_eq!(read_error_streak(), 0);
+
+        isolated.kill();
+        owned.finish().await;
+    }
+
+    // ─── Stale pending-event sweep (Redis-backed) ─────────────────
+
+    #[tokio::test]
+    async fn check_stale_pending_events_warns_for_old_events_and_scans_clean_redis() {
+        let owned = provision_env("check_stale_events").await;
+        let env = &owned;
+        let _metering_guard =
+            crate::test_support::redis_keys_guard(&owned.admin_url, "stale-monitor").await;
+
+        // Empty keyspace: the SCAN loop completes and the gauge is set to 0.
+        check_stale_pending_events(&env.state).await;
+
+        // 25 keys exercise the 20-key sample cap; the payloads span the
+        // fresh/stale boundary plus unparsable noise.
+        let mut conn = env.state.redis.get().await.expect("redis");
+        let now = Utc::now();
+        for i in 0..25 {
+            let ts = if i == 0 {
+                now - chrono::Duration::minutes(90)
+            } else if i == 1 {
+                now - chrono::Duration::minutes(2)
+            } else {
+                now
+            };
+            let payload = if i == 2 {
+                "not json at all".to_string()
+            } else {
+                serde_json::json!({ "timestamp": ts.to_rfc3339() }).to_string()
+            };
+            let _: () = redis::cmd("SET")
+                .arg(format!("meter:pending:stale_cov_{i}"))
+                .arg(payload)
+                .query_async(&mut conn)
+                .await
+                .expect("seed pending");
+        }
+        drop(conn);
+
+        check_stale_pending_events(&env.state).await;
+
+        // Cleanup so sibling suites never see these keys.
+        let mut conn = env.state.redis.get().await.expect("redis cleanup");
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg("meter:pending:stale_cov_*")
+            .query_async(&mut conn)
+            .await
+            .expect("keys");
+        if !keys.is_empty() {
+            let _: () = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut conn)
+                .await
+                .expect("cleanup del");
+        }
+        drop(conn);
+
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn check_stale_pending_events_survives_a_dead_redis() {
+        let owned = provision_env("check_stale_dead_redis").await;
+        let state = crate::test_support::state_with_dead_redis(&owned.pool);
+        // Must warn and return instead of propagating the error.
+        check_stale_pending_events(&state).await;
+        owned.finish().await;
+    }
+
+    #[tokio::test]
+    async fn check_stale_pending_events_survives_a_redis_that_dies_mid_scan() {
+        // A private redis-server that is killed after the pool was created:
+        // the SCAN fails at call time and the sweep degrades to a warn.
+        let mut isolated = crate::test_support::spawn_isolated_redis();
+        let config = crate::config::BillingConfig {
+            redis_url: "redis://127.0.0.1:1".to_string(),
+            ..crate::config::BillingConfig::default()
+        };
+        let state = crate::AppState::new(
+            crate::test_support::broken_db_pool(),
+            isolated.pool.clone(),
+            config,
+        );
+        // Poison the pool by dropping the server behind it, then wait for the
+        // socket to actually close so the SCAN fails deterministically.
+        isolated.kill();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        check_stale_pending_events(&state).await;
+    }
 }

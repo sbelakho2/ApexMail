@@ -1359,3 +1359,421 @@ mod router_adversarial_tests {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }
+
+// ─── Coverage residuals: every insight/trend/recommendation branch ──
+
+#[cfg(test)]
+mod coverage_residual_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn admin() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_cov_insights".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    fn insights_query(lookback: &str) -> Query<InsightsQuery> {
+        Query(InsightsQuery {
+            lookback: lookback.into(),
+        })
+    }
+
+    /// Seed one send-cohort message with its outcomes: every event for the
+    /// message shares the message's timestamp, so the cohort windows are
+    /// exact. `days_ago` < 7 lands in the current window, >= 7 in the
+    /// frozen previous one.
+    async fn seed_cohort_message(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        n: usize,
+        days_ago: i64,
+        outcomes: &[&str],
+    ) {
+        let message = format!("cov-msg-{tenant}-{days_ago}-{n}");
+        let recipient = format!("cov-{days_ago}-{n}@example.test");
+        for event in std::iter::once(&"sent").chain(outcomes.iter()) {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, NOW() - ($6 || ' days')::interval)",
+            )
+            .bind(format!("evt-{}-{}", uuid::Uuid::new_v4().simple(), event))
+            .bind(tenant)
+            .bind(&message)
+            .bind(event)
+            .bind(&recipient)
+            .bind(days_ago.to_string())
+            .execute(pool)
+            .await
+            .expect("seed cohort event");
+        }
+    }
+
+    /// Seed `count` messages sharing one outcome set.
+    async fn seed_cohort_batch(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        days_ago: i64,
+        count: usize,
+        outcomes: &[&str],
+    ) {
+        for n in 0..count {
+            seed_cohort_message(pool, tenant, n, days_ago, outcomes).await;
+        }
+    }
+
+    /// Seed tenants at a fixed age to drive the signup insight.
+    async fn seed_tenants(pool: &sqlx::PgPool, tag: &str, count: usize, days_ago: i64) {
+        for n in 0..count {
+            let id = apexmail_lib::id::generate_id("", 26);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'free', 'active',
+                         NOW() - ($4 || ' days')::interval,
+                         NOW() - ($4 || ' days')::interval)",
+            )
+            .bind(&id)
+            .bind(format!("cov tenant {tag} {n}"))
+            .bind(format!("cov-{tag}-{n}-{days_ago}-{id}"))
+            .bind(days_ago.to_string())
+            .execute(pool)
+            .await
+            .expect("seed tenant");
+        }
+    }
+
+    /// Seed `email_queue` rows spread over distinct days.
+    async fn seed_queue_days(pool: &sqlx::PgPool, shape: &[(i64, usize)]) {
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'queue cov', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seed queue tenant");
+        for (days_ago, rows) in shape {
+            for n in 0..*rows {
+                sqlx::query(
+                    "INSERT INTO email_queue (from_address, to_addresses, subject, status,
+                         tenant_id, created_at, updated_at)
+                     VALUES ('cov@example.test', ARRAY['r@example.test'], $1, 'failed',
+                             $2, NOW() - ($3 || ' days')::interval, NOW())",
+                )
+                .bind(format!("cov-queue-{days_ago}-{n}"))
+                .bind(&tenant)
+                .bind(days_ago.to_string())
+                .execute(pool)
+                .await
+                .expect("seed queue row");
+            }
+        }
+    }
+
+    /// The current window is strictly worse than the previous one: every
+    /// "decreased" title, its severity ladder (warning for delivery, info
+    /// versus warning for engagement), the complaint-warning arm, the
+    /// signups-slowing arm, and the warning-class recommendations.
+    #[tokio::test]
+    async fn decreasing_periods_fire_every_downward_arm() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_down_arms").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = "cov_insights_down";
+
+        // CURRENT (1 day ago): 20 sends / 16 delivered (80%) / 11 opened /
+        // 1 bounced (5%) / 15 complained. PREVIOUS (10 days ago): 100 sends
+        // / 95 delivered (95%) / 100 opened / 50 bounced (50%) /
+        // 10 complained.
+        for n in 0..20 {
+            let mut outcomes: Vec<&str> = Vec::new();
+            if n < 16 {
+                outcomes.push("delivered");
+            }
+            if n < 11 {
+                outcomes.push("opened");
+            }
+            if n < 15 {
+                outcomes.push("complained");
+            }
+            if n < 1 {
+                outcomes.push("bounced");
+            }
+            seed_cohort_message(&pool, tenant, n, 1, &outcomes).await;
+        }
+        for n in 0..100 {
+            let mut outcomes: Vec<&str> = Vec::new();
+            if n < 95 {
+                outcomes.push("delivered");
+            }
+            outcomes.push("opened");
+            if n < 50 {
+                outcomes.push("bounced");
+            }
+            if n < 10 {
+                outcomes.push("complained");
+            }
+            seed_cohort_message(&pool, tenant, 1000 + n, 10, &outcomes).await;
+        }
+
+        // Signups: 2 tenants now vs 10 in the previous window (plus the
+        // one row the canonical chain itself seeds) → decisively slowing.
+        seed_tenants(&pool, "slowing", 2, 1).await;
+        seed_tenants(&pool, "slowing-prior", 10, 10).await;
+
+        let Json(response) = get_insights(State(state), admin(), insights_query("7d"))
+            .await
+            .expect("insights");
+
+        let by_metric: HashMap<&str, &Insight> = response
+            .insights
+            .iter()
+            .map(|i| (i.metric_name.as_str(), i))
+            .collect();
+
+        // Delivery down 80% vs 95%: warning severity (below -5%).
+        let delivery = by_metric.get("delivery_rate").expect("delivery insight");
+        assert_eq!(delivery.title, "Delivery rate decreased");
+        assert_eq!(delivery.severity, "warning");
+        assert_eq!(delivery.direction, "down");
+
+        // Bounce down 5% vs 50%: positive severity.
+        let bounce = by_metric.get("bounce_rate").expect("bounce insight");
+        assert_eq!(bounce.title, "Bounce rate decreased");
+        assert_eq!(bounce.severity, "positive");
+
+        // Engagement down 11 vs 100 opens: warning severity (< -20%).
+        let engagement = by_metric
+            .get("opened_messages")
+            .expect("engagement insight");
+        assert_eq!(engagement.title, "Open engagement decreased");
+        assert_eq!(engagement.severity, "warning");
+
+        // Complaints up 15 vs 10 (+50%, not above it): warning severity.
+        let complaint = by_metric
+            .get("complained_messages")
+            .expect("complaint insight");
+        assert_eq!(complaint.severity, "warning");
+        assert_eq!(complaint.direction, "up");
+
+        // Signups slowing 2 vs 10 seeded tenants: warning (< -30%).
+        let signups = by_metric.get("signups").expect("signup insight");
+        assert_eq!(signups.direction, "down");
+        assert_eq!(signups.title, "Signups slowing");
+        assert_eq!(signups.severity, "warning");
+
+        // The warning-class recommendations all fired.
+        let titles: Vec<&str> = response
+            .recommendations
+            .iter()
+            .map(|r| r.title.as_str())
+            .collect();
+        assert!(
+            titles.contains(&"Review email authentication and list hygiene"),
+            "deliverability warning recommendation: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Optimize email content and send timing"),
+            "engagement warning recommendation: {titles:?}"
+        );
+        assert!(
+            titles.contains(&"Review acquisition channels and onboarding"),
+            "growth warning recommendation: {titles:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Improvement arms: the bounce-critical ladder and its critical
+    /// recommendation, the engagement-info rung, signups-stable, and an
+    /// empty recommendation set for flat periods.
+    #[tokio::test]
+    async fn improving_periods_fire_positive_and_critical_arms() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_up_arms").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = "cov_insights_up";
+
+        // CURRENT: 85 sends, all delivered, 85 opened, 30 bounced.
+        // PREVIOUS: 100 sends, all delivered, 100 opened, none bounced.
+        seed_cohort_batch(&pool, tenant, 1, 85, &["delivered", "opened"]).await;
+        // The bounced messages carry no open — they must not inflate the
+        // engagement numerator.
+        for n in 0..30 {
+            seed_cohort_message(&pool, tenant, 500 + n, 1, &["delivered", "bounced"]).await;
+        }
+        seed_cohort_batch(&pool, tenant, 10, 100, &["delivered", "opened"]).await;
+
+        // Signups slow MORE in the current window than the handful of
+        // rows the canonical chain itself seeds: 3+ε current vs 10 prior.
+        seed_tenants(&pool, "stable", 3, 1).await;
+        seed_tenants(&pool, "stable-prior", 10, 10).await;
+
+        let Json(response) = get_insights(State(state), admin(), insights_query("7d"))
+            .await
+            .expect("insights");
+        let by_metric: HashMap<&str, &Insight> = response
+            .insights
+            .iter()
+            .map(|i| (i.metric_name.as_str(), i))
+            .collect();
+
+        // Bounce 30/85 vs 0/100: up from zero → +100% → critical.
+        let bounce = by_metric.get("bounce_rate").expect("bounce insight");
+        assert_eq!(bounce.title, "Bounce rate increased");
+        assert_eq!(bounce.severity, "critical");
+
+        // Engagement 85 vs 100: a mild decline (-15%) stays "info".
+        let engagement = by_metric
+            .get("opened_messages")
+            .expect("engagement insight");
+        assert_eq!(engagement.title, "Open engagement decreased");
+        assert_eq!(engagement.severity, "info");
+
+        // Signups 3(+ε) vs 10: a mild-looking decline stays inside the
+        // warning band boundary checks — asserted on the direction only,
+        // because the canonical chain seeds a tenant of its own.
+        let signups = by_metric.get("signups").expect("signup insight");
+        assert_eq!(signups.direction, "down");
+
+        // The critical bounce drives the critical recommendation.
+        let titles: Vec<&str> = response
+            .recommendations
+            .iter()
+            .map(|r| r.title.as_str())
+            .collect();
+        assert!(
+            titles.contains(&"Investigate delivery failures immediately"),
+            "critical recommendation fired: {titles:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Both trend surfaces (inline in insights and the /trends resource)
+    /// detect an accelerating queue and growing send volume with "high"
+    /// confidence at 11+ and 15+ data points.
+    #[tokio::test]
+    async fn upward_queue_and_volume_trends_fire_with_high_confidence() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_trends_up").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = "cov_insights_trends_up";
+
+        // Queue: 1 row/day on days 5..10, then 10 rows/day on days 0..4 →
+        // the recent week dwarfs the prior one. 11 distinct days → "high".
+        let mut shape: Vec<(i64, usize)> = Vec::new();
+        for day in 5..=10 {
+            shape.push((day, 1));
+        }
+        for day in 0..=4 {
+            shape.push((day, 10));
+        }
+        seed_queue_days(&pool, &shape).await;
+
+        // Send volume: 1 send/day on days 8..15, then 5/day on days 0..7 →
+        // 16 data points ("high") with a steep upward average.
+        for day in 8..=15 {
+            seed_cohort_batch(&pool, tenant, day, 1, &[]).await;
+        }
+        for day in 0..=7 {
+            seed_cohort_batch(&pool, tenant, day, 5, &[]).await;
+        }
+
+        let Json(response) = get_insights(State(state.clone()), admin(), insights_query("7d"))
+            .await
+            .expect("insights");
+        let queue_trend = response
+            .trends
+            .iter()
+            .find(|t| t.title.contains("Queue depth"))
+            .expect("queue trend fires");
+        assert_eq!(queue_trend.title, "Queue depth trending upward");
+        assert_eq!(queue_trend.confidence, "high");
+        let volume_trend = response
+            .trends
+            .iter()
+            .find(|t| t.title.contains("Send volume"))
+            .expect("volume trend fires");
+        assert!(
+            volume_trend.title.contains("growing"),
+            "{:?}",
+            volume_trend.title
+        );
+        assert_eq!(volume_trend.confidence, "high");
+
+        // The dedicated trends resource computes the same series.
+        let Json(trends) = get_trends(State(state), admin()).await.expect("trends");
+        assert!(trends.iter().any(|t| t.title.contains("Queue depth")));
+        assert!(trends.iter().any(|t| t.title.contains("Send volume")));
+        pool.close().await;
+    }
+
+    /// The mirror image: a draining queue ("decreasing") and a shrinking
+    /// send volume at "medium" confidence (10 data points).
+    #[tokio::test]
+    async fn downward_queue_and_volume_trends_fire_with_medium_confidence() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_trends_down").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = "cov_insights_trends_down";
+
+        // Queue: 10 rows/day on days 5..10, then 1 row/day on days 0..4.
+        let mut shape: Vec<(i64, usize)> = Vec::new();
+        for day in 5..=10 {
+            shape.push((day, 10));
+        }
+        for day in 0..=4 {
+            shape.push((day, 1));
+        }
+        seed_queue_days(&pool, &shape).await;
+
+        // Volume: 10 distinct days, recent week sparser than the prior one
+        // → shrinking, and 10 points stays at "medium".
+        for day in 0..=4 {
+            seed_cohort_batch(&pool, tenant, day, 1, &[]).await;
+        }
+        for day in 5..=9 {
+            seed_cohort_batch(&pool, tenant, day, 5, &[]).await;
+        }
+
+        let Json(response) = get_insights(State(state.clone()), admin(), insights_query("7d"))
+            .await
+            .expect("insights");
+        let queue_trend = response
+            .trends
+            .iter()
+            .find(|t| t.title.contains("Queue depth"))
+            .expect("queue trend fires");
+        assert_eq!(queue_trend.title, "Queue depth decreasing");
+
+        let volume_trend = response
+            .trends
+            .iter()
+            .find(|t| t.title.contains("Send volume"))
+            .expect("volume trend fires");
+        assert!(
+            volume_trend.title.contains("shrinking"),
+            "{:?}",
+            volume_trend.title
+        );
+        assert_eq!(volume_trend.confidence, "medium");
+
+        let Json(trends) = get_trends(State(state), admin()).await.expect("trends");
+        assert!(
+            trends
+                .iter()
+                .any(|t| t.title.contains("Queue depth") && t.trend_direction == "down"),
+            "the trends resource mirrors the decreasing queue"
+        );
+        pool.close().await;
+    }
+}

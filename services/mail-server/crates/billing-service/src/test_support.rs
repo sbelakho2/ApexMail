@@ -55,8 +55,8 @@ pub(crate) static CLONE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 pub(crate) struct TestEnv {
     pub state: Arc<AppState>,
     pub pool: PgPool,
-    db_name: String,
-    admin_url: String,
+    pub db_name: String,
+    pub admin_url: String,
 }
 
 impl TestEnv {
@@ -242,6 +242,16 @@ pub(crate) fn dead_redis_pool() -> deadpool_redis::Pool {
 pub(crate) struct IsolatedRedis {
     pub pool: deadpool_redis::Pool,
     child: std::process::Child,
+}
+
+impl IsolatedRedis {
+    /// Kill the server behind the pool early (the pool keeps returning
+    /// connection-refused): lets a test observe Redis dying mid-suite
+    /// deterministically. `Drop` remains a no-op-safe backstop.
+    pub(crate) fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for IsolatedRedis {

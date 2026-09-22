@@ -46,33 +46,144 @@ fn xml_local_name(full_name: &str) -> &str {
     full_name.rsplit(':').next().unwrap_or(full_name)
 }
 
-/// Convert a certificate string to PEM format if it is not already.
-/// Accepts raw base64-encoded DER or PEM-formatted certificates.
-fn ensure_pem_format(cert: &str) -> Result<String, String> {
-    let cert = cert.trim();
-    if cert.starts_with("-----BEGIN ") {
-        // Already PEM-encoded
-        return Ok(cert.to_string());
+// ── X.509 → SPKI extraction (minimal DER walk, no external deps) ────────────
+//
+// xml-sec's `verify_signature_with_pem_key` verifies with a `PUBLIC KEY`
+// (SubjectPublicKeyInfo) PEM and rejects CERTIFICATE PEMs, while IdP SAML
+// metadata hands us an X.509 certificate. Extract the certificate's embedded
+// SubjectPublicKeyInfo so real IdP certificates verify:
+//
+// Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+// TBSCertificate ::= SEQUENCE {
+//     [0] version, serialNumber, signatureAlgorithm,
+//     issuer, validity, subject, subjectPublicKeyInfo, ... }
+//
+// The walker only needs offsets, so it verifies tags structurally and
+// borrows the SPKI bytes straight out of the input.
+
+/// Read one DER TLV at `pos`; returns `(tag, contents, position_after)`.
+fn der_tlv(buf: &[u8], pos: usize) -> Result<(u8, &[u8], usize), String> {
+    let tag = *buf.get(pos).ok_or("DER: truncated tag")?;
+    let mut p = pos + 1;
+    let first = *buf.get(p).ok_or("DER: truncated length")?;
+    p += 1;
+    let len = if first & 0x80 == 0 {
+        first as usize
+    } else {
+        let count = (first & 0x7f) as usize;
+        if count == 0 || count > 4 {
+            return Err("DER: unsupported length form".to_string());
+        }
+        let mut len = 0usize;
+        for _ in 0..count {
+            let byte = *buf.get(p).ok_or("DER: truncated long length")?;
+            len = (len << 8) | byte as usize;
+            p += 1;
+        }
+        len
+    };
+    let end = p.checked_add(len).ok_or("DER: length overflow")?;
+    if end > buf.len() {
+        return Err("DER: contents exceed buffer".to_string());
     }
+    Ok((tag, &buf[p..end], end))
+}
 
-    // Assume it is raw base64-encoded DER -- wrap in PEM headers
-    // Remove any whitespace/newlines first
-    let clean: String = cert.chars().filter(|c| !c.is_whitespace()).collect();
+fn expect_tlv<'a>(
+    buf: &'a [u8],
+    pos: usize,
+    want_tag: u8,
+    context: &str,
+) -> Result<(&'a [u8], usize), String> {
+    let (tag, contents, end) = der_tlv(buf, pos)?;
+    if tag != want_tag {
+        return Err(format!(
+            "DER {context}: expected tag 0x{want_tag:02x}, got 0x{tag:02x}"
+        ));
+    }
+    Ok((contents, end))
+}
 
-    // Validate that it looks like valid base64
+/// Extract the DER SubjectPublicKeyInfo from a DER X.509 certificate.
+fn spki_der_from_certificate_der(cert_der: &[u8]) -> Result<&[u8], String> {
+    let (tbs_sequence, _) = expect_tlv(cert_der, 0, 0x30, "certificate")?;
+    let (tbs, _) = expect_tlv(tbs_sequence, 0, 0x30, "tbsCertificate")?;
+    let mut pos = 0usize;
+
+    // Optional [0] EXPLICIT version.
+    if let Some(&first) = tbs.first() {
+        if first == 0xA0 {
+            let (_version, end) = expect_tlv(tbs, pos, 0xA0, "version")?;
+            pos = end;
+        }
+    }
+    let (_serial, next) = expect_tlv(tbs, pos, 0x02, "serialNumber")?;
+    let (_signature_algorithm, next) = expect_tlv(tbs, next, 0x30, "signature algorithm")?;
+    let (_issuer, next) = expect_tlv(tbs, next, 0x30, "issuer")?;
+    let (_validity, next) = expect_tlv(tbs, next, 0x30, "validity")?;
+    let (_subject, next) = expect_tlv(tbs, next, 0x30, "subject")?;
+    // The PUBLIC KEY PEM must carry the full SPKI element — tag and length
+    // header included — not just its contents.
+    let spki_start = next;
+    let (_spki_contents, spki_end) = expect_tlv(tbs, next, 0x30, "subjectPublicKeyInfo")?;
+    Ok(&tbs[spki_start..spki_end])
+}
+
+fn strip_pem_armor(pem: &str) -> Result<String, String> {
+    let body: String = pem
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("-----"))
+        .map(|line| line.trim())
+        .collect();
+    if body.is_empty() {
+        return Err("PEM body is empty".to_string());
+    }
+    Ok(body)
+}
+
+/// Build a `PUBLIC KEY` PEM from DER SubjectPublicKeyInfo bytes.
+fn spki_der_to_public_key_pem(spki_der: &[u8]) -> String {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(spki_der);
+    let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        pem.push('\n');
+    }
+    pem.push_str("-----END PUBLIC KEY-----");
+    pem
+}
+
+/// Convert a certificate (PEM or base64 DER) into the SPKI `PUBLIC KEY` PEM
+/// the verifier needs. A `PUBLIC KEY` block passes through unchanged.
+fn public_key_pem_from_certificate(cert: &str) -> Result<String, String> {
+    let trimmed = cert.trim();
+    if trimmed.starts_with("-----BEGIN PUBLIC KEY-----") {
+        return Ok(trimmed.to_string());
+    }
+    if trimmed.starts_with("-----BEGIN CERTIFICATE-----") {
+        let body = strip_pem_armor(trimmed)?;
+        let cert_der =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body.as_bytes())
+                .map_err(|error| format!("SAML certificate base64 decode failed: {error}"))?;
+        return Ok(spki_der_to_public_key_pem(spki_der_from_certificate_der(
+            &cert_der,
+        )?));
+    }
+    if trimmed.starts_with("-----BEGIN ") {
+        return Err("SAML IdP certificate must be a CERTIFICATE or PUBLIC KEY PEM".to_string());
+    }
+    // Raw base64 DER certificate: wrap, then extract.
+    let clean: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
     if clean.len() < 20 {
         return Err("SAML certificate is too short".to_string());
     }
-
-    // Re-wrap with PEM headers (RFC 7468)
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-    // Split into 64-char lines
-    for chunk in clean.as_bytes().chunks(64) {
-        pem.push_str(&String::from_utf8_lossy(chunk));
-        pem.push('\n');
-    }
-    pem.push_str("-----END CERTIFICATE-----");
-    Ok(pem)
+    let cert_der =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, clean.as_bytes())
+            .map_err(|error| format!("SAML certificate base64 decode failed: {error}"))?;
+    Ok(spki_der_to_public_key_pem(spki_der_from_certificate_der(
+        &cert_der,
+    )?))
 }
 
 /// Verify the XML digital signature on a SAML response using the IdP's certificate.
@@ -80,7 +191,12 @@ fn verify_saml_signature(saml_xml: &str, cert_pem: &str) -> Result<(), String> {
     use xml_sec::xmldsig::verify::verify_signature_with_pem_key;
     use xml_sec::xmldsig::verify::DsigStatus;
 
-    match verify_signature_with_pem_key(saml_xml, cert_pem, false) {
+    // The verifier requires an SPKI `PUBLIC KEY` PEM; the configured IdP
+    // material is usually an X.509 CERTIFICATE (or bare base64 DER of one).
+    // Extract the embedded public key so real IdP certificates verify.
+    let verifying_pem = public_key_pem_from_certificate(cert_pem)?;
+
+    match verify_signature_with_pem_key(saml_xml, &verifying_pem, false) {
         Ok(result) => match result.status {
             DsigStatus::Valid => Ok(()),
             DsigStatus::Invalid(reason) => {
@@ -628,8 +744,7 @@ impl SSOService {
             );
             "SAML IdP certificate is not configured; cannot verify XML signature".to_string()
         })?;
-        let cert_pem = ensure_pem_format(cert_raw)?;
-        verify_saml_signature(saml_response_xml, &cert_pem)?;
+        verify_saml_signature(saml_response_xml, cert_raw)?;
 
         let mut current_path = Vec::new();
         let mut status_code_value: Option<String> = None;
@@ -2342,5 +2457,1200 @@ mod tests {
         // Verify that 257 chars are rejected.
         let too_long = "a".repeat(257);
         assert!(sanitize_saml_value(&too_long).is_empty());
+    }
+    // ═══════════════════════════════════════════════════════════════════
+    // Signed-SAML fixture machinery
+    //
+    // An in-test IdP: a real RSA keypair (see tests/keys/) plus a minimal
+    // big-integer RSA implementation so tests can produce genuinely signed
+    // XML-DSig envelopes (RSA-SHA256, exclusive C14N over SignedInfo,
+    // enveloped-signature transform over the whole document). Every byte of
+    // the signature path is exercised through the production verifier, so a
+    // signing bug fails loudly instead of faking coverage.
+    // ═══════════════════════════════════════════════════════════════════
+
+    mod idp {
+        use super::*;
+
+        // ── big integer (little-endian u64 limbs) ──
+
+        pub fn mul(a: &[u64], b: &[u64]) -> Vec<u64> {
+            let mut out = vec![0u64; a.len() + b.len()];
+            for (i, &ai) in a.iter().enumerate() {
+                let mut carry: u128 = 0;
+                for (j, &bj) in b.iter().enumerate() {
+                    let t = ai as u128 * bj as u128 + out[i + j] as u128 + carry;
+                    out[i + j] = t as u64;
+                    carry = t >> 64;
+                }
+                let mut k = i + b.len();
+                while carry > 0 {
+                    let t = out[k] as u128 + carry;
+                    out[k] = t as u64;
+                    carry = t >> 64;
+                    k += 1;
+                }
+            }
+            while out.len() > 1 && *out.last().unwrap() == 0 {
+                out.pop();
+            }
+            out
+        }
+
+        pub fn cmp(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+            let n = a.len().max(b.len());
+            for i in (0..n).rev() {
+                let av = a.get(i).copied().unwrap_or(0);
+                let bv = b.get(i).copied().unwrap_or(0);
+                if av != bv {
+                    return av.cmp(&bv);
+                }
+            }
+            std::cmp::Ordering::Equal
+        }
+
+        fn shl(a: &[u64], shift: u32) -> Vec<u64> {
+            if shift == 0 {
+                return a.to_vec();
+            }
+            let mut out = vec![0u64; a.len()];
+            for i in 0..a.len() {
+                if i > 0 {
+                    out[i] |= a[i - 1] >> (64 - shift);
+                }
+                out[i] |= a[i] << shift;
+            }
+            out
+        }
+
+        fn shr(a: &[u64], shift: u32) -> Vec<u64> {
+            if shift == 0 {
+                return a.to_vec();
+            }
+            let mut out = vec![0u64; a.len()];
+            for i in 0..a.len() {
+                out[i] = a[i] >> shift;
+                if i + 1 < a.len() {
+                    out[i] |= a[i + 1] << (64 - shift);
+                }
+            }
+            while out.len() > 1 && *out.last().unwrap() == 0 {
+                out.pop();
+            }
+            out
+        }
+
+        /// Knuth algorithm D: `(quotient, remainder)` of `u / v`.
+        pub fn divmod(u: &[u64], v: &[u64]) -> (Vec<u64>, Vec<u64>) {
+            assert!(!v.is_empty() && *v.last().unwrap() != 0, "zero divisor");
+            if cmp(u, v) == std::cmp::Ordering::Less {
+                return (vec![0], u.to_vec());
+            }
+            if v.len() == 1 {
+                let d = v[0];
+                let mut q = vec![0u64; u.len()];
+                let mut rem: u128 = 0;
+                for i in (0..u.len()).rev() {
+                    let cur = (rem << 64) | u[i] as u128;
+                    q[i] = (cur / d as u128) as u64;
+                    rem = cur % d as u128;
+                }
+                while q.len() > 1 && *q.last().unwrap() == 0 {
+                    q.pop();
+                }
+                return (q, vec![rem as u64]);
+            }
+            let shift = v[v.len() - 1].leading_zeros();
+            let vn = shl(v, shift);
+            let mut padded = u.to_vec();
+            padded.push(0);
+            let mut un = shl(&padded, shift);
+            while un.len() < padded.len() {
+                un.push(0);
+            }
+            let n = vn.len();
+            let m = un.len() - n - 1;
+            let mut q = vec![0u64; m + 1];
+            let vtop = vn[n - 1];
+            let vnext = vn[n - 2];
+            for j in (0..=m).rev() {
+                let num = ((un[j + n] as u128) << 64) | un[j + n - 1] as u128;
+                let mut qhat = num / vtop as u128;
+                let mut rhat = num % vtop as u128;
+                while qhat >> 64 != 0
+                    || qhat * vnext as u128 > ((rhat << 64) | un[j + n - 2] as u128)
+                {
+                    qhat -= 1;
+                    rhat += vtop as u128;
+                    if rhat >> 64 != 0 {
+                        break;
+                    }
+                }
+                let mut borrow: u64 = 0;
+                let mut carry: u64 = 0;
+                for i in 0..n {
+                    let p = qhat * vn[i] as u128 + carry as u128;
+                    carry = (p >> 64) as u64;
+                    let (r1, b1) = un[i + j].overflowing_sub(p as u64);
+                    let (r2, b2) = r1.overflowing_sub(borrow);
+                    un[i + j] = r2;
+                    borrow = (b1 as u64) + (b2 as u64);
+                }
+                let (r1, b1) = un[j + n].overflowing_sub(carry);
+                let (r2, b2) = r1.overflowing_sub(borrow);
+                un[j + n] = r2;
+                if b1 || b2 {
+                    qhat -= 1;
+                    let mut carry: u128 = 0;
+                    for i in 0..n {
+                        let t = un[i + j] as u128 + vn[i] as u128 + carry;
+                        un[i + j] = t as u64;
+                        carry = t >> 64;
+                    }
+                    un[j + n] = un[j + n].wrapping_add(carry as u64);
+                }
+                q[j] = qhat as u64;
+            }
+            while q.len() > 1 && *q.last().unwrap() == 0 {
+                q.pop();
+            }
+            let mut rem = un[..n].to_vec();
+            rem = shr(&rem, shift);
+            (q, rem)
+        }
+
+        pub fn modexp(base: &[u64], exp: &[u64], modulus: &[u64]) -> Vec<u64> {
+            let reduced = divmod(base, modulus).1;
+            let mut result = vec![1u64];
+            for i in (0..exp.len()).rev() {
+                for bit in (0..64).rev() {
+                    result = divmod(&mul(&result, &result), modulus).1;
+                    if (exp[i] >> bit) & 1 == 1 {
+                        result = divmod(&mul(&result, &reduced), modulus).1;
+                    }
+                }
+            }
+            result
+        }
+
+        fn le_bytes_to_limbs(bytes: &[u8]) -> Vec<u64> {
+            let mut out = vec![0u64; bytes.len().div_ceil(8)];
+            for (i, &b) in bytes.iter().rev().enumerate() {
+                out[i / 8] |= (b as u64) << ((i % 8) * 8);
+            }
+            out
+        }
+
+        fn limbs_to_be_bytes(limbs: &[u64], len: usize) -> Vec<u8> {
+            let mut out = vec![0u8; len];
+            for (i, limb) in limbs.iter().enumerate() {
+                for b in 0..8 {
+                    let idx = match len.checked_sub(1 + i * 8 + b) {
+                        Some(idx) => idx,
+                        None => break,
+                    };
+                    out[idx] = (limb >> (8 * b)) as u8;
+                }
+            }
+            out
+        }
+
+        // ── DER (PKCS#8) private-key parse ──
+
+        fn read_tlv(buf: &[u8], pos: usize) -> (u8, &[u8], usize) {
+            let tag = buf[pos];
+            let mut p = pos + 1;
+            let first = buf[p];
+            p += 1;
+            let len = if first & 0x80 == 0 {
+                first as usize
+            } else {
+                let count = (first & 0x7f) as usize;
+                let mut len = 0usize;
+                for _ in 0..count {
+                    len = (len << 8) | buf[p] as usize;
+                    p += 1;
+                }
+                len
+            };
+            (tag, &buf[p..p + len], p + len)
+        }
+
+        /// An RSA private key with just the pieces signing needs.
+        pub struct RsaPrivateKey {
+            pub n: Vec<u64>,
+            pub d: Vec<u64>,
+            pub byte_len: usize,
+        }
+
+        impl RsaPrivateKey {
+            pub fn from_pkcs8_pem(pem: &str) -> RsaPrivateKey {
+                use base64::Engine;
+                let body: String = pem
+                    .lines()
+                    .filter(|line| !line.starts_with("-----"))
+                    .map(|line| line.trim())
+                    .collect();
+                let der = base64::engine::general_purpose::STANDARD
+                    .decode(body.as_bytes())
+                    .expect("PKCS#8 base64");
+                // PrivateKeyInfo ::= SEQUENCE { version, algorithm, privateKey }
+                let (tag, info, _) = read_tlv(&der, 0);
+                assert_eq!(tag, 0x30);
+                let (_t_version, _v, after_version) = read_tlv(info, 0);
+                let (_t_alg, _alg, after_alg) = read_tlv(info, after_version);
+                let (t_octet, pkcs1, _) = read_tlv(info, after_alg);
+                assert_eq!(t_octet, 0x04, "expected OCTET STRING privateKey");
+                // RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, ... }
+                let (t_seq, seq, _) = read_tlv(pkcs1, 0);
+                assert_eq!(t_seq, 0x30);
+                let (_tv, _version, p) = read_tlv(seq, 0);
+                let (_tn, n, p) = read_tlv(seq, p);
+                let (_te, _e, p) = read_tlv(seq, p);
+                let (_td, d, _p) = read_tlv(seq, p);
+                let n = if n[0] == 0 { &n[1..] } else { n };
+                let d = if d[0] == 0 { &d[1..] } else { d };
+                let byte_len = n.len();
+                RsaPrivateKey {
+                    n: le_bytes_to_limbs(n),
+                    d: le_bytes_to_limbs(d),
+                    byte_len,
+                }
+            }
+
+            /// RSASSA-PKCS1-v1_5 signature over `message` with SHA-256.
+            pub fn sign_pkcs1_sha256(&self, message: &[u8]) -> Vec<u8> {
+                let digest = Sha256::digest(message);
+                // DigestInfo for SHA-256 (RFC 8017 §9.2 note 1).
+                let t: Vec<u8> = [
+                    &[
+                        0x30u8, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03,
+                        0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+                    ][..],
+                    &digest,
+                ]
+                .concat();
+                let k = self.byte_len;
+                let mut em = vec![0u8, 0x01];
+                em.extend(std::iter::repeat_n(0xff, k - 3 - t.len()));
+                em.push(0x00);
+                em.extend_from_slice(&t);
+                assert_eq!(em.len(), k);
+                let sig = modexp(&le_bytes_to_limbs(&em), &self.d, &self.n);
+                limbs_to_be_bytes(&sig, k)
+            }
+        }
+
+        // ── XML-DSig envelope assembly ──
+
+        use xml_sec::c14n::{canonicalize_xml, C14nAlgorithm, C14nMode};
+
+        const EXC_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
+        const RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+        const ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
+        const SHA256_DIGEST: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
+        const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+
+        fn b64(data: &[u8]) -> String {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(data)
+        }
+
+        /// Sign `document_prefix` + `document_suffix` (the SAML response with
+        /// the Signature element excised) and return the full document with
+        /// the enveloped `<ds:Signature>` spliced between them.
+        pub fn seal(document_prefix: &str, document_suffix: &str, key: &RsaPrivateKey) -> String {
+            // Digest over the canonicalised unsigned document: exactly what
+            // the verifier's enveloped-signature transform leaves behind.
+            let unsigned = format!("{document_prefix}{document_suffix}");
+            let algorithm = C14nAlgorithm::new(C14nMode::Inclusive1_0, false);
+            let canonical = canonicalize_xml(unsigned.as_bytes(), &algorithm)
+                .expect("canonicalize unsigned SAML document");
+            let digest = Sha256::digest(&canonical);
+
+            let signed_info = format!(
+                r#"<ds:SignedInfo xmlns:ds="{DS_NS}"><ds:CanonicalizationMethod Algorithm="{EXC_C14N}"/><ds:SignatureMethod Algorithm="{RSA_SHA256}"/><ds:Reference URI=""><ds:Transforms><ds:Transform Algorithm="{ENVELOPED}"/></ds:Transforms><ds:DigestMethod Algorithm="{SHA256_DIGEST}"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo>"#,
+                b64(&digest)
+            );
+            // The verifier canonicalises the SignedInfo SUBTREE with its
+            // declared exclusive C14N — canonicalising the same bytes
+            // standalone produces the identical octets.
+            let exc = C14nAlgorithm::new(C14nMode::Exclusive1_0, false);
+            let canonical_signed_info =
+                canonicalize_xml(signed_info.as_bytes(), &exc).expect("canonicalize SignedInfo");
+            let signature = key.sign_pkcs1_sha256(&canonical_signed_info);
+
+            format!(
+                "{document_prefix}<ds:Signature xmlns:ds=\"{DS_NS}\">{signed_info}<ds:SignatureValue>{}</ds:SignatureValue></ds:Signature>{document_suffix}",
+                b64(&signature)
+            )
+        }
+    }
+
+    const IDP_PRIVATE_KEY_PEM: &str = include_str!("../tests/keys/saml_idp_key.pem");
+    const IDP_CERTIFICATE_PEM: &str = include_str!("../tests/keys/saml_idp_cert.pem");
+
+    /// The properties of one IdP response fixture; every refusal arm of the
+    /// parser is a small mutation of this struct.
+    struct SamlFixture {
+        issuer: String,
+        audience: String,
+        name_id: String,
+        status_value: String,
+        assertion_id: String,
+        not_before: Option<DateTime<Utc>>,
+        not_on_or_after: Option<DateTime<Utc>>,
+        attributes: Vec<(String, String)>,
+        include_signature: bool,
+        include_audience: bool,
+        include_conditions: bool,
+    }
+
+    impl SamlFixture {
+        fn valid(expected_entity_id: &str, expected_acs_url: &str) -> SamlFixture {
+            SamlFixture {
+                issuer: expected_entity_id.to_string(),
+                audience: expected_acs_url.to_string(),
+                name_id: "alice.smith@example.com".to_string(),
+                status_value: "urn:oasis:names:tc:SAML:2.0:status:Success".to_string(),
+                assertion_id: format!("_assertion_{}", Uuid::new_v4()),
+                not_before: Some(Utc::now() - chrono::Duration::minutes(2)),
+                not_on_or_after: Some(Utc::now() + chrono::Duration::minutes(5)),
+                attributes: vec![
+                    ("email".to_string(), "alice.smith@example.com".to_string()),
+                    ("group".to_string(), "engineering".to_string()),
+                ],
+                include_signature: true,
+                include_audience: true,
+                include_conditions: true,
+            }
+        }
+
+        fn unsigned_document(&self) -> String {
+            let conditions = if self.include_conditions {
+                let mut attrs = String::new();
+                if let Some(nb) = self.not_before {
+                    attrs.push_str(&format!(
+                        " NotBefore=\"{}\"",
+                        nb.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    ));
+                }
+                if let Some(e) = self.not_on_or_after {
+                    attrs.push_str(&format!(
+                        " NotOnOrAfter=\"{}\"",
+                        e.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    ));
+                }
+                format!("<saml:Conditions{attrs}>")
+            } else {
+                String::new()
+            };
+            let conditions_close = if self.include_conditions {
+                "</saml:Conditions>"
+            } else {
+                ""
+            };
+            let audience = if self.include_audience {
+                format!(
+                    "<saml:AudienceRestriction><saml:Audience>{}</saml:Audience></saml:AudienceRestriction>",
+                    self.audience
+                )
+            } else {
+                String::new()
+            };
+            let attributes: String = self
+                .attributes
+                .iter()
+                .map(|(name, value)| {
+                    format!(
+                        "<saml:Attribute Name=\"{name}\"><saml:AttributeValue>{value}</saml:AttributeValue></saml:Attribute>"
+                    )
+                })
+                .collect();
+            format!(
+                "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_resp_cov\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\" Destination=\"{acs}\">\
+<samlp:Status><samlp:StatusCode Value=\"{status}\"/></samlp:Status>\
+<saml:Issuer>{issuer}</saml:Issuer>\
+<saml:Assertion ID=\"{assertion}\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\">\
+<saml:Issuer>{issuer}</saml:Issuer>\
+<saml:Subject><saml:NameID>{name_id}</saml:NameID></saml:Subject>\
+{conditions}{audience}{conditions_close}<saml:AttributeStatement>{attributes}</saml:AttributeStatement>\
+</saml:Assertion>\
+</samlp:Response>",
+                acs = self.audience,
+                status = self.status_value,
+                issuer = self.issuer,
+                assertion = self.assertion_id,
+                name_id = self.name_id,
+            )
+        }
+
+        /// The full signed document (or unsigned when
+        /// `include_signature == false`).
+        fn render(&self, key: &idp::RsaPrivateKey) -> String {
+            let document = self.unsigned_document();
+            if !self.include_signature {
+                return document;
+            }
+            // Splice point: right before the closing Response element.
+            let split = document
+                .rfind("</samlp:Response>")
+                .expect("fixture has a Response root");
+            let (prefix, suffix) = document.split_at(split);
+            idp::seal(prefix, suffix, key)
+        }
+    }
+
+    // ── pure signing-machinery sanity (openssl-verified construction) ──
+
+    #[test]
+    fn idp_key_parses_and_signs_deterministically() {
+        let key = idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM);
+        assert_eq!(key.byte_len, 256, "the fixture key is RSA-2048");
+        let sig = key.sign_pkcs1_sha256(b"apexmail saml fixture");
+        assert_eq!(sig.len(), 256);
+        assert_eq!(sig, key.sign_pkcs1_sha256(b"apexmail saml fixture"));
+        assert_ne!(sig, key.sign_pkcs1_sha256(b"apexmail saml fixture 2"));
+    }
+
+    #[test]
+    fn bignum_matches_known_small_values() {
+        assert_eq!(idp::modexp(&[2], &[10], &[1000]), vec![24]);
+        assert_eq!(idp::mul(&[3, 0], &[5]), vec![15]);
+        assert_eq!(idp::divmod(&[100], &[7]), (vec![14], vec![2]));
+        // A divisor whose top limb has leading zeros forces the normalized
+        // (shifted) division path.
+        let x = vec![0xdead_beef, 0x1234, 0x5678, 9];
+        let y = vec![0xfeed_face, 0x9999, 3];
+        let product = idp::mul(&x, &y);
+        let (q, r) = idp::divmod(&product, &y);
+        assert_eq!(q, x, "quotient");
+        assert!(r.iter().all(|&limb| limb == 0), "remainder is zero");
+        // A dividend that needs the padded-high-limb normalization shift.
+        let u = vec![0xffff_ffff, 0xffff_ffff, 0xffff_ffff, 5];
+        let v = vec![0x8000_0000_0000_0001, 1];
+        let (q3, r3) = idp::divmod(&u, &v);
+        assert!(idp::cmp(&r3, &v) == std::cmp::Ordering::Less);
+        let check = idp::mul(&q3, &v);
+        assert!(idp::cmp(&check, &u) != std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn saml_fixture_renders_the_no_conditions_and_attributeless_shapes() {
+        let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
+        let mut fixture = SamlFixture::valid("https://idp.example.com", "https://acs");
+        fixture.include_conditions = false;
+        let without_conditions = fixture.unsigned_document();
+        assert!(!without_conditions.contains("saml:Conditions"));
+        let signed = fixture.render(key);
+        assert!(signed.contains("<ds:Signature "), "signed envelope present");
+
+        fixture.attributes.clear();
+        assert!(!fixture.unsigned_document().contains("saml:Attribute Name"));
+
+        fixture.not_before = None;
+        fixture.not_on_or_after = None;
+        assert!(!fixture.unsigned_document().contains("NotBefore"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DB-backed signed-SAML coverage: every parser-refusal arm, the
+    // replay guard, the OIDC state machine and the session lifecycle,
+    // driven against private clones of the canonical schema.
+    // ═══════════════════════════════════════════════════════════════════
+
+    async fn provision_sso(tag: &str) -> (SSOService, sqlx::PgPool) {
+        if std::env::var("SSO_ENCRYPTION_KEY").is_err() {
+            std::env::set_var("SSO_ENCRYPTION_KEY", "sso-coverage-key-0123456789");
+        }
+        if std::env::var("LOG_STREAM_ENCRYPTION_KEY").is_err() {
+            std::env::set_var(
+                "LOG_STREAM_ENCRYPTION_KEY",
+                "log-stream-coverage-key-0123456789",
+            );
+        }
+        let pool = migrator::test_support::fresh_canonical_pool(tag, &format!("sso_cov_{tag}"))
+            .await
+            .expect("provision canonical pool")
+            .expect("TEST_DATABASE_URL must be configured for this suite");
+        let config = Config::from_env().expect("Config::from_env in test env");
+        (SSOService::new(pool.clone(), config), pool)
+    }
+
+    fn coverage_tenant(tag: &str) -> String {
+        let unique = Uuid::new_v4().simple().to_string();
+        let keep = 26usize.saturating_sub(tag.len() + 1);
+        format!("{tag}_{}", &unique[..keep.min(unique.len())])
+    }
+
+    fn self_acs_url(service: &SSOService) -> String {
+        service.config.sso.saml.acs_url.clone()
+    }
+
+    async fn configure_saml_tenant(
+        service: &SSOService,
+        tenant: &str,
+        domain: &str,
+        with_certificate: bool,
+    ) -> (String, String) {
+        // The entity id must match the fixture Issuer; the ACS URL comes
+        // from the service config (the audience in the assertion).
+        let entity_id = "https://idp.coverage.example.com/metadata".to_string();
+        // The parser compares the assertion Audience against the SERVICE
+        // config's ACS URL (not anything stored on the tenant row).
+        let acs_url = self_acs_url(service);
+        service
+            .configure(SSOConfigureRequest {
+                tenant_id: tenant.to_string(),
+                provider_type: "saml".to_string(),
+                domain: domain.to_string(),
+                enabled: Some(true),
+                entity_id: Some(entity_id.clone()),
+                sso_url: Some("https://idp.coverage.example.com/sso".to_string()),
+                certificate: if with_certificate {
+                    Some(IDP_CERTIFICATE_PEM.to_string())
+                } else {
+                    None
+                },
+                oidc_client_id: None,
+                oidc_client_secret: None,
+                oidc_issuer: None,
+                attribute_mapping: None,
+                enforce_sso: Some(true),
+                session_duration_hours: None,
+            })
+            .await
+            .expect("configure SAML")
+            .data
+            .expect("configure returned a row");
+        (entity_id, acs_url)
+    }
+
+    async fn parse_fixture(
+        service: &SSOService,
+        domain: &str,
+        fixture: &SamlFixture,
+    ) -> Result<ValidatedSamlResponse, String> {
+        let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
+        let document = fixture.render(key);
+        service
+            .parse_and_validate_saml_response(&document, domain)
+            .await
+    }
+
+    static IDP_KEY: std::sync::OnceLock<idp::RsaPrivateKey> = std::sync::OnceLock::new();
+
+    #[tokio::test]
+    async fn signed_saml_response_is_validated_and_replays_are_rejected() {
+        let tag = "signed_ok";
+        let (service, _pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "signed-ok.coverage.example.com";
+        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+
+        let fixture = SamlFixture::valid(&entity_id, &acs_url);
+        let validated = parse_fixture(&service, domain, &fixture)
+            .await
+            .expect("a genuinely signed, correctly-formed response validates");
+        assert_eq!(validated.name_id, "alice.smith@example.com");
+        assert!(validated
+            .attributes
+            .iter()
+            .any(|(name, value)| name == "email" && value == "alice.smith@example.com"));
+        assert!(validated.attributes.iter().any(|(name, _)| name == "group"));
+
+        // The same assertion id may never be consumed twice for the tenant.
+        let replay = parse_fixture(&service, domain, &fixture)
+            .await
+            .err()
+            .expect("the second use of an assertion id is a replay");
+        assert!(
+            replay.contains("replay rejected"),
+            "unexpected error: {replay}"
+        );
+
+        // A DIFFERENT tenant cannot burn the first tenant's assertion id...
+        let other_tenant = coverage_tenant("signed_ok2");
+        let (other_entity, other_acs) = configure_saml_tenant(
+            &service,
+            &other_tenant,
+            "signed-ok2.coverage.example.com",
+            true,
+        )
+        .await;
+        let mut other_fixture = SamlFixture::valid(&other_entity, &other_acs);
+        other_fixture.assertion_id = fixture.assertion_id.clone();
+        // ...the replay guard is per-tenant, so this is accepted — but a
+        // second use for the OTHER tenant is still a replay.
+        let _ = parse_fixture(&service, "signed-ok2.coverage.example.com", &other_fixture)
+            .await
+            .expect("replay protection is scoped per tenant");
+        let replay_other =
+            parse_fixture(&service, "signed-ok2.coverage.example.com", &other_fixture)
+                .await
+                .err()
+                .expect("second use for the other tenant is also a replay");
+        assert!(replay_other.contains("replay rejected"));
+    }
+
+    #[tokio::test]
+    async fn every_saml_refusal_arm_rejects_a_genuinely_signed_response() {
+        let tag = "signed_refusals";
+        let (service, _pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "refusals.coverage.example.com";
+        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+
+        // Each case mutates one claim; the response stays properly SIGNED so
+        // the refusal demonstrably comes from the claim check, not the
+        // signature gate. (name, fixture mutation, expected error fragment)
+        let assert_id = format!("_assertion_{}", Uuid::new_v4());
+        type RefusalCase<'a> = (&'a str, Box<dyn Fn(&mut SamlFixture)>, &'a str);
+        let cases: Vec<RefusalCase> = vec![
+            (
+                "failure status code",
+                Box::new(move |f: &mut SamlFixture| {
+                    f.status_value = "urn:oasis:names:tc:SAML:2.0:status:Responder".into();
+                }),
+                "StatusCode",
+            ),
+            (
+                "issuer mismatch",
+                Box::new(|f: &mut SamlFixture| f.issuer = "https://evil.example.com".into()),
+                "Issuer does not match",
+            ),
+            (
+                "missing issuer",
+                Box::new(|f: &mut SamlFixture| f.issuer = String::new()),
+                "missing Issuer",
+            ),
+            (
+                "audience mismatch",
+                Box::new(|f: &mut SamlFixture| f.audience = "https://evil.example.com/acs".into()),
+                "AudienceRestriction does not match",
+            ),
+            (
+                "missing audience restriction",
+                Box::new(|f: &mut SamlFixture| f.include_audience = false),
+                "missing AudienceRestriction",
+            ),
+            (
+                "missing NameID",
+                Box::new(|f: &mut SamlFixture| f.name_id = String::new()),
+                "missing NameID",
+            ),
+            (
+                "NameID sanitizes to empty (whitespace-only)",
+                Box::new(|f: &mut SamlFixture| f.name_id = "   ".into()),
+                "empty after sanitization",
+            ),
+            (
+                "NameID over 256 chars sanitizes to empty",
+                Box::new(|f: &mut SamlFixture| f.name_id = "x".repeat(257)),
+                "empty after sanitization",
+            ),
+            (
+                "missing assertion ID",
+                Box::new(move |f: &mut SamlFixture| f.assertion_id = String::new()),
+                "missing an ID",
+            ),
+            (
+                "NotBefore in the future",
+                Box::new(|f: &mut SamlFixture| {
+                    f.not_before = Some(Utc::now() + chrono::Duration::minutes(30));
+                }),
+                "not yet valid",
+            ),
+            (
+                "assertion expired",
+                Box::new(|f: &mut SamlFixture| {
+                    f.not_on_or_after = Some(Utc::now() - chrono::Duration::minutes(30));
+                }),
+                "has expired",
+            ),
+        ];
+        let _ = assert_id;
+
+        for (name, mutate, expected) in cases {
+            let mut fixture = SamlFixture::valid(&entity_id, &acs_url);
+            mutate(&mut fixture);
+            let error = parse_fixture(&service, domain, &fixture)
+                .await
+                .err()
+                .unwrap_or_default();
+            assert!(
+                error.contains(expected),
+                "case {name}: expected error containing '{expected}', got '{error}'"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_saml_gate_itself_rejects_unsigned_and_tampered_documents() {
+        let tag = "signed_gate";
+        let (service, _pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "gate.coverage.example.com";
+        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+
+        // Unsigned: refused before any parsing.
+        let mut fixture = SamlFixture::valid(&entity_id, &acs_url);
+        fixture.include_signature = false;
+        let unsigned_error = parse_fixture(&service, domain, &fixture)
+            .await
+            .err()
+            .expect("unsigned must be refused");
+        assert!(
+            unsigned_error.contains("signature"),
+            "unsigned must be refused at the signature gate: {unsigned_error}"
+        );
+
+        // Tampered: text inserted into the digest value AFTER signing
+        // breaks the reference digest — the DsigStatus::Invalid arm.
+        let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
+        let mut signed_case = SamlFixture::valid(&entity_id, &acs_url);
+        signed_case.name_id = "tamper-check@example.com".into();
+        let signed_document = signed_case.render(key);
+        let marker = "<ds:DigestValue>";
+        let pos = signed_document
+            .find(marker)
+            .expect("signed doc has a digest");
+        let mut tampered = signed_document.clone();
+        // Flip the first digest character IN PLACE: same length, so the
+        // signature still parses and the failure is a real digest mismatch.
+        let digest_start = pos + marker.len();
+        let original_char = tampered.as_bytes()[digest_start] as char;
+        let replacement = if original_char == 'A' { 'B' } else { 'A' };
+        tampered.replace_range(digest_start..digest_start + 1, &replacement.to_string());
+        assert_ne!(tampered, signed_document, "tampering must change the doc");
+        let tampered_error = service
+            .parse_and_validate_saml_response(&tampered, domain)
+            .await
+            .err()
+            .expect("tampered digest must be refused");
+        assert!(
+            tampered_error.contains("signature verification failed"),
+            "tampered digest must be Invalid: {tampered_error}"
+        );
+        // The untouched document still validates (the gate is exact).
+        let valid = service
+            .parse_and_validate_saml_response(&signed_document, domain)
+            .await;
+        assert!(valid.is_ok(), "the untouched signed document must validate");
+
+        // Malformed XML is refused (parse error before any claim logic).
+        let malformed_error = service
+            .parse_and_validate_saml_response("<not-xml", domain)
+            .await
+            .err()
+            .expect("malformed XML must be refused");
+        assert!(
+            malformed_error.contains("signature") || malformed_error.contains("parse"),
+            "malformed XML: {malformed_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn saml_without_a_configured_certificate_is_refused() {
+        let tag = "signed_nocert";
+        let (service, _pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "nocert.coverage.example.com";
+        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, false).await;
+
+        let fixture = SamlFixture::valid(&entity_id, &acs_url);
+        let error = parse_fixture(&service, domain, &fixture)
+            .await
+            .err()
+            .expect("a signed response without a configured cert must be refused");
+        assert!(
+            error.contains("certificate is not configured"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_state_machine_covers_redis_db_fallback_and_error_arms() {
+        let tag = "oidc_state";
+        let (service, pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "oidc.coverage.example.com";
+        service
+            .configure(SSOConfigureRequest {
+                tenant_id: tenant.clone(),
+                provider_type: "oidc".to_string(),
+                domain: domain.to_string(),
+                enabled: Some(true),
+                entity_id: None,
+                sso_url: None,
+                certificate: None,
+                oidc_client_id: Some("client-123".to_string()),
+                oidc_client_secret: Some("shhh".to_string()),
+                oidc_issuer: Some("https://oidp.coverage.example.com".to_string()),
+                attribute_mapping: None,
+                enforce_sso: Some(false),
+                session_duration_hours: None,
+            })
+            .await
+            .expect("configure OIDC");
+
+        // Non-OIDC providers and unknown domains are refused.
+        let saml_service_domain = "oidc-saml.coverage.example.com";
+        service
+            .configure(SSOConfigureRequest {
+                tenant_id: coverage_tenant(tag),
+                provider_type: "saml".to_string(),
+                domain: saml_service_domain.to_string(),
+                enabled: Some(true),
+                entity_id: None,
+                sso_url: None,
+                certificate: None,
+                oidc_client_id: None,
+                oidc_client_secret: None,
+                oidc_issuer: None,
+                attribute_mapping: None,
+                enforce_sso: None,
+                session_duration_hours: None,
+            })
+            .await
+            .expect("configure SAML-only tenant");
+        let wrong_provider = service
+            .initiate_oidc_login(saml_service_domain)
+            .await
+            .expect("query works");
+        assert!(
+            !wrong_provider.success,
+            "SAML provider is not an OIDC provider"
+        );
+        let unknown = service
+            .initiate_oidc_login("no-such-oidc.example.com")
+            .await
+            .expect("query");
+        assert!(!unknown.success, "unknown domain has no OIDC config");
+
+        // Without a Redis pool the state falls back to the durable table.
+        let redirect = service
+            .initiate_oidc_login(domain)
+            .await
+            .expect("initiate works")
+            .data
+            .expect("redirect");
+        assert!(redirect
+            .redirect_url
+            .contains("/authorize?client_id=client-123"));
+        assert!(redirect.redirect_url.contains("code_challenge_method=S256"));
+        let state = redirect.request_id.clone();
+        let from_db = service
+            .validate_oidc_state(&state)
+            .await
+            .expect("validate state")
+            .expect("state exists in the durable fallback");
+        assert_eq!(from_db.domain, domain);
+        assert!(!from_db.code_verifier.is_empty());
+        // Single use: the DELETE..RETURNING makes the second lookup a miss.
+        let replayed = service
+            .validate_oidc_state(&state)
+            .await
+            .expect("validate again");
+        assert!(replayed.is_none(), "a consumed state never validates twice");
+
+        // With a Redis pool the state round-trips through `oidc_state:*`.
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let with_redis = SSOService::with_redis(pool.clone(), redis.clone(), new_sso_config());
+        let redirect = with_redis
+            .initiate_oidc_login(domain)
+            .await
+            .expect("initiate with redis")
+            .data
+            .expect("redirect");
+        let state = redirect.request_id.clone();
+        let stored: Option<String> = {
+            let mut conn = redis.get().await.expect("redis conn");
+            conn.get(format!("oidc_state:{state}")).await.expect("get")
+        };
+        assert!(stored.is_some(), "the state is staged in redis");
+        let from_redis = with_redis
+            .validate_oidc_state(&state)
+            .await
+            .expect("validate from redis")
+            .expect("state exists in redis");
+        assert_eq!(from_redis.tenant_id.as_deref(), Some(tenant.as_str()));
+        // Consumed: the key is deleted, and the DB fallback misses too.
+        let consumed: Option<String> = {
+            let mut conn = redis.get().await.expect("redis conn");
+            conn.get(format!("oidc_state:{state}")).await.expect("get")
+        };
+        assert!(consumed.is_none(), "redis state is single-use");
+        let _ = with_redis.validate_oidc_state(&state).await;
+
+        // Malformed staged JSON and a missing code_verifier are honest
+        // errors, not silent fallbacks.
+        let mut conn = redis.get().await.expect("redis conn");
+        let _: () = conn
+            .set_ex("oidc_state:cov_malformed", "not-json", 60)
+            .await
+            .expect("stage malformed");
+        let _: () = conn
+            .set_ex(
+                "oidc_state:cov_no_verifier",
+                r#"{"domain":"x.example.com"}"#,
+                60,
+            )
+            .await
+            .expect("stage no-verifier");
+        drop(conn);
+        let malformed = with_redis
+            .validate_oidc_state("cov_malformed")
+            .await
+            .expect_err("malformed JSON fails");
+        assert!(malformed.contains("Parse state"), "unexpected: {malformed}");
+        let no_verifier = with_redis
+            .validate_oidc_state("cov_no_verifier")
+            .await
+            .expect_err("missing verifier fails");
+        assert!(
+            no_verifier.contains("code_verifier"),
+            "unexpected: {no_verifier}"
+        );
+    }
+
+    fn new_sso_config() -> Config {
+        Config::from_env().expect("Config::from_env in test env")
+    }
+
+    #[tokio::test]
+    async fn sso_session_lifecycle_covers_new_and_returning_users() {
+        let tag = "sso_session";
+        let (service, pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "session.coverage.example.com";
+        let (entity_id, _acs) = configure_saml_tenant(&service, &tenant, domain, true).await;
+        let _ = entity_id;
+
+        // First login: a new user with a session bound to the configured
+        // duration.
+        let first = service
+            .handle_saml_callback(
+                &tenant,
+                "carol@example.com",
+                Some("Carol"),
+                "carol-external-id",
+                Some(serde_json::json!(["admins"])),
+                None,
+            )
+            .await
+            .expect("callback works")
+            .data
+            .expect("session result");
+        assert!(first.is_new_user, "the first login is a new user");
+        let token = first.session.session_token.clone();
+
+        // The token validates and stamps last activity.
+        let session = service
+            .validate_session(&token)
+            .await
+            .expect("validate")
+            .expect("live session");
+        assert_eq!(session.email, "carol@example.com");
+
+        // Second login for the same external id: not a new user.
+        let second = service
+            .handle_saml_callback(
+                &tenant,
+                "carol@example.com",
+                Some("Carol"),
+                "carol-external-id",
+                None,
+                None,
+            )
+            .await
+            .expect("callback works")
+            .data
+            .expect("session result");
+        assert!(!second.is_new_user, "the second login is a returning user");
+
+        // Expired sessions validate to nothing and are swept.
+        sqlx::query("UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour'")
+            .execute(&pool)
+            .await
+            .expect("expire sessions");
+        let expired = service
+            .validate_session(&token)
+            .await
+            .expect("validate")
+            .is_none();
+        assert!(expired, "an expired session never validates");
+        let swept = service.cleanup_expired_sessions().await.expect("cleanup");
+        assert!(swept >= 2, "both carol sessions were swept, got {swept}");
+        let left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ent_sso_sessions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(left, 0);
+
+        // OIDC callbacks create sessions too.
+        let oidc_session = service
+            .handle_oidc_callback(&tenant, "dave@example.com", None, "dave-external-id", None)
+            .await
+            .expect("oidc callback")
+            .data
+            .expect("session");
+        assert!(oidc_session.is_new_user);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_sessions_degrades_when_the_table_is_missing() {
+        let tag = "sso_cleanup_missing";
+        let (service, pool) = provision_sso(tag).await;
+        sqlx::query("ALTER TABLE ent_sso_sessions RENAME TO ent_sso_sessions_gone")
+            .execute(&pool)
+            .await
+            .expect("break table");
+        let swept = service
+            .cleanup_expired_sessions()
+            .await
+            .expect("a missing table degrades to a no-op sweep");
+        assert_eq!(swept, 0);
+        sqlx::query("ALTER TABLE ent_sso_sessions_gone RENAME TO ent_sso_sessions")
+            .execute(&pool)
+            .await
+            .expect("restore table");
+    }
+
+    #[tokio::test]
+    async fn tenant_enforces_sso_covers_every_lookup_arm() {
+        let tag = "sso_enforce";
+        let (service, pool) = provision_sso(tag).await;
+        let enforcing = coverage_tenant(tag);
+        let relaxed = coverage_tenant(tag);
+
+        // Enforcing and non-enforcing rows.
+        for (tenant, enforce) in [(&enforcing, true), (&relaxed, false)] {
+            service
+                .configure(SSOConfigureRequest {
+                    tenant_id: tenant.to_string(),
+                    provider_type: "saml".to_string(),
+                    domain: format!("{tenant}.enforce.example.com"),
+                    enabled: Some(true),
+                    entity_id: None,
+                    sso_url: None,
+                    certificate: None,
+                    oidc_client_id: None,
+                    oidc_client_secret: None,
+                    oidc_issuer: None,
+                    attribute_mapping: None,
+                    enforce_sso: Some(enforce),
+                    session_duration_hours: None,
+                })
+                .await
+                .expect("configure");
+        }
+        assert!(service
+            .tenant_enforces_sso(&enforcing)
+            .await
+            .expect("lookup"));
+        assert!(!service.tenant_enforces_sso(&relaxed).await.expect("lookup"));
+        // The free function agrees with the method.
+        assert!(enterprise_sso_enforces(&pool, &enforcing).await);
+        // No row: the gate stays open.
+        assert!(!enterprise_sso_enforces(&pool, "no-such-enforce-tenant").await);
+
+        // Missing table (42P01): the gate degrades open instead of locking
+        // every tenant out.
+        sqlx::query("ALTER TABLE ent_sso_configurations RENAME TO ent_sso_configurations_gone")
+            .execute(&pool)
+            .await
+            .expect("break table");
+        assert!(!enterprise_sso_enforces(&pool, &enforcing).await);
+        sqlx::query("ALTER TABLE ent_sso_configurations_gone RENAME TO ent_sso_configurations")
+            .execute(&pool)
+            .await
+            .expect("restore table");
+
+        // Any other database failure surfaces as Err (broken pool).
+        let broken = crate::config::Config::from_env().expect("config");
+        let broken_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("postgresql://127.0.0.1:5432/enterprise_no_such_db_cov")
+            .expect("lazy pool");
+        let error = tenant_enforces_sso(&broken_pool, &enforcing)
+            .await
+            .expect_err("a broken pool is an error, not an open gate");
+        assert!(error.contains("Check enforce_sso"), "unexpected: {error}");
+        let _ = broken;
+    }
+
+    async fn enterprise_sso_enforces(pool: &sqlx::PgPool, tenant: &str) -> bool {
+        tenant_enforces_sso(pool, tenant)
+            .await
+            .expect("lookup works")
+    }
+
+    #[tokio::test]
+    async fn configuration_lookup_and_domain_gates_cover_their_arms() {
+        let tag = "sso_lookup";
+        let (service, pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "lookup.coverage.example.com";
+        let _ = configure_saml_tenant(&service, &tenant, domain, true).await;
+
+        // Found and not-found configuration lookups.
+        let found = service
+            .get_configuration(&tenant)
+            .await
+            .expect("lookup works");
+        assert!(found.data.is_some(), "the configured tenant is found");
+        let missing = service
+            .get_configuration("no-such-lookup-tenant")
+            .await
+            .expect("lookup works");
+        assert!(!missing.success, "an unconfigured tenant is NOT_FOUND");
+
+        // Enabled-domain lookup finds the row...
+        let by_domain = service
+            .get_config_by_domain(domain)
+            .await
+            .expect("domain lookup");
+        assert!(by_domain.is_some());
+        // ...disabled rows never match...
+        sqlx::query("UPDATE ent_sso_configurations SET enabled = false WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("disable");
+        let disabled = service
+            .get_config_by_domain(domain)
+            .await
+            .expect("domain lookup");
+        assert!(
+            disabled.is_none(),
+            "a disabled config is invisible by domain"
+        );
+        sqlx::query("UPDATE ent_sso_configurations SET enabled = true WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("re-enable");
+        // ...and a missing table degrades to "no config for domain".
+        sqlx::query("ALTER TABLE ent_sso_configurations RENAME TO ent_sso_configurations_gone")
+            .execute(&pool)
+            .await
+            .expect("break table");
+        let gone = service
+            .get_config_by_domain(domain)
+            .await
+            .expect("missing table degrades to None");
+        assert!(gone.is_none());
+        sqlx::query("ALTER TABLE ent_sso_configurations_gone RENAME TO ent_sso_configurations")
+            .execute(&pool)
+            .await
+            .expect("restore table");
     }
 }

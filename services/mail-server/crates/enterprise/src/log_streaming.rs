@@ -1230,4 +1230,330 @@ mod tests {
         assert_eq!(json["event_count"], 500);
         assert_eq!(json["success"], true);
     }
+
+    // ── Coverage residuals: mask edges, SSRF failure shapes, pinned-client
+    // cache behaviour, at-rest secret encryption round-trips, and the
+    // heartbeat/verify failure paths (loopback, no real network). ─────────
+
+    #[test]
+    fn mask_destination_config_handles_every_value_shape() {
+        // Secrets keep only their last four characters.
+        let config = serde_json::json!({
+            "url": "https://hooks.example.com/x",
+            "secret": "super-secret-token",
+            "token": "abc",
+            "not_a_secret": "visible"
+        });
+        let masked = mask_destination_config(&config);
+        assert_eq!(masked["url"], "https://hooks.example.com/x");
+        assert_eq!(masked["not_a_secret"], "visible");
+        let secret = masked["secret"].as_str().unwrap();
+        assert!(secret.starts_with('*'), "masked: {secret}");
+        assert!(secret.ends_with("oken"), "masked: {secret}");
+        assert!(!secret.contains("super"), "masked: {secret}");
+        assert_eq!(masked["token"], "****abc", "masked keeps only the tail");
+
+        // Non-object configs pass through untouched.
+        let array = serde_json::json!(["a"]);
+        assert_eq!(mask_destination_config(&array), array);
+        let plain = serde_json::json!("plain");
+        assert_eq!(mask_destination_config(&plain), plain);
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_reports_each_failure_shape() {
+        // The allowlist is read once per process: set it before anything
+        // touches the guard so the loopback case below can pass.
+        std::env::set_var("LOG_STREAMING_SSRF_ALLOWLIST", "127.0.0.1");
+        // Unparsable URL.
+        assert!(ssrf_guard_url("not a url at all")
+            .await
+            .err()
+            .unwrap()
+            .contains("Invalid URL"));
+        // Non-HTTPS scheme is refused outright.
+        assert!(ssrf_guard_url("http://hooks.example.com/x")
+            .await
+            .err()
+            .unwrap()
+            .contains("HTTPS"));
+        // Empty-host URL fails to parse in this form.
+        assert!(ssrf_guard_url("https://")
+            .await
+            .err()
+            .unwrap()
+            .contains("Invalid URL"));
+        // DNS failure.
+        assert!(
+            ssrf_guard_url("https://this-host-does-not-exist-cov.invalid/x")
+                .await
+                .err()
+                .unwrap()
+                .contains("DNS resolution failed")
+        );
+        // A private address NOT on the allowlist is still blocked...
+        let blocked = ssrf_guard_url("https://192.168.1.1/x").await.err().unwrap();
+        assert!(blocked.contains("blocked private/reserved"), "{blocked}");
+        // ...while the allow-listed loopback passes and pins the address.
+        let allowed = ssrf_guard_url("https://127.0.0.1:9/x")
+            .await
+            .expect("allow-listed loopback passes the guard");
+        assert_eq!(allowed.host, "127.0.0.1");
+        assert_eq!(allowed.addr.to_string(), "127.0.0.1:9");
+        std::env::remove_var("LOG_STREAMING_SSRF_ALLOWLIST");
+    }
+
+    #[test]
+    fn pinned_client_is_cached_per_destination_and_evicts_at_capacity() {
+        let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let _first = pinned_client("cov.example.com", addr).expect("client");
+        let _second = pinned_client("cov.example.com", addr).expect("client");
+        // Same key resolves to the SAME cached client: the cache returns a
+        // clone, and reqwest clients are reference-counted internally, so a
+        // cache hit never rebuilds. Assert via the cache size instead.
+        assert_eq!(PINNED_CLIENTS.lock().unwrap().len(), 1, "cache hit");
+
+        // Fill the cache past the cap: it is evicted wholesale but the
+        // builder still succeeds.
+        {
+            let mut cache = PINNED_CLIENTS.lock().unwrap();
+            for i in 0..80u16 {
+                let filler: std::net::SocketAddr =
+                    format!("10.9.0.1:{}", 1000 + i).parse().unwrap();
+                let client = reqwest::Client::new();
+                cache.insert((format!("filler-{i}"), filler), client);
+            }
+        }
+        let third = pinned_client("other.example.com", addr).expect("client after eviction");
+        let cache = PINNED_CLIENTS.lock().unwrap();
+        assert!(cache.len() <= 65, "cache was trimmed, got {}", cache.len());
+        drop(cache);
+        let _ = third;
+    }
+
+    #[tokio::test]
+    async fn secret_configs_are_encrypted_at_rest_and_decrypted_for_responses() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "log_stream_secrets",
+            "log_stream_cov_secrets",
+        )
+        .await
+        .expect("provision") else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        // An invalid derivation secret takes the logged degradation arm...
+        let degraded = LogStreamingService::with_secret_key(pool.clone(), "");
+        // ...while a valid key protects destination secrets.
+        let service = LogStreamingService::with_secret_key(pool.clone(), "cov-log-stream-secret");
+        let _ = degraded;
+
+        let tenant = format!("ls{}", &Uuid::new_v4().simple().to_string()[..23]);
+        let created = service
+            .create(
+                tenant.clone(),
+                "cov stream",
+                None,
+                "webhook",
+                Some(serde_json::json!({
+                    "url": "https://hooks.example.com/x",
+                    "secret": "super-secret-value",
+                    "token": "tok-1234",
+                    "plain": "visible"
+                })),
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("create")
+            .data
+            .expect("row");
+        let id = created.id;
+
+        // At rest the secret fields are ciphertext bound to the tenant...
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT destination_config FROM ent_log_streams WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_ne!(stored["secret"], "super-secret-value");
+        assert!(crate::field_encryption::FieldEncryptor::is_encrypted(
+            stored["secret"].as_str().unwrap()
+        ));
+        // ...while non-secret fields stay plaintext.
+        assert_eq!(stored["plain"], "visible");
+
+        // Reads decrypt then mask: only the tail of the REAL secret shows.
+        let fetched = service.get(id).await.expect("get").data.expect("row");
+        let fetched_secret = fetched.destination_config.as_ref().unwrap()["secret"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            fetched_secret.ends_with("alue"),
+            "masked tail: {fetched_secret}"
+        );
+        assert!(!fetched_secret.contains("super-secret-value"),);
+
+        // Legacy plaintext secrets pass through the decrypt arm untouched
+        // and are encrypted on the next update.
+        let id2 = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO ent_log_streams (id, tenant_id, name, destination_type, status, enabled, destination_config, compression_enabled, format, total_events_delivered, total_bytes_delivered, delivery_failures_count, created_at, updated_at)
+             VALUES ($1, $2, 'legacy', 'webhook', 'active', true, $3, false, 'json', 0, 0, 0, NOW(), NOW())",
+        )
+        .bind(id2)
+        .bind(&tenant)
+        .bind(serde_json::json!({"url": "https://h.example.com", "secret": "legacy-plain-secret"}))
+        .execute(&pool)
+        .await
+        .expect("seed legacy");
+        service
+            .update(
+                id2,
+                None,
+                None,
+                Some(serde_json::json!({
+                    "url": "https://h.example.com",
+                    "secret": "legacy-plain-secret"
+                })),
+                None,
+            )
+            .await
+            .expect("update");
+        let stored2: serde_json::Value =
+            sqlx::query_scalar("SELECT destination_config FROM ent_log_streams WHERE id = $1")
+                .bind(id2)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(crate::field_encryption::FieldEncryptor::is_encrypted(
+            stored2["secret"].as_str().unwrap()
+        ));
+    }
+
+    /// A TCP listener that accepts and immediately closes: TLS handshakes
+    /// against it fail fast, so send-time error arms are deterministic.
+    async fn spawn_accept_and_drop() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                drop(socket);
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn verify_and_heartbeat_report_honest_delivery_failures() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "log_stream_delivery",
+            "log_stream_cov_delivery",
+        )
+        .await
+        .expect("provision") else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        let service = LogStreamingService::new(pool.clone());
+        let tenant = format!("ld{}", &Uuid::new_v4().simple().to_string()[..23]);
+
+        // A webhook stream whose config has no URL: the delivery path
+        // refuses before any network activity.
+        let no_url = service
+            .create(
+                tenant.clone(),
+                "no-url",
+                None,
+                "webhook",
+                Some(serde_json::json!({"not_url": "x"})),
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("create")
+            .data
+            .expect("row");
+        let verify_missing = service.verify(no_url.id).await.expect("verify");
+        assert!(
+            !verify_missing.success,
+            "missing URL must fail verification"
+        );
+
+        // A webhook stream pointing at a black-holed loopback port (the
+        // SSRF guard is explicitly told this destination is allowed): the
+        // delivery failure surfaces honestly.
+        std::env::set_var("LOG_STREAMING_SSRF_ALLOWLIST", "127.0.0.1");
+        let dead_port = spawn_accept_and_drop().await;
+        let dead = service
+            .create(
+                tenant.clone(),
+                "dead-hook",
+                None,
+                "webhook",
+                Some(serde_json::json!({
+                    "url": format!("https://127.0.0.1:{dead_port}/hook"),
+                    "secret": "cov-signing-secret"
+                })),
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("create")
+            .data
+            .expect("row");
+        let dead_verify = service.verify(dead.id).await.expect("verify");
+        assert!(
+            !dead_verify.success,
+            "a TLS handshake against a dead port cannot verify"
+        );
+
+        // A splunk stream without a token is refused before delivery.
+        let splunk_no_token = service
+            .create(
+                tenant.clone(),
+                "splunk-no-token",
+                None,
+                "splunk",
+                Some(serde_json::json!({"url": "https://127.0.0.1:9/x"})),
+                None,
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("create")
+            .data
+            .expect("row");
+        let splunk_missing = service.verify(splunk_no_token.id).await.expect("verify");
+        assert!(!splunk_missing.success, "missing HEC token must fail");
+
+        // The delivery cycle records the failures instead of panicking.
+        let delivered = service.run_delivery_cycle().await.expect("cycle runs");
+        let _ = delivered;
+        let failures: i32 =
+            sqlx::query_scalar("SELECT delivery_failures_count FROM ent_log_streams WHERE id = $1")
+                .bind(dead.id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(
+            failures >= 1,
+            "the failed heartbeat is recorded: {failures}"
+        );
+        std::env::remove_var("LOG_STREAMING_SSRF_ALLOWLIST");
+    }
 }

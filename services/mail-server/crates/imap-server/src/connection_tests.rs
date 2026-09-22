@@ -288,6 +288,7 @@ async fn imap_accept_loop_rejects_over_cap_connections_with_bye() {
         tokenless_interceptor(),
         false,
         limiter,
+        Arc::new(tokio::sync::Notify::new()),
     ));
     let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let line = read_line_tok(&mut client).await;
@@ -318,6 +319,7 @@ async fn imaps_accept_loop_rejects_per_ip_cap_connections_with_bye() {
         "http://127.0.0.1:1".to_string(),
         tokenless_interceptor(),
         limiter,
+        Arc::new(tokio::sync::Notify::new()),
     ));
     let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let line = read_line_tok(&mut client).await;
@@ -350,6 +352,7 @@ async fn imap_accept_loop_releases_slot_when_connection_ends() {
         tokenless_interceptor(),
         false,
         limiter.clone(),
+        Arc::new(tokio::sync::Notify::new()),
     ));
     // First connection takes the last slot and gets the plaintext greeting.
     let mut first = tokio::net::TcpStream::connect(addr)
@@ -799,5 +802,192 @@ fn parse_imap_line_splits_tag_command_and_args() {
     assert_eq!(
         (tag.as_str(), cmd.as_str(), args.as_str()),
         ("a2", "NOOP", "")
+    );
+}
+
+// ── residual accept-loop / shutdown / TLS-path arms ─────────────────────────
+
+/// Accept sources for the loop seam: one that errors once (EMFILE-class
+/// accept failure) and one that runs forever afterwards, so the loop's
+/// error arm is covered without spinning.
+struct FlakyAcceptor {
+    failures_left: usize,
+}
+
+impl TcpAccept for FlakyAcceptor {
+    fn accept(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>> + Send
+    {
+        if self.failures_left > 0 {
+            self.failures_left -= 1;
+            Box::pin(async { Err(std::io::Error::other("accept failed (injected)")) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        } else {
+            Box::pin(std::future::pending())
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        }
+    }
+}
+
+/// Both accept loops log injected accept errors and keep running until the
+/// shutdown signal fires, at which point they exit cleanly.
+#[tokio::test]
+async fn accept_loops_log_errors_and_stop_on_shutdown() {
+    // IMAP loop: one injected accept error, then pending, then shutdown.
+    let shutdown: Shutdown = Arc::new(tokio::sync::Notify::new());
+    let task = tokio::spawn(run_imap_accept_loop(
+        FlakyAcceptor { failures_left: 1 },
+        None,
+        "http://127.0.0.1:1".to_string(),
+        tokenless_interceptor(),
+        false,
+        Arc::new(Mutex::new(ConnectionLimiter::default())),
+        Arc::clone(&shutdown),
+    ));
+    // IMAPS loop: same shape with a TLS acceptor.
+    let task_tls = tokio::spawn(run_imaps_accept_loop(
+        FlakyAcceptor { failures_left: 1 },
+        test_acceptor(),
+        "http://127.0.0.1:1".to_string(),
+        tokenless_interceptor(),
+        Arc::new(Mutex::new(ConnectionLimiter::default())),
+        Arc::clone(&shutdown),
+    ));
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.notify_waiters();
+    let (a, b) = tokio::join!(task, task_tls);
+    assert!(a.is_ok(), "IMAP loop must exit cleanly on shutdown");
+    assert!(b.is_ok(), "IMAPS loop must exit cleanly on shutdown");
+}
+
+/// The IMAPS loop's success path: a real TLS connection is accepted, greeted
+/// over TLS, and the limiter slot is released when the session ends.
+#[tokio::test]
+async fn imaps_loop_serves_real_tls_connections_end_to_end() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let limiter = Arc::new(Mutex::new(ConnectionLimiter::default()));
+    let shutdown: Shutdown = Arc::new(tokio::sync::Notify::new());
+    let task = tokio::spawn(run_imaps_accept_loop(
+        listener,
+        test_acceptor(),
+        "http://127.0.0.1:1".to_string(),
+        tokenless_interceptor(),
+        limiter.clone(),
+        Arc::clone(&shutdown),
+    ));
+
+    // Connect with the loopback TLS connector and drive a CAPABILITY.
+    let connector = test_tls_connector();
+    let stream = tokio::net::TcpStream::connect(addr).await.expect("tcp");
+    let tls = connector
+        .connect(
+            ServerName::try_from("localhost").expect("ServerName from localhost"),
+            stream,
+        )
+        .await
+        .expect("TLS handshake");
+    let mut tls = tokio::io::BufReader::new(tls);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), tls.read_line(&mut line))
+        .await
+        .expect("greeting timeout")
+        .expect("read greeting");
+    assert!(line.starts_with("* OK"), "TLS greeting expected: {line:?}");
+    tls.get_mut().write_all(b"a1 CAPABILITY\r\n").await.unwrap();
+    let mut rest = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tls.get_mut().read_until(b'\n', &mut rest),
+    )
+    .await
+    .expect("capability timeout")
+    .expect("read capability");
+    // End the session (LOGOUT); the limiter slot is released when the
+    // connection task finishes.
+    tls.get_mut()
+        .write_all(b"a9 LOGOUT\r\n")
+        .await
+        .expect("logout write");
+    let mut drain = Vec::new();
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        tls.get_mut().read_to_end(&mut drain),
+    )
+    .await
+    .expect("logout drain timeout");
+    drop(tls);
+    let mut released = false;
+    for _ in 0..100 {
+        let g = limiter.lock().await;
+        let total: usize = g.per_ip.values().sum();
+        drop(g);
+        if total == 0 {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(released, "the finished session released its slot");
+
+    shutdown.notify_waiters();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+/// `ConnectionLimiter::release` removes a tenant's entry entirely once its
+/// last slot is freed (no unbounded map growth).
+#[test]
+fn limiter_release_removes_the_ip_entry_at_zero() {
+    use std::net::IpAddr;
+    let ip = IpAddr::from([192, 0, 2, 9]);
+    let mut limiter = ConnectionLimiter::default();
+    assert!(limiter.try_acquire(ip));
+    limiter.release(ip);
+    assert!(
+        !limiter.per_ip.contains_key(&ip),
+        "the per-IP entry must be removed when the count reaches zero"
+    );
+}
+
+/// STARTTLS-capable plaintext handle_connection: with a TLS acceptor wired,
+/// the plaintext path still greets with STARTTLS advertised and completes
+/// the upgrade.
+#[tokio::test]
+async fn handle_connection_with_acceptor_serves_starttls_path() {
+    ensure_crypto_provider();
+    let server =
+        start_handle_connection(Some(test_acceptor()), "http://127.0.0.1:1", false, false).await;
+    let mut client = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    let greeting = read_line_tok(&mut client).await;
+    assert!(
+        greeting.contains("STARTTLS"),
+        "plaintext-with-acceptor must advertise STARTTLS: {greeting:?}"
+    );
+    client.write_all(b"a1 LOGOUT\r\n").await.unwrap();
+    let mut drain = Vec::new();
+    let _ = read_until_crlf(&mut client, &mut drain).await;
+    let _ = server.done.await;
+}
+
+/// A client that disconnects right after STARTTLS is advertised (EOF before
+/// the upgrade) ends the pre-STARTTLS loop quietly.
+#[tokio::test]
+async fn pre_starttls_loop_ends_quietly_on_client_disconnect() {
+    let server =
+        start_handle_connection(Some(test_acceptor()), "http://127.0.0.1:1", false, false).await;
+    let mut client = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    let greeting = read_line_tok(&mut client).await;
+    assert!(greeting.contains("* OK"), "{greeting:?}");
+    drop(client);
+    let result = tokio::time::timeout(Duration::from_secs(10), server.done).await;
+    assert!(
+        result.is_ok() && result.unwrap().is_ok(),
+        "client EOF must end the pre-STARTTLS session without an error"
     );
 }

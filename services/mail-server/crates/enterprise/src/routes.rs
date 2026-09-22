@@ -3625,4 +3625,100 @@ mod tests {
         assert_eq!(body.name, "t1");
         assert_eq!(body.submitted_by, "user1");
     }
+
+    // ── helper arms that need deliberately-failing inputs ─────────────
+
+    /// A serializer that always fails: drives the defensive serialization
+    /// arms of the response helpers with a genuine serde error.
+    struct Unserializable;
+
+    impl serde::Serialize for Unserializable {
+        fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("no serialization possible"))
+        }
+    }
+
+    #[test]
+    fn response_helpers_report_serialization_failures_as_500() {
+        let (status, json) = ok_json(Unserializable);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json.0["error"], "internal serialization error");
+
+        let (status, json) = json_status(StatusCode::CREATED, Unserializable);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json.0["error"], "internal serialization error");
+    }
+
+    #[test]
+    fn unwrap_contract_result_maps_every_service_outcome() {
+        // Successful data passes through.
+        let ok = crate::types::ApiResult::ok(serde_json::json!({"id": 1}));
+        assert!(unwrap_contract_result(ok).is_ok());
+
+        // Not-found keeps the 404 envelope...
+        let not_found =
+            crate::types::ApiResult::<serde_json::Value>::err("Contract not found", "NOT_FOUND");
+        let err = unwrap_contract_result(not_found).expect_err("not found");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.1 .0["error"], "Contract not found");
+
+        // ...any other service message is a 500...
+        let failed = crate::types::ApiResult::<serde_json::Value>::err(
+            "contracts table missing",
+            "INTERNAL",
+        );
+        let err = unwrap_contract_result(failed).expect_err("failure");
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // ...and an empty ApiResult with no message is an honest 500.
+        let empty = crate::types::ApiResult::<serde_json::Value> {
+            success: false,
+            data: None,
+            error: None,
+            code: None,
+        };
+        let err = unwrap_contract_result(empty).expect_err("unexpected shape");
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.1 .0["error"], "Unexpected contract response");
+    }
+
+    #[test]
+    fn network_cidr_validation_rejects_each_malformed_shape() {
+        // No slash, bad prefix, bad address.
+        assert!(!is_valid_network_cidr("203.0.113.0"));
+        assert!(!is_valid_network_cidr("203.0.113.0/xx"));
+        assert!(!is_valid_network_cidr("not-an-ip/24"));
+        // Prefix too long per family.
+        assert!(!is_valid_network_cidr("203.0.113.0/33"));
+        assert!(!is_valid_network_cidr("2001:db8::/129"));
+        // Host bits set.
+        assert!(!is_valid_network_cidr("203.0.113.1/29"));
+        assert!(!is_valid_network_cidr("2001:db8::1/64"));
+        // Valid networks, including the 0 and max prefixes.
+        assert!(is_valid_network_cidr("203.0.113.0/29"));
+        assert!(is_valid_network_cidr("203.0.113.9/32"));
+        assert!(is_valid_network_cidr("0.0.0.0/0"));
+        assert!(is_valid_network_cidr("2001:db8::/32"));
+        assert!(is_valid_network_cidr("::/0"));
+        assert!(is_valid_network_cidr(" 203.0.113.0/24 ")); // trimmed
+    }
+
+    #[test]
+    fn cors_layer_builds_from_explicit_origin_lists() {
+        let mut config = Config::from_env().unwrap();
+        config.cors_origins = vec!["https://app.example.com".to_string()];
+        let _layer = cors_layer(&config); // exact-origin allowlist path
+        config.cors_origins = vec!["*".to_string()];
+        let _layer = cors_layer(&config); // Any path
+        config.cors_origins = vec!["not a header value".to_string()];
+        let _layer = cors_layer(&config); // unparsable origins are skipped
+    }
+
+    #[test]
+    fn clamp_limit_bounds_values() {
+        assert_eq!(clamp_limit(5, 10), 5);
+        assert_eq!(clamp_limit(50, 10), 10);
+        assert_eq!(clamp_limit(0, 10), 1);
+        assert_eq!(clamp_limit(-3, 10), 1);
+    }
 }

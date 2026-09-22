@@ -163,6 +163,22 @@ fn build_redis_url(host: &str, port: u16, db: u32, password: Option<&str>) -> St
     }
 }
 
+/// The effective Postgres URL: `DATABASE_URL` when set, otherwise composed
+/// from the discrete `DB_*` parts (the docker-compose variable shape).
+/// Extracted from `load` so the fallback is unit-testable — `load` runs
+/// `dotenvy`, and a repo-checkout `.env` normally provides `DATABASE_URL`,
+/// which would make the branch unreachable from a whole-`load` test.
+fn compose_database_url() -> String {
+    std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        let h = var_or("DB_HOST", "localhost");
+        let p = var_or_u16("DB_PORT", 5432);
+        let d = var_or("DB_NAME", "apexmail");
+        let u = var_or("DB_USER", "apexmail");
+        let pw = var_or("DB_PASSWORD", "");
+        format!("postgresql://{}:{}@{}:{}/{}", u, pw, h, p, d)
+    })
+}
+
 /// Load and validate configuration from environment.
 pub fn load() -> Result<Config> {
     dotenvy::dotenv().ok();
@@ -180,14 +196,7 @@ pub fn load() -> Result<Config> {
         .parse()
         .context("Invalid TRACKING_HOST/TRACKING_PORT")?;
 
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        let h = var_or("DB_HOST", "localhost");
-        let p = var_or_u16("DB_PORT", 5432);
-        let d = var_or("DB_NAME", "apexmail");
-        let u = var_or("DB_USER", "apexmail");
-        let pw = var_or("DB_PASSWORD", "");
-        format!("postgresql://{}:{}@{}:{}/{}", u, pw, h, p, d)
-    });
+    let db_url = compose_database_url();
 
     let redis_url = {
         let host = var_or("REDIS_HOST", "localhost");
@@ -287,7 +296,10 @@ pub fn load() -> Result<Config> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_redis_url, load, parse_trusted_proxies, var_or_bool};
+    use super::{
+        build_redis_url, compose_database_url, default_max_redirect_url_len, load,
+        parse_trusted_proxies, var_or_bool, TrackingConfig,
+    };
 
     /// Serializes env-mutating tests.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -496,5 +508,78 @@ mod tests {
         let redis_url = build_redis_url("redis", 6379, 2, Some(""));
 
         assert_eq!(redis_url, "redis://redis:6379/2");
+    }
+
+    /// `with_env` must restore a variable that WAS set before the call (the
+    /// Some arm of the restore loop).
+    #[test]
+    fn with_env_restores_previously_set_values() {
+        let key = "TRACKING_WITH_ENV_RESTORE_TEST";
+        std::env::set_var(key, "original");
+        with_env(&[(key, Some("temporary"))], || {
+            assert_eq!(std::env::var(key).as_deref(), Ok("temporary"));
+        });
+        assert_eq!(std::env::var(key).as_deref(), Ok("original"));
+        std::env::remove_var(key);
+    }
+
+    /// A panic inside `with_env`'s closure still restores the environment and
+    /// is re-raised in the test (the resume_unwind arm).
+    #[test]
+    #[should_panic(expected = "boom-inside-with-env")]
+    fn with_env_resumes_the_closure_panic_after_restoring() {
+        let key = "TRACKING_WITH_ENV_PANIC_TEST";
+        with_env(&[(key, Some("x"))], || panic!("boom-inside-with-env"));
+    }
+
+    /// With DATABASE_URL unset, the URL is composed from the DB_* parts.
+    /// (`compose_database_url` is tested directly: `load` runs `dotenvy`,
+    /// and a repo-checkout `.env` normally provides DATABASE_URL, which
+    /// would make the fallback unreachable through `load` itself.)
+    #[test]
+    fn database_url_falls_back_to_db_parts() {
+        let url = with_env(
+            &[
+                ("DATABASE_URL", None),
+                ("DB_HOST", Some("db.example.test")),
+                ("DB_PORT", Some("6543")),
+                ("DB_NAME", Some("apexdb")),
+                ("DB_USER", Some("apexuser")),
+                ("DB_PASSWORD", Some("s3cret")),
+            ],
+            compose_database_url,
+        );
+        assert_eq!(
+            url,
+            "postgresql://apexuser:s3cret@db.example.test:6543/apexdb"
+        );
+
+        // An explicit DATABASE_URL always wins.
+        let explicit = with_env(
+            &[("DATABASE_URL", Some("postgresql://explicit@db/choice"))],
+            compose_database_url,
+        );
+        assert_eq!(explicit, "postgresql://explicit@db/choice");
+    }
+
+    /// The serde default for `max_redirect_url_len` (2048) applies when the
+    /// struct is deserialized without the field (all other fields are
+    /// required).
+    #[test]
+    fn tracking_config_defaults_max_redirect_url_len() {
+        let json = r#"{
+            "base_url": "https://t.example",
+            "pixel_path": "/px",
+            "click_path": "/c",
+            "unsubscribe_path": "/u",
+            "preferences_path": "/prefs",
+            "fallback_url": "https://fallback.example",
+            "confirmation_url": "https://t.example/confirm",
+            "redirect_status": 302,
+            "trusted_proxies": []
+        }"#;
+        let cfg: TrackingConfig = serde_json::from_str(json).expect("without the optional field");
+        assert_eq!(cfg.max_redirect_url_len, default_max_redirect_url_len());
+        assert_eq!(cfg.max_redirect_url_len, 2048);
     }
 }

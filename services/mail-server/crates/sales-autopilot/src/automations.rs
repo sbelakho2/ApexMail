@@ -4105,4 +4105,726 @@ mod tests {
         assert_eq!(third.events_claimed, 0, "{third:?}");
         assert_eq!(message_count(&pool, &tenant).await, 1);
     }
+
+    // -----------------------------------------------------------------------
+    // Residual-arm coverage: condition operator matrix, the send-action skip
+    // ladder, admission error mapping, the resume/terminal action ladder, and
+    // the tag/list/webhook action effects.
+    // -----------------------------------------------------------------------
+
+    fn executor_with(pool: &PgPool, backend: Arc<dyn SendAdmissionBackend>) -> AutomationExecutor {
+        AutomationExecutor::new(
+            pool.clone(),
+            SendAdmissionService::new(backend),
+            "automation-lib-worker",
+        )
+    }
+
+    #[test]
+    fn event_kind_names_are_canonical() {
+        assert_eq!(
+            AutomationEventKind::ContactCreated.as_str(),
+            "contact.created"
+        );
+        assert_eq!(
+            AutomationEventKind::ContactUpdated.as_str(),
+            "contact.updated"
+        );
+        assert_eq!(
+            AutomationEventKind::ContactTagAdded.as_str(),
+            "contact.tag_added"
+        );
+        assert_eq!(
+            AutomationEventKind::MessageReceived.as_str(),
+            "message.received"
+        );
+    }
+
+    fn effects_context(tags: &[&str], status: &str) -> EventContext {
+        EventContext {
+            contact: Some(AutomationContact {
+                id: Uuid::new_v4(),
+                email: "Ada@Example.com".into(),
+                name: Some("Ada Lovelace".into()),
+                status: status.into(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+            }),
+            tags_added: vec!["vip".to_string()],
+            from_email: Some("customer@Example.NET".into()),
+            to_email: Some("support@example.com".into()),
+            subject: Some("Question".into()),
+        }
+    }
+
+    fn all_group(leaves: Vec<Value>) -> Value {
+        json!({ "all": leaves })
+    }
+
+    fn assert_met(conditions: Value, ctx: &EventContext) {
+        match evaluate_conditions(Some(&conditions), ctx) {
+            ConditionVerdict::Met => {}
+            other => panic!("{conditions} must be met, got {other:?}"),
+        }
+    }
+
+    fn assert_not_met(conditions: Value, ctx: &EventContext, needle: &str) {
+        match evaluate_conditions(Some(&conditions), ctx) {
+            ConditionVerdict::NotMet(reason) => assert!(
+                reason.contains(needle),
+                "{conditions}: '{reason}' must contain '{needle}'"
+            ),
+            other => panic!("{conditions} must not be met, got {other:?}"),
+        }
+    }
+
+    fn assert_unsupported(conditions: Value, ctx: &EventContext, needle: &str) {
+        match evaluate_conditions(Some(&conditions), ctx) {
+            ConditionVerdict::Unsupported(reason) => assert!(
+                reason.contains(needle),
+                "{conditions}: '{reason}' must contain '{needle}'"
+            ),
+            other => panic!("{conditions} must be unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn condition_operators_cover_every_scalar_and_array_path() {
+        let ctx = effects_context(&["vip", "beta"], "subscribed");
+
+        // Existence operators.
+        assert_met(
+            all_group(vec![
+                json!({ "field": "email", "operator": "exists" }),
+                json!({ "field": "no_such_field", "operator": "not_exists" }),
+            ]),
+            &ctx,
+        );
+        assert_not_met(
+            all_group(vec![
+                json!({ "field": "no_such_field", "operator": "exists" }),
+            ]),
+            &ctx,
+            "does not exist",
+        );
+        assert_not_met(
+            all_group(vec![json!({ "field": "email", "operator": "not_exists" })]),
+            &ctx,
+            "exists",
+        );
+
+        // Scalar equality is case-insensitive; both spellings work.
+        for operator in ["equals", "eq"] {
+            assert_met(
+                all_group(vec![json!({ "field": "email", "operator": operator,
+                                       "value": "ada@example.COM" })]),
+                &ctx,
+            );
+        }
+        for operator in ["not_equals", "ne"] {
+            assert_met(
+                all_group(vec![json!({ "field": "email", "operator": operator,
+                                       "value": "other@example.com" })]),
+                &ctx,
+            );
+        }
+        // A scalar compared against a non-string expected value never matches
+        // (equals) / always matches (not_equals).
+        assert_not_met(
+            all_group(vec![
+                json!({ "field": "email", "operator": "equals", "value": 3 }),
+            ]),
+            &ctx,
+            "email",
+        );
+        assert_met(
+            all_group(vec![
+                json!({ "field": "email", "operator": "not_equals", "value": 3 }),
+            ]),
+            &ctx,
+        );
+        // Scalar contains / in.
+        assert_met(
+            all_group(vec![json!({ "field": "email", "operator": "contains",
+                                   "value": "EXAMPLE" })]),
+            &ctx,
+        );
+        assert_met(
+            all_group(vec![json!({ "field": "email", "operator": "in",
+                                   "value": ["bob@example.com", "ada@example.com"] })]),
+            &ctx,
+        );
+
+        // Array-valued fields: contains (member + subset forms), set equality,
+        // and subset-in.
+        assert_met(
+            all_group(vec![
+                json!({ "field": "tags", "operator": "contains", "value": "VIP" }),
+            ]),
+            &ctx,
+        );
+        assert_met(
+            all_group(vec![json!({ "field": "tags", "operator": "contains",
+                                   "value": ["vip", "BETA"] })]),
+            &ctx,
+        );
+        assert_not_met(
+            all_group(vec![json!({ "field": "tags", "operator": "contains",
+                                   "value": ["vip", "missing"] })]),
+            &ctx,
+            "tags",
+        );
+        assert_met(
+            all_group(vec![json!({ "field": "tags", "operator": "eq",
+                                   "value": ["BETA", "VIP"] })]),
+            &ctx,
+        );
+        assert_met(
+            all_group(vec![
+                json!({ "field": "tags", "operator": "ne", "value": ["vip"] }),
+            ]),
+            &ctx,
+        );
+        assert_met(
+            all_group(vec![json!({ "field": "tags", "operator": "in",
+                                   "value": ["vip", "beta", "vip2"] })]),
+            &ctx,
+        );
+        // tags_added is an array field with only one member.
+        assert_met(
+            all_group(vec![json!({ "field": "tags_added", "operator": "contains",
+                                   "value": "vip" })]),
+            &ctx,
+        );
+
+        // An operator that exists for arrays but not scalars is unsupported on
+        // a scalar field (and vice versa).
+        assert_unsupported(
+            all_group(vec![
+                json!({ "field": "email", "operator": "regex", "value": ".*" }),
+            ]),
+            &ctx,
+            "unsupported operator",
+        );
+    }
+
+    /// An admission backend whose metering or suppression lookups FAIL (the
+    /// operational-degraded case, distinct from a quota refusal).
+    #[derive(Debug)]
+    struct FailingAdmission {
+        metering_fails: bool,
+        suppression_fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionBackend for FailingAdmission {
+        async fn record_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+        ) -> Result<QuotaRecordResult, UsageError> {
+            if self.metering_fails {
+                Err(UsageError::Audit("simulated metering outage".into()))
+            } else {
+                Ok(QuotaRecordResult {
+                    allowed: true,
+                    current: 0,
+                    duplicate: false,
+                })
+            }
+        }
+
+        async fn rollback_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+            _recorded_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), UsageError> {
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            _canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            if self.suppression_fails {
+                Err("simulated suppression outage".into())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    async fn all_action_reasons(pool: &PgPool, tenant: &str) -> Vec<String> {
+        sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT COALESCE(reason, error) FROM automation_run_actions \
+             WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind(tenant)
+        .fetch_all(pool)
+        .await
+        .expect("action reasons")
+        .into_iter()
+        .map(|(reason,)| reason.unwrap_or_default())
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn send_action_skip_ladder_records_every_reason() {
+        let Some(pool) = fresh_pool("automations_lib_skips", "sa_lib_auto_skip").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-skip");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let exec = executor(&pool, Arc::new(FakeAdmission::new()));
+
+        insert_automation(
+            &pool,
+            &tenant,
+            "Reply",
+            json!({ "type": "event", "event": "message.received" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        insert_automation(
+            &pool,
+            &tenant,
+            "Subscribed only",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        // message.received WITHOUT a sender address: no recipient at all.
+        exec.ingest_event(
+            &tenant,
+            "message.received",
+            "msg:no-from",
+            None,
+            None,
+            json!({}),
+        )
+        .await
+        .expect("ingest");
+        // message.received from an address that is not an email: refused.
+        exec.ingest_event(
+            &tenant,
+            "message.received",
+            "msg:bad-from",
+            None,
+            None,
+            json!({ "from_email": "not-an-address" }),
+        )
+        .await
+        .expect("ingest");
+        // contact.created for a contact that is NOT subscribed.
+        let unsubscribed: Uuid = sqlx::query_scalar(
+            "INSERT INTO contacts (tenant_id, email, name, tags, status) \
+             VALUES ($1, 'gone@example.com', 'Gone', '[]'::jsonb, 'unsubscribed') RETURNING id",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("insert unsubscribed contact");
+        exec.ingest_event(
+            &tenant,
+            "contact.created",
+            "contact:unsubscribed",
+            Some(unsubscribed),
+            None,
+            json!({}),
+        )
+        .await
+        .expect("ingest");
+        // contact.created for a contact id with no row: no trigger entity.
+        exec.ingest_event(
+            &tenant,
+            "contact.created",
+            "contact:vanished",
+            Some(Uuid::new_v4()),
+            None,
+            json!({}),
+        )
+        .await
+        .expect("ingest");
+
+        let _report = exec.tick().await.expect("tick");
+        // The contacts trigger ALSO emitted contact.created events for the
+        // inserted contacts; only the four ingested events' skip reasons are
+        // asserted here.
+        let reasons = all_action_reasons(&pool, &tenant).await;
+        for needle in [
+            "no_recipient",
+            "invalid_recipient",
+            "contact_not_subscribed",
+        ] {
+            assert!(
+                reasons.iter().any(|reason| reason.contains(needle)),
+                "{needle} missing from {reasons:?}"
+            );
+        }
+        // The vanished-contact event skips at RUN level (with no trigger
+        // entity there is no action to record).
+        let run_skips: Vec<Option<String>> =
+            sqlx::query_as("SELECT skip_reason FROM automation_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("run skips")
+                .into_iter()
+                .map(|(reason,)| reason)
+                .collect();
+        assert!(
+            run_skips.iter().any(|reason| {
+                reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("trigger_entity_missing")
+            }),
+            "{run_skips:?}"
+        );
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unverified_sender_domain_is_a_recorded_skip() {
+        let Some(pool) = fresh_pool("automations_lib_domain", "sa_lib_auto_dom").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-dom");
+        insert_tenant(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let exec = executor(&pool, Arc::new(FakeAdmission::new()));
+        insert_automation(
+            &pool,
+            &tenant,
+            "From nowhere",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action("sales@never-registered.example.com", &template),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "dom@example.com", &[]).await;
+
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.runs_succeeded, 0, "{report:?}");
+        let reasons = all_action_reasons(&pool, &tenant).await;
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("sender_domain_not_ready")),
+            "{reasons:?}"
+        );
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn admission_outages_are_retryable_and_quota_refusals_defer() {
+        let Some(pool) = fresh_pool("automations_lib_admit", "sa_lib_auto_adm").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-adm");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        insert_automation(
+            &pool,
+            &tenant,
+            "Welcome",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "adm@example.com", &[]).await;
+
+        // Metering unavailable: the run fails RETRYABLY and the event is
+        // deferred for another attempt.
+        let metering_down = Arc::new(FailingAdmission {
+            metering_fails: true,
+            suppression_fails: false,
+        });
+        let report = executor_with(&pool, metering_down.clone())
+            .tick()
+            .await
+            .expect("tick");
+        assert_eq!(report.events_deferred, 1, "{report:?}");
+        assert_eq!(report.runs_failed, 1);
+        let reasons = all_action_reasons(&pool, &tenant).await;
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("metering_unavailable")),
+            "{reasons:?}"
+        );
+
+        // Suppression lookup unavailable: same retryable deferral.
+        let suppression_down = Arc::new(FailingAdmission {
+            metering_fails: false,
+            suppression_fails: true,
+        });
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("resurrect event");
+        let report = executor_with(&pool, suppression_down.clone())
+            .tick()
+            .await
+            .expect("tick");
+        assert_eq!(report.events_deferred, 1, "{report:?}");
+        let reasons = all_action_reasons(&pool, &tenant).await;
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("suppression_lookup_unavailable")),
+            "{reasons:?}"
+        );
+
+        // Quota refused: the retryable failure path with the quota reason.
+        let capped = Arc::new(FakeAdmission::new());
+        capped.set_limit(0);
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("resurrect event");
+        let report = executor(&pool, capped.clone()).tick().await.expect("tick");
+        assert_eq!(report.events_deferred, 1, "{report:?}");
+        let reasons = all_action_reasons(&pool, &tenant).await;
+        assert!(
+            reasons.iter().any(|reason| reason.contains("quota")),
+            "{reasons:?}"
+        );
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_action_ladder_resumes_and_folds_previous_results() {
+        let Some(pool) = fresh_pool("automations_lib_ladder", "sa_lib_auto_lad").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-lad");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        insert_automation(
+            &pool,
+            &tenant,
+            "Tag then send",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            json!([
+                { "type": "add_tag", "config": { "tags": ["welcomed"] } },
+                send_email_action(&format!("sales@{domain}"), &template)[0]
+            ]),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "ladder@example.com", &[]).await;
+
+        // First attempt: the tag lands, the send hits a full quota -> the run
+        // fails retryably AFTER the successful action.
+        backend.set_limit(0);
+        let report = executor(&pool, backend.clone()).tick().await.expect("tick");
+        assert_eq!(report.runs_failed, 1, "{report:?}");
+        assert_eq!(report.events_deferred, 1);
+        let tags: Value = sqlx::query_scalar(
+            "SELECT tags FROM contacts WHERE tenant_id = $1 AND email = 'ladder@example.com'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("contact tags");
+        assert_eq!(tags, json!(["welcomed"]));
+
+        // Retry with quota restored: the run RESUMES. The succeeded tag action
+        // is folded (never re-executed), and the send completes once.
+        backend.set_limit(-1);
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("resurrect event");
+        let report = executor(&pool, backend.clone()).tick().await.expect("tick");
+        assert_eq!(report.runs_started, 1, "the SAME run resumes: {report:?}");
+        assert_eq!(report.runs_succeeded, 1);
+        assert_eq!(report.actions_enqueued, 1);
+        assert_eq!(message_count(&pool, &tenant).await, 1);
+        let tags: Value = sqlx::query_scalar(
+            "SELECT tags FROM contacts WHERE tenant_id = $1 AND email = 'ladder@example.com'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("contact tags");
+        assert_eq!(
+            tags,
+            json!(["welcomed"]),
+            "the tag was applied exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spent_attempt_budget_makes_the_resume_terminal() {
+        let Some(pool) = fresh_pool("automations_lib_terminal", "sa_lib_auto_term").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-term");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        insert_automation(
+            &pool,
+            &tenant,
+            "Send",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "terminal@example.com", &[]).await;
+
+        backend.set_limit(0);
+        executor(&pool, backend.clone()).tick().await.expect("tick");
+        // Spend the action's attempt budget, then make quota available again.
+        sqlx::query("UPDATE automation_run_actions SET attempts = $2 WHERE tenant_id = $1")
+            .bind(&tenant)
+            .bind(MAX_ACTION_ATTEMPTS)
+            .execute(&pool)
+            .await
+            .expect("spend attempts");
+        backend.set_limit(-1);
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("resurrect event");
+
+        let report = executor(&pool, backend.clone()).tick().await.expect("tick");
+        assert_eq!(report.runs_failed, 1, "{report:?}");
+        assert_eq!(
+            report.events_deferred, 0,
+            "a terminal failure never retries"
+        );
+        let (status, retryable): (String, bool) =
+            sqlx::query_as("SELECT status, retryable FROM automation_runs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("run");
+        assert_eq!(status, "failed");
+        assert!(!retryable, "a spent budget is terminal");
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn tag_list_and_webhook_actions_apply_their_effects() {
+        let Some(pool) = fresh_pool("automations_lib_effects", "sa_lib_auto_eff").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-eff");
+        insert_tenant(&pool, &tenant).await;
+        let exec = executor(&pool, Arc::new(FakeAdmission::new()));
+
+        let list_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO lists (id, tenant_id, name, description) VALUES ($1, $2, 'Nurture', '')",
+        )
+        .bind(list_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert list");
+        // `webhooks.id` is the platform 26-char nanoid, not a UUID.
+        let webhook_id = apexmail_lib::id::generate_id("wh", 22);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, created_at) \
+             VALUES ($1, $2, 'Lib hook', 'http://127.0.0.1:9/hook', 'lib-secret', $3, TRUE, NOW())",
+        )
+        .bind(&webhook_id)
+        .bind(&tenant)
+        .bind(serde_json::json!(["*"]))
+        .execute(&pool)
+        .await
+        .expect("insert webhook");
+
+        insert_automation(
+            &pool,
+            &tenant,
+            "Effects",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            json!([
+                { "type": "add_tag", "config": { "tags": ["a", "b"] } },
+                { "type": "remove_tag", "config": { "tags": ["b"] } },
+                { "type": "add_to_list", "config": { "list_id": list_id.to_string() } },
+                { "type": "remove_from_list", "config": { "list": list_id.to_string() } },
+                { "type": "add_to_list", "config": { "list_id": list_id.to_string() } },
+                { "type": "webhook", "config": { "webhook_id": webhook_id.to_string() } },
+                { "type": "webhook", "config": { "webhook_id": Uuid::new_v4().to_string() } }
+            ]),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "effects@example.com", &["keep"]).await;
+
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.runs_succeeded, 1, "{report:?}");
+
+        let tags: Value = sqlx::query_scalar(
+            "SELECT tags FROM contacts WHERE tenant_id = $1 AND email = 'effects@example.com'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("contact tags");
+        let mut tag_list: Vec<String> = tags
+            .as_array()
+            .expect("tags array")
+            .iter()
+            .filter_map(|tag| tag.as_str().map(str::to_string))
+            .collect();
+        tag_list.sort();
+        assert_eq!(tag_list, vec!["a", "keep"], "b was added then removed");
+
+        let subscribed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM list_subscribers \
+             WHERE list_id = $1 AND status = 'active'",
+        )
+        .bind(list_id)
+        .fetch_one(&pool)
+        .await
+        .expect("list subscription");
+        assert_eq!(subscribed, 1, "removed then re-added: the final state wins");
+
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM webhook_queue WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("webhook queue");
+        assert_eq!(
+            queued, 1,
+            "the real webhook enqueued; the missing one did not"
+        );
+    }
 }

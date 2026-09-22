@@ -540,8 +540,8 @@ mod tests {
         /// genuine extractor path.)
         #[tokio::test]
         async fn click_r_param_not_decoded_twice_percent_and_plus_survive() {
-            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
-                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
             };
             let tenant = test_support::unique_tenant("dbldecode");
@@ -580,8 +580,8 @@ mod tests {
         /// click-through (302 to the original URL) but records NOTHING.
         #[tokio::test]
         async fn click_from_prefetcher_bot_records_nothing_but_still_redirects() {
-            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
-                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
             };
             let tenant = test_support::unique_tenant("botclick");
@@ -620,8 +620,8 @@ mod tests {
         /// Normal UA on an authorised domain → the click IS recorded.
         #[tokio::test]
         async fn click_from_normal_user_is_recorded() {
-            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
-                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
             };
             let tenant = test_support::unique_tenant("human");
@@ -656,8 +656,8 @@ mod tests {
         /// poisoned.
         #[tokio::test]
         async fn click_on_blocked_domain_records_nothing_and_falls_back() {
-            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
-                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
             };
             let tenant = test_support::unique_tenant("blocked");
@@ -710,8 +710,8 @@ mod tests {
         /// and not a re-decoded variant).
         #[tokio::test]
         async fn click_on_allowed_domain_records_original_url() {
-            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
-                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
             };
             let tenant = test_support::unique_tenant("allowed");
@@ -732,12 +732,11 @@ mod tests {
 
             settle().await;
             let recorded = wal_entries_for(&redis, &message_id).await;
+            let first = recorded.first().cloned().unwrap_or_default();
             assert_eq!(recorded.len(), 1, "got: {recorded:?}");
             assert!(
-                recorded[0]
-                    .contains("\"linkUrl\":\"https://allowed.example.test/promo%2Fsale+event\""),
-                "click must be recorded with the ORIGINAL url, got: {}",
-                recorded[0]
+                first.contains("\"linkUrl\":\"https://allowed.example.test/promo%2Fsale+event\""),
+                "click must be recorded with the ORIGINAL url, got: {first}"
             );
 
             cleanup(&redis, &tenant, &message_id).await;

@@ -2664,3 +2664,728 @@ mod tests {
         assert_eq!(stats["total"], 0);
     }
 }
+
+/// Worker-loop coverage: `execute_claimed` (heartbeat, lease-loss, fenced
+/// finish), `tick` (expired-lease recovery, slot accounting) and `run`
+/// (claim-yielding tick, erroring tick, shutdown). Every test here provisions
+/// a PRIVATE canonical database: `tick` claims globally, so exact claim counts
+/// and the trigger-based fault injection are only sound on a database this
+/// test alone owns. Timing arms use the queue's own 1s heartbeat cadence with
+/// 50ms poll loops (never one long sleep), so the interleaving tolerates
+/// arbitrary machine stalls: the awaited transition happens at the first
+/// heartbeat round AFTER the setup writes, whenever that is.
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Provision a private canonical database, then hand back a PATIENT pool
+    /// on it (the provisioning pool's 5s acquire timeout is tuned for the
+    /// suite database, and this module's asserts are worth waiting for under a
+    /// machine busy with sibling test processes). The database name mirrors
+    /// `migrator::test_support`'s bounded naming for suffixes that keep the
+    /// full name within the 63-byte identifier limit, which every name here
+    /// does.
+    async fn private_pool(test_name: &str) -> Option<PgPool> {
+        let provisioned =
+            match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            }?;
+        let raw = std::env::var("TEST_DATABASE_URL").ok()?;
+        let (server_part, db_part) = raw.rsplit_once('/')?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let db_name = format!("{db_only}_{test_name}");
+        assert!(
+            db_name.len() <= 63,
+            "test {test_name} would need the bounded-name digest"
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&format!("{server_part}/{db_name}"))
+            .await
+            .expect("connect the private test database");
+        provisioned.close().await;
+        Some(pool)
+    }
+
+    async fn enqueue_one(
+        queue: &ActionQueue,
+        tenant: &str,
+        key: &str,
+        payload: serde_json::Value,
+    ) -> SalesAction {
+        queue
+            .enqueue(
+                tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                key,
+                payload,
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .expect("enqueue action")
+    }
+
+    async fn row_state(pool: &PgPool, action_id: Uuid) -> (String, Option<String>, i32) {
+        sqlx::query_as("SELECT state, last_error, attempt FROM sales_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(pool)
+            .await
+            .expect("read action row")
+    }
+
+    /// Poll (real clock, 10ms steps) until the condition holds or the budget
+    /// is spent.
+    async fn eventually<F, Fut>(f: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if f().await {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("condition must become true within the poll budget");
+    }
+
+    /// Wait until at least `minimum` has really elapsed, in 50ms steps — the
+    /// pause a handler gate needs before it may be released.
+    async fn wait_at_least(minimum: Duration) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < minimum {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A handler that routes on the payload's `verdict` field, so one tick can
+    /// exercise every terminal/retry outcome.
+    struct RoutingHandler;
+
+    #[async_trait::async_trait]
+    impl ActionHandler for RoutingHandler {
+        async fn handle(&self, action: &LeasedAction) -> ActionOutcome {
+            match action.payload().get("verdict").and_then(|v| v.as_str()) {
+                Some("dead") => ActionOutcome::DeadLetter("simulated permanent failure".into()),
+                Some("retry") => ActionOutcome::Retry("simulated transient failure".into()),
+                _ => ActionOutcome::Succeeded,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_claim_hands_out_due_work_with_a_payload_and_a_token() {
+        let Some(pool) = private_pool("actions_plain_claim").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-plain-claim");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        // The pool accessor the worker tick uses: a round-trip through
+        // `ActionQueue::db` must hit the same database.
+        let pong: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(queue.db())
+            .await
+            .expect("query through the queue's pool accessor");
+        assert_eq!(pong, 1);
+
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("plain-claim:{tenant}"),
+            serde_json::json!({ "verdict": "succeed" }),
+        )
+        .await;
+
+        let claimed = queue.claim(10, DEFAULT_LEASE_SECS).await.expect("claim");
+        assert_eq!(claimed.len(), 1, "the only due action is claimed");
+        let leased = claimed.into_iter().next().unwrap();
+        assert_eq!(leased.id(), action.id);
+        assert!(!leased.lease_token.is_nil(), "the claim issues a token");
+        assert_eq!(
+            leased.payload()["verdict"],
+            "succeed",
+            "the payload accessor exposes the enqueued payload"
+        );
+        assert_eq!(leased.tenant_id(), tenant);
+        assert_eq!(leased.action_type(), action_type::RESCORE);
+    }
+
+    #[tokio::test]
+    async fn tick_executes_claimed_actions_and_records_every_outcome_class() {
+        let Some(pool) = private_pool("actions_tick_outcomes").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-tick-out");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let succeeded = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("tick-ok:{tenant}"),
+            serde_json::json!({ "verdict": "succeed" }),
+        )
+        .await;
+        let dead = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("tick-dead:{tenant}"),
+            serde_json::json!({ "verdict": "dead" }),
+        )
+        .await;
+        let retry = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("tick-retry:{tenant}"),
+            serde_json::json!({ "verdict": "retry" }),
+        )
+        .await;
+
+        let handler: Arc<dyn ActionHandler> = Arc::new(RoutingHandler);
+        let semaphore = Arc::new(Semaphore::new(8));
+        let claimed = tick(&queue, &handler, &semaphore, DEFAULT_LEASE_SECS)
+            .await
+            .expect("tick");
+        assert_eq!(claimed, 3, "all three due actions were claimed");
+
+        eventually(|| async {
+            let (state, ..) = row_state(&pool, succeeded.id).await;
+            state == "succeeded"
+        })
+        .await;
+        eventually(|| async {
+            let (state, last_error, _) = row_state(&pool, dead.id).await;
+            state == "dead_letter" && last_error.as_deref() == Some("simulated permanent failure")
+        })
+        .await;
+        eventually(|| async {
+            let (state, last_error, attempt) = row_state(&pool, retry.id).await;
+            state == "queued"
+                && attempt == 1
+                && last_error.as_deref() == Some("simulated transient failure")
+        })
+        .await;
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tick_recovers_an_expired_lease_and_reexecutes_the_action() {
+        let Some(pool) = private_pool("actions_tick_recover").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-tick-rec");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("tick-rec:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // A crashed worker: live claim, expired lease, first attempt spent.
+        let claimed = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[action.id]))
+            .await
+            .expect("claim");
+        assert_eq!(claimed.len(), 1);
+        sqlx::query(
+            "UPDATE sales_actions SET lease_expires_at = NOW() - interval '1 second' \
+             WHERE id = $1",
+        )
+        .bind(action.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let handler: Arc<dyn ActionHandler> = Arc::new(RoutingHandler);
+        let semaphore = Arc::new(Semaphore::new(4));
+        let claimed = tick(&queue, &handler, &semaphore, DEFAULT_LEASE_SECS)
+            .await
+            .expect("tick");
+        assert_eq!(
+            claimed, 1,
+            "the recovered action is the only claimable work"
+        );
+
+        eventually(|| async {
+            let (state, _, attempt) = row_state(&pool, action.id).await;
+            state == "succeeded" && attempt == 2
+        })
+        .await;
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_closed_semaphore_requeues_the_claimed_action_instead_of_running_it() {
+        let Some(pool) = private_pool("actions_closed_semaphore").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-sem-closed");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("sem-closed:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // A tearing-down worker: zero permits, closed before execution.
+        let semaphore = Arc::new(Semaphore::new(0));
+        semaphore.close();
+        let handler: Arc<dyn ActionHandler> = Arc::new(RoutingHandler);
+        let claimed = tick(&queue, &handler, &semaphore, DEFAULT_LEASE_SECS)
+            .await
+            .expect("tick");
+        assert_eq!(claimed, 1, "the claim happened before the slot check");
+
+        // The action was handed back with a retryable error, not stranded in
+        // this process's hands.
+        let (state, last_error, attempt) = row_state(&pool, action.id).await;
+        assert_eq!(state, "queued");
+        assert_eq!(attempt, 1);
+        assert!(
+            last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("semaphore closed"),
+            "{last_error:?}"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The handler parks until the test releases it, so the test — not timing
+    /// — decides the interleaving between the handler, the heartbeat and the
+    /// lease theft.
+    struct ParkedHandler {
+        in_flight: tokio::sync::mpsc::Sender<()>,
+        release: Arc<tokio::sync::Notify>,
+        effect_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ActionHandler for ParkedHandler {
+        async fn handle(&self, _action: &LeasedAction) -> ActionOutcome {
+            let _ = self.in_flight.send(()).await;
+            // Wait until released. If the lease was lost first, the worker
+            // drops this future at the await point below — the effect counter
+            // then stays at zero, which is the "no external effect" guarantee.
+            self.release.notified().await;
+            self.effect_calls.fetch_add(1, Ordering::SeqCst);
+            ActionOutcome::Succeeded
+        }
+    }
+
+    fn parked_handler() -> (
+        ParkedHandler,
+        tokio::sync::mpsc::Receiver<()>,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let effects = Arc::new(AtomicUsize::new(0));
+        (
+            ParkedHandler {
+                in_flight: tx,
+                release: release.clone(),
+                effect_calls: effects.clone(),
+            },
+            rx,
+            release,
+            effects,
+        )
+    }
+
+    /// Steal the live lease the way a recovering worker's claim would: new
+    /// owner, NEW token, fresh expiry, still `executing`.
+    async fn steal_lease(pool: &PgPool, action_id: Uuid, thief: &str) {
+        sqlx::query(
+            "UPDATE sales_actions \
+             SET lease_owner = $2, lease_token = gen_random_uuid(), \
+                 lease_expires_at = NOW() + interval '60 seconds' \
+             WHERE id = $1",
+        )
+        .bind(action_id)
+        .bind(thief)
+        .execute(pool)
+        .await
+        .expect("steal lease");
+    }
+
+    /// Spawn `execute_claimed` exactly the way `tick` does and wait until the
+    /// handler reports itself in flight.
+    async fn spawn_parked_worker(
+        queue: &ActionQueue,
+        action_id: Uuid,
+        lease_secs: i64,
+    ) -> (
+        tokio::sync::mpsc::Receiver<()>,
+        Arc<tokio::sync::Notify>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (handler, mut in_flight, release, effects) = parked_handler();
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let task = tokio::spawn(execute_claimed(
+            queue.clone(),
+            Arc::new(handler),
+            queue
+                .claim_filtered(1, lease_secs, Some(&[action_id]))
+                .await
+                .expect("claim")
+                .into_iter()
+                .next()
+                .unwrap(),
+            lease_secs,
+            permit,
+        ));
+        // The handler signals once it is running under its live lease. The
+        // heartbeat fires at lease_secs/3 >= 1s, so this recv (channel-driven,
+        // milliseconds) always wins the race.
+        in_flight.recv().await.expect("handler started");
+        (in_flight, release, effects, task)
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_that_loses_the_lease_stops_the_handler_without_an_effect() {
+        let Some(pool) = private_pool("actions_hb_lost").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-hb-lost");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("hb-lost:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // Lease 2s -> heartbeat every 1s. The handler is in flight well
+        // before the first round, and the steal below happens before it too.
+        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 2).await;
+        steal_lease(&pool, action.id, "thief").await;
+
+        // The first heartbeat round AFTER the steal finds the lost lease,
+        // stops the handler, and the task ends with the effect never produced
+        // and no result written over the recovering worker.
+        tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("the worker task must end after the lease loss")
+            .expect("the worker task must not panic");
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            0,
+            "a dropped handler must not produce its external effect"
+        );
+        let (state, _, attempt) = row_state(&pool, action.id).await;
+        assert_eq!(state, "executing", "the thief's claim is untouched");
+        assert_eq!(attempt, 1);
+
+        // Keep the parked future from leaking into a later assertion.
+        release.notify_waiters();
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_result_is_dropped_when_the_lease_was_recovered_before_finish() {
+        let Some(pool) = private_pool("actions_finish_stale").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-finish-stale");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("finish-stale:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // Lease 300s -> heartbeat every 100s: no round fires inside this test,
+        // so the handler (not the heartbeat) finishes the race.
+        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 300).await;
+
+        // The lease is recovered while the handler is parked, and THEN the
+        // handler completes: the fenced finish must refuse the stale token and
+        // the result is dropped rather than written over the recovery.
+        steal_lease(&pool, action.id, "thief-2").await;
+        release.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("the worker task must end after the refused finish")
+            .expect("the worker task must not panic");
+
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            1,
+            "the handler DID run to completion this time"
+        );
+        let (state, last_error, _) = row_state(&pool, action.id).await;
+        assert_eq!(state, "executing", "the recovering worker owns the row");
+        assert_eq!(last_error, None, "no result was written over it");
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Install a BEFORE UPDATE trigger that raises for updates matching
+    /// `when_clause`, so a single SQL statement class fails at the database.
+    async fn install_raise_trigger(pool: &PgPool, name: &str, when_clause: &str) {
+        for statement in [
+            format!(
+                "CREATE OR REPLACE FUNCTION {name}_fn() RETURNS trigger AS $$ \
+                 BEGIN RAISE EXCEPTION 'sales-cov fault injection: %', TG_NAME; \
+                 END $$ LANGUAGE plpgsql"
+            ),
+            format!(
+                "CREATE TRIGGER {name} BEFORE UPDATE ON sales_actions FOR EACH ROW \
+                 WHEN ({when_clause}) EXECUTE FUNCTION {name}_fn()"
+            ),
+        ] {
+            sqlx::query(&statement)
+                .execute(pool)
+                .await
+                .expect("install fault-injection trigger");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_database_error_keeps_beating_and_the_result_still_lands() {
+        let Some(pool) = private_pool("actions_hb_db_err").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-hb-err");
+        // Raise only for extend-shaped updates: still `executing` with a live
+        // expiry on both sides. Claims (queued -> executing) and finishes
+        // (executing -> terminal) do not match.
+        install_raise_trigger(
+            &pool,
+            "cov_extend_raises",
+            "NEW.state = 'executing' AND OLD.state = 'executing' \
+             AND NEW.lease_expires_at IS NOT NULL AND OLD.lease_expires_at IS NOT NULL",
+        )
+        .await;
+        // Prove the trigger really makes THIS statement class fail (the same
+        // statement the heartbeat loop issues).
+        let action = enqueue_one(
+            &queue_for(&pool, &tenant),
+            &tenant,
+            &format!("hb-err-probe:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+        let probe = queue_for(&pool, &tenant)
+            .claim_filtered(1, 10, Some(&[action.id]))
+            .await
+            .expect("claim probe")
+            .into_iter()
+            .next()
+            .unwrap();
+        let error = queue_for(&pool, &tenant)
+            .extend_lease(&probe.fence(), 10)
+            .await
+            .expect_err("the trigger must fail the extend");
+        assert!(error.to_string().contains("fault injection"), "{error}");
+
+        let queue = queue_for(&pool, &tenant);
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("hb-err:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // Lease 3s -> heartbeat every 1s: two rounds fire well inside the
+        // 3s expiry (the raising trigger aborts the UPDATE, so no round can
+        // extend it), and both hit the database error and keep beating.
+        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 3).await;
+        wait_at_least(Duration::from_millis(2_300)).await;
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("the worker task must end after the handler returns")
+            .expect("the worker task must not panic");
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let (state, _, _) = row_state(&pool, action.id).await;
+        assert_eq!(
+            state, "succeeded",
+            "a transient heartbeat error never blocks the result"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    fn queue_for(pool: &PgPool, tenant: &str) -> ActionQueue {
+        ActionQueue::new(pool.clone(), format!("worker-{tenant}"))
+    }
+
+    #[tokio::test]
+    async fn a_failing_finish_write_is_logged_and_the_row_is_left_executing() {
+        let Some(pool) = private_pool("actions_finish_db_err").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-finish-err");
+        // Raise only when a terminal `succeeded` state is written: exactly the
+        // fenced finish of a successful handler.
+        install_raise_trigger(&pool, "cov_finish_raises", "NEW.state = 'succeeded'").await;
+
+        let queue = queue_for(&pool, &tenant);
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("finish-err:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // Lease 300s: no heartbeat round can fire; the finish write itself is
+        // the failing statement.
+        let (_rx, release, effects, task) = spawn_parked_worker(&queue, action.id, 300).await;
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("the worker task must end after the failed finish")
+            .expect("the worker task must not panic");
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let (state, _, _) = row_state(&pool, action.id).await;
+        assert_eq!(
+            state, "executing",
+            "the outcome could not be recorded, so the row is untouched; \
+             lease expiry is the recovery path"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_processes_a_claim_tick_and_then_stops_on_shutdown() {
+        let Some(pool) = private_pool("actions_run_proc").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-run-proc");
+        let queue = queue_for(&pool, &tenant);
+        let action = enqueue_one(
+            &queue,
+            &tenant,
+            &format!("run-proc:{tenant}"),
+            serde_json::json!({}),
+        )
+        .await;
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handler: Arc<dyn ActionHandler> = Arc::new(RoutingHandler);
+        // A 1s interval: the first tick fires within ~1.2s (jitter <= base/5).
+        let worker = tokio::spawn(run(
+            queue.clone(),
+            handler,
+            1,
+            1,
+            DEFAULT_LEASE_SECS,
+            async move {
+                let _ = rx.await;
+            },
+        ));
+
+        eventually(|| async {
+            let (state, ..) = row_state(&pool, action.id).await;
+            state == "succeeded"
+        })
+        .await;
+
+        // Shutdown fires between ticks: the worker exits promptly.
+        tx.send(()).expect("the worker is still running");
+        tokio::time::timeout(Duration::from_secs(15), worker)
+            .await
+            .expect("the worker must stop on shutdown")
+            .expect("the worker task must not panic");
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_logs_a_failing_tick_and_keeps_going_until_shutdown() {
+        let Some(pool) = private_pool("actions_run_tick_err").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-run-err");
+        // Raise exactly on claim-shaped updates: every tick errors at the
+        // claim and the loop must survive it.
+        install_raise_trigger(
+            &pool,
+            "cov_claim_raises",
+            "OLD.state = 'queued' AND NEW.state = 'executing'",
+        )
+        .await;
+
+        let queue = queue_for(&pool, &tenant);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handler: Arc<dyn ActionHandler> = Arc::new(RoutingHandler);
+        let worker = tokio::spawn(run(
+            queue.clone(),
+            handler,
+            1,
+            1,
+            DEFAULT_LEASE_SECS,
+            async move {
+                let _ = rx.await;
+            },
+        ));
+
+        // Survive at least two erroring ticks, then shut down.
+        wait_at_least(Duration::from_millis(2_600)).await;
+        tx.send(()).expect("the worker is still running");
+        tokio::time::timeout(Duration::from_secs(15), worker)
+            .await
+            .expect("the worker must stop on shutdown")
+            .expect("the worker task must not panic");
+    }
+}

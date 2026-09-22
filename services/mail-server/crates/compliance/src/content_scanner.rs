@@ -1154,6 +1154,88 @@ mod tests {
         assert!(!result.is_spam);
         assert!(result.score < 50.0);
     }
+    // ── Trigger-arm coverage: each spam rule fires on a crafted email ──
+
+    fn email_with(subject: &str, from: &str, reply_to: &str, text: &str) -> EmailContent {
+        EmailContent {
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            from_address: from.into(),
+            from_display_name: None,
+            subject: subject.into(),
+            text_body: Some(text.into()),
+            html_body: None,
+            headers: {
+                let mut h = HashMap::new();
+                if !reply_to.is_empty() {
+                    h.insert("Reply-To".into(), reply_to.into());
+                }
+                h
+            },
+            attachments: vec![],
+        }
+    }
+
+    fn has_trigger(analysis: &SpamAnalysis, rule: &str) -> bool {
+        analysis.triggers.iter().any(|t| t.rule == rule)
+    }
+
+    #[test]
+    fn excessive_caps_subject_trigger_fires() {
+        let scanner = ContentScanner::new(dummy_pool(), dummy_config());
+        // 100% uppercase subject (threshold: >90% caps).
+        let email = email_with("BUYNOWCHEAPPILLSFREE", "s@x.test", "", "hello");
+        let result = scanner.analyze_spam(&email);
+        assert!(
+            has_trigger(&result, "ALL_CAPS_SUBJECT"),
+            "all-caps rule: {:?}",
+            result.triggers
+        );
+    }
+
+    #[test]
+    fn sender_mismatch_trigger_fires_on_reply_to_domain_change() {
+        let scanner = ContentScanner::new(dummy_pool(), dummy_config());
+        let email = email_with(
+            "hello",
+            "sender@legit.test",
+            "reply@elsewhere.test",
+            "plain message",
+        );
+        let result = scanner.analyze_spam(&email);
+        assert!(
+            has_trigger(&result, "SENDER_MISMATCH"),
+            "sender mismatch rule: {:?}",
+            result.triggers
+        );
+    }
+
+    #[test]
+    fn excessive_links_trigger_fires() {
+        let scanner = ContentScanner::new(dummy_pool(), dummy_config());
+        // The link rule counts <a ...> anchors in the HTML body (>15).
+        let anchors: String = (0..20)
+            .map(|i| format!(r#"<a href="http://x{i}.test">x{i}</a>"#))
+            .collect();
+        let mut email = email_with("links", "s@x.test", "", "body text");
+        email.html_body = Some(anchors);
+        let result = scanner.analyze_spam(&email);
+        assert!(
+            has_trigger(&result, "EXCESSIVE_LINKS"),
+            "excessive links rule: {:?}",
+            result.triggers
+        );
+    }
+
+    /// The regex-compile failure path increments the global counter and
+    /// degrades to "no rule" — never a panic.
+    #[test]
+    fn broken_regex_is_counted_and_degrades_to_none() {
+        let before = regex_failure_count();
+        assert!(compile_regex("(unclosed", "broken_test").is_none());
+        let after = regex_failure_count();
+        assert!(after > before, "the failure counter must advance");
+    }
 
     #[test]
     fn test_nigerian_prince_spam() {

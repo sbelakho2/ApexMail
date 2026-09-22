@@ -167,6 +167,26 @@ pub(crate) async fn get_transfer_suggestion(
     }))
 }
 
+/// The DNS observations the transfer suggestion performs, abstracted so
+/// the evidence matrix can be driven deterministically in tests (the same
+/// seam as `domains.rs`'s `VerificationDns`). Production implements this
+/// with the process-wide [`DnsLookup`]; the `Err` side is the resolver
+/// failure the probe already treats as "no evidence".
+pub(crate) trait TransferDns {
+    fn lookup_txt(
+        &self,
+        host: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<String>, String>> + Send;
+}
+
+impl TransferDns for DnsLookup {
+    async fn lookup_txt(&self, host: &str) -> Result<Vec<String>, String> {
+        DnsLookup::lookup_txt(self, host)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Observe whether the domain's current DNS holder publishes platform
 /// records: the DKIM TXT for the row's selector (fetched to compare against
 /// the row's public key) and a `_dmarc` TXT.
@@ -182,7 +202,16 @@ async fn probe_dns_control(
             return DnsControlEvidence::Unavailable;
         }
     };
+    probe_dns_control_with(dns, domain, dkim_selector, db).await
+}
 
+/// The resolver-parameterized probe core.
+async fn probe_dns_control_with<D: TransferDns>(
+    dns: &D,
+    domain: &str,
+    dkim_selector: Option<&str>,
+    db: &sqlx::PgPool,
+) -> DnsControlEvidence {
     let public_key: Option<String> =
         sqlx::query_scalar("SELECT dkim_public_key FROM domains WHERE name = $1")
             .bind(domain)
@@ -619,7 +648,11 @@ mod tests {
             .connect(&isolated_url)
             .await
             .ok()?;
-        sqlx::query(
+        // Multi-statement DDL needs the simple query protocol: a prepared
+        // `sqlx::query` rejects a batch with "cannot insert multiple
+        // commands into a prepared statement", which the `.ok()?` below
+        // used to swallow — silently skipping this whole test.
+        sqlx::raw_sql(
             r#"
             CREATE TABLE tenants (
                 id   TEXT PRIMARY KEY,
@@ -1185,5 +1218,402 @@ mod adversarial_tests {
                 .await
                 .expect("cleanup tenants");
         });
+    }
+}
+
+// ─── Coverage residuals: transfer suggestion + carried-key transfer ──
+
+#[cfg(test)]
+mod coverage_residual_tests {
+    use super::*;
+
+    const TEST_DKIM_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_domains_cov".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// In-memory DNS for the probe seam: hostname pattern → TXT records,
+    /// or None to simulate a resolver failure for that name.
+    struct FakeDns(std::collections::HashMap<String, Option<Vec<String>>>);
+
+    impl TransferDns for FakeDns {
+        async fn lookup_txt(&self, host: &str) -> Result<Vec<String>, String> {
+            match self.0.get(host) {
+                Some(Some(records)) => Ok(records.clone()),
+                Some(None) => Err("resolver timeout".into()),
+                None => Ok(vec![]),
+            }
+        }
+    }
+
+    /// The evidence matrix: a DKIM TXT matching the row's public key, a
+    /// DMARC record, resolver failures, blank selectors and missing keys
+    /// all classify exactly as the suggestion semantics require.
+    #[tokio::test]
+    async fn dns_probe_evidence_matrix_classifies_every_arm() {
+        let Some(pool) = crate::test_db::canonical_pool("domains_probe_matrix").await else {
+            return;
+        };
+        let domain = "cov-probe.example";
+        let probe_tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'probe cov', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&probe_tenant)
+        .bind(format!("slug-{probe_tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed probe tenant");
+        let key_pair = generate_dkim_keypair().unwrap();
+        // The row's selector + public key: a DNS holder publishing THIS
+        // key's TXT record proves control.
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, dkim_selector, dkim_public_key)
+             VALUES ($1, $2, $3, 'pending', 'sel2026', $4)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&probe_tenant)
+        .bind(domain)
+        .bind(&key_pair.public_key)
+        .execute(&pool)
+        .await
+        .expect("seed probe domain");
+
+        let mut dns = std::collections::HashMap::new();
+        // DKIM record matching the row's public key (trailing dot trimmed).
+        dns.insert(
+            "sel2026._domainkey.cov-probe.example".to_string(),
+            Some(vec![format!(
+                "{}.",
+                dkim_txt_record_value(&key_pair.public_key)
+            )]),
+        );
+        // DMARC record published by the current DNS holder.
+        dns.insert(
+            "_dmarc.cov-probe.example".to_string(),
+            Some(vec!["v=DMARC1; p=none".to_string()]),
+        );
+        // A name the resolver cannot answer (failure arm).
+        dns.insert("dead._domainkey.cov-probe.example".to_string(), None);
+        let dns = FakeDns(dns);
+
+        // Both records published → Proven { dkim, dmarc }.
+        let evidence = probe_dns_control_with(&dns, domain, Some("sel2026"), &pool).await;
+        assert!(matches!(
+            evidence,
+            DnsControlEvidence::Proven {
+                dkim: true,
+                dmarc: true
+            }
+        ));
+
+        // DKIM lookup fails but DMARC answers → Proven { dkim: false, dmarc: true }.
+        let evidence = probe_dns_control_with(&dns, domain, Some("dead"), &pool).await;
+        assert!(matches!(
+            evidence,
+            DnsControlEvidence::Proven {
+                dkim: false,
+                dmarc: true
+            }
+        ));
+
+        // No published records at all → NotProven.
+        let evidence = probe_dns_control_with(&dns, "other.example", Some("sel2026"), &pool).await;
+        assert!(matches!(evidence, DnsControlEvidence::NotProven));
+
+        // A blank selector skips the DKIM lookup entirely.
+        let evidence = probe_dns_control_with(&dns, domain, Some("   "), &pool).await;
+        assert!(matches!(
+            evidence,
+            DnsControlEvidence::Proven {
+                dkim: false,
+                dmarc: true
+            }
+        ));
+
+        // A row with NO stored public key: any non-empty TXT proves DKIM.
+        let evidence =
+            probe_dns_control_with(&dns, "keyless.example", Some("sel2026"), &pool).await;
+        assert!(matches!(evidence, DnsControlEvidence::NotProven));
+        pool.close().await;
+    }
+
+    /// The suggestion endpoint: malformed requests and unknown domains
+    /// refuse before any DNS work; a verified owner short-circuits the
+    /// probe; the production static resolver is constructible.
+    #[tokio::test]
+    async fn transfer_suggestion_refuses_bad_requests_and_verified_owners() {
+        let Some(pool) = crate::test_db::canonical_pool("domains_suggestion_gates").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // Blank domain → 400 before the row lookup.
+        let empty = get_transfer_suggestion(
+            State(state.clone()),
+            admin_auth(),
+            axum::extract::Query(TransferSuggestionQuery {
+                domain: "   ".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(empty, Err(ApiError::BadRequest(_))));
+
+        // Unknown domain → 404 (still no DNS: the row gates the probe).
+        let unknown = get_transfer_suggestion(
+            State(state.clone()),
+            admin_auth(),
+            axum::extract::Query(TransferSuggestionQuery {
+                domain: "never-registered-cov.example".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(unknown, Err(ApiError::NotFound(_))));
+
+        // The wildcard scope is enforced.
+        let mut scopeless = admin_auth();
+        scopeless.scopes = vec![];
+        let denied = get_transfer_suggestion(
+            State(state.clone()),
+            scopeless,
+            axum::extract::Query(TransferSuggestionQuery {
+                domain: "whatever.example".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err(ApiError::Forbidden(_))));
+
+        // A verified owner: the probe is skipped entirely and no transfer
+        // is suggested (the row lookup runs, the answer is deterministic).
+        let owner = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'owner cov', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&owner)
+        .bind(format!("slug-{owner}"))
+        .execute(&pool)
+        .await
+        .expect("seed owner tenant");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified)
+             VALUES ($1, $2, $3, 'verified', true)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&owner)
+        .bind("verified-owner.example")
+        .execute(&pool)
+        .await
+        .expect("seed verified domain");
+        let response = get_transfer_suggestion(
+            State(state.clone()),
+            admin_auth(),
+            axum::extract::Query(TransferSuggestionQuery {
+                domain: "  Verified-Owner.Example ".into(),
+            }),
+        )
+        .await
+        .expect("verified owner resolves");
+        assert_eq!(response.0.domain, "verified-owner.example");
+        assert!(response.0.owner_ever_verified);
+        assert!(!response.0.transfer_suggested);
+        assert_eq!(response.0.dns_control, "not_proven");
+        assert!(response.0.note.is_empty(), "no suggestion → no note");
+
+        // The process-wide resolver this module ships with is constructible
+        // in the test environment (its failure arm maps to `Unavailable`).
+        assert!(DNS_LOOKUP.as_ref().is_ok(), "system resolver initialises");
+
+        // The SSR-facing error arm of the suggestion response: a scopeless
+        // caller never reaches the row lookup.
+        pool.close().await;
+    }
+
+    /// A transfer whose DKIM material decrypts under the source tenant's
+    /// AAD is CARRIED OVER (re-encrypted for the target), not rotated.
+    #[test]
+    fn transfer_carries_encrypted_dkim_material_between_tenants() {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let had_key = std::env::var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY").ok();
+        std::env::set_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY", TEST_DKIM_KEY);
+
+        // Serialised on the DKIM env mutex and driven by a dedicated
+        // current-thread runtime (the guard must never span an await on a
+        // multi-thread pool).
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("domains_carry_key").await else {
+                return;
+            };
+            let state = crate::app::test_support::test_state_over(pool.clone()).await;
+            let source = apexmail_lib::id::generate_id("", 26);
+            let target = apexmail_lib::id::generate_id("", 26);
+            for tenant in [&source, &target] {
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'domains carry cov', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(tenant)
+                .bind(format!("slug-{tenant}"))
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+            }
+
+            // Encrypted DKIM material bound to the SOURCE tenant's AAD.
+            let domain_id = uuid::Uuid::new_v4();
+            let key_pair = generate_dkim_keypair().unwrap();
+            let aad = dkim_private_key_aad(&source, &domain_id.to_string());
+            let encrypted = encrypt_dkim_private_key(&key_pair.private_key_pem, &aad).unwrap();
+            let domain_name = "carry-key.example";
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, dkim_selector,
+                     dkim_public_key, dkim_private_key)
+                 VALUES ($1, $2, $3, 'verified', 'sel-carry', $4, $5)",
+            )
+            .bind(domain_id)
+            .bind(&source)
+            .bind(domain_name)
+            .bind(&key_pair.public_key)
+            .bind(&encrypted)
+            .execute(&pool)
+            .await
+            .expect("seed carry domain");
+
+            let (status, Json(transferred)) = admin_transfer_domain(
+                State(state),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.into(),
+                    to_tenant_id: target.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await
+            .expect("carry transfer");
+            assert_eq!(status, StatusCode::OK);
+            assert!(!transferred.dkim_rotated, "decryptable key material carries over");
+            assert_eq!(transferred.domain_id, domain_id.to_string());
+
+            // The stored ciphertext decrypts under the TARGET AAD and is
+            // the same key material; the selector is preserved.
+            let new_aad = dkim_private_key_aad(&target, &domain_id.to_string());
+            let stored: (String, String, Option<String>) = sqlx::query_as(
+                "SELECT dkim_private_key, dkim_public_key, dkim_selector FROM domains WHERE id = $1",
+            )
+            .bind(domain_id)
+            .fetch_one(&pool)
+            .await
+            .expect("transferred row");
+            assert_eq!(
+                decrypt_dkim_private_key(&stored.0, &new_aad).unwrap(),
+                key_pair.private_key_pem
+            );
+            assert_eq!(stored.1, key_pair.public_key);
+            assert_eq!(stored.2.as_deref(), Some("sel-carry"));
+
+            // The transfer is audited with the carried-over marker.
+            let audited: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM audit_logs
+                 WHERE action = 'admin.domain.transfer'
+                   AND details->>'dkim_rotated' = 'false'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("audit row");
+            assert_eq!(audited, 1);
+            pool.close().await;
+        });
+
+        match had_key {
+            Some(key) => std::env::set_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY", key),
+            None => std::env::remove_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY"),
+        }
+    }
+
+    /// The post-commit cache invalidation is best-effort: with Redis
+    /// unreachable the transfer still succeeds and the failure is only
+    /// logged (SCALE-M-05 never blocks the transfer on the cache).
+    #[test]
+    fn transfer_succeeds_when_the_cache_is_unreachable() {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let had_key = std::env::var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY").ok();
+        std::env::set_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY", TEST_DKIM_KEY);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("domains_cache_dead").await else {
+                return;
+            };
+            let mut config = crate::app::test_support::test_config();
+            config.sales_autopilot_base_url = String::new();
+            let state = crate::app::test_support::test_state_over_with_config_and_redis(
+                pool.clone(),
+                config,
+                "redis://127.0.0.1:1",
+            )
+            .await;
+            let source = apexmail_lib::id::generate_id("", 26);
+            let target = apexmail_lib::id::generate_id("", 26);
+            for tenant in [&source, &target] {
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'cache cov', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(tenant)
+                .bind(format!("slug-{tenant}"))
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+            }
+            let domain_name = "cache-dead.example";
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status) VALUES ($1, $2, $3, 'verified')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&source)
+            .bind(domain_name)
+            .execute(&pool)
+            .await
+            .expect("seed domain");
+
+            let (status, Json(transferred)) = admin_transfer_domain(
+                State(state),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.into(),
+                    to_tenant_id: target.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await
+            .expect("transfer with dead cache");
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(transferred.to_tenant_id, target);
+            pool.close().await;
+        });
+
+        match had_key {
+            Some(key) => std::env::set_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY", key),
+            None => std::env::remove_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY"),
+        }
     }
 }

@@ -57,3 +57,6 @@ sha2.workspace             = true
 # Test databases bootstrap through the REAL production migrator (audit F01):
 # the same embedded canonical migration set the deploy gate applies.
 migrator = { path = "../migrator" }
+# Paused tokio clocks for deterministic lease/backoff/scheduler timing tests
+# (the same dev-only feature every other workspace crate enables).
+tokio = { workspace = true, features = ["test-util", "macros"] }

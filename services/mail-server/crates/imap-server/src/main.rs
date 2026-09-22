@@ -2070,7 +2070,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
 }
 // ── FETCH ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BodySection {
     Full,
     Header,
@@ -2182,33 +2182,74 @@ enum FetchItem {
     },
 }
 
-fn resolve_macro_item(item: &FetchItem) -> Vec<FetchItem> {
+/// A FETCH response item after macro expansion. FAST/ALL/FULL never reach
+/// the response writer (they are resolved here), so the writer's match is
+/// exhaustive without dead macro arms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FetchLeaf {
+    Flags,
+    InternalDate,
+    Rfc822Size,
+    Envelope,
+    Uid,
+    BodyStructure {
+        extended: bool,
+    },
+    Body {
+        section: BodySection,
+        peek: bool,
+        name: String,
+        partial: Option<(usize, usize)>,
+    },
+}
+
+fn resolve_macro_item(item: &FetchItem) -> Vec<FetchLeaf> {
     match item {
         FetchItem::Fast => vec![
-            FetchItem::Flags,
-            FetchItem::InternalDate,
-            FetchItem::Rfc822Size,
+            FetchLeaf::Flags,
+            FetchLeaf::InternalDate,
+            FetchLeaf::Rfc822Size,
         ],
         FetchItem::All => vec![
-            FetchItem::Flags,
-            FetchItem::InternalDate,
+            FetchLeaf::Flags,
+            FetchLeaf::InternalDate,
             // RFC 3501 §6.4.5: ALL = (FLAGS INTERNALDATE RFC822.SIZE ENVELOPE).
             // Omitting RFC822.SIZE made an ALL FETCH return every macro
             // attribute except the size.
-            FetchItem::Rfc822Size,
-            FetchItem::Envelope,
+            FetchLeaf::Rfc822Size,
+            FetchLeaf::Envelope,
         ],
         // F5: RFC 3501 §6.4.5 — the FULL macro is ALL + BODY (the structure).
         // The old expansion returned BODY[] CONTENT and set \Seen on every
         // FULL FETCH; the structure is a peek-only derived view instead.
         FetchItem::Full => vec![
-            FetchItem::Flags,
-            FetchItem::InternalDate,
-            FetchItem::Rfc822Size,
-            FetchItem::Envelope,
-            FetchItem::BodyStructure { extended: true },
+            FetchLeaf::Flags,
+            FetchLeaf::InternalDate,
+            FetchLeaf::Rfc822Size,
+            FetchLeaf::Envelope,
+            FetchLeaf::BodyStructure { extended: true },
         ],
-        other => vec![other.clone()],
+        FetchItem::Flags => vec![FetchLeaf::Flags],
+        FetchItem::InternalDate => vec![FetchLeaf::InternalDate],
+        FetchItem::Rfc822Size => vec![FetchLeaf::Rfc822Size],
+        FetchItem::Envelope => vec![FetchLeaf::Envelope],
+        FetchItem::Uid => vec![FetchLeaf::Uid],
+        FetchItem::BodyStructure { extended } => {
+            vec![FetchLeaf::BodyStructure {
+                extended: *extended,
+            }]
+        }
+        FetchItem::Body {
+            section,
+            peek,
+            name,
+            partial,
+        } => vec![FetchLeaf::Body {
+            section: section.clone(),
+            peek: *peek,
+            name: name.clone(),
+            partial: *partial,
+        }],
     }
 }
 
@@ -2730,10 +2771,11 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     for chunk in uids.chunks(FETCH_CONCURRENCY) {
         let mut body_futures = Vec::new();
         if need_body {
+            // Invariant: `uids` is a subset of `uid_map` (resolve_intervals
+            // only ever returns members of the map), and `uid_map` is exactly
+            // the key set of `meta_map` — so no membership re-check is needed
+            // (and no skip arm could ever run).
             for &uid in chunk {
-                if !meta_map.contains_key(&uid) {
-                    continue;
-                }
                 let req = GetMessageRequest {
                     account_id: session.account_id.clone(),
                     mailbox: session.mailbox.clone(),
@@ -2779,14 +2821,11 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                     return write_line(writer, &fetch_body_failure_line(tag, status)).await;
                 }
             }
-            let meta = match meta_map.get(&uid) {
-                Some(m) => m,
-                None => continue,
-            };
-            let seq = match uid_map.iter().position(|&u| u == uid) {
-                Some(i) => i as u32 + 1,
-                None => continue,
-            };
+            // Same invariant as above: `uid` is in `meta_map`, and (uid_map
+            // being sorted) its sequence number is its rank in that map —
+            // binary search asserts both in one step.
+            let meta = &meta_map[&uid];
+            let seq = uid_map.binary_search(&uid).expect("uid from the view map") as u32 + 1;
             // F6: \Recent is a per-session property of the message.
             let is_recent = session.recent_uids.contains(&uid);
             emit_fetch_response(
@@ -2807,10 +2846,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         // messages in this chunk.
         let mut seen_futures = Vec::new();
         for &uid in chunk {
-            let meta = match meta_map.get(&uid) {
-                Some(m) => m,
-                None => continue,
-            };
+            let meta = &meta_map[&uid];
             let was_seen = meta.flags.clone().unwrap_or_default().seen;
             if sets_seen && !was_seen {
                 let req = SetFlagsRequest {
@@ -2944,26 +2980,26 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
             match ritem {
                 // L11: in UID mode the UID attribute is prepended exactly
                 // once below; an explicit UID item must not add a second.
-                FetchItem::Uid if !is_uid => {
+                FetchLeaf::Uid if !is_uid => {
                     segments.push(FetchSegment::Attr(format!("UID {}", uid)));
                 }
-                FetchItem::Uid => {}
-                FetchItem::Flags => {
+                FetchLeaf::Uid => {}
+                FetchLeaf::Flags => {
                     segments.push(FetchSegment::Attr(format!(
                         "FLAGS {}",
                         format_imap_flags(&flags)
                     )));
                 }
-                FetchItem::InternalDate => {
+                FetchLeaf::InternalDate => {
                     segments.push(FetchSegment::Attr(format!(
                         "INTERNALDATE {}",
                         format_internal_date(meta.internal_date)
                     )));
                 }
-                FetchItem::Rfc822Size => {
+                FetchLeaf::Rfc822Size => {
                     segments.push(FetchSegment::Attr(format!("RFC822.SIZE {}", meta.size)));
                 }
-                FetchItem::Envelope => {
+                FetchLeaf::Envelope => {
                     let env = meta.envelope.clone().unwrap_or_default();
                     segments.push(FetchSegment::Attr(format!(
                         "ENVELOPE {}",
@@ -2971,7 +3007,7 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                     )));
                 }
                 // F5: BODY (bare) / BODYSTRUCTURE — the derived structure.
-                FetchItem::BodyStructure { extended } => {
+                FetchLeaf::BodyStructure { extended } => {
                     let raw = match body {
                         Some(Ok(b)) => &b.body,
                         Some(Err(e)) => {
@@ -2986,7 +3022,7 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         format_body_structure(raw, extended)
                     )));
                 }
-                FetchItem::Body {
+                FetchLeaf::Body {
                     section,
                     peek: _,
                     name,
@@ -3034,7 +3070,6 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         payload,
                     });
                 }
-                FetchItem::Fast | FetchItem::All | FetchItem::Full => {}
             }
         }
     }
@@ -3527,13 +3562,15 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                                 .map(|e| e.cc.iter().any(|a| a.to_lowercase().contains(&term)))
                                 .unwrap_or(false)
                         }),
-                        "BCC" => keep.retain(|m| {
+                        // BCC is the only token left in this group when the
+                        // match above hits the catch-all (SUBJECT..CC are
+                        // enumerated), so the fallback IS the BCC filter.
+                        _ => keep.retain(|m| {
                             m.envelope
                                 .as_ref()
                                 .map(|e| e.bcc.iter().any(|a| a.to_lowercase().contains(&term)))
                                 .unwrap_or(false)
                         }),
-                        _ => {}
                     }
                 }
             }
@@ -3561,13 +3598,15 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                         "BEFORE" => {
                             keep.retain(|m| day_start.map(|t| m.internal_date < t).unwrap_or(true))
                         }
-                        "ON" => keep.retain(|m| {
+                        // ON is the only token left in this group when the
+                        // match above hits the catch-all (SINCE/BEFORE are
+                        // enumerated), so the fallback IS the ON filter.
+                        _ => keep.retain(|m| {
                             day_start
                                 .zip(day_end)
                                 .map(|(s, e)| m.internal_date >= s && m.internal_date <= e)
                                 .unwrap_or(true)
                         }),
-                        _ => {}
                     }
                 }
             }
@@ -5002,14 +5041,33 @@ async fn get_mailbox_status(
 // ── TLS configuration ───────────────────────────────────────────────────────
 
 fn configure_tls(cert_path: Option<&str>, key_path: Option<&str>) -> Result<Option<TlsAcceptor>> {
+    configure_tls_with_defaults(
+        cert_path,
+        key_path,
+        "/opt/apexmail/certs/apexmail.crt",
+        "/opt/apexmail/certs/apexmail.key",
+    )
+}
+
+/// The resolvable-path logic is split from the PEM loading so the
+/// "deployed default exists" arms are exercisable with fixture files (the
+/// production default under /opt is not writable from tests).
+fn configure_tls_with_defaults(
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+    default_cert_path: &str,
+    default_key_path: &str,
+) -> Result<Option<TlsAcceptor>> {
     let cert_path = match cert_path {
         Some(p) => p.to_string(),
         None => {
-            let default = "/opt/apexmail/certs/apexmail.crt".to_string();
-            if std::path::Path::new(&default).exists() {
-                default
+            if std::path::Path::new(default_cert_path).exists() {
+                default_cert_path.to_string()
             } else {
-                warn!("No TLS cert found at {} — running without IMAPS", default);
+                warn!(
+                    "No TLS cert found at {} — running without IMAPS",
+                    default_cert_path
+                );
                 return Ok(None);
             }
         }
@@ -5018,9 +5076,8 @@ fn configure_tls(cert_path: Option<&str>, key_path: Option<&str>) -> Result<Opti
     let key_path = match key_path {
         Some(p) => p.to_string(),
         None => {
-            let default = "/opt/apexmail/certs/apexmail.key".to_string();
-            if std::path::Path::new(&default).exists() {
-                default
+            if std::path::Path::new(default_key_path).exists() {
+                default_key_path.to_string()
             } else {
                 warn!("No TLS key found — running without IMAPS");
                 return Ok(None);
@@ -5730,6 +5787,12 @@ async fn reject_connection(mut stream: TcpStream, reason: &str) {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
+/// Cooperative shutdown signal for the accept loops: fired on Ctrl-C so the
+/// process can stop accepting and exit cleanly instead of being killed
+/// mid-session (previously the loops had no exit path at all, which made the
+/// composition root untestable as well).
+type Shutdown = Arc<tokio::sync::Notify>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -5738,10 +5801,26 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let shutdown: Shutdown = Arc::new(tokio::sync::Notify::new());
+    {
+        let shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("SIGINT received — shutting down");
+            shutdown.notify_waiters();
+        });
+    }
+
+    run(Cli::parse(), shutdown).await
+}
+
+/// Serve IMAP/IMAPS until `shutdown` fires. Split out of `main` so the
+/// startup sequence is exercisable by tests (the accept loops take the
+/// shutdown signal and terminate cleanly).
+async fn run(cli: Cli, shutdown: Shutdown) -> Result<()> {
     let _ =
         rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
-    let cli = Cli::parse();
     let mailstore_auth = InternalServiceAuthInterceptor::from_env()
         .map_err(|error| anyhow::anyhow!("invalid internal mailstore authentication: {error}"))?;
 
@@ -5766,7 +5845,7 @@ async fn main() -> Result<()> {
     // The plaintext IMAP path needs it for STARTTLS upgrade.
     let plaintext_tls_acceptor = tls_acceptor.clone();
 
-    let _imaps = match (imaps_listener, tls_acceptor) {
+    let imaps_task = match (imaps_listener, tls_acceptor) {
         (Some(imaps_listener), Some(acceptor)) => {
             let mailstore = cli.mailstore_addr.clone();
             let mailstore_auth = mailstore_auth.clone();
@@ -5777,6 +5856,7 @@ async fn main() -> Result<()> {
                 mailstore,
                 mailstore_auth,
                 conn_limiter,
+                Arc::clone(&shutdown),
             )))
         }
         _ => None,
@@ -5792,8 +5872,15 @@ async fn main() -> Result<()> {
         mailstore_auth,
         allow_insecure_auth,
         conn_limiter,
+        shutdown,
     )
     .await;
+
+    // The IMAPS loop observes the same shutdown signal; give it a moment to
+    // finish so tests observe a clean teardown.
+    if let Some(imaps_task) = imaps_task {
+        let _ = imaps_task.await;
+    }
     Ok(())
 }
 
@@ -5826,15 +5913,36 @@ async fn bind_listeners(
 /// IMAPS (993) accept loop: implicit TLS. Runs until the listener errors
 /// fatally; each connection is capped by the shared limiter and released
 /// when its task finishes.
+/// Accept seam: production passes the real [`TcpListener`]; tests inject
+/// accept sources that fail deterministically (EMFILE-class errors) without
+/// raw fd tricks, and drive the shutdown arm without sockets.
+trait TcpAccept: Send + 'static {
+    fn accept(
+        &mut self,
+    ) -> impl std::future::Future<Output = std::io::Result<(TcpStream, std::net::SocketAddr)>> + Send;
+}
+
+impl TcpAccept for TcpListener {
+    async fn accept(&mut self) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+        TcpListener::accept(self).await
+    }
+}
+
 async fn run_imaps_accept_loop(
-    imaps_listener: TcpListener,
+    mut imaps_listener: impl TcpAccept,
     acceptor: TlsAcceptor,
     mailstore: String,
     mailstore_auth: InternalServiceAuthInterceptor,
     conn_limiter: Arc<Mutex<ConnectionLimiter>>,
+    shutdown: Shutdown,
 ) {
     loop {
-        match imaps_listener.accept().await {
+        tokio::select! {
+            _ = shutdown.notified() => {
+                info!("IMAPS accept loop shutting down");
+                return;
+            }
+            accepted = imaps_listener.accept() => match accepted {
             Ok((stream, addr)) => {
                 if !conn_limiter.lock().await.try_acquire(addr.ip()) {
                     warn!("IMAPS connection from {} rejected: connection cap", addr);
@@ -5866,6 +5974,7 @@ async fn run_imaps_accept_loop(
                 });
             }
             Err(e) => error!("IMAPS accept error: {}", e),
+            }
         }
     }
 }
@@ -5874,15 +5983,21 @@ async fn run_imaps_accept_loop(
 /// until the listener errors fatally; each connection is capped by the
 /// shared limiter and released when its task finishes.
 async fn run_imap_accept_loop(
-    imap_listener: TcpListener,
+    mut imap_listener: impl TcpAccept,
     plaintext_tls_acceptor: Option<TlsAcceptor>,
     mailstore: String,
     mailstore_auth: InternalServiceAuthInterceptor,
     allow_insecure_auth: bool,
     conn_limiter: Arc<Mutex<ConnectionLimiter>>,
+    shutdown: Shutdown,
 ) {
     loop {
-        match imap_listener.accept().await {
+        tokio::select! {
+            _ = shutdown.notified() => {
+                info!("IMAP accept loop shutting down");
+                return;
+            }
+            accepted = imap_listener.accept() => match accepted {
             Ok((stream, addr)) => {
                 if !conn_limiter.lock().await.try_acquire(addr.ip()) {
                     warn!("IMAP connection from {} rejected: connection cap", addr);
@@ -5914,6 +6029,7 @@ async fn run_imap_accept_loop(
                 });
             }
             Err(e) => error!("IMAP accept error: {}", e),
+            }
         }
     }
 }
@@ -6403,10 +6519,10 @@ mod tests {
             client_io.write_all(b"a1 LOGIN {5}\r\n").await.unwrap();
             let mut buf = [0u8; 64];
             let n = client_io.read(&mut buf).await.unwrap();
+            let got = String::from_utf8_lossy(&buf[..n]).to_string();
             assert!(
-                String::from_utf8_lossy(&buf[..n]).starts_with('+'),
-                "expected continuation prompt, got {:?}",
-                String::from_utf8_lossy(&buf[..n])
+                got.starts_with('+'),
+                "expected continuation prompt, got {got:?}"
             );
             client_io
                 .write_all(b"admin {6}\r\nsecret\r\n")
@@ -6449,12 +6565,8 @@ mod tests {
             // EOF once the server side of the duplex is dropped below.
             let mut buf = [0u8; 16];
             let n = client_io.read(&mut buf).await.unwrap();
-            assert_eq!(
-                n,
-                0,
-                "unexpected data: {:?}",
-                String::from_utf8_lossy(&buf[..n])
-            );
+            let unexpected = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert_eq!(n, 0, "unexpected data: {unexpected:?}");
         });
 
         let (tag, cmd, args, literals) = read_command(&mut reader, &mut server_w)
@@ -6883,6 +6995,43 @@ mod tests {
         assert_eq!(out, "* 1 FETCH (UID 9)\r\n");
     }
 
+    // ── RENAME flow guard arms, driven directly against the mock API ──
+
+    #[tokio::test]
+    async fn rename_flow_with_an_empty_source_finishes_immediately() {
+        let mut mock = MockRenameApi::new(vec![]);
+        let result = rename_mailbox_flow(&mut mock, "acct", "Old", "New").await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(mock.created, vec!["New".to_string()]);
+        assert_eq!(mock.list_calls, 2, "one page walk + the completeness check");
+        assert_eq!(mock.deleted, vec!["Old".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn rename_flow_stops_at_a_zero_uid_boundary() {
+        // A page whose oldest UID is 0 ends the walk defensively (UIDs are
+        // 1-based; 0 must not loop forever).
+        let mut mock = MockRenameApi::new(vec![0; 100_000]);
+        let result = rename_mailbox_flow(&mut mock, "acct", "Old", "New").await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn rename_flow_gives_up_after_the_page_budget() {
+        let mut mock = MockRenameApi::new(vec![]);
+        mock.stubborn = true;
+        let result = rename_mailbox_flow(&mut mock, "acct", "Old", "New").await;
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.contains("too many pages")),
+            "the source never drains: {result:?}"
+        );
+        // The source mailbox is NOT deleted after a failed rename.
+        assert_eq!(mock.deleted, Vec::<String>::new());
+    }
+
     // ── B: RENAME flow against a mock mailstore ────────────────────────────
 
     struct MockRenameApi {
@@ -6897,6 +7046,9 @@ mod tests {
         /// Simulate a swallowed/failed removal: move "succeeds" but this UID
         /// stays in the source.
         keep_in_source: Option<u64>,
+        /// Ignore the stored UIDs and always report a FULL page of the same
+        /// UID (the source never drains) — drives the page-cap guard.
+        stubborn: bool,
     }
 
     impl MockRenameApi {
@@ -6909,6 +7061,7 @@ mod tests {
                 list_calls: 0,
                 fail_move_for: None,
                 keep_in_source: None,
+                stubborn: false,
             }
         }
     }
@@ -6932,6 +7085,10 @@ mod tests {
             limit: u32,
         ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<u64>>> {
             self.list_calls += 1;
+            if self.stubborn {
+                // A source that never drains: the same full page, forever.
+                return Box::pin(std::future::ready(Ok(vec![7u64; 100_000])));
+            }
             // Mimic the real backend: the NEWEST `limit` UIDs within
             // [uid_min, uid_max], returned ascending.
             let in_range: Vec<u64> = self
@@ -6953,6 +7110,9 @@ mod tests {
             _dest: &str,
             uids: Vec<u64>,
         ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
+            if self.stubborn {
+                return Box::pin(std::future::ready(Ok(())));
+            }
             if let Some(doomed) = self.fail_move_for {
                 if uids.contains(&doomed) {
                     return Box::pin(std::future::ready(Err(anyhow::anyhow!(
@@ -7057,23 +7217,23 @@ mod tests {
         assert_eq!(
             expanded,
             vec![
-                FetchItem::Flags,
-                FetchItem::InternalDate,
+                FetchLeaf::Flags,
+                FetchLeaf::InternalDate,
                 // RFC 3501 §6.4.5: FULL = ALL + BODY, and ALL includes
                 // RFC822.SIZE.
-                FetchItem::Rfc822Size,
-                FetchItem::Envelope,
-                FetchItem::BodyStructure { extended: true },
+                FetchLeaf::Rfc822Size,
+                FetchLeaf::Envelope,
+                FetchLeaf::BodyStructure { extended: true },
             ]
         );
         // The ALL macro on its own carries RFC822.SIZE too.
         assert_eq!(
             resolve_macro_item(&FetchItem::All),
             vec![
-                FetchItem::Flags,
-                FetchItem::InternalDate,
-                FetchItem::Rfc822Size,
-                FetchItem::Envelope,
+                FetchLeaf::Flags,
+                FetchLeaf::InternalDate,
+                FetchLeaf::Rfc822Size,
+                FetchLeaf::Envelope,
             ]
         );
         // FULL needs the raw message to derive the structure, but it must
@@ -7109,11 +7269,12 @@ mod tests {
         );
         // Extended adds the extension data (md5, disposition, language,
         // location); a part without Content-Disposition renders NIL.
+        let extended = format_body_structure(raw, true);
         assert!(
-            format_body_structure(raw, true)
-                .starts_with("(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2 NIL NIL NIL NIL)"),
-            "got: {}",
-            format_body_structure(raw, true)
+            extended.starts_with(
+                "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2 NIL NIL NIL NIL)"
+            ),
+            "got: {extended}"
         );
 
         let multipart = concat!(
@@ -7354,14 +7515,17 @@ mod tests {
         limiter.release(ip(1));
         assert!(limiter.try_acquire(ip(1)));
 
-        // Global cap: fill up to the total from distinct IPs.
+        // Global cap: fill up to the total from distinct IPs. The totals are
+        // aligned (10 IPs fill exactly 500 slots), so every acquire here
+        // must succeed — a refusal would mean the accounting is wrong.
         let mut limiter = ConnectionLimiter::default();
         let mut acquired = 0;
         'outer: for n in 1..=254u8 {
             for _ in 0..MAX_CONNECTIONS_PER_IP {
-                if !limiter.try_acquire(ip(n)) {
-                    break 'outer;
-                }
+                assert!(
+                    limiter.try_acquire(ip(n)),
+                    "unexpected refusal while filling to the global cap"
+                );
                 acquired += 1;
                 if acquired == MAX_TOTAL_CONNECTIONS {
                     break 'outer;
@@ -7985,11 +8149,10 @@ mod unit_arms {
         {
             let table = AUTH_IP_FAILURES.lock().await;
             let history = table.get(&ip).expect("ip tracked");
+            let len = history.len();
             assert!(
-                history.len() <= AUTH_IP_FAILURE_LIMIT,
-                "history must be capped at {}, got {}",
-                AUTH_IP_FAILURE_LIMIT,
-                history.len()
+                len <= AUTH_IP_FAILURE_LIMIT,
+                "history must be capped at {AUTH_IP_FAILURE_LIMIT}, got {len}"
             );
         }
         assert!(
@@ -8316,11 +8479,8 @@ mod unit_arms {
         assert!(extract_body_part(raw, "1", false).contains(&b'i'));
         // Part 1 MIME headers.
         let mime = extract_body_part(raw, "1", true);
-        assert!(
-            mime.starts_with(b"Content-Type:"),
-            "{:?}",
-            String::from_utf8_lossy(&mime)
-        );
+        let mime_text = String::from_utf8_lossy(&mime).to_string();
+        assert!(mime.starts_with(b"Content-Type:"), "{mime_text:?}");
         // A numeric part inside a non-multipart message yields the whole text.
         let plain = b"Content-Type: text/plain\r\n\r\nbody";
         assert_eq!(extract_body_part(plain, "1", false), b"body");
@@ -8484,11 +8644,247 @@ mod unit_arms {
         process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
             .await
             .expect("no-diff listing is a no-op");
+        let written = writer.take_output();
         assert!(
-            writer.is_empty(),
-            "an unchanged diff must not write: {:?}",
-            writer.take_output()
+            written.is_empty(),
+            "an unchanged diff must not write: {written:?}"
         );
+    }
+
+    // ── residual pure-helper arms: each line proven with a real input ──────
+
+    #[test]
+    fn parse_sequence_set_skips_empty_parts() {
+        // A double comma yields an empty part, which is skipped rather than
+        // rejected (and rather than parsed as an error).
+        assert_eq!(parse_sequence_set("1,,3").unwrap(), vec![(1, 1), (3, 3)]);
+    }
+
+    #[test]
+    fn format_internal_date_renders_nil_for_out_of_range_timestamps() {
+        assert_eq!(format_internal_date(i64::MAX), "NIL");
+        assert_eq!(format_internal_date(0), "\"01-Jan-1970 00:00:00 +0000\"");
+    }
+
+    #[test]
+    fn format_single_address_handles_empty_and_domainless_addresses() {
+        assert_eq!(format_single_address(""), "NIL");
+        // No '@': the whole address is the mailbox, host empty.
+        let out = format_single_address("bare");
+        assert!(out.contains("\"bare\""), "{out}");
+        assert!(out.contains("NIL NIL"), "{out}");
+    }
+
+    #[test]
+    fn unquote_keeps_unknown_escapes_and_trailing_backslashes() {
+        // Unknown escape: the backslash is preserved verbatim.
+        assert_eq!(unquote("\"a\\nb\""), "a\\nb");
+        // A trailing lone backslash inside the quotes survives verbatim
+        // (the escape has no following character to consume).
+        assert_eq!(unquote("\"abc\\\""), "abc\\");
+    }
+
+    #[test]
+    fn resolve_token_splices_literal_content() {
+        let literals = vec![b"INBOX.lit".to_vec()];
+        assert_eq!(
+            resolve_token("\x01LIT0\x01", &literals),
+            "INBOX.lit",
+            "a literal marker resolves to its spliced content"
+        );
+        // Out-of-range marker: falls back to treating the token as an atom.
+        assert_eq!(resolve_token("\x01LIT9\x01", &literals), "\x01LIT9\x01");
+    }
+
+    #[test]
+    fn modified_b64_decode_honours_the_imap_charset_and_padding() {
+        // '+' (62) and ',' (63) are the modified-base64 digits: a full
+        // 4-digit group decodes to three bytes.
+        assert_eq!(modified_b64_decode("++,,="), Some(vec![0xFB, 0xEF, 0xFF]));
+        // '=' padding is tolerated and stops the decode.
+        assert_eq!(modified_b64_decode("AB=="), Some(vec![0]));
+    }
+
+    #[test]
+    fn imap_utf7_decode_consumes_complete_base64_runs() {
+        // A complete, valid run must be replaced by its UTF-8 content and
+        // the scan must continue past it (both sides decoded).
+        let encoded = imap_utf7_encode("aäb");
+        assert_eq!(imap_utf7_decode(&encoded), "aäb");
+        // Two separate runs in one name.
+        let two = format!("{}x{}", imap_utf7_encode("ä"), imap_utf7_encode("ö"));
+        assert_eq!(imap_utf7_decode(&two), "äxö");
+    }
+
+    #[test]
+    fn combine_list_pattern_treats_a_slash_only_reference_as_empty() {
+        assert_eq!(combine_list_pattern("/", "sent*"), "sent*");
+        assert_eq!(combine_list_pattern("///", "x"), "x");
+    }
+
+    #[test]
+    fn mailbox_astring_escapes_backslashes() {
+        assert_eq!(mailbox_astring("a\\b"), "\"a\\\\b\"");
+    }
+
+    #[tokio::test]
+    async fn command_readers_enforce_the_line_budget() {
+        // read_line_limited: a line longer than MAX_COMMAND_LINE bails.
+        let (client, mut server) = tokio::io::duplex(1 << 16);
+        let mut client = client;
+        let huge = "x".repeat(MAX_COMMAND_LINE + 1);
+        let writer = tokio::spawn(async move {
+            client.write_all(huge.as_bytes()).await.unwrap();
+            client.flush().await.unwrap();
+        });
+        let mut reader = BufReader::new(&mut server);
+        let res = read_line_limited(&mut reader).await;
+        assert!(res.is_err(), "over-budget line must bail");
+        // The client side may still be mid-write when the server bails; the
+        // aborted duplex surfaces as a write error there, not a hang.
+        let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+
+        // read_literal_chunked: the connection stalls mid-literal (EOF)
+        // after only a few of the declared octets arrive.
+        let (client, mut server) = tokio::io::duplex(1 << 16);
+        let mut client = client;
+        let writer = tokio::spawn(async move {
+            client.write_all(b"01234567").await.unwrap();
+            client.flush().await.unwrap();
+            // A brief pause (no read — nothing will ever be written back),
+            // then drop: the server's partial literal surfaces EOF.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            drop(client);
+        });
+        let mut reader = BufReader::new(&mut server);
+        let res = read_literal_chunked(&mut reader, 16).await;
+        assert!(res.is_err(), "EOF mid-literal must bail");
+        let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
+    }
+
+    #[test]
+    fn find_literal_spec_skips_escaped_characters_inside_quotes() {
+        // The backslash keeps the scanner from treating the quoted `{5}` as
+        // a literal spec (and from mis-detecting the quote as closed).
+        assert!(find_literal_spec("x \"a\\\"b\" {5}").is_some());
+    }
+
+    #[test]
+    fn header_and_text_supports_bare_lf_separator() {
+        let raw = b"Subject: x\n\nbody line\n";
+        let (header, text) = header_and_text(raw);
+        assert_eq!(header, b"Subject: x\n\n");
+        assert_eq!(text, b"body line\n");
+    }
+
+    #[test]
+    fn raw_header_value_folds_continuation_lines() {
+        let raw = b"Subject: first\r\n\tcontinued and\r\n more\r\nFrom: a@b.test\r\n\r\n";
+        let subject = raw_header_value(raw, "Subject").expect("subject present");
+        assert_eq!(subject, "first continued and more");
+        // A continuation with no preceding header is ignored.
+        let orphan = b"\r\n folded\r\n\r\n";
+        assert_eq!(raw_header_value(orphan, "Subject"), None);
+    }
+
+    #[test]
+    fn split_part_header_supports_bare_lf_separator() {
+        let part = b"Content-Type: text/plain\n\nbody";
+        let (h, b) = split_part_header(part);
+        assert_eq!(h, b"Content-Type: text/plain\n\n");
+        assert_eq!(b, b"body");
+    }
+
+    #[test]
+    fn split_multipart_tolerates_epilogue_variants() {
+        // A closing delimiter with epilogue content after it: the part
+        // content ends at the delimiter, nothing after it is delivered.
+        let body = b"--b\r\nX: y\r\n\r\nA\r\n--b--\r\nepilogue junk";
+        let parts = split_multipart(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content, b"A");
+        // A malformed trailing delimiter (extra junk glued to the close)
+        // is NOT a close: without a valid close nothing is delivered.
+        let body = b"--b\r\nX: y\r\n\r\nA\r\n--b--junk\r\n";
+        assert!(split_multipart(body, "b").is_empty());
+    }
+
+    #[test]
+    fn extract_body_part_rejects_malformed_part_numbers() {
+        let raw =
+            b"Content-Type: multipart/mixed; boundary=\"bb\"\r\n\r\n--bb\r\n\r\none\r\n--bb--\r\n";
+        // A non-numeric component.
+        assert!(extract_body_part(raw, "1.a", false).is_empty());
+        // Part number zero does not exist in MIME numbering.
+        assert!(extract_body_part(raw, "0", false).is_empty());
+        // A deep numbering path with no such part.
+        assert!(extract_body_part(raw, "9.9.9", false).is_empty());
+        assert!(extract_body_part(raw, "1.1", false).is_empty());
+    }
+
+    #[test]
+    fn format_disposition_field_defaults_to_inline() {
+        let region = b"Content-Type: text/plain\r\nContent-Disposition: ; filename=x\r\n\r\nbody";
+        let out = format_disposition_field(region);
+        assert!(out.contains("\"INLINE\""), "{out}");
+        assert!(out.contains("\"FILENAME\" \"x\""), "{out}");
+    }
+
+    #[test]
+    fn embedded_envelope_extracts_comma_separated_address_lists() {
+        let inner = b"From: sender@x.test\r\nTo: a@x.test, b@y.test\r\nSubject: s\r\n\r\nbody";
+        let env = embedded_envelope(inner);
+        assert_eq!(env.to, vec!["a@x.test".to_string(), "b@y.test".to_string()]);
+    }
+
+    #[test]
+    fn format_structure_region_defaults_to_text_plain_without_content_type() {
+        let region = b"From: a@b.test\r\n\r\nbody";
+        let out = format_structure_region(region, true);
+        assert!(
+            out.starts_with("(\"TEXT\" \"PLAIN\""),
+            "missing Content-Type must default to TEXT PLAIN: {out}"
+        );
+    }
+
+    #[test]
+    fn format_body_structure_inlines_embedded_message_envelope() {
+        let raw = b"Content-Type: multipart/mixed; boundary=\"mm\"\r\n\r\n--mm\r\nContent-Type: message/rfc822\r\n\r\nFrom: inner@x.test\r\nSubject: inner\r\n\r\ninner body\r\n--mm--\r\n";
+        let out = format_body_structure(raw, true);
+        assert!(
+            out.contains("\"MESSAGE\" \"RFC822\""),
+            "embedded message part: {out}"
+        );
+        assert!(
+            out.contains("(NIL NIL \"inner\" \"x.test\")"),
+            "the embedded ENVELOPE is inlined: {out}"
+        );
+    }
+
+    #[test]
+    fn tokenize_fetch_items_splits_top_level_parentheses() {
+        // Parentheses outside brackets delimit items; inside brackets
+        // (HEADER.FIELDS lists) they are content.
+        let tokens = tokenize_fetch_items("FLAGS (ENVELOPE) BODY[HEADER.FIELDS (DATE FROM)]");
+        assert_eq!(
+            tokens,
+            vec![
+                "FLAGS".to_string(),
+                "ENVELOPE".to_string(),
+                "BODY[HEADER.FIELDS (DATE FROM)]".to_string(),
+            ]
+        );
+        // parse_fetch_items accepts the parenthesised wire form too.
+        let items = parse_fetch_items("FLAGS (ENVELOPE)").unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn parse_sequence_set_and_literals_stay_within_the_declared_budgets() {
+        // The interval expansion caps are enforced in both modes (already
+        // covered); here: single values and stars normalise sanely.
+        assert_eq!(parse_sequence_set("5").unwrap(), vec![(5, 5)]);
+        assert_eq!(parse_sequence_set("*").unwrap(), vec![(u64::MAX, u64::MAX)]);
     }
 
     /// A writer that records everything written, for asserting on guard arms.

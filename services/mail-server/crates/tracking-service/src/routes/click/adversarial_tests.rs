@@ -289,6 +289,7 @@ fn match_domain_pattern_is_case_insensitive_and_wildcard_scoped() {
 
 #[tokio::test]
 async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -402,6 +403,7 @@ async fn oversized_and_non_http_targets_are_refused() {
 
 #[tokio::test]
 async fn bot_click_still_redirects_but_records_nothing() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -441,6 +443,7 @@ async fn bot_click_still_redirects_but_records_nothing() {
 
 #[tokio::test]
 async fn human_click_on_the_fallback_host_records_even_with_dead_redis() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     // The fallback host is config-authorized; Redis is dead, so the recorder
     // fails — the redirect must STILL happen and the failure must be logged,
     // never swallowed as a fabricated success.
@@ -461,6 +464,7 @@ async fn human_click_on_the_fallback_host_records_even_with_dead_redis() {
 
 #[tokio::test]
 async fn per_link_url_cache_failure_does_not_break_the_redirect() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -517,6 +521,7 @@ async fn per_link_url_cache_failure_does_not_break_the_redirect() {
 
 #[tokio::test]
 async fn redis_cached_verdicts_are_authoritative_without_db() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -564,6 +569,7 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
 
 #[tokio::test]
 async fn database_error_denies_for_one_request_and_caches_nothing() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -606,6 +612,7 @@ async fn database_error_denies_for_one_request_and_caches_nothing() {
 
 #[tokio::test]
 async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
@@ -736,6 +743,7 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
 
 #[tokio::test]
 async fn fallback_host_is_authorized_without_any_database() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
     // A redirect to the configured fallback host needs no DB round-trip and
     // is recorded normally even with a dead DB (the click is on OUR page).
     let Some(redis) = live_redis() else {

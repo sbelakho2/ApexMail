@@ -171,11 +171,15 @@ pub fn extract_client_ip(
     }
 
     // #188:Validate X-Real-IP as a valid IP address before trusting it.
-    // Only reachable when the peer is a trusted proxy.
+    // Only reachable when the peer is a trusted proxy. The value is passed
+    // through the same IPv4-mapped-IPv6 normalisation as the XFF path — a
+    // proxy behind a dual-stack frontend reports `::ffff:a.b.c.d`, and
+    // returning it verbatim split one client across two rate-limit/stats
+    // identities (`::ffff:203.0.113.9` vs `203.0.113.9`).
     if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         let trimmed = xri.trim();
-        if trimmed.parse::<std::net::IpAddr>().is_ok() {
-            return trimmed.to_owned();
+        if let Ok(parsed) = trimmed.parse::<std::net::IpAddr>() {
+            return normalise_ip(parsed).to_string();
         }
         // Invalid IP in header — fall through to socket IP
     }
@@ -429,7 +433,35 @@ pub(crate) mod test_support {
         )
     }
 
-    fn dead_redis_pool() -> deadpool_redis::Pool {
+    /// A state built around an EXPLICIT config (for tests that must flip
+    /// config flags such as the rate limiter).
+    pub(crate) fn state_with_config(
+        cfg: Config,
+        redis: deadpool_redis::Pool,
+        db_url: &str,
+    ) -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy(db_url)
+            .expect("lazy pg pool");
+        let clickhouse = clickhouse::Client::default();
+        let processor = std::sync::Arc::new(EventProcessor::new(
+            db.clone(),
+            redis.clone(),
+            clickhouse,
+            std::time::Duration::from_secs(1),
+        ));
+        AppState::new(
+            TrackingCodec::new(TEST_SECRET),
+            db,
+            redis,
+            processor,
+            BotDetector::new(),
+            cfg,
+        )
+    }
+
+    pub(crate) fn dead_redis_pool() -> deadpool_redis::Pool {
         deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .builder()
             .expect("dead redis builder")
@@ -446,6 +478,114 @@ pub(crate) mod test_support {
             dead_redis_pool(),
             "postgresql://offline:offline@127.0.0.1:1/offline",
         )
+    }
+
+    /// Live-Redis state with the standard skip log centralized: the
+    /// "skipping" line itself is covered by
+    /// [`Self::skip_logging_is_reported_when_redis_is_unconfigured`] (env
+    /// removed) instead of being dead text at every call site.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn live_redis_or_skip(
+        trusted_proxies: &[&str],
+    ) -> Option<(AppState, deadpool_redis::Pool)> {
+        match live_redis_state(trusted_proxies).await {
+            Some(pair) => Some(pair),
+            None => {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                None
+            }
+        }
+    }
+
+    /// Live Redis + Postgres state with the skip log centralized (see
+    /// [`live_redis_or_skip`]).
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn live_redis_pg_or_skip(
+        trusted_proxies: &[&str],
+    ) -> Option<(AppState, deadpool_redis::Pool, sqlx::PgPool)> {
+        match live_redis_pg_state(trusted_proxies).await {
+            Some(triple) => Some(triple),
+            None => {
+                eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL to run");
+                None
+            }
+        }
+    }
+
+    /// Coverage for the centralized skip logs: with the env vars removed,
+    /// both helpers report `None` and print the operator hint.
+    #[tokio::test]
+    async fn skip_logging_is_reported_when_redis_is_unconfigured() {
+        // nextest runs each test in its own process, so removing the env
+        // here cannot race any other test; restore the previous values
+        // anyway so plain `cargo test` whole-process runs stay correct.
+        let saved_redis = std::env::var("TEST_REDIS_URL").ok();
+        let saved_db = std::env::var("TEST_DATABASE_URL").ok();
+        std::env::remove_var("TEST_REDIS_URL");
+        std::env::remove_var("TEST_DATABASE_URL");
+
+        let a = live_redis_or_skip(&[]).await;
+        let b = live_redis_pg_or_skip(&[]).await;
+
+        match (saved_redis, saved_db) {
+            (Some(r), Some(d)) => {
+                std::env::set_var("TEST_REDIS_URL", r);
+                std::env::set_var("TEST_DATABASE_URL", d);
+            }
+            (Some(r), None) => {
+                std::env::set_var("TEST_REDIS_URL", r);
+                std::env::remove_var("TEST_DATABASE_URL");
+            }
+            (None, Some(d)) => {
+                std::env::set_var("TEST_DATABASE_URL", d);
+                std::env::remove_var("TEST_REDIS_URL");
+            }
+            (None, None) => {}
+        }
+
+        assert!(a.is_none(), "no redis configured → None");
+        assert!(b.is_none(), "no redis+db configured → None");
+    }
+
+    /// Cross-process serialization for every test that touches the shared
+    /// Redis DB-8 WAL / suppression-retry keys (`apexmail:events:pending`,
+    /// `apexmail:suppressions:pending`).
+    ///
+    /// The keys are process-global: a processor test's whole-list flush
+    /// drains entries that a concurrently running click/pixel handler test
+    /// is about to assert on (observed as intermittent `got: []` under
+    /// parallel `cargo nextest`). The guard is a SESSION-level Postgres
+    /// advisory lock on a dedicated connection — `cargo nextest` runs every
+    /// test as its own process, so a process-local mutex is not enough.
+    /// Acquired for the test's lifetime; released when the pool drops.
+    /// `None` when no test database is configured (callers soft-skip
+    /// anyway).
+    pub(crate) async fn redis_wal_serial() -> Option<sqlx::PgPool> {
+        let url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TEST_DATABASE_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .and_then(|value| {
+                        value
+                            .rsplit_once('/')
+                            .map(|(server, _)| format!("{server}/postgres"))
+                    })
+            })?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect(&url)
+            .await
+            .ok()?;
+        sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+            .bind("tracking-service:redis-db8-serial")
+            .execute(&pool)
+            .await
+            .ok()?;
+        Some(pool)
     }
 
     /// State wired to the live test Redis (`TEST_REDIS_URL`, workspace
@@ -625,10 +765,10 @@ mod tests {
         const IP: &str = "198.51.100.7";
         let limit = local_fallback_limit(1000);
         for i in 0..limit {
+            let n = i + 1;
             assert!(
                 local_fallback_allows(IP, 1000, 4242),
-                "request {} must be allowed",
-                i + 1
+                "request {n} must be allowed"
             );
         }
         assert!(
@@ -639,5 +779,101 @@ mod tests {
         assert!(local_fallback_allows("198.51.100.8", 1000, 4242));
         // A new minute resets the window.
         assert!(local_fallback_allows(IP, 1000, 4243));
+    }
+
+    /// A trusted proxy may supply X-Real-IP; a bare (non-CIDR) valid IP is
+    /// accepted, an IPv4-mapped IPv6 form is normalised to plain IPv4, and a
+    /// non-IP value is ignored in favour of the socket address.
+    #[tokio::test]
+    async fn x_real_ip_is_validated_and_normalised_for_trusted_proxies() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+
+        // Bare IP: accepted verbatim.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "203.0.113.77".parse().unwrap());
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.5"), &state),
+            "203.0.113.77"
+        );
+
+        // IPv4-mapped IPv6 is normalised to the plain v4 form.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "::ffff:198.51.100.9".parse().unwrap());
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.5"), &state),
+            "198.51.100.9"
+        );
+
+        // A non-IP X-Real-IP is ignored: the (normalised) socket peer wins.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "not-an-ip-at-all".parse().unwrap());
+        assert_eq!(
+            extract_client_ip(&headers, ip("::ffff:10.9.8.7"), &state),
+            "10.9.8.7"
+        );
+    }
+
+    /// The XFF walk stops at the first UNTRUSTED entry (each entry to the
+    /// left is client input) — that first untrusted entry is the client.
+    #[tokio::test]
+    async fn xff_walk_stops_at_the_first_untrusted_hop() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "203.0.113.9, 10.0.0.6, 10.0.0.5".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.5"), &state),
+            "203.0.113.9"
+        );
+    }
+
+    /// The emergency in-process quota (bounded fail-open): past
+    /// EMERGENCY_LOCAL_LIMIT requests from one IP within a Redis outage get
+    /// the rate-limited response, not unlimited admission.
+    #[tokio::test]
+    async fn local_emergency_quota_limits_when_redis_is_down() {
+        // The fallback window keys on the socket IP: over loopback every run
+        // shares 127.0.0.1, and nextest runs this test in its own process, so
+        // the window starts empty here.
+        LOCAL_FALLBACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let mut cfg = test_support::test_config(&[]);
+        cfg.rate_limit.enabled = true;
+        let state = test_support::state_with_config(
+            cfg,
+            test_support::dead_redis_pool(),
+            &test_support::offline_db_url(),
+        );
+        let srv = axum_test::TestServer::new(
+            build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .expect("test server");
+
+        // Drive past the quota: the window is per minute, and a minute
+        // boundary can land mid-loop, so assert that AT LEAST ONE request in
+        // the batch was limited (with 2x the limit sent, any split of the
+        // batch across a boundary still fills one window completely).
+        let total = (EMERGENCY_LOCAL_LIMIT as usize + 20) * 2;
+        let mut limited = 0usize;
+        for _ in 0..total {
+            let resp = srv.get("/health").await;
+            if resp.status_code().as_u16() == 429 {
+                limited += 1;
+            }
+        }
+        assert!(
+            limited > 0,
+            "past the emergency quota the middleware must answer 429"
+        );
+
+        LOCAL_FALLBACK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }

@@ -980,3 +980,269 @@ async fn sse_wrong_tenant_token_cannot_read_another_tenants_channel() {
     let response = sse_head(&state, Some(&format!("Bearer {token_a}")), None, None).await;
     assert_eq!(response.status(), 200);
 }
+
+// ── Residual-arm coverage: preferences faults, dedup side channels, click
+//    logging paths ──────────────────────────────────────────────────────────
+
+/// `prefs_post` against hostile database states: a bad token (400), a dead
+/// database at BEGIN (500), a deferred trigger fault at COMMIT (500), a
+/// dropped table at UPDATE (500) — and the no-op submission that never
+/// touches the database at all.
+#[tokio::test]
+async fn prefs_post_survives_database_faults() {
+    let Some(db) = canonical_pool("tracking_prefs_faults").await else {
+        return;
+    };
+    let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+        return;
+    };
+    let redis = env_pool();
+    let tenant = unique("tn_pfault");
+    seed_tenant(&db, &tenant).await;
+    let recipient = "pfault@example.com";
+    sqlx::query(
+        "INSERT INTO email_categories (tenant_id, name, description, active, display_order)
+         VALUES ($1, 'marketing', 'Promotions', true, 0),
+                ($1, 'product',   'Product news', true, 1)",
+    )
+    .bind(&tenant)
+    .execute(&db)
+    .await
+    .unwrap();
+    let state = state_with(db.clone(), redis.clone(), test_config(&redis_url, ""));
+    let srv = server(&state).await;
+    let token = codec()
+        .generate_preferences_token(&tenant, recipient)
+        .expect("prefs token");
+
+    // (a) A token that fails the shape check → 400 JSON, never a panic.
+    let response = srv
+        .post("/p/not$$a$$valid$$shape")
+        .form(&[("category_marketing", "false")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 400);
+    assert!(response.text().contains("Invalid token"));
+
+    // (b) Dead database: BEGIN fails → 500 JSON.
+    let dead_db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+        .unwrap();
+    let dead_srv = server(&state_with(
+        dead_db,
+        redis.clone(),
+        test_config(&redis_url, ""),
+    ))
+    .await;
+    let response = dead_srv
+        .post(&format!("/p/{token}"))
+        .form(&[("category_marketing", "false")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 500);
+
+    // (c) COMMIT-time fault: a DEFERRED constraint trigger raises exactly
+    //     when the transaction commits.
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION prefs_deferred_fault() RETURNS trigger AS $$
+         BEGIN RAISE EXCEPTION 'deferred prefs fault'; END;
+         $$ LANGUAGE plpgsql",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER prefs_deferred_fault_trg
+         AFTER INSERT ON subscription_preferences
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW EXECUTE FUNCTION prefs_deferred_fault()",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let response = srv
+        .post(&format!("/p/{token}"))
+        .form(&[("category_product", "false")])
+        .await;
+    assert_eq!(
+        response.status_code().as_u16(),
+        500,
+        "commit fault surfaces"
+    );
+    let committed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM subscription_preferences WHERE tenant_id = $1 AND email = $2",
+    )
+    .bind(&tenant)
+    .bind(recipient)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(committed, 0, "the faulted transaction rolled back cleanly");
+    sqlx::query("DROP TRIGGER prefs_deferred_fault_trg ON subscription_preferences")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // (d) Table gone: the batch UPDATE fails → 500 JSON.
+    sqlx::query("DROP TABLE subscription_preferences CASCADE")
+        .execute(&db)
+        .await
+        .unwrap();
+    let response = srv
+        .post(&format!("/p/{token}"))
+        .form(&[("category_marketing", "false")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 500);
+
+    // (e) A submission with no recognised fields never opens a transaction:
+    //     still a clean redirect even with the table gone.
+    let response = srv
+        .post(&format!("/p/{token}"))
+        .form(&[("unrelated", "value")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 303);
+}
+
+/// The dedup side channels (mark on record, clear on resubscribe) are
+/// best-effort: a dead Redis must not fail the operation itself.
+#[tokio::test]
+async fn dedup_side_channels_survive_a_dead_redis() {
+    let Some(db) = canonical_pool("tracking_dedup_dead").await else {
+        return;
+    };
+    let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+        return;
+    };
+    let state = state_with(db.clone(), dead_redis(), test_config(&redis_url, ""));
+    let srv = server(&state).await;
+
+    let tenant = unique("tn_dedupdead");
+    seed_tenant(&db, &tenant).await;
+    let recipient = "dedupdead@example.com";
+
+    // One-click unsubscribe: records durably even though the dedup MARK
+    // cannot reach Redis.
+    let token = codec()
+        .generate_unsubscribe_token_with_message(&tenant, recipient, "m1")
+        .unwrap();
+    let response = srv
+        .post(&format!("/u/{token}"))
+        .text("List-Unsubscribe=One-Click")
+        .await;
+    assert_eq!(response.status_code().as_u16(), 200);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(&tenant)
+            .bind(recipient)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "the suppression landed without dedup marking");
+
+    // Resubscribe: the dedup CLEAR fails the same way — the suppression is
+    // still removed.
+    let prefs_token = codec()
+        .generate_preferences_token(&tenant, recipient)
+        .unwrap();
+    let response = srv
+        .post(&format!("/p/{prefs_token}"))
+        .form(&[("resubscribe_all", "true")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 303);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(&tenant)
+            .bind(recipient)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "resubscribe removes the suppression");
+}
+
+/// A database that cannot record the unsubscribe answers the honest error
+/// page — never a fabricated success.
+#[tokio::test]
+async fn confirm_with_a_dead_database_answers_the_error_page() {
+    let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+        return;
+    };
+    let dead_db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+        .unwrap();
+    let state = state_with(dead_db, env_pool(), test_config(&redis_url, ""));
+    let srv = server(&state).await;
+
+    let token = codec()
+        .generate_unsubscribe_token_with_message("tn_confirmdead", "confirmdead@example.com", "m1")
+        .unwrap();
+    let response = srv
+        .post(&format!("/u/{token}/confirm"))
+        .form(&[("confirm", "true")])
+        .await;
+    assert_eq!(response.status_code().as_u16(), 200);
+    let body = response.text();
+    assert!(
+        body.contains("Something went wrong"),
+        "the error page must not claim success: {body}"
+    );
+}
+
+/// Webhook queueing is best-effort: losing the queue table must not fail
+/// the compliance-critical suppression.
+#[tokio::test]
+async fn webhook_queue_failure_does_not_break_one_click() {
+    let Some(db) = canonical_pool("tracking_webhook_fail").await else {
+        return;
+    };
+    let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+        return;
+    };
+    let tenant = unique("tn_hookfail");
+    seed_tenant(&db, &tenant).await;
+    sqlx::query("DROP TABLE webhook_queue CASCADE")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let state = state_with(db.clone(), env_pool(), test_config(&redis_url, ""));
+    let srv = server(&state).await;
+    let recipient = "hookfail@example.com";
+    let token = codec()
+        .generate_unsubscribe_token_with_message(&tenant, recipient, "m1")
+        .unwrap();
+    let response = srv
+        .post(&format!("/u/{token}"))
+        .text("List-Unsubscribe=One-Click")
+        .await;
+    assert_eq!(response.status_code().as_u16(), 200);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(&tenant)
+            .bind(recipient)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "the suppression is the durable record");
+}
+
+/// A GET with a well-shaped token that cannot verify hits the decode-failure
+/// arm (error page), and a shape-invalid token hits the classification log.
+#[tokio::test]
+async fn get_with_undecodable_but_valid_shape_token_renders_the_error_page() {
+    let state = state_with(
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://offline:offline@127.0.0.1:1/offline")
+            .unwrap(),
+        dead_redis(),
+        test_config("redis://127.0.0.1:1", ""),
+    );
+    let srv = server(&state).await;
+    // Alphanumeric (valid shape) but garbage cryptographically.
+    let response = srv
+        .get("/u/AAAAABLITblobofciphertextaaaaaaaaaaaaaaaa")
+        .await;
+    assert_eq!(response.status_code().as_u16(), 200);
+    assert!(response.text().contains("Invalid or expired"));
+}

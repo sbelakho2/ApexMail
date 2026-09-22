@@ -109,6 +109,7 @@ async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
 
 #[tokio::test]
 async fn pixel_always_serves_the_exact_gif_with_locked_headers_and_no_pii() {
+    let _wal_serial = test_support::redis_wal_serial().await;
     let state = test_support::offline_state(&[]);
     let addr = addr();
 
@@ -157,6 +158,7 @@ async fn pixel_always_serves_the_exact_gif_with_locked_headers_and_no_pii() {
 
 #[tokio::test]
 async fn pixel_records_human_opens_once_and_hostile_or_bot_hits_never() {
+    let _wal_serial = test_support::redis_wal_serial().await;
     let _guard = SERIAL.lock().await;
     let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
         eprintln!("skipping: set TEST_REDIS_URL");
@@ -257,6 +259,7 @@ async fn pixel_records_human_opens_once_and_hostile_or_bot_hits_never() {
 
 #[tokio::test]
 async fn pixel_gif_alternative_route_records_only_with_t_param() {
+    let _wal_serial = test_support::redis_wal_serial().await;
     let _guard = SERIAL.lock().await;
     let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
         eprintln!("skipping: set TEST_REDIS_URL");
@@ -300,6 +303,7 @@ async fn pixel_gif_alternative_route_records_only_with_t_param() {
 
 #[tokio::test]
 async fn open_recorder_concurrency_bound_drops_excess_opens() {
+    let _wal_serial = test_support::redis_wal_serial().await;
     let _guard = SERIAL.lock().await;
     let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
         eprintln!("skipping: set TEST_REDIS_URL");
@@ -383,7 +387,7 @@ async fn health_reports_shutdown_state_and_ready_checks_both_dependencies() {
     assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
 
     // Both alive → ready.
-    if let Some(url) = std::env::var("TEST_REDIS_URL").ok() {
+    if let Ok(url) = std::env::var("TEST_REDIS_URL") {
         let live_redis = deadpool_redis::Config::from_url(&url)
             .builder()
             .expect("builder")
@@ -469,4 +473,61 @@ fn state_over(db: sqlx::PgPool, redis: deadpool_redis::Pool) -> AppState {
         BotDetector::new(),
         cfg,
     )
+}
+
+/// With a DEBUG subscriber installed, the invalid-token warn's FIELD
+/// expressions evaluate (tracing lazily formats only for enabled events) and
+/// the response is still the byte-exact GIF.
+#[tokio::test]
+async fn invalid_pixel_token_warns_with_a_truncated_prefix_and_still_serves() {
+    test_log_subscriber();
+    let state = test_support::offline_state(&[]);
+    let resp = handle_pixel(
+        State(state),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        // Long enough that the logged id_prefix field truncation matters.
+        Path("0123456789abcdef0123456789-not-a-valid-token".to_string()),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = body_bytes(resp).await;
+    assert_eq!(body, TRANSPARENT_GIF, "still the exact GIF");
+}
+
+/// A recorder that cannot enqueue (dead Redis) logs the failure and never
+/// breaks the pixel response.
+#[tokio::test]
+async fn failed_open_recorder_still_serves_the_gif() {
+    test_log_subscriber();
+    let _wal_serial = test_support::redis_wal_serial().await;
+    let state = state_over(
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://offline:offline@127.0.0.1:1/offline")
+            .expect("lazy pool"),
+        test_support::dead_redis_pool(),
+    );
+    let token = tracking_token("tenant_px_fail", "msg_px_fail", "u@example.com");
+    let resp = handle_pixel(
+        State(state),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(token),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = body_bytes(resp).await;
+    assert_eq!(body, TRANSPARENT_GIF, "the GIF is never withheld");
+    // Give the fire-and-forget recorder a moment to fail and log.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+/// Enable a DEBUG-level tracing subscriber so log FIELD expressions (lazily
+/// evaluated only for enabled events) execute in these coverage tests.
+fn test_log_subscriber() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new("tracking_service=debug"))
+        .with_test_writer()
+        .try_init();
 }

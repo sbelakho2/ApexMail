@@ -690,3 +690,151 @@ mod tests {
         });
     }
 }
+
+// -----------------------------------------------------------------------
+
+/// Residual-arm coverage tests (see the crate's test-database
+/// convention in `src/test_db.rs`).
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    use serde_json::{json, Value};
+    // Residual coverage: urgency sanitising, record_signal guards, and the
+    // active_signals store round trip.
+    // -----------------------------------------------------------------------
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+
+    async fn live_pool() -> Option<PgPool> {
+        canonical_test_pool("signals_residual").await
+    }
+
+    #[tokio::test]
+    async fn record_signal_guards_and_active_signals_round_trip() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sig-resid");
+        let account = Uuid::new_v4();
+        // Create the account the FK needs.
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country) \
+                 VALUES ($1, $2, 'Signal Co', 'signal.example.com', 'EE')",
+        )
+        .bind(account)
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("insert account");
+
+        // Input guards.
+        let error = record_signal(&db, "  ", account, "funding", 0.5, None, json!({}), None)
+            .await
+            .expect_err("blank tenant");
+        assert!(error.to_string().contains("tenant_id is required"));
+        let error = record_signal(&db, &tenant, account, "  ", 0.5, None, json!({}), None)
+            .await
+            .expect_err("blank signal type");
+        assert!(error.to_string().contains("signal_type must not be empty"));
+        let error = record_signal(&db, &tenant, account, "funding", 1.5, None, json!({}), None)
+            .await
+            .expect_err("out-of-range strength");
+        assert!(error.to_string().contains("signal strength must be"));
+
+        // A NULL payload becomes {}; an evidence link is stored (the FK
+        // needs a real sales_evidence row).
+        let evidence_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO sales_evidence \
+                     (id, tenant_id, account_id, proposition, confidence, source_kind, observed_at) \
+                 VALUES (gen_random_uuid(), $1, $2, 'signal grounding', 0.8, 'dns_observation', NOW()) \
+                 RETURNING id",
+            )
+            .bind(&tenant)
+            .bind(account)
+            .fetch_one(&db)
+            .await
+            .expect("insert evidence");
+        let id = record_signal(
+            &db,
+            &tenant,
+            account,
+            "funding",
+            0.8,
+            Some(evidence_id),
+            Value::Null,
+            None,
+        )
+        .await
+        .expect("records");
+        let (payload, linked): (Value, Option<Uuid>) =
+            sqlx::query_as("SELECT payload, evidence_id FROM sales_signals WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .expect("signal row");
+        assert_eq!(payload, json!({}));
+        assert_eq!(linked, Some(evidence_id));
+
+        // An already-expired signal exists but is not ACTIVE.
+        let expired = record_signal(
+            &db,
+            &tenant,
+            account,
+            "job_change",
+            0.9,
+            None,
+            json!({"k": 1}),
+            Some(Utc::now() - chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("records expired");
+        let _ = expired;
+
+        let now = Utc::now();
+        let active = active_signals(&db, &tenant, account, now)
+            .await
+            .expect("active");
+        assert_eq!(active.len(), 1, "the expired signal is filtered out");
+        assert_eq!(active[0].signal_type, "funding");
+        assert_eq!(active[0].evidence_id, Some(evidence_id));
+        assert_eq!(active[0].payload, json!({}));
+    }
+
+    #[test]
+    fn urgency_sanitises_hostile_observations() {
+        let now = Utc::now();
+        // A future observation reads as brand new (age <= 0 -> urgency 1).
+        let future = SignalObservation {
+            signal_type: "funding".into(),
+            strength: 1.0,
+            observed_at: now + chrono::Duration::days(30),
+        };
+        assert!((signal_urgency(&future.signal_type, future.observed_at, now) - 1.0).abs() < 1e-6);
+        // A non-finite half-life can never occur for a known type, but an
+        // empty type still yields the default table's answer, and a stale
+        // observation decays toward 0.
+        let stale = SignalObservation {
+            signal_type: "funding".into(),
+            strength: 1.0,
+            observed_at: now - chrono::Duration::days(10_000),
+        };
+        let decayed = signal_urgency(&stale.signal_type, stale.observed_at, now);
+        assert!(decayed < 0.01, "{decayed}");
+        // Combined urgency: empty set is 0, and a hostile strength contributes
+        // nothing.
+        assert_eq!(combined_urgency(&[], now), 0.0);
+        let hostile = SignalObservation {
+            signal_type: "funding".into(),
+            strength: f32::NAN,
+            observed_at: now,
+        };
+        assert_eq!(combined_urgency(&[hostile], now), 0.0);
+        let fresh = SignalObservation {
+            signal_type: "funding".into(),
+            strength: 1.0,
+            observed_at: now,
+        };
+        let both = combined_urgency(&[fresh.clone(), fresh], now);
+        assert!(both > 0.5 && both <= 1.0, "{both}");
+    }
+}

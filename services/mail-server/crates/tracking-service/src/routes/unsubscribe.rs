@@ -1298,6 +1298,21 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
 
+            /// A Redis pool that cannot answer yields no WAL events (and
+            /// never panics) — the reader is diagnostics-only.
+            #[tokio::test]
+            async fn wal_event_reader_tolerates_a_dead_pool() {
+                let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+                    .builder()
+                    .expect("dead redis builder")
+                    .max_size(1)
+                    .runtime(deadpool_redis::Runtime::Tokio1)
+                    .build()
+                    .expect("dead redis pool");
+                let events = wal_unsub_events(&dead, "tn_whatever").await;
+                assert!(events.is_empty());
+            }
+
             async fn cleanup(db: &sqlx::PgPool, redis: &deadpool_redis::Pool, tenant: &str) {
                 let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
                     .bind(tenant)
@@ -1326,8 +1341,9 @@ mod tests {
             /// "unknown".
             #[tokio::test]
             async fn unsubscribe_attribution_legacy_v2_and_unknown() {
-                let Some((state, redis, db)) = test_support::live_redis_pg_state(&[]).await else {
-                    eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL to run");
+                let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+                let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
+                else {
                     return;
                 };
                 let tenant = unique_tenant("f13attr");
@@ -1362,11 +1378,11 @@ mod tests {
                 settle().await;
 
                 let events = wal_unsub_events(&redis, &tenant).await;
+                let first = events.first().cloned().unwrap_or_default();
                 assert_eq!(events.len(), 1, "got: {events:?}");
                 assert!(
-                    events[0].contains(&format!(r#""messageId":"{bcc_new}""#)),
-                    "must attribute to the NEWEST canonical-recipient message (bcc), got: {}",
-                    events[0]
+                    first.contains(&format!(r#""messageId":"{bcc_new}""#)),
+                    "must attribute to the NEWEST canonical-recipient message (bcc), got: {first}"
                 );
 
                 // (2) v2 token: attribution comes from the token itself —
@@ -1424,8 +1440,9 @@ mod tests {
             /// a deliberately stale dedup key (simulating a failed DEL).
             #[tokio::test]
             async fn consent_triple_transition_keeps_final_choice() {
-                let Some((state, redis, db)) = test_support::live_redis_pg_state(&[]).await else {
-                    eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL to run");
+                let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+                let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
+                else {
                     return;
                 };
                 let tenant = unique_tenant("f38triple");
@@ -1511,8 +1528,9 @@ mod tests {
             /// the suppression intact answers success WITHOUT a second event.
             #[tokio::test]
             async fn duplicate_unsubscribe_still_dedupes_events() {
-                let Some((state, redis, db)) = test_support::live_redis_pg_state(&[]).await else {
-                    eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL to run");
+                let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+                let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
+                else {
                     return;
                 };
                 let tenant = unique_tenant("f38dedup");
@@ -1543,8 +1561,9 @@ mod tests {
             /// manual unsubscribe.
             #[tokio::test]
             async fn manual_unsubscribe_requires_post_confirm() {
-                let Some((state, redis, db)) = test_support::live_redis_pg_state(&[]).await else {
-                    eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL to run");
+                let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+                let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
+                else {
                     return;
                 };
                 let tenant = unique_tenant("f39post");

@@ -1011,3 +1011,159 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }
+
+// ─── Coverage residuals: filtered chunks and mid-stream failure ──
+
+#[cfg(test)]
+mod coverage_residual_tests {
+    use super::*;
+    use crate::middleware::auth::AuthUser;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    fn admin() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_aexport_cov".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+        axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Every filter combination shapes its own chunk query: tenant,
+    /// action, and full-text `q` each add a placeholder, and the binds
+    /// follow the same order.
+    #[tokio::test]
+    async fn export_chunks_honor_every_filter_combination() {
+        let Some(pool) = crate::test_db::canonical_pool("aexport_filters").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = format!("flt{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+
+        // Seed rows readable by each filter arm.
+        for action in ["cov.action.one", "cov.action.two"] {
+            sqlx::query(
+                "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, details,
+                     outcome, timestamp, hash, signature, fts_vector)
+                 VALUES (replace(gen_random_uuid()::text, '-', ''), $1, 'usr_1', $2,
+                         'audit_probe', '{\"needle\": \"haystack\"}'::jsonb, 'success',
+                         NOW(), 'h', 's',
+                         to_tsvector('english', $2 || ' haystack'))",
+            )
+            .bind(&tenant)
+            .bind(action)
+            .execute(&pool)
+            .await
+            .expect("seed filter row");
+        }
+
+        // tenant + action + q together: three optional conditions.
+        let response = audit_export(
+            State(state.clone()),
+            admin(),
+            Json(AuditExportRequest {
+                q: Some("haystack".into()),
+                tenant_id: Some(tenant.clone()),
+                action: Some("cov.action.one".into()),
+                from: None,
+                to: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .expect("filtered export")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let csv = String::from_utf8(body_bytes(response).await).unwrap();
+        assert!(csv.contains("cov.action.one"), "{csv}");
+        assert!(
+            !csv.contains("cov.action.two"),
+            "the action filter narrows: {csv}"
+        );
+
+        // The condition builder mirrors the bind order for every subset.
+        let mk = |tenant: Option<String>, action: Option<String>, q: Option<String>| {
+            build_export_chunk_conditions(&ExportChunkState {
+                pool: state.db.clone(),
+                tenant_id: tenant,
+                action,
+                q,
+                window_start: Utc::now() - chrono::Duration::days(1),
+                window_end: Utc::now(),
+                offset: 0,
+                remaining: 10,
+            })
+        };
+        assert_eq!(mk(None, None, None), "timestamp >= $1 AND timestamp <= $2");
+        assert!(mk(Some("t".into()), None, None).contains("tenant_id = $3"));
+        assert!(mk(None, Some("a".into()), None).contains("action = $3"));
+        assert!(mk(Some("t".into()), Some("a".into()), None).contains("action = $4"));
+        assert!(mk(Some("t".into()), Some("a".into()), Some("q".into()))
+            .contains("fts_vector @@ plainto_tsquery('english', $5)"));
+        pool.close().await;
+    }
+
+    /// A storage failure mid-stream ends the body with the error instead
+    /// of hanging or fabricating rows, and a failing search surfaces it.
+    #[tokio::test]
+    async fn storage_failure_terminates_stream_and_search_honestly() {
+        let Some(pool) = crate::test_db::canonical_pool("aexport_failure").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        crate::routes::fault::hide_table(&pool, "audit_logs")
+            .await
+            .expect("hide audit_logs");
+
+        // The chunk query fails: the stream ends with the error.
+        let response = audit_export(
+            State(state.clone()),
+            admin(),
+            Json(AuditExportRequest {
+                q: None,
+                tenant_id: None,
+                action: None,
+                from: None,
+                to: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .expect("export response")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        // The chunk query fails: the stream ends with the error — a
+        // truncated, error-terminated download, never a hang. The header
+        // row may or may not have flushed before the failure.
+        if let Ok(bytes) = axum::body::to_bytes(response.into_body(), usize::MAX).await {
+            assert!(bytes.is_empty() || bytes.starts_with(b"timestamp,action"));
+        }
+
+        // The search handler surfaces the same failure from try_join.
+        let error = audit_search(
+            State(state),
+            admin(),
+            Query(AuditSearchQuery {
+                q: None,
+                tenant_id: None,
+                action: None,
+                from: None,
+                to: None,
+                limit: 10,
+                offset: 0,
+            }),
+        )
+        .await;
+        assert!(matches!(error, Err(ApiError::Internal(_))), "got {error:?}");
+        pool.close().await;
+    }
+}

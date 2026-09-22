@@ -387,4 +387,253 @@ mod tests {
         assert_eq!(plan.limit, 200);
         assert_eq!(plan.offset, 0);
     }
+
+    fn viewer() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_audit_viewer".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn seed_viewer_audit_row(
+        pool: &sqlx::PgPool,
+        tag: &str,
+        user_id: Option<&str>,
+        outcome: &str,
+        details: serde_json::Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id,
+                 details, ip_address, user_agent, outcome, timestamp, hash, signature)
+             VALUES ($1, 'system', $2, $3, 'audit_probe', $3, $4, '127.0.0.1', 'cov-test/1',
+                     $5, NOW(), 'seed-hash', 'seed-sig')",
+        )
+        .bind(format!("cov-audit-{tag}-{}", uuid::Uuid::new_v4().simple()))
+        .bind(user_id)
+        .bind(format!("cov.probe.{tag}"))
+        .bind(details)
+        .bind(outcome)
+        .execute(pool)
+        .await
+        .expect("seed audit row");
+    }
+
+    /// The viewer handler executes its plan against the canonical
+    /// audit_logs table and maps both actor shapes (a user actor and a
+    /// system actor with a NULL user_id) and both details shapes (a
+    /// nested {status, details} envelope and a bare details object).
+    #[tokio::test]
+    async fn list_audit_logs_filters_maps_and_orders_rows() {
+        let Some(pool) = crate::test_db::canonical_pool("audit_viewer_lists").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // A row whose details carry the status/details envelope, with a
+        // user actor → actor_type "user", nested details preferred.
+        seed_viewer_audit_row(
+            &pool,
+            "envelope",
+            Some("usr_actor_1"),
+            "failed",
+            serde_json::json!({
+                "status": "failed",
+                "details": { "reason": "quota" },
+                "other": "kept"
+            }),
+        )
+        .await;
+        // A bare-details row with a NULL user_id → system actor, status
+        // defaults to "success", the whole metadata object is the details.
+        seed_viewer_audit_row(
+            &pool,
+            "bare",
+            None,
+            "success",
+            serde_json::json!({ "reason": "seeded" }),
+        )
+        .await;
+
+        // Every filter column rides the same plan; the default limit comes
+        // from the serde default (no explicit limit in the query string).
+        let params = AuditListQuery {
+            action: None,
+            status: None,
+            tenant_id: Some("system".into()),
+            user_id: None,
+            resource_type: Some("audit_probe".into()),
+            from: None,
+            to: None,
+            limit: 50,
+            offset: 0,
+        };
+        let entries = list_audit_logs(State(state.clone()), viewer(), Query(params))
+            .await
+            .expect("audit list query succeeds");
+
+        let envelope = entries
+            .iter()
+            .find(|e| e.action == "cov.probe.envelope")
+            .expect("envelope row listed");
+        assert_eq!(envelope.status, "failed");
+        assert_eq!(envelope.actor_type, "user");
+        assert_eq!(envelope.actor_id, "usr_actor_1");
+        assert_eq!(envelope.resource, "audit_probe");
+        assert_eq!(envelope.resource_id, envelope.action);
+        assert_eq!(envelope.tenant_id.as_deref(), Some("system"));
+        assert_eq!(envelope.ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(envelope.user_agent.as_deref(), Some("cov-test/1"));
+        assert_eq!(envelope.details["reason"], "quota");
+        // A nested details envelope REPLACES the flat details in the
+        // viewer output — sibling metadata keys are not surfaced.
+        assert_eq!(envelope.details["other"], serde_json::Value::Null);
+
+        let bare = entries
+            .iter()
+            .find(|e| e.action == "cov.probe.bare")
+            .expect("bare row listed");
+        assert_eq!(bare.status, "success", "missing status defaults to success");
+        assert_eq!(bare.actor_type, "system", "NULL user_id is a system actor");
+        assert_eq!(bare.details["reason"], "seeded");
+
+        // Action + status filters narrow to exactly one row; an
+        // exhaustive match on the outcome column.
+        let params = AuditListQuery {
+            action: Some("cov.probe.envelope".into()),
+            status: Some("failed".into()),
+            tenant_id: None,
+            user_id: None,
+            resource_type: None,
+            from: None,
+            to: None,
+            limit: 200,
+            offset: 0,
+        };
+        let entries = list_audit_logs(State(state.clone()), viewer(), Query(params))
+            .await
+            .expect("filtered audit list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "cov.probe.envelope");
+
+        // User-id filter matches the seeded NULL only against absent.
+        let params = AuditListQuery {
+            action: Some("cov.probe.bare".into()),
+            status: None,
+            tenant_id: None,
+            user_id: Some("usr_nobody".into()),
+            resource_type: None,
+            from: None,
+            to: None,
+            limit: 10,
+            offset: 0,
+        };
+        let entries = list_audit_logs(State(state.clone()), viewer(), Query(params))
+            .await
+            .expect("user-filtered audit list");
+        assert!(entries.is_empty(), "NULL user_id never matches a filter");
+
+        // Pagination is applied (limit clamps inside the plan; offset skips).
+        let params = AuditListQuery {
+            action: None,
+            status: None,
+            tenant_id: None,
+            user_id: None,
+            resource_type: Some("audit_probe".into()),
+            from: None,
+            to: None,
+            limit: 1,
+            offset: 1,
+        };
+        let entries = list_audit_logs(State(state), viewer(), Query(params))
+            .await
+            .expect("paginated audit list");
+        assert_eq!(entries.len(), 1, "offset=1&limit=1 leaves one of two rows");
+    }
+
+    /// Malformed window bounds surface as validation errors from the
+    /// handler itself (parse + ordering + width arms).
+    #[tokio::test]
+    async fn list_audit_logs_rejects_bad_windows() {
+        let Some(pool) = crate::test_db::canonical_pool("audit_viewer_windows").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let build = |from: Option<String>, to: Option<String>| AuditListQuery {
+            action: None,
+            status: None,
+            tenant_id: None,
+            user_id: None,
+            resource_type: None,
+            from,
+            to,
+            limit: 10,
+            offset: 0,
+        };
+
+        for params in [
+            build(Some("not-a-timestamp".into()), None),
+            build(None, Some("2026-13-40".into())),
+        ] {
+            let result = list_audit_logs(State(state.clone()), viewer(), Query(params)).await;
+            assert!(
+                matches!(result, Err(ApiError::Validation(_))),
+                "malformed timestamp must be a validation error"
+            );
+        }
+
+        let result = list_audit_logs(
+            State(state.clone()),
+            viewer(),
+            Query(build(
+                Some("2026-02-02T00:00:00Z".into()),
+                Some("2026-02-01T00:00:00Z".into()),
+            )),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Validation(_))));
+
+        let result = list_audit_logs(
+            State(state),
+            viewer(),
+            Query(build(
+                Some("2026-01-01T00:00:00Z".into()),
+                Some("2026-04-15T00:00:00Z".into()),
+            )),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Validation(_))));
+    }
+
+    /// The system-tenant gate fires inside the handler: a customer-tenant
+    /// caller with a wildcard scope is still refused.
+    #[tokio::test]
+    async fn list_audit_logs_refuses_non_system_tenants() {
+        let Some(pool) = crate::test_db::canonical_pool("audit_viewer_gate").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let customer = AuthUser {
+            tenant_id: "ten_customer".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let params = AuditListQuery {
+            action: None,
+            status: None,
+            tenant_id: None,
+            user_id: None,
+            resource_type: None,
+            from: None,
+            to: None,
+            limit: 10,
+            offset: 0,
+        };
+        let result = list_audit_logs(State(state), customer, Query(params)).await;
+        assert!(matches!(result, Err(ApiError::Forbidden(_))));
+    }
 }

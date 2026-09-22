@@ -1785,3 +1785,129 @@ mod tests {
         assert_eq!(EvidenceSourceKind::Manual.as_str(), "manual");
     }
 }
+
+// -----------------------------------------------------------------------
+
+/// Residual-arm coverage tests (see the crate's test-database
+/// convention in `src/test_db.rs`).
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    // Residual coverage: the public wrappers and the persist_evidence store.
+    // -----------------------------------------------------------------------
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+
+    async fn live_pool() -> Option<PgPool> {
+        canonical_test_pool("email_stack_residual").await
+    }
+
+    #[test]
+    fn analysers_surface_the_hostile_policy_and_external_include_arms() {
+        // Each all-mechanism shape produces its own named evidence. The
+        // analyser folds a multi-record response into one policy verdict,
+        // so the shapes are recognised with one record each.
+        let neutral = analyse_spf(&["v=spf1 ?all".to_string()]);
+        assert!(
+            neutral
+                .iter()
+                .any(|row| row.proposition == "spf_policy_neutral"),
+            "{:?}",
+            neutral
+                .iter()
+                .map(|row| row.proposition.as_str())
+                .collect::<Vec<_>>()
+        );
+        let permissive = analyse_spf(&["v=spf1 +all".to_string()]);
+        assert!(permissive
+            .iter()
+            .any(|row| row.proposition == "spf_policy_permissive_all_pass"));
+        // An include that maps to NO known vendor authorises an external
+        // sender (deliverability-critical, named evidence).
+        let external = analyse_spf(&["v=spf1 include:_spf.partner.example.net ~all".to_string()]);
+        assert!(external
+            .iter()
+            .any(|row| row.proposition == "spf_authorizes_external_sender"));
+    }
+
+    #[test]
+    fn dkim_cnames_and_stack_aggregation_corroborate_vendors() {
+        // A CNAME whose target belongs to a vendor's DKIM namespace
+        // implicates that vendor even without a direct selector hit.
+        let cname_only = analyse_dkim(
+            &[],
+            &["example.com.s200-1._domainkey.sendgrid.net".to_string()],
+        );
+        assert!(cname_only
+            .iter()
+            .any(|row| row.proposition == "company_may_use_sendgrid"));
+        // Selector + CNAME for the SAME vendor corroborate into "likely".
+        let corroborated = analyse_dkim(
+            &["s1".to_string()],
+            &["example.com.s200-1._domainkey.sendgrid.net".to_string()],
+        );
+        assert!(corroborated
+            .iter()
+            .any(|row| row.proposition == "company_likely_uses_sendgrid"));
+        // An unknown CNAME target is a custom config: named evidence.
+        let custom = analyse_dkim(&[], &["dkim.example.org".to_string()]);
+        assert!(custom
+            .iter()
+            .any(|row| row.proposition == "custom_dkim_cname_configured"));
+    }
+
+    #[tokio::test]
+    async fn persist_evidence_guards_and_persists_provenance() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("ev-resid");
+        let evidence = evidence(
+            "dmarc_policy_reject",
+            0.9,
+            EvidenceSourceKind::DnsObservation,
+            Utc::now(),
+        );
+
+        // Guards: blank tenant, blank proposition, no subject.
+        let error = persist_evidence(&db, "  ", Some(Uuid::new_v4()), None, &evidence)
+            .await
+            .expect_err("blank tenant");
+        assert!(error.to_string().contains("tenant_id is required"));
+        let blank = Evidence::new("  ", 0.9, EvidenceSourceKind::DnsObservation, Utc::now());
+        let error = persist_evidence(&db, &tenant, Some(Uuid::new_v4()), None, &blank)
+            .await
+            .expect_err("blank proposition");
+        assert!(error.to_string().contains("proposition must not be empty"));
+        let error = persist_evidence(&db, &tenant, None, None, &evidence)
+            .await
+            .expect_err("no subject");
+        assert!(error
+            .to_string()
+            .contains("requires an account_id or contact_id"));
+
+        // A persisted row carries source kind and provenance. The FK
+        // needs a real account row.
+        let account = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country) \
+                 VALUES ($1, $2, 'Evidence Co', 'evidence.example.com', 'EE')",
+        )
+        .bind(account)
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("insert account");
+        let id = persist_evidence(&db, &tenant, Some(account), None, &evidence)
+            .await
+            .expect("persists");
+        let (proposition, source_kind): (String, String) =
+            sqlx::query_as("SELECT proposition, source_kind FROM sales_evidence WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db)
+                .await
+                .expect("evidence row");
+        assert_eq!(proposition, "dmarc_policy_reject");
+        assert!(!source_kind.is_empty());
+    }
+}

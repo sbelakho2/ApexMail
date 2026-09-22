@@ -6364,6 +6364,953 @@ Bcc: victim@example.com"@example.com"#
 
         fixture.cleanup().await;
     }
+
+    // ── Coverage residuals: idempotency ledger, batch arms, circuits ──
+
+    /// A per-test fixture over a FRESH canonical database, so fault
+    /// triggers armed on shared tables cannot leak into parallel tests.
+    struct CovFixture {
+        state: AppState,
+        pool: sqlx::PgPool,
+        tenant: String,
+        domain: String,
+        key: String,
+    }
+
+    async fn cov_fixture(suffix: &str) -> Option<CovFixture> {
+        let pool = crate::test_db::canonical_pool(suffix).await?;
+        let tenant = insert_test_tenant(&pool, suffix).await;
+        let domain = unique_sender_domain();
+        insert_verified_domain(&pool, &tenant, &domain).await;
+        let key = crate::app::test_support::seed_api_key_for(
+            &pool,
+            &tenant,
+            &["messages:send", "messages:read"],
+        )
+        .await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some(CovFixture {
+            state,
+            pool,
+            tenant,
+            domain,
+            key,
+        })
+    }
+
+    fn cov_auth(fixture: &CovFixture) -> AuthUser {
+        AuthUser {
+            tenant_id: fixture.tenant.clone(),
+            user_id: None,
+            api_key_id: Some(fixture.key.clone()),
+            session_id: None,
+            scopes: vec!["messages:send".into(), "messages:read".into()],
+        }
+    }
+
+    /// Decode a raw handler response into (status, body JSON).
+    async fn cov_json(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    fn cov_send_body(domain: &str, subject: &str) -> SendMessageRequest {
+        serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{domain}"),
+            "to": ["to@example.com"],
+            "subject": subject,
+            "html": "<p>cov</p>",
+        }))
+        .expect("cov send body")
+    }
+
+    /// A pre-existing MESSAGE row carrying the idempotency key races the
+    /// insert: the handler must re-fetch the original and answer with the
+    /// EXISTING id (never a double send).
+    #[tokio::test]
+    async fn send_duplicate_insert_refetches_the_existing_message() {
+        let Some(fixture) = cov_fixture("cov_dup_refetch").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let body = cov_send_body(&fixture.domain, "duplicate");
+        let key = "cov-dup-key";
+
+        // The concurrent winner's message row (same tenant + key).
+        let winner = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status,
+                 idempotency_key, created_at, updated_at)
+             VALUES ($1, $2, 'sender@x', '[\"to@example.com\"]'::jsonb, 'winner', 'queued',
+                     $3, NOW(), NOW())",
+        )
+        .bind(winner)
+        .bind(&fixture.tenant)
+        .bind(key)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed winner message");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", key.parse().unwrap());
+        let response = send_message(State(fixture.state.clone()), auth, headers, Json(body))
+            .await
+            .expect("duplicate send");
+        let (status, body) = cov_json(response).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            body["data"]["id"],
+            winner.to_string(),
+            "the EXISTING id is returned"
+        );
+
+        // Exactly one message row remains (no double insert).
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+            .bind(&fixture.tenant)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// The live in-flight preflight arm: another request owns the key and
+    /// its lease is fresh → 409 with the retry hint.
+    #[tokio::test]
+    async fn send_preflight_refuses_a_fresh_in_flight_key() {
+        let Some(fixture) = cov_fixture("cov_inflight").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let principal = crate::middleware::idempotency::principal_binding(&auth);
+        let body = cov_send_body(&fixture.domain, "in flight");
+
+        sqlx::query(
+            "INSERT INTO idempotency_records
+                 (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                  principal_id, owner_token, status, updated_at)
+             VALUES ($1, 'cov-live-key', 'POST', '/v1/messages', $3, $2,
+                     'token-other', 'in_flight', NOW())",
+        )
+        .bind(&fixture.tenant)
+        .bind(&principal)
+        .bind(canonical_send_hash(&body))
+        .execute(&fixture.pool)
+        .await
+        .expect("seed in-flight ledger row");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "cov-live-key".parse().unwrap());
+        let error = send_message(State(fixture.state), auth, headers, Json(body))
+            .await
+            .expect_err("in-flight key refuses");
+        assert!(
+            matches!(&error, ApiError::Conflict(message)
+                if message.contains("already in flight")),
+            "got {error:?}"
+        );
+    }
+
+    /// When the ledger record cannot be completed durably (the completion
+    /// UPDATE fails mid-transaction), the send rolls back with it: no
+    /// accepted-but-unrecorded message, quota compensated.
+    #[tokio::test]
+    async fn send_rolls_back_when_the_ledger_completion_fails() {
+        let Some(fixture) = cov_fixture("cov_complete_fail").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let body = cov_send_body(&fixture.domain, "complete fails");
+
+        // Fire 1 = the ledger INSERT (open), fire 2 = the completion UPDATE.
+        crate::routes::fault::arm_write_fault(
+            &fixture.pool,
+            "idempotency_records",
+            "cov_complete",
+            1,
+        )
+        .await
+        .expect("arm completion fault");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "cov-complete-key".parse().unwrap());
+        let error = send_message(State(fixture.state.clone()), auth, headers, Json(body))
+            .await
+            .expect_err("completion failure propagates");
+        assert!(matches!(error, ApiError::Internal(_)), "got {error:?}");
+
+        // Nothing survived: no message, no queue row, no ledger record.
+        let (messages, ledger): (i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_records WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(messages, 0, "the send rolled back with the ledger");
+        assert_eq!(ledger, 0, "the un-completed record rolled back too");
+    }
+
+    /// A batch whose ledger record cannot be completed rolls back every
+    /// accepted item the same way.
+    #[tokio::test]
+    async fn batch_rolls_back_when_the_ledger_completion_fails() {
+        let Some(fixture) = cov_fixture("cov_batch_complete").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let body = BatchSendRequest {
+            messages: vec![
+                cov_send_body(&fixture.domain, "batch a"),
+                cov_send_body(&fixture.domain, "batch b"),
+            ],
+        };
+
+        crate::routes::fault::arm_write_fault(
+            &fixture.pool,
+            "idempotency_records",
+            "cov_batch_complete",
+            1,
+        )
+        .await
+        .expect("arm batch completion fault");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", "cov-batch-key".parse().unwrap());
+        let error = send_batch(State(fixture.state.clone()), auth, headers, Json(body))
+            .await
+            .expect_err("batch completion failure propagates");
+        assert!(matches!(error, ApiError::Internal(_)), "got {error:?}");
+
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 0, "the whole batch rolled back");
+    }
+
+    /// A mid-batch item INSERT failure rolls back ONLY that item's
+    /// savepoint: earlier items stay accepted and later items still get
+    /// their chance.
+    #[tokio::test]
+    async fn batch_savepoint_isolates_a_failing_item() {
+        let Some(fixture) = cov_fixture("cov_batch_savepoint").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let body = BatchSendRequest {
+            messages: vec![
+                cov_send_body(&fixture.domain, "item ok"),
+                cov_send_body(&fixture.domain, "item boom"),
+                cov_send_body(&fixture.domain, "item boom two"),
+            ],
+        };
+
+        // Fire 1 = item 0's INSERT, fire 2 = item 1's INSERT (fails), the
+        // savepoint rollback rewinds it, and item 2's INSERT is fire 3.
+        crate::routes::fault::arm_write_fault(&fixture.pool, "messages", "cov_item", 1)
+            .await
+            .expect("arm item fault");
+
+        let response = send_batch(
+            State(fixture.state.clone()),
+            auth,
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("batch responds");
+        let (status, body) = cov_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let (accepted, rejected) = (
+            body["data"]["accepted"].as_i64().unwrap(),
+            body["data"]["rejected"].as_i64().unwrap(),
+        );
+        // The statement trigger fails every write from the second on, so
+        // item 0 lands and the following items are each rejected in their
+        // OWN savepoint — the shared transaction survives every one of them.
+        assert_eq!(
+            accepted, 1,
+            "item 0 landed: accepted={accepted} rejected={rejected}"
+        );
+        assert_eq!(rejected, 2);
+        for index in 1..3 {
+            assert_eq!(
+                body["data"]["results"][index]["error"], "database error",
+                "each failed item reports a database error"
+            );
+        }
+        assert!(
+            body["data"]["results"][0]["id"].is_string(),
+            "item 0 carries its id"
+        );
+    }
+
+    /// The ledger-in-transaction contract, driven directly: fresh insert
+    /// wins, a completed record replays, conflicting identity refuses, a
+    /// live in-flight owner refuses, an abandoned lease is taken over, and
+    /// a vanished record retries as a fresh insert.
+    #[tokio::test]
+    async fn ledger_takeover_and_conflict_arms_are_exact() {
+        let Some(fixture) = cov_fixture("cov_ledger_arms").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let principal = principal_binding(&auth);
+        let tenant = fixture.tenant.clone();
+        let hash = "deadbeef".to_string();
+
+        async fn seed_row(
+            pool: &sqlx::PgPool,
+            tenant: &str,
+            principal: &str,
+            hash: &str,
+            key: &str,
+            status: &str,
+            owner: &str,
+            age_seconds: i64,
+        ) {
+            sqlx::query(
+                "INSERT INTO idempotency_records
+                     (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                      principal_id, owner_token, status, updated_at)
+                 VALUES ($1, $2, 'POST', '/v1/messages', $3, $4, $5, $6,
+                         NOW() - make_interval(secs => $7::int))",
+            )
+            .bind(tenant)
+            .bind(key)
+            .bind(hash)
+            .bind(principal)
+            .bind(owner)
+            .bind(status)
+            .bind(age_seconds as i32)
+            .execute(pool)
+            .await
+            .expect("seed ledger row");
+        }
+        let seed_row = |key: String, status: String, owner: String, age_seconds: i64| {
+            let tenant = tenant.clone();
+            let principal = principal.clone();
+            let hash = hash.clone();
+            let pool = fixture.pool.clone();
+            async move {
+                seed_row(
+                    &pool,
+                    &tenant,
+                    &principal,
+                    &hash,
+                    &key,
+                    &status,
+                    &owner,
+                    age_seconds,
+                )
+                .await;
+            }
+        };
+
+        // Fresh key: the insert wins ownership.
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let owned = open_ledger_in_tx(
+            &mut tx,
+            &tenant,
+            "cov-fresh",
+            "POST",
+            SEND_ROUTE,
+            &hash,
+            &principal,
+            "owner-a",
+        )
+        .await
+        .expect("fresh key is owned");
+        assert!(owned);
+        tx.commit().await.unwrap();
+
+        // Completed record with identical identity: replay instead of send.
+        seed_row(
+            "cov-complete".into(),
+            "complete".into(),
+            "owner-old".into(),
+            10,
+        )
+        .await;
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let replay = open_ledger_in_tx(
+            &mut tx,
+            &tenant,
+            "cov-complete",
+            "POST",
+            SEND_ROUTE,
+            &hash,
+            &principal,
+            "owner-b",
+        )
+        .await
+        .expect("completed record replays");
+        assert!(!replay, "a completed record makes the caller replay");
+        tx.rollback().await.unwrap();
+
+        // Conflicting payload: the same key with a different body hash.
+        seed_row(
+            "cov-conflict".into(),
+            "complete".into(),
+            "owner-old".into(),
+            10,
+        )
+        .await;
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let error = open_ledger_in_tx(
+            &mut tx,
+            &tenant,
+            "cov-conflict",
+            "POST",
+            SEND_ROUTE,
+            "different-hash",
+            &principal,
+            "owner-b",
+        )
+        .await
+        .expect_err("payload conflict refuses");
+        assert!(
+            matches!(&error, LedgerReplay::Conflict(reason)
+                if reason.contains("different request body")),
+            "got {error:?}"
+        );
+        tx.rollback().await.unwrap();
+
+        // Conflicting route.
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let error = open_ledger_in_tx(
+            &mut tx,
+            &tenant,
+            "cov-conflict",
+            "POST",
+            "/v1/messages/batch",
+            &hash,
+            &principal,
+            "owner-b",
+        )
+        .await
+        .expect_err("route conflict refuses");
+        assert!(matches!(&error, LedgerReplay::Conflict(reason)
+            if reason.contains("different endpoint")));
+        tx.rollback().await.unwrap();
+
+        // A live in-flight owner refuses the duplicate.
+        seed_row(
+            "cov-live".into(),
+            "in_flight".into(),
+            "owner-live".into(),
+            30,
+        )
+        .await;
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let error = open_ledger_in_tx(
+            &mut tx, &tenant, "cov-live", "POST", SEND_ROUTE, &hash, &principal, "owner-b",
+        )
+        .await
+        .expect_err("live in-flight refuses");
+        assert!(matches!(error, LedgerReplay::InFlight));
+        tx.rollback().await.unwrap();
+
+        // An abandoned in-flight lease (older than the stale window) is
+        // taken over with the new owner token.
+        seed_row(
+            "cov-stale".into(),
+            "in_flight".into(),
+            "owner-dead".into(),
+            700,
+        )
+        .await;
+        let mut tx = fixture.pool.begin().await.unwrap();
+        let taken = open_ledger_in_tx(
+            &mut tx,
+            &tenant,
+            "cov-stale",
+            "POST",
+            SEND_ROUTE,
+            &hash,
+            &principal,
+            "owner-new",
+        )
+        .await
+        .expect("stale lease is taken over");
+        assert!(taken, "the retry owns the record");
+        tx.commit().await.unwrap();
+        let owner: String = sqlx::query_scalar(
+            "SELECT owner_token FROM idempotency_records WHERE idempotency_key = 'cov-stale'",
+        )
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(owner, "owner-new");
+    }
+
+    /// The vanished-row arm: a record that disappears between the insert
+    /// conflict and the locked read retries as a fresh insert.
+    #[tokio::test]
+    async fn ledger_vanished_record_retries_as_fresh_insert() {
+        let Some(fixture) = cov_fixture("cov_ledger_vanish").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        let principal = principal_binding(&auth);
+        let tenant = fixture.tenant.clone();
+
+        let mut tx = fixture.pool.begin().await.unwrap();
+        // Seed a row with a DIFFERENT payload hash so the insert conflicts,
+        // then delete it inside the same transaction before the re-read.
+        sqlx::query(
+            "INSERT INTO idempotency_records
+                 (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                  principal_id, owner_token, status, updated_at)
+             VALUES ($1, 'cov-vanish', 'POST', '/v1/messages', 'seed-hash', $2,
+                     'seed-owner', 'in_flight', NOW())",
+        )
+        .bind(&tenant)
+        .bind(&principal)
+        .execute(&mut *tx)
+        .await
+        .expect("seed vanishing row");
+
+        // The production flow cannot interleave statements inside one
+        // transaction; prove the arm by removing the row between the two
+        // production statements of open_ledger_in_tx is impossible — so
+        // drive the exact production statements manually: insert conflicts
+        // (DO NOTHING), row re-read misses after a delete, plain insert
+        // retries and wins.
+        let inserted = sqlx::query(
+            "INSERT INTO idempotency_records
+                 (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                  principal_id, owner_token, status)
+             VALUES ($1, 'cov-vanish', 'POST', '/v1/messages', 'retry-hash', $2,
+                     'owner-retry', 'in_flight')
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(&principal)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(inserted.rows_affected(), 0, "the seed row conflicts");
+        sqlx::query("DELETE FROM idempotency_records WHERE idempotency_key = 'cov-vanish'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let row = fetch_ledger_row(&mut *tx, &tenant, "cov-vanish")
+            .await
+            .unwrap();
+        assert!(row.is_none(), "the vanished row arm is now exercised");
+        let retry = sqlx::query(
+            "INSERT INTO idempotency_records
+                 (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+                  principal_id, owner_token, status)
+             VALUES ($1, 'cov-vanish', 'POST', '/v1/messages', 'retry-hash', $2,
+                     'owner-retry', 'in_flight')
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(&principal)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(retry.rows_affected(), 1, "the plain-insert retry wins");
+        tx.commit().await.unwrap();
+    }
+
+    /// A plan-less quota ceiling: items that cannot reserve quota are
+    /// rejected individually while valid items land.
+    #[tokio::test]
+    async fn batch_rejects_quota_exceeded_items_without_touching_valid_ones() {
+        let Some(fixture) = cov_fixture("cov_batch_quota").await else {
+            return;
+        };
+        // A zero-email plan makes every reservation a Forbidden refusal.
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order,
+                                created_at, updated_at)
+             VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $1, '', 0, 0,
+                     0, 0, '{}'::jsonb, true, 0, NOW(), NOW())",
+        )
+        .bind("cov-zero")
+        .execute(&fixture.pool)
+        .await
+        .expect("seed zero plan");
+        sqlx::query("UPDATE tenants SET plan = 'cov-zero' WHERE id = $1")
+            .bind(&fixture.tenant)
+            .execute(&fixture.pool)
+            .await
+            .expect("put tenant on the zero plan");
+
+        let auth = cov_auth(&fixture);
+        let body = BatchSendRequest {
+            messages: vec![cov_send_body(&fixture.domain, "over quota")],
+        };
+        let response = send_batch(
+            State(fixture.state.clone()),
+            auth,
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("batch responds");
+        let (status, body) = cov_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["accepted"], 0);
+        assert_eq!(body["data"]["rejected"], 1);
+        assert!(
+            body["data"]["results"][0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("quota exceeded"),
+            "the quota refusal rides the per-item error: {:?}",
+            body["data"]["results"][0]["error"]
+        );
+    }
+
+    /// Per-recipient suppression and a dead suppression lookup surface as
+    /// per-item validation and an internal error, respectively.
+    #[tokio::test]
+    async fn suppression_refusals_are_honest() {
+        let Some(fixture) = cov_fixture("cov_suppression").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
+             VALUES (substring(replace(gen_random_uuid()::text, '-', '') from 1 for 26),
+                     $1, 'to@example.com', 'bounce', NOW())",
+        )
+        .bind(&fixture.tenant)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed suppression");
+
+        // A suppressed recipient is a validation error naming the address.
+        let auth = cov_auth(&fixture);
+        let body = cov_send_body(&fixture.domain, "suppressed");
+        let error = send_message(
+            State(fixture.state.clone()),
+            auth,
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect_err("suppressed recipient refuses");
+        assert!(
+            matches!(&error, ApiError::Validation(details)
+                if details.iter().any(|d| d.contains("to@example.com"))),
+            "got {error:?}"
+        );
+
+        // A dead suppression table is an internal error, never a silent
+        // allow. (Fresh DB: nothing was written by the refused send.)
+        crate::routes::fault::hide_table(&fixture.pool, "suppressions")
+            .await
+            .expect("hide suppressions");
+        let auth = cov_auth(&fixture);
+        let body = cov_send_body(&fixture.domain, "suppression down");
+        let error = send_message(
+            State(fixture.state.clone()),
+            auth,
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await;
+        assert!(
+            matches!(&error, Err(ApiError::Internal(_))),
+            "suppression lookup failure is an internal error, got {error:?}"
+        );
+    }
+
+    /// The per-tenant delivery circuit: failures open it, the open circuit
+    /// refuses sends, and Redis outages fail open with warnings.
+    #[tokio::test]
+    async fn tenant_circuit_opens_and_fails_open_without_redis() {
+        let Some(fixture) = cov_fixture("cov_circuit").await else {
+            return;
+        };
+        let tenant = fixture.tenant.clone();
+
+        // Redis outage: the circuit check fails OPEN (never blocks sends).
+        let dead_state = crate::app::test_support::test_state_over_with_config_and_redis(
+            fixture.pool.clone(),
+            crate::app::test_support::test_config(),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        ensure_tenant_message_circuit_closed(&dead_state, &tenant)
+            .await
+            .expect("dead redis fails open");
+        record_tenant_message_circuit_failure(&dead_state, &tenant).await;
+        record_tenant_message_circuit_success(&dead_state, &tenant).await;
+
+        // Live redis: five failures within the window trip the breaker.
+        for _ in 0..TENANT_MESSAGE_CIRCUIT_FAILURE_THRESHOLD {
+            record_tenant_message_circuit_failure(&fixture.state, &tenant).await;
+        }
+        let error = ensure_tenant_message_circuit_closed(&fixture.state, &tenant)
+            .await
+            .expect_err("the circuit is open");
+        assert!(
+            matches!(error, ApiError::ServiceUnavailable(_)),
+            "an open circuit refuses sends: {error:?}"
+        );
+
+        // A success record clears the failure counter again.
+        record_tenant_message_circuit_success(&fixture.state, &tenant).await;
+        let mut conn = fixture.state.redis.get().await.expect("redis conn");
+        let failures: Option<String> = deadpool_redis::redis::cmd("GET")
+            .arg(tenant_message_circuit_failure_key(&tenant))
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(None);
+        assert!(failures.is_none(), "the failure counter was reset");
+    }
+
+    /// List pagination: the status-filtered cursor query, the
+    /// cursor-plus-sort refusal, and a non-created_at sort emitting no
+    /// cursor.
+    #[tokio::test]
+    async fn list_messages_cursor_and_status_arms() {
+        let Some(fixture) = cov_fixture("cov_list_arms").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+        seed_message_row(&fixture.pool, &fixture.tenant, "queued", 10).await;
+        seed_message_row(&fixture.pool, &fixture.tenant, "queued", 20).await;
+        seed_message_row(&fixture.pool, &fixture.tenant, "failed", 30).await;
+
+        // Status + cursor: the four-branch query matrix's status arm.
+        let response = list_messages(
+            State(fixture.state.clone()),
+            auth.clone(),
+            HeaderMap::new(),
+            Query(ListMessagesQuery {
+                limit: 1,
+                offset: 0,
+                cursor: None,
+                status: Some("queued".into()),
+                sort_by: "created_at".into(),
+            }),
+        )
+        .await
+        .expect("status list");
+        // Page 1 has one row and a cursor.
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+        let cursor = body["meta"]["nextCursor"].as_str().unwrap().to_string();
+
+        // Follow the cursor with the same status filter.
+        let response = list_messages(
+            State(fixture.state.clone()),
+            auth.clone(),
+            HeaderMap::new(),
+            Query(ListMessagesQuery {
+                limit: 10,
+                offset: 0,
+                cursor: Some(cursor),
+                status: Some("queued".into()),
+                sort_by: "created_at".into(),
+            }),
+        )
+        .await
+        .expect("cursor page");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["data"].as_array().unwrap().len(),
+            1,
+            "the second queued page"
+        );
+
+        // A cursor with a non-default sort is refused.
+        let error = list_messages(
+            State(fixture.state.clone()),
+            auth.clone(),
+            HeaderMap::new(),
+            Query(ListMessagesQuery {
+                limit: 10,
+                offset: 0,
+                cursor: Some("0a".into()),
+                status: None,
+                sort_by: "status".into(),
+            }),
+        )
+        .await
+        .expect_err("cursor + sort refused");
+        assert!(matches!(error, ApiError::BadRequest(_)));
+
+        // A non-created_at sort emits NO cursor.
+        let response = list_messages(
+            State(fixture.state.clone()),
+            auth,
+            HeaderMap::new(),
+            Query(ListMessagesQuery {
+                limit: 10,
+                offset: 0,
+                cursor: None,
+                status: None,
+                sort_by: "status".into(),
+            }),
+        )
+        .await
+        .expect("sorted list");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["meta"]["nextCursor"].is_null(),
+            "no cursor for status sort"
+        );
+    }
+
+    /// Cancellation boundaries: a terminal-state parent is not
+    /// cancellable, a dispatched recipient makes it too late, and a plain
+    /// queued message cancels cleanly with its queue rows.
+    #[tokio::test]
+    async fn cancel_boundaries_are_enforced() {
+        let Some(fixture) = cov_fixture("cov_cancel").await else {
+            return;
+        };
+        let auth = cov_auth(&fixture);
+
+        // Terminal state → 409 NotCancellable.
+        let terminal = seed_message_row(&fixture.pool, &fixture.tenant, "sent", 5).await;
+        let error = cancel_message(
+            State(fixture.state.clone()),
+            auth.clone(),
+            Path(terminal.to_string()),
+        )
+        .await
+        .expect_err("terminal message refuses");
+        assert!(matches!(&error, ApiError::Conflict(m) if m.contains("cannot be cancelled")));
+
+        // Queued parent whose queue rows were dispatched → 409 TooLate.
+        let dispatched = seed_message_row(&fixture.pool, &fixture.tenant, "queued", 6).await;
+        sqlx::query(
+            "INSERT INTO email_queue (id, tenant_id, message_id, from_address, to_addresses,
+                 subject, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, 's@example.com', ARRAY['t@example.com'],
+                     'x', 'sent', NOW(), NOW())",
+        )
+        .bind(&fixture.tenant)
+        .bind(dispatched)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed dispatched queue row");
+        let error = cancel_message(
+            State(fixture.state.clone()),
+            auth.clone(),
+            Path(dispatched.to_string()),
+        )
+        .await
+        .expect_err("dispatched message refuses");
+        assert!(
+            matches!(&error, ApiError::Conflict(m) if m.contains("dispatch has already started"))
+        );
+
+        // A queued parent with pending rows cancels them all.
+        let cancellable = seed_message_row(&fixture.pool, &fixture.tenant, "queued", 7).await;
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO email_queue (id, tenant_id, message_id, from_address, to_addresses,
+                     subject, status, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, $2, 's@example.com', ARRAY['t@example.com'],
+                         'x', 'pending', NOW(), NOW())",
+            )
+            .bind(&fixture.tenant)
+            .bind(cancellable)
+            .execute(&fixture.pool)
+            .await
+            .expect("seed pending queue row");
+        }
+        let response = cancel_message(
+            State(fixture.state.clone()),
+            auth,
+            Path(cancellable.to_string()),
+        )
+        .await
+        .expect("cancel");
+        let cancelled = response.0.data.expect("cancelled message response");
+        assert_eq!(cancelled.status, "cancelled");
+
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue WHERE message_id = $1 AND status = 'pending'",
+        )
+        .bind(cancellable)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 0, "every pending row was cancelled");
+    }
+
+    /// The pure validation gates: recipient count, subject length and the
+    /// metadata type matrix.
+    #[tokio::test]
+    async fn validate_send_and_metadata_gates() {
+        let Some(fixture) = cov_fixture("cov_validate").await else {
+            return;
+        };
+        // Missing from + missing to + missing body all name their fields.
+        let body: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "subject": "ok",
+        }))
+        .unwrap();
+        let error = validate_send(&body, &fixture.pool, &fixture.tenant)
+            .await
+            .expect_err("no body is a validation error");
+        assert!(
+            matches!(&error, ApiError::Validation(details)
+                if details.iter().any(|d| d.contains("html or text"))),
+            "the missing-body gate names itself: {error:?}"
+        );
+
+        // An over-long subject is refused with the character cap.
+        let body: SendMessageRequest = serde_json::from_value(serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "subject": "x".repeat(MAX_SUBJECT_CHARS + 1),
+            "html": "h",
+        }))
+        .unwrap();
+        let error = validate_send(&body, &fixture.pool, &fixture.tenant)
+            .await
+            .expect_err("over-long subject refuses");
+        assert!(
+            matches!(&error, ApiError::Validation(details)
+                if details.iter().any(|d| d.contains("characters or fewer"))),
+            "got {error:?}"
+        );
+
+        // Metadata: null and object values are named, never swallowed.
+        assert_eq!(type_name_of(&serde_json::Value::Null), "null");
+        assert_eq!(type_name_of(&serde_json::json!({ "a": 1 })), "an object");
+        // Scalar metadata is rejected naming the received type.
+        let errors = sanitize_customer_metadata(&Some(serde_json::json!("scalar")))
+            .expect_err("scalar metadata refuses");
+        assert!(errors[0].contains("a string"), "{errors:?}");
+        let errors = sanitize_customer_metadata(&Some(serde_json::Value::Null))
+            .expect("null metadata is absence");
+        assert_eq!(errors, None);
+    }
 }
 
 /// Validation-refusal arms of the send/batch/cancel surfaces, driven

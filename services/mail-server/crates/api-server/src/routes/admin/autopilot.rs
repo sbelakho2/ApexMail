@@ -579,4 +579,389 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+
+    // ── Coverage residuals: the live proxy surface ────────────────
+
+    fn system_admin() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_autopilot_cov".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// A real canonical-pool state with the proxy pointed at `base_url`
+    /// and the internal service token armed, so the audit writes land.
+    /// The pool is returned too so assertions can read the audit table.
+    async fn state_with_engine(
+        db_suffix: &str,
+        base_url: &str,
+        token: Option<&str>,
+    ) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::canonical_pool(db_suffix).await?;
+        let mut config = test_config();
+        config.sales_autopilot_base_url = base_url.to_string();
+        config.internal_service_token = token.map(str::to_string);
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
+        Some((state, pool))
+    }
+
+    async fn autopilot_audit_rows(pool: &sqlx::PgPool, action: &str) -> Vec<(String, i64)> {
+        sqlx::query_as(
+            "SELECT details->>'upstreamStatus', COUNT(*)::bigint FROM audit_logs
+             WHERE action = $1 GROUP BY 1",
+        )
+        .bind(action)
+        .fetch_all(pool)
+        .await
+        .expect("read autopilot audit rows")
+    }
+
+    /// A loopback sales-autopilot double that echoes the received request
+    /// (method, path, headers, body) back as JSON.
+    async fn start_mock_autopilot() -> String {
+        use axum::extract::Request;
+
+        async fn echo(request: Request) -> Response {
+            let method = request.method().to_string();
+            let path = request.uri().path().to_string();
+            let api_key = request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let tenant = request
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+                .await
+                .unwrap_or_default();
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            axum::response::IntoResponse::into_response((
+                StatusCode::OK,
+                Json(json!({
+                    "method": method,
+                    "path": path,
+                    "apiKey": api_key,
+                    "tenant": tenant,
+                    "body": body,
+                })),
+            ))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock autopilot");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::runtime::Handle::try_current().expect("test runtime");
+        handle.spawn(async move {
+            let _ = axum::serve(listener, Router::new().fallback(echo)).await;
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn proxy_forwards_every_control_surface_and_audits_mutations() {
+        let base = start_mock_autopilot().await;
+        let Some((state, pool)) =
+            state_with_engine("autopilot_proxy_all", &base, Some("internal-secret")).await
+        else {
+            return;
+        };
+        let admin = system_admin();
+
+        // The four read endpoints forward the upstream JSON verbatim.
+        for (path, upstream) in [
+            ("/control/overview", "/control/overview"),
+            ("/control/decisions", "/control/decisions"),
+            ("/control/exceptions", "/control/exceptions"),
+            ("/control/actions", "/control/actions"),
+        ] {
+            let response = proxy_control_get(&state, path).await.expect("GET forwards");
+            assert!(response.status().is_success(), "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["path"], upstream, "upstream path is preserved");
+            assert_eq!(body["apiKey"], "internal-secret");
+            assert_eq!(body["tenant"], "system");
+        }
+
+        // Mode change: the validated mode is forwarded and audited.
+        let response = post_mode(
+            State(state.clone()),
+            admin.clone(),
+            Json(ModeRequest {
+                mode: "autonomous_guarded".into(),
+            }),
+        )
+        .await
+        .expect("mode forwards");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["path"], "/control/mode");
+        assert_eq!(body["body"]["mode"], "autonomous_guarded");
+
+        // Pause / resume / kill-switch.
+        assert_eq!(
+            post_pause(State(state.clone()), admin.clone())
+                .await
+                .expect("pause")
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_resume(State(state.clone()), admin.clone())
+                .await
+                .expect("resume")
+                .status(),
+            StatusCode::OK
+        );
+        let response = post_kill_switch(
+            State(state.clone()),
+            admin.clone(),
+            Json(KillSwitchRequest { engaged: true }),
+        )
+        .await
+        .expect("kill switch");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["body"]["engaged"], true);
+
+        // Decision review: the outcome and optional note ride the payload.
+        let response = post_decision_review(
+            State(state.clone()),
+            admin.clone(),
+            Path("dec-123".into()),
+            Json(DecisionReviewRequest {
+                outcome: "approved".into(),
+                note: Some("looks safe".into()),
+            }),
+        )
+        .await
+        .expect("review forwards");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["body"]["outcome"], "approved");
+        assert_eq!(body["body"]["note"], "looks safe");
+
+        // Without a note the payload carries only the outcome.
+        let response = post_decision_review(
+            State(state.clone()),
+            admin.clone(),
+            Path("dec-124".into()),
+            Json(DecisionReviewRequest {
+                outcome: "rejected".into(),
+                note: None,
+            }),
+        )
+        .await
+        .expect("review without note");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["body"]["note"], serde_json::Value::Null);
+
+        // Action replay over the same proxy plumbing.
+        let response =
+            post_action_replay(State(state.clone()), admin.clone(), Path("act-1_2".into()))
+                .await
+                .expect("replay forwards");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["path"], "/control/actions/act-1_2/replay");
+
+        // Every mutation left an audit row carrying the upstream status.
+        let mut audited_mutations = 0;
+        for action in [
+            "control_plane.autopilot.mode_changed",
+            "control_plane.autopilot.paused",
+            "control_plane.autopilot.resumed",
+            "control_plane.autopilot.kill_switch_changed",
+            "control_plane.autopilot.decision_reviewed",
+            "control_plane.autopilot.action_replayed",
+        ] {
+            let rows = autopilot_audit_rows(&pool, action).await;
+            assert!(!rows.is_empty(), "{action} must be audited");
+            assert!(
+                rows.iter().all(|(status, _)| status == "200"),
+                "{action} rows carry the upstream status, got {rows:?}"
+            );
+            audited_mutations += rows.iter().map(|(_, n)| n).sum::<i64>();
+        }
+        assert!(audited_mutations >= 6);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn proxy_upstream_failures_are_honest_5xxs() {
+        // Connection refused: a closed loopback port fails fast and the
+        // proxy maps it to ServiceUnavailable.
+        let Some((state, _pool)) =
+            state_with_engine("autopilot_proxy_dead", "http://127.0.0.1:9", None).await
+        else {
+            return;
+        };
+        let result = proxy_control_get(&state, "/control/overview").await;
+        assert!(
+            matches!(result, Err(ApiError::ServiceUnavailable(_))),
+            "unreachable upstream must be a 503, got {result:?}"
+        );
+
+        // The internal token header is omitted entirely when unconfigured —
+        // this call proves that arm (no token configured above).
+        let result = proxy_request(&state, reqwest::Method::GET, "/control/overview", None).await;
+        assert!(
+            matches!(result, Err(ApiError::ServiceUnavailable(_))),
+            "dead upstream cannot yield a response"
+        );
+
+        // A truncated upstream body (headers promise more bytes than are
+        // sent, then the socket closes) is an unreadable response → 503.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind truncating upstream");
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::runtime::Handle::try_current().expect("test runtime");
+        handle.spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // Consume the request first: closing with unread received
+                // data would send an RST (a connect-class failure) instead
+                // of the FIN that truncates the body.
+                let mut request = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+                let _ = socket
+                    .try_write(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                          content-length: 100\r\n\r\n{\"partial\":",
+                    )
+                    .map(|_| ());
+                // Drop → FIN without the promised body.
+            }
+        });
+        let Some((state, pool)) =
+            state_with_engine("autopilot_proxy_trunc", &format!("http://{addr}"), None).await
+        else {
+            return;
+        };
+        let result = proxy_request(&state, reqwest::Method::GET, "/control/overview", None).await;
+        assert!(
+            matches!(&result, Err(ApiError::ServiceUnavailable(message))
+                if message.contains("unreadable")),
+            "truncated upstream body must map to the unreadable-response 503"
+        );
+        pool.close().await;
+    }
+
+    /// Upstream error statuses and content types are forwarded verbatim —
+    /// the CP never rewrites a service error.
+    #[tokio::test]
+    async fn proxy_forwards_upstream_error_status_and_content_type() {
+        use axum::extract::Request;
+
+        async fn broken(_request: Request) -> Response {
+            axum::response::IntoResponse::into_response((
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "engine on fire".to_string(),
+            ))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 503 upstream");
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::runtime::Handle::try_current().expect("test runtime");
+        handle.spawn(async move {
+            let _ = axum::serve(listener, Router::new().fallback(broken)).await;
+        });
+        let Some((state, pool)) =
+            state_with_engine("autopilot_proxy_503", &format!("http://{addr}"), None).await
+        else {
+            return;
+        };
+        let admin = system_admin();
+
+        let response = post_pause(State(state.clone()), admin)
+            .await
+            .expect("pause forwards");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain"),
+            "the upstream content type is preserved"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"engine on fire");
+
+        // The audit entry recorded the attempted change and the upstream
+        // status even though the call failed.
+        let rows = autopilot_audit_rows(&pool, "control_plane.autopilot.paused").await;
+        assert!(
+            rows.iter().any(|(status, _)| status == "503"),
+            "the attempted pause is audited with the upstream 503, got {rows:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Path ids are confined to conservative identifier characters.
+    #[tokio::test]
+    async fn decision_review_refuses_unsafe_path_ids_before_any_upstream_call() {
+        // A configured-but-dead engine: a pass would surface as 503 and
+        // only the validation arm yields 400.
+        let Some((state, pool)) =
+            state_with_engine("autopilot_proxy_ids", "http://127.0.0.1:9", None).await
+        else {
+            return;
+        };
+        let admin = system_admin();
+        for evil in ["../escape", "with space", "", "id;drop", "üñî"] {
+            let result = post_decision_review(
+                State(state.clone()),
+                admin.clone(),
+                Path(evil.to_string()),
+                Json(DecisionReviewRequest {
+                    outcome: "approved".into(),
+                    note: None,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(ApiError::Validation(_))),
+                "id {evil:?} must be refused, got {result:?}"
+            );
+        }
+        let result = post_action_replay(State(state.clone()), admin, Path("%2e%2e".into())).await;
+        assert!(matches!(result, Err(ApiError::Validation(_))));
+        pool.close().await;
+    }
 }

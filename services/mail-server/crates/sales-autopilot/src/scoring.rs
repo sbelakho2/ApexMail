@@ -2061,3 +2061,154 @@ mod tests {
         assert_eq!(reason_code_points(""), None);
     }
 }
+
+// -----------------------------------------------------------------------
+
+/// Residual-arm coverage tests (see the crate's test-database
+/// convention in `src/test_db.rs`).
+#[cfg(test)]
+mod residual_tests {
+    use super::*;
+    // Residual coverage: hostile feature validation, rank bands, dimension
+    // clamping, persist guards and the latest_for_account round trip.
+    // -----------------------------------------------------------------------
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+
+    async fn live_pool() -> Option<PgPool> {
+        canonical_test_pool("scoring_residual").await
+    }
+
+    #[tokio::test]
+    async fn validate_features_rejects_hostile_inputs() {
+        // An inverted employee band, a NaN evidence age and an empty intent
+        // signal type are each refused outright.
+        let error = validate_features(&ScoreFeatures {
+            ideal_employees_min: 500,
+            ideal_employees_max: 10,
+            ..ScoreFeatures::default()
+        })
+        .expect_err("inverted band");
+        assert!(
+            error.to_string().contains("ideal employee band inverted"),
+            "{error}"
+        );
+
+        let error = validate_features(&ScoreFeatures {
+            evidence: EvidenceFeatures {
+                count: 1,
+                mean_confidence: 0.9,
+                newest_age_days: Some(f32::NAN),
+            },
+            ..ScoreFeatures::default()
+        })
+        .expect_err("NaN age");
+        assert!(
+            error.to_string().contains("newest_age_days must be finite"),
+            "{error}"
+        );
+
+        let error = validate_features(&ScoreFeatures {
+            intent_signals: vec![SignalObservation {
+                signal_type: "  ".to_string(),
+                strength: 0.5,
+                observed_at: Utc::now(),
+            }],
+            ..ScoreFeatures::default()
+        })
+        .expect_err("empty signal type");
+        assert!(
+            error.to_string().contains("signal_type must not be empty"),
+            "{error}"
+        );
+        // A negative employee count is refused too.
+        let error = validate_features(&ScoreFeatures {
+            employees: Some(-1),
+            ..ScoreFeatures::default()
+        })
+        .expect_err("negative employees");
+        assert!(
+            error.to_string().contains("employees must be >= 0"),
+            "{error}"
+        );
+
+        // The pure scorer NEVER panics on the same hostile shapes: it
+        // sanitises (clamps to the documented bands) instead.
+        let hostile = ScoreFeatures {
+            employees: Some(i64::MAX),
+            ..ScoreFeatures::default()
+        };
+        let sanitized = score(&hostile);
+        assert!(sanitized.total.is_finite());
+    }
+
+    #[tokio::test]
+    async fn persist_and_latest_round_trip_per_account() {
+        let Some(db) = live_pool().await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("score-resid");
+        let account = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country) \
+                 VALUES ($1, $2, 'Score Co', 'score.example.com', 'EE')",
+        )
+        .bind(account)
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("insert account");
+
+        // Guards on persist.
+        let error = persist(&db, "  ", account, None, &OpportunityScore::default())
+            .await
+            .expect_err("blank tenant");
+        assert!(error.to_string().contains("tenant_id is required"));
+        let error = persist(&db, &tenant, account, None, &OpportunityScore::default())
+            .await
+            .expect_err("blank version");
+        assert!(error
+            .to_string()
+            .contains("scoring_version must not be empty"));
+
+        // latest_for_account with nothing stored is None.
+        assert!(latest_for_account(&db, &tenant, account)
+            .await
+            .unwrap()
+            .is_none());
+
+        // Persist one score and read it back with every dimension intact.
+        let score = OpportunityScore {
+            account_fit: 80.0,
+            persona_fit: 60.0,
+            need_fit: 55.0,
+            intent: 40.0,
+            timing: 30.0,
+            email_stack_fit: 90.0,
+            eu_residency_fit: 100.0,
+            reachability: 70.0,
+            evidence_quality: 65.0,
+            legal_contactability: 100.0,
+            risk: 10.0,
+            p_qualified_reply: 0.2,
+            p_meeting: 0.1,
+            p_paid: 0.05,
+            expected_value_eur: 1234.5,
+            total: 66.6,
+            reason_codes: vec!["strong_email_stack".to_string()],
+            scoring_version: "residual-test".to_string(),
+        };
+        persist(&db, &tenant, account, None, &score)
+            .await
+            .expect("persists");
+        let loaded = latest_for_account(&db, &tenant, account)
+            .await
+            .expect("loads")
+            .expect("a score exists");
+        assert!((loaded.total - 66.6).abs() < 0.01, "{loaded:?}");
+        assert_eq!(loaded.scoring_version, "residual-test");
+        assert_eq!(loaded.reason_codes, vec!["strong_email_stack".to_string()]);
+        assert!((loaded.expected_value_eur - 1234.5).abs() < 0.01);
+        assert!((loaded.account_fit - 80.0).abs() < 0.01);
+    }
+}

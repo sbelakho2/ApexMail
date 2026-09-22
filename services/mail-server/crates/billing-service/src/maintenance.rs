@@ -43,6 +43,18 @@ const INVOICE_ARCHIVE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); //
 /// soon enough to land before the reconciliation report is read.
 const DERIVED_USAGE_SWEEP_INITIAL_DELAY: Duration = Duration::from_secs(90 * 60);
 
+/// Operational override for the periodic-task intervals above. When set,
+/// EVERY loop ticks on this many milliseconds instead of its production
+/// cadence — so integration tests (and ops smoke-checks) can drive the real
+/// spawned loops in milliseconds. Unset keeps the production intervals.
+fn task_interval(default: Duration) -> Duration {
+    std::env::var("PERIODIC_TASK_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.max(10)))
+        .unwrap_or(default)
+}
+
 static DEDICATED_IP_TABLE_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
@@ -65,8 +77,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
 
         let mut interval = interval_at(
-            Instant::now() + DEDICATED_IP_TASK_INTERVAL,
-            DEDICATED_IP_TASK_INTERVAL,
+            Instant::now() + task_interval(DEDICATED_IP_TASK_INTERVAL),
+            task_interval(DEDICATED_IP_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -99,8 +111,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         .await;
 
         let mut interval = interval_at(
-            Instant::now() + METERING_TASK_INTERVAL,
-            METERING_TASK_INTERVAL,
+            Instant::now() + task_interval(METERING_TASK_INTERVAL),
+            task_interval(METERING_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -124,8 +136,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let wallet_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
-            Instant::now() + WALLET_CLEANUP_INTERVAL,
-            WALLET_CLEANUP_INTERVAL,
+            Instant::now() + task_interval(WALLET_CLEANUP_INTERVAL),
+            task_interval(WALLET_CLEANUP_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -148,8 +160,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     tokio::spawn(async move {
         let client = Client::new();
         let mut interval = interval_at(
-            Instant::now() + USAGE_ALERT_TASK_INTERVAL,
-            USAGE_ALERT_TASK_INTERVAL,
+            Instant::now() + task_interval(USAGE_ALERT_TASK_INTERVAL),
+            task_interval(USAGE_ALERT_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -175,8 +187,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let cost_margin_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
-            Instant::now() + COST_MARGIN_TASK_INTERVAL,
-            COST_MARGIN_TASK_INTERVAL,
+            Instant::now() + task_interval(COST_MARGIN_TASK_INTERVAL),
+            task_interval(COST_MARGIN_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -219,8 +231,11 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         let next_run = next_day_start(Utc::now());
         let initial_delay = (next_run - Utc::now())
             .to_std()
-            .unwrap_or(DAILY_TASK_INTERVAL);
-        let mut interval = interval_at(Instant::now() + initial_delay, DAILY_TASK_INTERVAL);
+            .unwrap_or(task_interval(DAILY_TASK_INTERVAL));
+        let mut interval = interval_at(
+            Instant::now() + initial_delay,
+            task_interval(DAILY_TASK_INTERVAL),
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -297,7 +312,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let grace_state = state.clone();
     tokio::spawn(async move {
         let client = Client::new();
-        let mut interval = interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + task_interval(HOURLY_TASK_INTERVAL),
+            task_interval(HOURLY_TASK_INTERVAL),
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -375,7 +393,10 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
             }
         }
 
-        let mut interval = interval_at(Instant::now() + HOURLY_TASK_INTERVAL, HOURLY_TASK_INTERVAL);
+        let mut interval = interval_at(
+            Instant::now() + task_interval(HOURLY_TASK_INTERVAL),
+            task_interval(HOURLY_TASK_INTERVAL),
+        );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -402,8 +423,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let kmd_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
-            Instant::now() + KMD_GENERATION_INTERVAL,
-            KMD_GENERATION_INTERVAL,
+            Instant::now() + task_interval(KMD_GENERATION_INTERVAL),
+            task_interval(KMD_GENERATION_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -493,8 +514,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
 
         let mut interval = interval_at(
-            Instant::now() + INVOICE_ARCHIVE_INTERVAL,
-            INVOICE_ARCHIVE_INTERVAL,
+            Instant::now() + task_interval(INVOICE_ARCHIVE_INTERVAL),
+            task_interval(INVOICE_ARCHIVE_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -515,7 +536,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         // Run once on startup (staggered by 1 hour to let other services initialise)
         let mut interval = interval_at(
             Instant::now() + Duration::from_secs(3600),
-            DAILY_TASK_INTERVAL,
+            task_interval(DAILY_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -542,7 +563,7 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     tokio::spawn(async move {
         let mut interval = interval_at(
             Instant::now() + Duration::from_secs(5400),
-            DAILY_TASK_INTERVAL,
+            task_interval(DAILY_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -568,8 +589,8 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
     let derived_state = state.clone();
     tokio::spawn(async move {
         let mut interval = interval_at(
-            Instant::now() + DERIVED_USAGE_SWEEP_INITIAL_DELAY,
-            DAILY_TASK_INTERVAL,
+            Instant::now() + task_interval(DERIVED_USAGE_SWEEP_INITIAL_DELAY),
+            task_interval(DAILY_TASK_INTERVAL),
         );
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -7574,4 +7595,69 @@ mod coverage_adversarial {
             .expect("count");
         assert_eq!(rows, 1);
     });
+
+    // ── spawned periodic-loop bodies driven at real short intervals ────
+    //
+    // start_periodic_jobs spawns one interval loop per task. The production
+    // cadences (minutes..hours) are overridden through
+    // PERIODIC_TASK_INTERVAL_MS, so every spawned loop really ticks — and
+    // really runs its task bodies — against a private database clone within
+    // milliseconds, no virtual clock and no long sleeps.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_job_loops_run_every_task_at_overridden_intervals() {
+        let Some(owned) = provision("periodic_ok_intervals").await else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        // Give one task real work to report so its activity arm fires
+        // alongside the empty-success arms: an expired wallet reservation.
+        let wallet: Option<(Uuid, String)> =
+            sqlx::query_as("SELECT id, tenant_id FROM wallets WHERE tenant_id = 'mtcov_periodic'")
+                .fetch_optional(&owned.pool)
+                .await
+                .expect("wallet probe");
+        if let Some((wallet_id, _)) = wallet {
+            sqlx::query(
+                "INSERT INTO wallet_reservations (id, wallet_id, tenant_id, amount, status, created_at, updated_at) \
+                 VALUES (gen_random_uuid(), $1, 'mtcov_periodic', 100, 'pending', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours') \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(wallet_id)
+            .execute(&owned.pool)
+            .await
+            .expect("seed expired reservation");
+        }
+
+        std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "15");
+        start_periodic_jobs(owned.state.clone());
+
+        // Let every loop tick several times at the 15 ms cadence.
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        std::env::remove_var("PERIODIC_TASK_INTERVAL_MS");
+
+        // The runtime survived every task body.
+        let ready: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&owned.pool)
+            .await
+            .expect("database still reachable");
+        assert_eq!(ready, 1);
+
+        // Stop before the private clone is dropped (the loops keep
+        // erroring harmlessly in the background until the runtime drops).
+        owned.finish().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_job_loops_report_errors_when_the_database_is_gone() {
+        let state = crate::test_support::state_with_broken_db();
+        std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "15");
+        start_periodic_jobs(state);
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        std::env::remove_var("PERIODIC_TASK_INTERVAL_MS");
+    }
 }
