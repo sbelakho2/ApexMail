@@ -505,4 +505,66 @@ mod tests {
             .iter()
             .all(|p| p.validation_method == FblValidationMethod::RdnsFcrcdns));
     }
+
+    #[test]
+    fn validation_method_db_strings_round_trip_including_unknown() {
+        // Every known method stringifies and parses back to itself.
+        for (method, text) in [
+            (FblValidationMethod::RdnsFcrcdns, "rdns_fcrcdns"),
+            (FblValidationMethod::WebhookHmac, "webhook_hmac"),
+            (FblValidationMethod::DkimSignature, "dkim_signature"),
+            (FblValidationMethod::SourceIpAllowlist, "source_ip_allowlist"),
+            (FblValidationMethod::Unknown, "unknown"),
+        ] {
+            assert_eq!(method.as_str(), text);
+            assert_eq!(FblValidationMethod::from_db(text), method);
+        }
+        // DB values are trimmed and case-folded before matching.
+        assert_eq!(
+            FblValidationMethod::from_db("  DKIM_Signature "),
+            FblValidationMethod::DkimSignature
+        );
+        // A method this build does not know is Unknown: never authoritative
+        // for SMTP ARF, never a permissive default.
+        assert_eq!(
+            FblValidationMethod::from_db("carrier_pigeon"),
+            FblValidationMethod::Unknown
+        );
+        for method in [
+            FblValidationMethod::Unknown,
+            FblValidationMethod::WebhookHmac,
+            FblValidationMethod::DkimSignature,
+            FblValidationMethod::SourceIpAllowlist,
+        ] {
+            assert!(
+                !method.is_evaluable_for_smtp_arf(),
+                "{method:?} must not validate SMTP ARF complaints"
+            );
+        }
+        assert!(FblValidationMethod::RdnsFcrcdns.is_evaluable_for_smtp_arf());
+    }
+
+    #[test]
+    fn ipnet_prefix_zero_covers_the_family_and_cross_family_never_matches() {
+        let v4_any = IpNet::parse("10.0.0.0/0").unwrap();
+        assert!(
+            v4_any.contains("203.0.113.9".parse().unwrap()),
+            "a /0 prefix is the whole IPv4 space"
+        );
+        assert!(
+            !v4_any.contains("2001:db8::1".parse().unwrap()),
+            "a v4 network never contains a v6 address"
+        );
+        let v6_any = IpNet::parse("2001:db8::/0").unwrap();
+        assert!(
+            v6_any.contains("2001:db8::1".parse().unwrap()),
+            "a /0 prefix is the whole IPv6 space"
+        );
+        assert!(
+            !v6_any.contains("203.0.113.9".parse().unwrap()),
+            "a v6 network never contains a v4 address"
+        );
+        // Prefixes beyond the family width are unparseable.
+        assert!(IpNet::parse("2001:db8::/129").is_none());
+    }
 }

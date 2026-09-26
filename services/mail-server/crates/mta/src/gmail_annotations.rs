@@ -525,4 +525,107 @@ mod tests {
         assert!(badge.contains("&lt;b&gt;bold&lt;/b&gt; &amp; scary"));
         assert!(badge.contains("&lt;script&gt;"));
     }
+
+    #[test]
+    fn validation_requires_deal_copy_and_warns_on_http_logos_and_oversized_carousels() {
+        let svc = GmailAnnotationsService::new();
+        let products: Vec<PromotionCardProduct> = (0..11)
+            .map(|i| PromotionCardProduct {
+                name: format!("Widget {i}"),
+                image_url: format!("https://example.com/{i}.jpg"),
+                price: 1.0 + i as f64,
+                currency: "USD".into(),
+                url: format!("https://example.com/{i}"),
+                discount: None,
+            })
+            .collect();
+        let config = GmailAnnotationConfig {
+            logo_url: Some("http://insecure.example/logo.png".into()),
+            featured_image_url: None,
+            deal: Some(DealBadge {
+                discount_code: None,
+                description: String::new(),
+                start_date: None,
+                end_date: None,
+            }),
+            products,
+            go_to_action: None,
+            organization: None,
+        };
+        let validation = svc.validate_config(&config);
+        assert!(
+            !validation.valid,
+            "an empty deal description is a hard error: {:?}",
+            validation.errors
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|e| e.contains("Deal description is required")),
+            "{:?}",
+            validation.errors
+        );
+        assert!(
+            validation
+                .warnings
+                .iter()
+                .any(|w| w.contains("should use HTTPS")),
+            "a plaintext logo URL is warned about: {:?}",
+            validation.warnings
+        );
+        assert!(
+            validation
+                .warnings
+                .iter()
+                .any(|w| w.contains("maximum of 10 products")),
+            "an 11-product carousel is warned about: {:?}",
+            validation.warnings
+        );
+
+        // The convenience wrapper produces the identical verdict.
+        let wrapped = svc.generate_promotion_email_annotations(&config);
+        assert_eq!(wrapped.validation.errors, validation.errors);
+        assert_eq!(wrapped.validation.warnings, validation.warnings);
+    }
+
+    #[test]
+    fn json_ld_carries_deal_code_dates_product_image_and_action_description() {
+        let svc = GmailAnnotationsService::new();
+        let config = GmailAnnotationConfig {
+            logo_url: None,
+            featured_image_url: None,
+            deal: Some(DealBadge {
+                discount_code: Some("SAVE5".into()),
+                description: "5% off".into(),
+                start_date: Some("2026-01-01".into()),
+                end_date: Some("2026-02-01".into()),
+            }),
+            products: vec![PromotionCardProduct {
+                name: "Widget".into(),
+                image_url: "https://example.com/widget.jpg".into(),
+                price: 9.99,
+                currency: "USD".into(),
+                url: "https://example.com/widget".into(),
+                discount: Some(0.15),
+            }],
+            go_to_action: Some(GoToAction {
+                name: "Shop".into(),
+                url: "https://example.com/shop".into(),
+                description: Some("Shop the deal".into()),
+            }),
+            organization: None,
+        };
+        let result = svc.generate_annotations(&config);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.json_ld).expect("valid JSON-LD");
+        let offer = &parsed["offers"][0];
+        assert_eq!(offer["discountCode"], "SAVE5");
+        assert_eq!(offer["availabilityStarts"], "2026-01-01");
+        assert_eq!(offer["availabilityEnds"], "2026-02-01");
+        let item = &parsed["itemListElement"][0];
+        assert_eq!(item["image"], "https://example.com/widget.jpg");
+        assert_eq!(item["offers"]["discount"], 0.15);
+        assert_eq!(parsed["potentialAction"]["description"], "Shop the deal");
+    }
 }

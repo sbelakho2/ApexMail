@@ -326,6 +326,32 @@ mod tests {
         )
         .unwrap()
         .is_some());
+
+        // Not-yet-valid certificate: a cert whose validity starts in the
+        // future must refuse to start submission in production (it would
+        // hand out certificates every client rejects).
+        let dir2 = tempfile::tempdir().expect("temp dir");
+        let future_path = dir2.path().join("future.pem");
+        let mut params = rcgen::CertificateParams::new(vec!["mail.apexmail.ee".to_string()])
+            .expect("valid rcgen params");
+        params.not_before = rcgen::date_time_ymd(now_year() + 1, 1, 1);
+        params.not_after = rcgen::date_time_ymd(now_year() + 2, 1, 1);
+        let key = rcgen::KeyPair::generate().expect("key generation");
+        let future_cert = params.self_signed(&key).expect("self-signed cert");
+        std::fs::write(&future_path, pem(future_cert.der().as_ref())).unwrap();
+        let err = enforce_submission_tls_production(
+            true,
+            true,
+            true,
+            Some(future_path.to_str().unwrap()),
+            now,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid before"), "{err}");
+    }
+
+    fn now_year() -> i32 {
+        chrono::Utc::now().format("%Y").to_string().parse().unwrap()
     }
 
     fn pem(der: &[u8]) -> String {

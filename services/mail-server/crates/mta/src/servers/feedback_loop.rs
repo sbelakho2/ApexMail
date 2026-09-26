@@ -1852,6 +1852,76 @@ Original-Message-ID: <original@example.com>\r\n";
             .expect("session task must not panic");
     }
 
+    #[tokio::test]
+    async fn fbl_overlong_data_line_is_drained_and_refused_and_meta_verbs_never_leak() {
+        // A single DATA line beyond the per-line cap (>1 MiB) is TooLong:
+        // the reader drains to end-of-data, the payload is refused with 552,
+        // and the session stays synchronised. VRFY/EXPN must never leak
+        // recipient validity (252) and HELP must list the verbs.
+        let server = test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let _ = fbl_read_reply(&mut reader).await; // greeting
+
+        // VRFY / EXPN: 252, deliberately vague.
+        writer.write_all(b"VRFY abuse@fbl.test\r\n").await.unwrap();
+        assert!(
+            fbl_read_reply(&mut reader)
+                .await
+                .starts_with("252 2.5.2 Cannot VRFY"),
+            "VRFY must never confirm a recipient"
+        );
+        writer.write_all(b"EXPN list\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("252"));
+        // HELP: the 214 verb list.
+        writer.write_all(b"HELP\r\n").await.unwrap();
+        let help = fbl_read_reply(&mut reader).await;
+        assert!(help.starts_with("214"), "{help:?}");
+        assert!(help.contains("DATA"), "HELP lists DATA: {help:?}");
+
+        // Full transaction, then a >MAX_DATA_LINE single line.
+        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
+        let _ = fbl_read_reply(&mut reader).await;
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("354"));
+
+        // One physical line of 1 MiB + 1 byte: beyond the per-line cap.
+        let huge_line = "y".repeat(1024 * 1024 + 1);
+        writer
+            .write_all(format!("{huge_line}\r\n.\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            fbl_read_reply(&mut reader).await,
+            "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
+            "an over-long line must be refused, never partially stored"
+        );
+
+        // The session survived the drain: a fresh transaction works.
+        writer.write_all(b"NOOP\r\n").await.unwrap();
+        assert_eq!(fbl_read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("221"));
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session task must finish")
+            .expect("session task must not panic");
+    }
+
     #[test]
     fn webhook_push_is_trimmed_to_a_bounded_length() {
         // The `mta:webhook_queue` Redis list must be trimmed after every

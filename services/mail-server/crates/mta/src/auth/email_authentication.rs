@@ -1801,3 +1801,278 @@ mod tests {
         assert!(header.starts_with("Authentication-Results: mx.apexmail.ee;"));
     }
 }
+
+#[cfg(test)]
+mod wire_gap_tests {
+    //! Wire-path gap coverage against the loopback UDP DNS mock: the SPF
+    //! cache-hit surface, the DKIM parse-failure fallback, and the DMARC
+    //! organizational-domain fallback (`sp=` / permerror recovery) — every
+    //! one of these decides real accept/reject dispositions.
+
+    use super::super::test_dns::{resolver_at, DnsAnswer, MockDns};
+    use super::*;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    fn sender_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))
+    }
+
+    fn authenticator(port: u16, enforce_dmarc: bool) -> EmailAuthenticator {
+        // mail-auth's bundled hickory 0.24 stack (SPF/DKIM) and the
+        // workspace hickory 0.26 resolver (DMARC TXT) both pointed at the
+        // mock: the full authenticate() pipeline, no system resolver.
+        use mail_auth::hickory_resolver::config::{
+            NameServerConfig, NameServerConfigGroup, Protocol as McProtocol, ResolverConfig,
+            ResolverOpts,
+        };
+        let mut group = NameServerConfigGroup::new();
+        group.push(NameServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            McProtocol::Udp,
+        ));
+        let config = ResolverConfig::from_parts(None, vec![], group);
+        let mut opts = ResolverOpts::default();
+        opts.attempts = 1;
+        opts.timeout = Duration::from_millis(500);
+        opts.try_tcp_on_error = false;
+        opts.cache_size = 0;
+        let mail_auth_resolver =
+            mail_auth::Resolver::with_capacity(config, opts, 0).expect("mail-auth resolver");
+        EmailAuthenticator::with_injected_resolvers(
+            EmailAuthConfig {
+                require_spf: false,
+                require_dkim: false,
+                enforce_dmarc,
+                allow_soft_fail: true,
+                trusted_relays: vec![],
+                spf_cache_max_entries: 1000,
+            },
+            "mx.test".into(),
+            mail_auth_resolver,
+            resolver_at(port),
+        )
+    }
+
+    fn plain_message(from_domain: &str) -> Vec<u8> {
+        format!(
+            "From: sender@{from_domain}\r\nTo: rcpt@dest.test\r\nSubject: t\r\n\r\nhello\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn txt(strings: Vec<&str>) -> DnsAnswer {
+        DnsAnswer::Txt(strings.into_iter().map(|s| vec![s.to_string()]).collect())
+    }
+
+    #[tokio::test]
+    async fn a_second_identical_spf_evaluation_is_served_from_the_cache() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "cache.example",
+            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
+        );
+        let dns = MockDns::start(rules).await;
+        let auth = authenticator(dns.port, false);
+
+        let first = auth
+            .authenticate(
+                &plain_message("cache.example"),
+                sender_ip(),
+                "helo.cache.example",
+                "u@cache.example",
+            )
+            .await
+            .expect("first authenticate");
+        assert_eq!(first.spf.result, SpfVerdict::Pass, "{:?}", first.spf);
+        assert_eq!(first.spf.status, SpfStatus::Fresh);
+
+        let second = auth
+            .authenticate(
+                &plain_message("cache.example"),
+                sender_ip(),
+                "helo.cache.example",
+                "u@cache.example",
+            )
+            .await
+            .expect("second authenticate");
+        assert_eq!(
+            second.spf.status, SpfStatus::Cached,
+            "an identical (ip, helo, mail_from) must hit the cache"
+        );
+        assert_eq!(second.spf.explanation.as_deref(), Some("cached"));
+        assert_eq!(second.spf.result, SpfVerdict::Pass);
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_message_falls_back_to_a_none_dkim_verdict() {
+        let dns = MockDns::start(HashMap::new()).await;
+        let auth = authenticator(dns.port, false);
+        // No header/body split at all: AuthenticatedMessage::parse fails.
+        let garbage: Vec<u8> = vec![0x00, 0xff, 0xfe, b'g', b'a', b'r', b'b', b'a', b'g', b'e'];
+        let results = auth
+            .authenticate(&garbage, sender_ip(), "helo.example", "u@any.example")
+            .await
+            .expect("authenticate survives an unparseable message");
+        assert_eq!(results.dkim.len(), 1);
+        assert_eq!(results.dkim[0].result, DkimVerdict::None);
+        assert_eq!(
+            results.dkim[0].explanation.as_deref(),
+            Some("Failed to parse message for DKIM"),
+            "the fallback must be explicit, never a silent pass"
+        );
+        // No parseable From header either: DMARC is a determinate None.
+        assert_eq!(results.dmarc.result, DmarcVerdict::None);
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn dmarc_org_domain_fallback_applies_sp_on_the_wire() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        // The From subdomain publishes NO record (NXDOMAIN, a determinate
+        // negative): the organizational domain's record must govern, with
+        // sp= applied to the subdomain.
+        rules.insert("_dmarc.sub.example.com", DnsAnswer::Nxdomain);
+        rules.insert(
+            "_dmarc.example.com",
+            txt(vec!["v=DMARC1; p=none; sp=reject"]),
+        );
+        // SPF passes and is aligned, so the verdict difference is driven by
+        // the recovered policy alone.
+        rules.insert(
+            "sub.example.com",
+            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
+        );
+        let dns = MockDns::start(rules).await;
+        let auth = authenticator(dns.port, true);
+
+        let results = auth
+            .authenticate(
+                &plain_message("sub.example.com"),
+                sender_ip(),
+                "helo.sub.example.com",
+                "u@sub.example.com",
+            )
+            .await
+            .expect("authenticate");
+        assert_eq!(results.spf.result, SpfVerdict::Pass, "{:?}", results.spf);
+        assert_eq!(
+            results.dmarc.policy, DmarcPolicy::Reject,
+            "the org record's sp=reject must be the effective policy for the subdomain"
+        );
+        assert_eq!(
+            results.dmarc.result, DmarcVerdict::Pass,
+            "aligned SPF pass with p=none-family policy is a DMARC pass"
+        );
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn a_malformed_record_at_the_subdomain_still_falls_back_to_the_org() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        // v=DMARC1 without a usable p= is a PERMERROR (RFC 7489 §6.6.3) at
+        // the exact From domain — the org-domain record still applies.
+        rules.insert(
+            "_dmarc.a.b.example.net",
+            txt(vec!["v=DMARC1; p=banana"]),
+        );
+        rules.insert(
+            "_dmarc.example.net",
+            txt(vec!["v=DMARC1; p=quarantine"]),
+        );
+        rules.insert(
+            "a.b.example.net",
+            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
+        );
+        let dns = MockDns::start(rules).await;
+        let auth = authenticator(dns.port, true);
+
+        let results = auth
+            .authenticate(
+                &plain_message("a.b.example.net"),
+                sender_ip(),
+                "helo.a.b.example.net",
+                "u@a.b.example.net",
+            )
+            .await
+            .expect("authenticate");
+        assert_eq!(
+            results.dmarc.policy, DmarcPolicy::Quarantine,
+            "the malformed subdomain record must not hide the org policy: {:?}",
+            results.dmarc
+        );
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn a_temperror_dmarc_lookup_is_never_cached_as_a_policy() {
+        // SERVFAIL for the _dmarc query: TempError. TempError is NEVER
+        // cached, so the same authenticator must pick up the record the
+        // moment DNS recovers — a cached TempError would keep the domain
+        // failed for the 5-minute cache window.
+        let rules = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let socket = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let server_rules = rules.clone();
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                let (len, peer) = match socket.recv_from(&mut buf).await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let guard = server_rules.lock().await;
+                let response = super::super::test_dns::answer(&buf[..len], &guard);
+                drop(guard);
+                if let Ok(bytes) = response.to_vec() {
+                    let _ = socket.send_to(&bytes, peer).await;
+                }
+            }
+        });
+
+        let auth = authenticator(port, true);
+        let mut failing: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        failing.insert("_dmarc.temp.example", DnsAnswer::Servfail);
+        failing.insert("temp.example", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
+        *rules.lock().await = failing;
+
+        let first = auth
+            .authenticate(
+                &plain_message("temp.example"),
+                sender_ip(),
+                "helo.temp.example",
+                "u@temp.example",
+            )
+            .await
+            .expect("authenticate");
+        assert_eq!(
+            first.dmarc.result, DmarcVerdict::TempError,
+            "SERVFAIL must be a TempError, not a policy-none: {:?}",
+            first.dmarc
+        );
+
+        // DNS recovers: the SAME authenticator must now see the record.
+        let mut recovered: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        recovered.insert("_dmarc.temp.example", txt(vec!["v=DMARC1; p=reject"]));
+        recovered.insert("temp.example", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
+        *rules.lock().await = recovered;
+        let second = auth
+            .authenticate(
+                &plain_message("temp.example"),
+                sender_ip(),
+                "helo.temp.example",
+                "u@temp.example",
+            )
+            .await
+            .expect("authenticate");
+        assert_eq!(
+            second.dmarc.policy, DmarcPolicy::Reject,
+            "a recovered DNS answer must apply immediately: {:?}",
+            second.dmarc
+        );
+        server.abort();
+    }
+
+}

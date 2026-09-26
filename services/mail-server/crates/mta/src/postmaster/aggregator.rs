@@ -750,4 +750,80 @@ mod adversarial_db_tests {
 
         pool.close().await;
     }
+
+    #[tokio::test]
+    async fn every_band_transition_severity_and_event_type_is_emitted_per_provider() {
+        // The severity/event_type matrix: red -> critical/red_listed,
+        // amber -> warn/band_drop, green -> info/band_drop — for BOTH the
+        // google and the microsoft provider paths.
+        let Some(pool) = pool("postmaster_severity_matrix").await else {
+            return;
+        };
+        let domain = format!("sev-{}.example", &Uuid::new_v4().simple().to_string()[..8]);
+        let ip = format!("203.0.113.{}", 10 + (std::process::id() % 200) as u8);
+
+        // --- Google domain: green -> red -> green -> amber -> green.
+        insert_google(&pool, &domain, 0, "HIGH").await;
+        let _ = recompute(&pool).await.expect("seed recompute");
+        assert!(events(&pool, &domain).await.is_empty());
+
+        insert_google(&pool, &domain, 1, "BAD").await;
+        let (_, _, red_events) = recompute(&pool).await.expect("red recompute");
+        assert_eq!(red_events, 1);
+        let rows = events(&pool, &domain).await;
+        let (_, severity, event_type, provider, from, to) = &rows[rows.len() - 1];
+        assert_eq!(severity, "critical", "red is critical: {rows:?}");
+        assert_eq!(event_type, "red_listed");
+        assert_eq!(provider, "google", "the GOOGLE red arm");
+        assert_eq!(from.as_deref(), Some("green"));
+        assert_eq!(to, "red");
+
+        // red -> amber: warn-level band_drop on the google path.
+        insert_google(&pool, &domain, 2, "LOW").await;
+        let _ = recompute(&pool).await.expect("amber recompute");
+        let rows = events(&pool, &domain).await;
+        let (_, severity, event_type, _, from, to) = &rows[rows.len() - 1];
+        assert_eq!(severity, "warn");
+        assert_eq!(event_type, "band_drop");
+        assert_eq!(from.as_deref(), Some("red"));
+        assert_eq!(to, "amber");
+
+        // amber -> green: the recovery transition is INFO level.
+        insert_google(&pool, &domain, 3, "HIGH").await;
+        let (_, _, recovered) = recompute(&pool).await.expect("green recompute");
+        assert_eq!(recovered, 1, "recovery to green is still a band change");
+        let rows = events(&pool, &domain).await;
+        let (_, severity, event_type, _, from, to) = &rows[rows.len() - 1];
+        assert_eq!(severity, "info", "recovery to green is informational");
+        assert_eq!(event_type, "band_drop");
+        assert_eq!(from.as_deref(), Some("amber"));
+        assert_eq!(to, "green");
+
+        // --- SNDS IP: green -> amber (warn) -> green (info), microsoft path.
+        insert_snds(&pool, &ip, 0, "GREEN", 0).await;
+        let _ = recompute(&pool).await.expect("ip seed recompute");
+
+        insert_snds(&pool, &ip, 1, "YELLOW", 0).await;
+        let (_, _, amber_events) = recompute(&pool).await.expect("ip amber recompute");
+        assert_eq!(amber_events, 1);
+        let rows = events(&pool, &ip).await;
+        let (_, severity, event_type, provider, from, to) = &rows[rows.len() - 1];
+        assert_eq!(severity, "warn", "the SNDS amber arm");
+        assert_eq!(event_type, "band_drop");
+        assert_eq!(provider, "microsoft");
+        assert_eq!(from.as_deref(), Some("green"));
+        assert_eq!(to, "amber");
+
+        insert_snds(&pool, &ip, 2, "GREEN", 0).await;
+        let (_, _, ip_recovered) = recompute(&pool).await.expect("ip green recompute");
+        assert_eq!(ip_recovered, 1);
+        let rows = events(&pool, &ip).await;
+        let (_, severity, event_type, _, from, to) = &rows[rows.len() - 1];
+        assert_eq!(severity, "info", "the SNDS green-recovery arm");
+        assert_eq!(event_type, "band_drop");
+        assert_eq!(from.as_deref(), Some("amber"));
+        assert_eq!(to, "green");
+
+        pool.close().await;
+    }
 }

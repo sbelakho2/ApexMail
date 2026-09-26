@@ -1066,6 +1066,35 @@ mod tests {
         assert!(!mail_smtputf8_param("MAIL FROM:<a@b.com> XSMTPUTF8"));
     }
 
+    #[test]
+    fn parameter_parsing_survives_colonless_lines_and_bare_address_paths() {
+        // No colon anywhere: the first token is the bare address path, the
+        // rest are parameters (RFC 5321 allows the unbracketed form).
+        assert!(mail_smtputf8_param("user@example.com SMTPUTF8"));
+        assert!(!mail_smtputf8_param("user@example.com"));
+        assert!(!mail_smtputf8_param(""));
+        // A bracketed path terminated mid-line yields trailing parameters;
+        // an UNTERMINATED one consumes the rest of the line, so nothing
+        // after it is ever honoured as a parameter (fail-closed).
+        assert!(mail_smtputf8_param("<a@b> x SMTPUTF8"));
+        assert!(!mail_smtputf8_param("<a@b x SMTPUTF8"));
+        assert!(!mail_smtputf8_param("<a@b x"));
+        // The bare-address form flows through MAIL parameter validation.
+        let policy = MailParamPolicy {
+            body_8bitmime: true,
+            smtputf8: true,
+        };
+        assert!(validate_mail_params("user@example.com SIZE=500 SMTPUTF8", policy).is_ok());
+        assert!(validate_mail_params("user@example.com BODY=8BITMIME", policy).is_ok());
+        assert!(
+            validate_mail_params("user@example.com NOTICED", policy).is_err(),
+            "tokens after a bare address are still validated as parameters"
+        );
+        // And through the RCPT parameter gate.
+        assert!(validate_rcpt_params("user@example.com").is_ok());
+        assert!(validate_rcpt_params("user@example.com NOTIFY=never").is_err());
+    }
+
     // ── F-01: Received-hop counting ─────────────────────────────────────────
 
     #[test]

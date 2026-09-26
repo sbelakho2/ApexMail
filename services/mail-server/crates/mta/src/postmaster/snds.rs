@@ -326,6 +326,49 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
+    async fn fetch_surfaces_http_errors_from_the_data_endpoint() {
+        // A 500 from the SNDS endpoint must be an explicit error naming the
+        // status — never an empty "no traffic" success.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let body = "upstream unavailable";
+                    let response = format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let previous = std::env::var("SNDS_DATA_URL").ok();
+        std::env::set_var("SNDS_DATA_URL", format!("http://{addr}/data.aspx"));
+        let client = SndsClient::new(SndsCredentials {
+            access_key: "k".into(),
+        })
+        .expect("client");
+        let result = client.fetch().await;
+        match previous {
+            Some(v) => std::env::set_var("SNDS_DATA_URL", v),
+            None => std::env::remove_var("SNDS_DATA_URL"),
+        }
+        let error = result.expect_err("an HTTP 500 must be an error");
+        assert!(
+            error.starts_with("SNDS 500"),
+            "the status must be named for the scheduler's last_error: {error}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn upsert_is_idempotent_per_ip_and_day() {
         let pool = match migrator::test_support::fresh_canonical_pool("snds_upsert", "snds_upsert")
             .await

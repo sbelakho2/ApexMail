@@ -229,4 +229,43 @@ mod tests {
         assert!(results[0].1.is_ok());
         assert!(readiness.is_ready(), "graceful shutdown keeps readiness");
     }
+
+    #[tokio::test]
+    async fn join_all_reports_a_panicked_listener_and_aborts_stragglers() {
+        // Graceful shutdown must still COLLECT a listener that panicked
+        // inside the grace window (surfaced as an Err row, never silently
+        // swallowed), and must abort stragglers when the deadline expires.
+        let readiness = Readiness::new();
+        let mut supervisor = ListenerSupervisor::new(readiness.clone());
+        supervisor.spawn("panics", async { panic!("listener exploded") });
+        supervisor.spawn("forever", async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let results = supervisor.join_all(Duration::from_secs(5)).await;
+        assert_eq!(results.len(), 1, "the pending straggler is aborted silently");
+        assert_eq!(results[0].0, "<listener-task-panicked>");
+        assert!(
+            results[0].1.is_err(),
+            "a panicked listener is collected as an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_all_with_a_zero_grace_aborts_everything_immediately() {
+        let readiness = Readiness::new();
+        let mut supervisor = ListenerSupervisor::new(readiness.clone());
+        supervisor.spawn("stuck", async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let started = std::time::Instant::now();
+        let results = supervisor.join_all(Duration::ZERO).await;
+        assert!(results.is_empty(), "a zero grace collects nothing");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the zero grace must not wait: {:?}",
+            started.elapsed()
+        );
+    }
 }

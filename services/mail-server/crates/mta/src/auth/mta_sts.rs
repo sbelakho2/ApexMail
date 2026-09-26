@@ -637,6 +637,55 @@ mod verify_wire_tests {
         dns.stop();
     }
 
+    /// A policy host that LIES about its content-length: it claims 100
+    /// bytes, sends a fragment, and closes. The body read must surface as a
+    /// hard error — a truncated policy is never parsed as a real one.
+    #[tokio::test]
+    async fn a_truncated_policy_body_is_a_reported_error_never_a_policy() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            let response = String::from(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 100\r\nconnection: close\r\n\r\nSTSv1",
+            );
+            // Deliberately far fewer than the promised 100 bytes, then close.
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_mta-sts.trunc.example", txt(vec!["v=STSv1; id=trunc"]));
+        let dns = MockDns::start(rules).await;
+        let result = verify_mta_sts_with(
+            &dns.resolver,
+            Some(&client()),
+            "trunc.example",
+            &format!("http://127.0.0.1:{port}/.well-known/mta-sts.txt"),
+        )
+        .await;
+        assert!(result.supported, "the DNS record exists");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("Policy body read failed")),
+            "a truncated policy body must be reported: {:?}",
+            result.errors
+        );
+        assert!(
+            result.policy.is_none(),
+            "a truncated body must never yield a policy"
+        );
+        dns.stop();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn verify_tlsrpt_parses_multi_address_records_and_rejects_absent() {
         let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();

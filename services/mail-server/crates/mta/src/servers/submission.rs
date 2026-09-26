@@ -5686,6 +5686,120 @@ mod adversarial_db_tests {
     }
 
     #[tokio::test]
+    async fn bare_lf_commands_are_refused_and_overlong_lines_close_the_connection() {
+        // F-08 command-layer discipline: a bare-LF "command" is body data in
+        // RFC 5321 terms and must be refused in band (session continues); an
+        // over-long command line cannot be safely resynchronised, so the
+        // session closes after replying.
+        let Some(pool) = test_pool_retry("sub_line_discipline").await else {
+            return;
+        };
+        let server = Arc::new(SubmissionServer::new(
+            SubmissionConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 0,
+                hostname: "submission.test".into(),
+                max_message_size: 1024 * 1024,
+                max_recipients: 10,
+                auth_required: true,
+            },
+            RateLimitConfig {
+                enabled: true,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+                max_recipients_per_message: 100,
+            },
+            pool,
+            super::tests::unroutable_redis_pool(),
+            None,
+        ));
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let peer: std::net::SocketAddr = "10.7.7.7:2525".parse().unwrap();
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, peer, false, true)
+                .await
+        });
+        let mut client = BufStream::new(client);
+
+        use tokio::io::AsyncWriteExt;
+
+        // A bare-LF command line: refused in band, session stays open.
+        client
+            .write_all(b"EHLO client.test\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let reply = super::tests::read_smtp_response(&mut client).await;
+        assert!(
+            reply.starts_with("500 5.5.2 Bare LF not allowed"),
+            "{reply:?}"
+        );
+
+        // A well-formed CRLF command still works afterwards.
+        client
+            .write_all(b"NOOP\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let reply = super::tests::read_smtp_response(&mut client).await;
+        assert!(reply.starts_with("250"), "session survives a bare-LF attempt: {reply:?}");
+
+        // A resynchronisable over-long line (newline present): refused in
+        // band, remainder drained, session CONTINUES.
+        let flood = format!("NOOP {}\r\n", "x".repeat(8192));
+        client.write_all(flood.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+        let reply = super::tests::read_smtp_response(&mut client).await;
+        assert!(
+            reply.starts_with("500 5.5.2 Line too long"),
+            "{reply:?}"
+        );
+        client.write_all(b"NOOP\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let reply = super::tests::read_smtp_response(&mut client).await;
+        assert!(
+            reply.starts_with("250"),
+            "a drained over-long line must leave the session synchronised: {reply:?}"
+        );
+
+        // An UNRESYNCHRONISABLE flood (beyond the absolute 64 MiB drain
+        // limit with no newline at all): reply 500 and CLOSE — reading on
+        // would parse attacker bytes as commands.
+        let chunk = vec![b'x'; 1024 * 1024];
+        let total = crate::servers::util::ABSOLUTE_LINE_DRAIN_LIMIT + 4 * 1024 * 1024;
+        let mut sent = 0usize;
+        while sent < total {
+            let n = chunk.len().min(total - sent);
+            // The server stops consuming once Overflow fires and drops its
+            // side: late writes fail and that is the signal, not a failure.
+            match client.write_all(&chunk[..n]).await {
+                Ok(()) => sent += n,
+                Err(_) => break,
+            }
+        }
+        let _ = client.flush().await;
+        let reply = super::tests::read_smtp_response(&mut client).await;
+        assert!(
+            reply.starts_with("500 5.5.2 Line too long"),
+            "the drain-limit overflow must be refused: {reply:?}"
+        );
+        // The server closed its side: EOF, no further replies.
+        let mut eof_buf = [0u8; 16];
+        let n = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::io::AsyncReadExt::read(&mut client, &mut eof_buf),
+        )
+        .await
+        .expect("EOF within 30s")
+        .expect("read after close");
+        assert_eq!(n, 0, "expected EOF after the overflow close");
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    #[tokio::test]
     async fn eof_mid_auth_continuation_ends_the_session_silently() {
         // AuthOutcome::Silent: a client that vanishes mid-AUTH never gets a
         // reply and never counts an error.

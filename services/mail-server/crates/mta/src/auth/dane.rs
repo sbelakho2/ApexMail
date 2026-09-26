@@ -1994,6 +1994,177 @@ mod dane_wire_tests {
     }
 
     #[tokio::test]
+    async fn dane_a_stale_cache_entry_is_evicted_and_refetched_not_trusted() {
+        TLSA_CACHE.invalidate_all();
+        let (leaf, _lk, _ca, _ck) = cert_and_key();
+        let tlsa = generate_tlsa_record(&leaf.pem(), "dane.test", 25, "tcp", 3, 0, 1);
+        // Seed an entry past its TTL whose records match NOTHING (a hostile
+        // / rotated RRset). The stale entry must be evicted and the lookup
+        // re-fetched from DoH: the fresh answer decides, never the stale one.
+        let stale_records = vec![TlsaRecord {
+            usage: 3,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: "f".repeat(64),
+        }];
+        TLSA_CACHE.insert(
+            "_25._tcp.dane.test".to_string(),
+            CachedTlsaRecords {
+                records: stale_records,
+                fetched_at: Instant::now() - Duration::from_secs(301),
+            },
+        );
+
+        let mut answers: HashMap<String, Option<serde_json::Value>> = HashMap::new();
+        answers.insert(
+            "_25._tcp.dane.test".into(),
+            Some(tlsa_answer(&format!(
+                "3 0 1 {}",
+                tlsa.record.certificate_association_data
+            ))),
+        );
+        let der = leaf.der().to_vec();
+        let result = verify_dane_full(
+            "dane.test",
+            25,
+            "tcp",
+            &dns_config(false),
+            // A dead provider list would fail the re-fetch: the DoH answer
+            // below is the ONLY way `supported` can flip, proving the stale
+            // entry was not trusted.
+            &[],
+            Some(&http_client()),
+            move |_d: String, _p: u16| {
+                let der = der.clone();
+                async move { Ok(vec![der]) }
+            },
+        )
+        .await;
+        assert!(
+            !result.supported,
+            "no DoH provider is configured: the stale entry must not decide"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("All DoH providers failed")),
+            "the stale entry must force a real re-fetch: {:?}",
+            result.errors
+        );
+
+        // Now with a live DoH endpoint answering the CORRECT record: the
+        // same stale-seeded cache must recover to supported.
+        TLSA_CACHE.invalidate_all();
+        TLSA_CACHE.insert(
+            "_25._tcp.dane.test".to_string(),
+            CachedTlsaRecords {
+                records: vec![TlsaRecord {
+                    usage: 3,
+                    selector: 0,
+                    matching_type: 1,
+                    certificate_association_data: "e".repeat(64),
+                }],
+                fetched_at: Instant::now() - Duration::from_secs(301),
+            },
+        );
+        let mut answers: HashMap<String, Option<serde_json::Value>> = HashMap::new();
+        answers.insert(
+            "_25._tcp.dane.test".into(),
+            Some(tlsa_answer(&format!(
+                "3 0 1 {}",
+                tlsa.record.certificate_association_data
+            ))),
+        );
+        let (url, _hits, _server) = doh_endpoint(answers).await;
+        let leaked: &'static str = Box::leak(url.into_boxed_str());
+        let der = leaf.der().to_vec();
+        let result = verify_dane_full(
+            "dane.test",
+            25,
+            "tcp",
+            &dns_config(false),
+            &[leaked],
+            Some(&http_client()),
+            move |_d: String, _p: u16| {
+                let der = der.clone();
+                async move { Ok(vec![der]) }
+            },
+        )
+        .await;
+        assert!(
+            result.supported,
+            "the re-fetch must decide: {:?}",
+            result.errors
+        );
+        assert_eq!(result.tlsa_records[0].certificate_association_data.len(), 64);
+        assert_ne!(
+            result.tlsa_records[0].certificate_association_data,
+            "e".repeat(64),
+            "the stale hostile record must have been replaced"
+        );
+        TLSA_CACHE.invalidate_all();
+    }
+
+    #[tokio::test]
+    async fn dane_failover_covers_a_refused_and_an_http_erroring_provider() {
+        TLSA_CACHE.invalidate_all();
+        let (leaf, _lk, _ca, _ck) = cert_and_key();
+        let tlsa = generate_tlsa_record(&leaf.pem(), "dane.test", 25, "tcp", 3, 0, 1);
+        // Provider 1: no listener at all — the request itself errors.
+        let dead: &'static str = Box::leak("http://127.0.0.1:1/dns-query".into());
+        // Provider 2: answers HTTP 500 for everything.
+        let mut failing: HashMap<String, Option<serde_json::Value>> = HashMap::new();
+        failing.insert("_25._tcp.dane.test".into(), None);
+        let (url2, hits2, _s2) = doh_endpoint(failing).await;
+        // Provider 3: the healthy answer.
+        let mut ok: HashMap<String, Option<serde_json::Value>> = HashMap::new();
+        ok.insert(
+            "_25._tcp.dane.test".into(),
+            Some(tlsa_answer(&format!(
+                "3 0 1 {}",
+                tlsa.record.certificate_association_data
+            ))),
+        );
+        let (url3, hits3, _s3) = doh_endpoint(ok).await;
+        let providers: [&'static str; 3] = [
+            dead,
+            Box::leak(url2.into_boxed_str()),
+            Box::leak(url3.into_boxed_str()),
+        ];
+        let client = http_client();
+        let der = leaf.der().to_vec();
+        let result = verify_dane_full(
+            "dane.test",
+            25,
+            "tcp",
+            &dns_config(false),
+            &providers,
+            Some(&client),
+            move |_d: String, _p: u16| {
+                let der = der.clone();
+                async move { Ok(vec![der]) }
+            },
+        )
+        .await;
+        assert!(
+            result.supported,
+            "both failure arms must fail over to the healthy provider: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            hits2.load(Ordering::SeqCst),
+            1,
+            "the HTTP-erroring provider was consulted exactly once"
+        );
+        assert!(
+            hits3.load(Ordering::SeqCst) >= 1,
+            "the healthy provider answered"
+        );
+        TLSA_CACHE.invalidate_all();
+    }
+
+    #[tokio::test]
     async fn dane_fetches_the_live_chain_over_pinned_tls() {
         TLSA_CACHE.invalidate_all();
         let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();

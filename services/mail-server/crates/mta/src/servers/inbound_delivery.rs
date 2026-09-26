@@ -2473,4 +2473,865 @@ mod adversarial_delivery_tests {
             "a stalled mailstore RPC yields None, not a hang"
         );
     }
+
+    // ── DSN original-part bounding (RFC 3464 §6.2 headers-only fallback) ──
+
+    #[test]
+    fn original_part_is_the_full_message_within_the_cap() {
+        let dsn = DeliveryStatusNotification {
+            reporting_mta: "mail.test".into(),
+            original_sender: "s@remote.test".into(),
+            original_recipient: "u@managed.test".into(),
+            original_message_id: "inb_cap1".into(),
+            arrival_date: utc(0),
+            status: "5.1.1".into(),
+            diagnostic: "boom".into(),
+            original_message: Some(bytes::Bytes::from_static(b"Subject: hi\r\n\r\nbody\r\n")),
+        };
+        let rendered = String::from_utf8(dsn.render("MAILER-DAEMON@managed.test")).unwrap();
+        assert!(
+            rendered.contains("\r\nbody\r\n"),
+            "a small original is returned in full"
+        );
+    }
+
+    #[test]
+    fn original_part_drops_the_body_and_bounded_headers_beyond_the_cap() {
+        // A > 256 KiB original must contribute ONLY its header block, further
+        // capped at 64 KiB — never the (possibly huge) body.
+        let headers = format!("Subject: big\r\nX-A: {}\r\n\r\n", "h".repeat(1024));
+        let mut raw = headers.clone().into_bytes();
+        let body = vec![b'b'; DSN_MAX_ORIGINAL_BYTES]; // body alone exceeds the cap
+        raw.extend_from_slice(&body);
+        assert!(raw.len() > DSN_MAX_ORIGINAL_BYTES);
+
+        let dsn = DeliveryStatusNotification {
+            reporting_mta: "mail.test".into(),
+            original_sender: "s@remote.test".into(),
+            original_recipient: "u@managed.test".into(),
+            original_message_id: "inb_cap2".into(),
+            arrival_date: utc(0),
+            status: "5.1.1".into(),
+            diagnostic: "boom".into(),
+            original_message: Some(bytes::Bytes::from(raw)),
+        };
+        let rendered = String::from_utf8(dsn.render("MAILER-DAEMON@managed.test")).unwrap();
+        assert!(
+            rendered.contains("Subject: big"),
+            "the headers are retained"
+        );
+        assert!(
+            !rendered.contains("bbbb"),
+            "the oversized body must never be copied into the DSN"
+        );
+        // The message/rfc822 part is bounded by the header block (≈1 KiB),
+        // never the 64 KiB absolute header cap.
+        let part = rendered
+            .split("Content-Type: message/rfc822\r\n\r\n")
+            .nth(1)
+            .expect("an oversized message still contributes its headers");
+        let part = part.split("\r\n--").next().unwrap_or(part);
+        assert!(
+            part.len() <= DSN_MAX_HEADER_BYTES,
+            "header part {} exceeds the cap",
+            part.len()
+        );
+        assert!(part.len() < 4096, "headers-only, not the padded cap");
+    }
+
+    #[test]
+    fn an_empty_original_contributes_no_message_rfc822_part() {
+        let dsn = DeliveryStatusNotification {
+            reporting_mta: "mail.test".into(),
+            original_sender: "s@remote.test".into(),
+            original_recipient: "u@managed.test".into(),
+            original_message_id: "inb_cap3".into(),
+            arrival_date: utc(0),
+            status: "5.1.1".into(),
+            diagnostic: "boom".into(),
+            original_message: Some(bytes::Bytes::from_static(b"")),
+        };
+        let rendered = String::from_utf8(dsn.render("MAILER-DAEMON@managed.test")).unwrap();
+        assert!(
+            !rendered.contains("message/rfc822"),
+            "an empty original must not produce an empty MIME part"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_failure_while_loading_the_message_defers_the_job() {
+        // `load_message` erroring (a real DB outage between claim and load)
+        // must defer — with the error recorded — never panic and never
+        // deliver.
+        struct LoadFails {
+            inner: MemStore,
+        }
+        #[async_trait]
+        impl InboundDeliveryStore for LoadFails {
+            async fn claim_due(
+                &self,
+                now: DateTime<Utc>,
+                limit: i64,
+                lease_secs: i64,
+            ) -> anyhow::Result<Vec<RecipientJob>> {
+                self.inner.claim_due(now, limit, lease_secs).await
+            }
+            async fn load_message(
+                &self,
+                _message_id: &str,
+            ) -> anyhow::Result<Option<StoredInboundMessage>> {
+                Err(anyhow::anyhow!("connection reset during read"))
+            }
+            async fn record_attempt(&self, record: &AttemptRecord) -> anyhow::Result<()> {
+                self.inner.record_attempt(record).await
+            }
+            async fn mark_delivered(&self, job: &RecipientJob, a: i32) -> anyhow::Result<()> {
+                self.inner.mark_delivered(job, a).await
+            }
+            async fn mark_deferred(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                next: DateTime<Utc>,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_deferred(job, a, next, error).await
+            }
+            async fn mark_permanent_failure(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_permanent_failure(job, a, error).await
+            }
+            async fn mark_undeliverable(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_undeliverable(job, a, error).await
+            }
+            async fn claim_dsn(&self, job: &RecipientJob) -> anyhow::Result<bool> {
+                self.inner.claim_dsn(job).await
+            }
+            async fn mark_dsn_sent(&self, job: &RecipientJob, a: i32) -> anyhow::Result<()> {
+                self.inner.mark_dsn_sent(job, a).await
+            }
+            async fn release_dsn_claim(
+                &self,
+                job: &RecipientJob,
+                next: DateTime<Utc>,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.release_dsn_claim(job, next, error).await
+            }
+        }
+
+        let inner = MemStore::new(vec![job_row("inb_loaderr", "user@managed.test")])
+            .with_message("inb_loaderr", message("s@remote.test"));
+        let store = LoadFails { inner };
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("the sweep survives a load failure");
+        assert_eq!(stats.deferred, 1);
+        assert_eq!(dsn.sent_count(), 0);
+        let job = store.inner.job("inb_loaderr", "user@managed.test");
+        assert_eq!(job.status, STATUS_DEFERRED);
+        let last_error = job.last_error.clone();
+        assert!(
+            last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failed to load inbound message"),
+            "the load error is recorded on the row: {:?}",
+            last_error
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dsn_finalized_by_a_concurrent_worker_is_not_redispatched() {
+        // The race: this sweep claimed a failed row for its DSN dispatch,
+        // but between the claim and `claim_dsn` ANOTHER worker finalized the
+        // row (`dsn_sent`). The dispatch must be skipped — exactly-once
+        // finalization, no duplicate DSN.
+        struct ConcurrentFinalizer {
+            inner: MemStore,
+        }
+        #[async_trait]
+        impl InboundDeliveryStore for ConcurrentFinalizer {
+            async fn claim_due(
+                &self,
+                now: DateTime<Utc>,
+                limit: i64,
+                lease_secs: i64,
+            ) -> anyhow::Result<Vec<RecipientJob>> {
+                self.inner.claim_due(now, limit, lease_secs).await
+            }
+            async fn load_message(
+                &self,
+                message_id: &str,
+            ) -> anyhow::Result<Option<StoredInboundMessage>> {
+                self.inner.load_message(message_id).await
+            }
+            async fn record_attempt(&self, record: &AttemptRecord) -> anyhow::Result<()> {
+                self.inner.record_attempt(record).await
+            }
+            async fn mark_delivered(&self, job: &RecipientJob, a: i32) -> anyhow::Result<()> {
+                self.inner.mark_delivered(job, a).await
+            }
+            async fn mark_deferred(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                next: DateTime<Utc>,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_deferred(job, a, next, error).await
+            }
+            async fn mark_permanent_failure(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_permanent_failure(job, a, error).await
+            }
+            async fn mark_undeliverable(
+                &self,
+                job: &RecipientJob,
+                a: i32,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.mark_undeliverable(job, a, error).await
+            }
+            async fn claim_dsn(&self, job: &RecipientJob) -> anyhow::Result<bool> {
+                // The other worker wins the race first…
+                self.inner.update(job, |row| {
+                    row.status = STATUS_DSN_SENT.to_string();
+                    row.dsn_generated_at.get_or_insert_with(Utc::now);
+                });
+                // …then this sweep's guard observes a finalized row: false.
+                self.inner.claim_dsn(job).await
+            }
+            async fn mark_dsn_sent(&self, job: &RecipientJob, a: i32) -> anyhow::Result<()> {
+                self.inner.mark_dsn_sent(job, a).await
+            }
+            async fn release_dsn_claim(
+                &self,
+                job: &RecipientJob,
+                next: DateTime<Utc>,
+                error: &str,
+            ) -> anyhow::Result<()> {
+                self.inner.release_dsn_claim(job, next, error).await
+            }
+        }
+
+        let inner = MemStore::new(vec![job_row("inb_race", "user@managed.test")])
+            .with_message("inb_race", message("s@remote.test"));
+        let store = ConcurrentFinalizer { inner };
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(dsn.sent_count(), 0, "a finalized DSN is never re-sent");
+        assert_eq!(stats.dsn_sent, 0);
+        assert_eq!(stats.dsn_deferred, 0);
+        assert_eq!(stats.permanent, 0);
+    }
+}
+
+#[cfg(test)]
+mod pg_store_tests {
+    //! The REAL PostgreSQL delivery store and DSN dispatcher (migration 210):
+    //! claim ordering and leases, the SKIP LOCKED race between concurrent
+    //! workers, every state transition, the DSN single-dispatch guard, and
+    //! the honest RFC 3464 queue row — against a live Postgres.
+    //! TEST_DATABASE_URL unset soft-skips; a configured provisioning failure
+    //! panics.
+
+    use super::*;
+    use std::collections::BTreeSet;
+
+    async fn pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    async fn seed_message(pool: &PgPool, id: &str, mail_from: Option<&str>, raw: &[u8]) {
+        sqlx::query(
+            "INSERT INTO inbound_messages (id, mail_from, disposition, raw_message)
+             VALUES ($1, $2, 'accept', $3)",
+        )
+        .bind(id)
+        .bind(mail_from)
+        .bind(raw)
+        .execute(pool)
+        .await
+        .expect("insert inbound_messages row");
+    }
+
+    /// `due_in_secs` < 0 = already due; > 0 = not due yet.
+    async fn seed_job(
+        pool: &PgPool,
+        message_id: &str,
+        recipient: &str,
+        status: &str,
+        attempt: i32,
+        due_in_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO inbound_recipients
+                 (message_id, recipient, mailbox_id, status, attempt, next_attempt_at)
+             VALUES ($1, $2, NULL, $3, $4, NOW() + make_interval(secs => $5::double precision))",
+        )
+        .bind(message_id)
+        .bind(recipient)
+        .bind(status)
+        .bind(attempt)
+        .bind(due_in_secs as f64)
+        .execute(pool)
+        .await
+        .expect("insert inbound_recipients row");
+    }
+
+    async fn row(pool: &PgPool, message_id: &str, recipient: &str) -> (String, i32, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>) {
+        sqlx::query_as(
+            "SELECT status, attempt, next_attempt_at, dsn_generated_at, last_error
+             FROM inbound_recipients WHERE message_id = $1 AND recipient = $2",
+        )
+        .bind(message_id)
+        .bind(recipient)
+        .fetch_one(pool)
+        .await
+        .expect("recipient row")
+    }
+
+    #[tokio::test]
+    async fn pg_claim_due_claims_only_due_rows_in_order_and_extends_the_lease() {
+        let Some(pool) = pool("ipg_claim_order").await else {
+            return;
+        };
+        seed_message(&pool, "ipgmsg0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        // due oldest, due newer, not due, and a due-but-terminal row.
+        seed_job(&pool, "ipgmsg0000000000000001", "old@managed.test", "pending", 0, -600).await;
+        seed_job(&pool, "ipgmsg0000000000000001", "new@managed.test", "deferred", 2, -10).await;
+        seed_job(&pool, "ipgmsg0000000000000001", "future@managed.test", "pending", 0, 900).await;
+        seed_job(&pool, "ipgmsg0000000000000001", "done@managed.test", "delivered", 1, -900).await;
+
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let before = Utc::now();
+        let claimed = store
+            .claim_due(before, 10, 120)
+            .await
+            .expect("claim succeeds");
+
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|j| j.recipient.as_str())
+                .collect::<Vec<_>>(),
+            vec!["old@managed.test", "new@managed.test"],
+            "terminal and not-yet-due rows are never claimed; due rows come oldest-first"
+        );
+        assert_eq!(claimed[0].prior_status, "pending");
+        assert_eq!(claimed[1].prior_status, "deferred");
+        assert_eq!(claimed[1].attempt, 2, "the stored attempt travels with the job");
+
+        for job in &claimed {
+            let (status, _attempt, next_attempt_at, _dsn, _err) =
+                row(&pool, &job.message_id, &job.recipient).await;
+            assert_eq!(status, STATUS_DELIVERING, "the claim flips the row");
+            let lease = next_attempt_at.expect("claiming sets a lease");
+            assert!(
+                lease >= before && lease <= Utc::now() + chrono::Duration::seconds(120),
+                "the lease must extend ~120s from the claim instant, got {lease}"
+            );
+        }
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_concurrent_claimers_never_share_a_row() {
+        let Some(pool) = pool("ipg_claim_race").await else {
+            return;
+        };
+        seed_message(&pool, "ipgrace0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        for i in 0..6i32 {
+            seed_job(
+                &pool,
+                "ipgrace0000000000000001",
+                &format!("rcpt{i}@managed.test"),
+                "pending",
+                0,
+                -60,
+            )
+            .await;
+        }
+
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let now = Utc::now();
+        // Two workers racing on the SAME pool at the SAME instant: SKIP
+        // LOCKED must never hand one row to two workers, and no due row may
+        // be lost. (The second statement can legitimately observe zero rows
+        // when it runs after the first committed its leases — that is the
+        // lease doing its job, not a lost row.)
+        let (left, right) = tokio::join!(
+            store.claim_due(now, 10, 120),
+            store.claim_due(now, 10, 120),
+        );
+        let left = left.expect("left claim");
+        let right = right.expect("right claim");
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for job in left.iter().chain(right.iter()) {
+            assert!(
+                seen.insert(job.recipient.clone()),
+                "SKIP LOCKED must never hand one row to two workers: {} claimed twice",
+                job.recipient
+            );
+        }
+        assert_eq!(seen.len(), 6, "every due row is claimed exactly once");
+        // A follow-up claim while every lease is live observes nothing —
+        // claimed rows are exclusive for the lease duration.
+        let while_leases_live = store
+            .claim_due(Utc::now(), 10, 120)
+            .await
+            .expect("claim succeeds");
+        assert!(
+            while_leases_live.is_empty(),
+            "rows under a live lease must not be re-claimable: {while_leases_live:?}"
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_an_expired_lease_recovers_a_crashed_worker_and_travels_as_prior_status() {
+        let Some(pool) = pool("ipg_lease_recover").await else {
+            return;
+        };
+        seed_message(&pool, "ipglease0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        seed_job(&pool, "ipglease0000000000000001", "lost@managed.test", "delivering", 1, -500).await;
+
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let claimed = store
+            .claim_due(Utc::now(), 10, 120)
+            .await
+            .expect("claim succeeds");
+        assert_eq!(claimed.len(), 1, "an expired 'delivering' lease is reclaimable");
+        assert_eq!(claimed[0].prior_status, "delivering");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_load_message_maps_null_return_path_and_missing_rows() {
+        let Some(pool) = pool("ipg_load_message").await else {
+            return;
+        };
+        // NULL mail_from (the legacy form of the null return path) and a
+        // NULL body must not panic the worker.
+        sqlx::query(
+            "INSERT INTO inbound_messages (id, mail_from, disposition, raw_message)
+             VALUES ('ipgload0000000000000001', NULL, 'accept', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert");
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let message = store
+            .load_message("ipgload0000000000000001")
+            .await
+            .expect("load succeeds");
+        let message = message.expect("row exists");
+        assert_eq!(message.mail_from, "", "NULL mail_from is the null return path");
+        assert_eq!(message.disposition, "accept");
+        assert!(message.raw_message.is_none());
+
+        assert!(
+            store
+                .load_message("does-not-exist")
+                .await
+                .expect("a missing row is None, not an error")
+                .is_none()
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_state_transition_sql_round_trips_every_vocabulary_word() {
+        let Some(pool) = pool("ipg_transitions").await else {
+            return;
+        };
+        seed_message(&pool, "ipgtrans000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        for (i, recipient) in ["defer@managed.test", "deliver@managed.test", "fail@managed.test", "undeliv@managed.test"]
+            .iter()
+            .enumerate()
+        {
+            seed_job(&pool, "ipgtrans000000000000001", recipient, "delivering", i as i32, -10).await;
+        }
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let make_job = |recipient: &str| RecipientJob {
+            message_id: "ipgtrans000000000000001".into(),
+            recipient: recipient.into(),
+            mailbox_id: None,
+            prior_status: "delivering".into(),
+            attempt: 1,
+            last_error: None,
+        };
+
+        // deferred: retry scheduled, error recorded.
+        let next = Utc::now() + chrono::Duration::seconds(600);
+        store
+            .mark_deferred(&make_job("defer@managed.test"), 2, next, "mailstore 503")
+            .await
+            .expect("defer");
+        let (status, attempt, next_at, _dsn, err) =
+            row(&pool, "ipgtrans000000000000001", "defer@managed.test").await;
+        assert_eq!((status.as_str(), attempt), (STATUS_DEFERRED, 2));
+        assert!(
+            (next_at.expect("deferred sets a retry deadline") - next).num_milliseconds().abs() < 1000
+        );
+        assert_eq!(err.as_deref(), Some("mailstore 503"));
+
+        // delivered: terminal, error cleared, delivered_at stamped.
+        store
+            .mark_delivered(&make_job("deliver@managed.test"), 2)
+            .await
+            .expect("deliver");
+        let (status, attempt, _next, _dsn, err) =
+            row(&pool, "ipgtrans000000000000001", "deliver@managed.test").await;
+        assert_eq!((status.as_str(), attempt), (STATUS_DELIVERED, 2));
+        assert!(err.is_none(), "a delivered row has no stale error");
+        let delivered_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT delivered_at FROM inbound_recipients
+             WHERE message_id = $1 AND recipient = 'deliver@managed.test'",
+        )
+        .bind("ipgtrans000000000000001")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(delivered_at.is_some(), "delivered_at is stamped");
+
+        // permanent failure: status failed with the diagnostic.
+        store
+            .mark_permanent_failure(&make_job("fail@managed.test"), 3, "550 no mailbox")
+            .await
+            .expect("fail");
+        let (status, attempt, _next, _dsn, err) =
+            row(&pool, "ipgtrans000000000000001", "fail@managed.test").await;
+        assert_eq!((status.as_str(), attempt), (STATUS_FAILED, 3));
+        assert_eq!(err.as_deref(), Some("550 no mailbox"));
+
+        // undeliverable: the NULL-return-path terminal state.
+        store
+            .mark_undeliverable(&make_job("undeliv@managed.test"), 1, "no DSN permitted")
+            .await
+            .expect("undeliverable");
+        let (status, _attempt, _next, dsn, _err) =
+            row(&pool, "ipgtrans000000000000001", "undeliv@managed.test").await;
+        assert_eq!(status, STATUS_UNDELIVERABLE);
+        assert!(dsn.is_none(), "undeliverable rows never generate a DSN");
+
+        // Attempt history: append-only rows land with stage/outcome/error.
+        store
+            .record_attempt(&AttemptRecord {
+                message_id: "ipgtrans000000000000001".into(),
+                recipient: "defer@managed.test".into(),
+                attempt: 2,
+                stage: "delivery",
+                outcome: "transient",
+                error: Some("mailstore 503".into()),
+            })
+            .await
+            .expect("attempt recorded");
+        let (stage, outcome, error): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT stage, outcome, error FROM inbound_delivery_attempts
+             WHERE message_id = $1 AND recipient = 'defer@managed.test'",
+        )
+        .bind("ipgtrans000000000000001")
+        .fetch_one(&pool)
+        .await
+        .expect("attempt row");
+        assert_eq!((stage.as_str(), outcome.as_str()), ("delivery", "transient"));
+        assert_eq!(error.as_deref(), Some("mailstore 503"));
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_claim_dsn_locks_out_finalized_rows_and_release_reschedules() {
+        let Some(pool) = pool("ipg_dsn_guard").await else {
+            return;
+        };
+        seed_message(&pool, "ipgdsng000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        seed_job(&pool, "ipgdsng000000000000001", "a@managed.test", "failed", 3, -10).await;
+        seed_job(&pool, "ipgdsng000000000000001", "b@managed.test", "failed", 3, -10).await;
+        let store = PgInboundDeliveryStore::new(pool.clone());
+        let job = |r: &str| RecipientJob {
+            message_id: "ipgdsng000000000000001".into(),
+            recipient: r.into(),
+            mailbox_id: None,
+            prior_status: STATUS_FAILED.into(),
+            attempt: 3,
+            last_error: None,
+        };
+
+        // Guard open: claim succeeds and stamps the guard.
+        assert!(store.claim_dsn(&job("a@managed.test")).await.expect("claim a"));
+        let (_s, _a, _n, dsn, _e) = row(&pool, "ipgdsng000000000000001", "a@managed.test").await;
+        assert!(dsn.is_some(), "claiming stamps dsn_generated_at");
+
+        // A crash before mark_dsn_sent leaves a stamped-but-failed row —
+        // the documented at-least-once window: claimable again.
+        let reclaimed = store.claim_due(Utc::now(), 10, 120).await.expect("claim");
+        assert!(
+            reclaimed.iter().any(|j| j.recipient == "a@managed.test"),
+            "a claimed-but-not-finalized DSN is re-dispatched, never lost"
+        );
+
+        // Finalize a: dsn_sent closes the guard forever.
+        store
+            .mark_dsn_sent(&job("a@managed.test"), 3)
+            .await
+            .expect("finalize");
+        assert!(
+            !store.claim_dsn(&job("a@managed.test")).await.expect("claim after sent"),
+            "a dsn_sent row can never be claimed again"
+        );
+        let claimable = store.claim_due(Utc::now(), 10, 120).await.expect("claim");
+        assert!(
+            !claimable.iter().any(|j| j.recipient == "a@managed.test"),
+            "dsn_sent is not in the claimable vocabulary"
+        );
+
+        // Release: the claim is returned with the retry deadline and the
+        // guard cleared so a later sweep can retry the dispatch.
+        let next = Utc::now() + chrono::Duration::seconds(300);
+        store
+            .release_dsn_claim(&job("b@managed.test"), next, "DSN dispatch failed: queue down")
+            .await
+            .expect("release");
+        let (status, _a, next_at, dsn, err) =
+            row(&pool, "ipgdsng000000000000001", "b@managed.test").await;
+        assert_eq!(status, STATUS_FAILED, "released back to the retryable state");
+        assert!(dsn.is_none(), "the guard is cleared for retry");
+        assert!(
+            (next_at.expect("release reschedules") - next).num_milliseconds().abs() < 1000
+        );
+        assert!(
+            err.unwrap_or_default().contains("queue down"),
+            "the release records why"
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_dsn_dispatcher_fails_closed_without_a_dkim_ready_receiving_domain() {
+        let Some(pool) = pool("ipg_dsn_domain").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO domains (name, status, dkim_enabled, dkim_selector, dkim_private_key)
+             VALUES ('halfready.test', 'pending', false, NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed domain");
+        let dispatcher = PgDsnDispatcher::new(pool.clone());
+        let dsn_for = |recipient: &str| DeliveryStatusNotification {
+            reporting_mta: "mail.test".into(),
+            original_sender: "s@remote.test".into(),
+            original_recipient: recipient.into(),
+            original_message_id: "ipgdom0000000000000001".into(),
+            arrival_date: Utc::now(),
+            status: "5.1.1".into(),
+            diagnostic: "no mailbox".into(),
+            original_message: Some(bytes::Bytes::from_static(b"Subject: x\r\n\r\n")),
+        };
+
+        // Not verified: retryable dispatch failure, nothing enqueued.
+        let error = dispatcher
+            .dispatch(&dsn_for("u@halfready.test"))
+            .await
+            .expect_err("an unverified domain must refuse the dispatch");
+        assert!(error.contains("no ready DKIM domain"), "{error}");
+
+        // Verified but DKIM off, then DKIM on without key material: every
+        // readiness conjunction must hold before the DSN is enqueued.
+        sqlx::query("UPDATE domains SET status = 'verified' WHERE name = 'halfready.test'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = dispatcher
+            .dispatch(&dsn_for("u@halfready.test"))
+            .await
+            .expect_err("dkim_enabled=false must refuse");
+        assert!(error.contains("no ready DKIM domain"), "{error}");
+
+        sqlx::query(
+            "UPDATE domains SET dkim_enabled = true, dkim_selector = 'sel' WHERE name = 'halfready.test'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let error = dispatcher
+            .dispatch(&dsn_for("u@halfready.test"))
+            .await
+            .expect_err("a NULL private key must refuse");
+        assert!(error.contains("no ready DKIM domain"), "{error}");
+
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_queue")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0, "no refused dispatch may leave a queue row");
+
+        // A recipient with no domain at all cannot originate the DSN.
+        let error = dispatcher
+            .dispatch(&dsn_for("no-domain-at-all"))
+            .await
+            .expect_err("a domainless recipient must refuse");
+        assert!(
+            error.contains("no domain to originate the DSN from"),
+            "{error}"
+        );
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn pg_dsn_dispatcher_enqueues_an_honest_rfc3464_report() {
+        let Some(pool) = pool("ipg_dsn_enqueue").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO domains (name, status, dkim_enabled, dkim_selector, dkim_private_key)
+             VALUES ('ready.test', 'verified', true, 'apexmail2026', '-----BEGIN PRIVATE KEY-----')",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed ready domain");
+
+        let original = bytes::Bytes::from_static(
+            b"From: s@remote.test\r\nSubject: help\r\n\r\nplease help\r\n",
+        );
+        let dsn = DeliveryStatusNotification {
+            reporting_mta: "mail.test".into(),
+            original_sender: "s@remote.test".into(),
+            original_recipient: "gone@ready.test".into(),
+            original_message_id: "ipgenq0000000000000001".into(),
+            arrival_date: Utc::now(),
+            status: "5.1.1".into(),
+            diagnostic: "mailstore: no such mailbox".into(),
+            original_message: Some(original),
+        };
+        let dispatcher = PgDsnDispatcher::new(pool.clone());
+        dispatcher
+            .dispatch(&dsn)
+            .await
+            .expect("a DKIM-ready domain accepts the DSN");
+
+        let (from_address, to_addresses, subject, raw_headers, headers, metadata): (
+            String,
+            Vec<String>,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            r#"SELECT from_address, to_addresses, subject, raw_headers, headers, metadata
+               FROM email_queue WHERE to_addresses = ARRAY[$1::text]"#,
+        )
+        .bind("s@remote.test")
+        .fetch_one(&pool)
+        .await
+        .expect("the DSN queue row");
+
+        assert_eq!(
+            from_address, "MAILER-DAEMON@ready.test",
+            "the DSN is originated by the RECEIVING domain"
+        );
+        assert_eq!(to_addresses, vec!["s@remote.test".to_string()]);
+        assert_eq!(subject, DSN_SUBJECT);
+        // The transported MIME is the complete RFC 3464 report with honest
+        // failure fields — no invented successes.
+        for needle in [
+            "multipart/report; report-type=delivery-status",
+            "Final-Recipient: rfc822; gone@ready.test",
+            "Action: failed",
+            "Status: 5.1.1",
+            "Reporting-MTA: dns; mail.test",
+            "Subject: help",
+        ] {
+            assert!(
+                raw_headers.contains(needle),
+                "the queued MIME must contain {needle:?}:\n{raw_headers}"
+            );
+        }
+        assert_eq!(
+            headers.get("X-ApexMail-DSN-Status").and_then(|v| v.as_str()),
+            Some("5.1.1")
+        );
+        assert_eq!(
+            headers.get("X-ApexMail-DSN-Recipient").and_then(|v| v.as_str()),
+            Some("gone@ready.test")
+        );
+        let dsn_meta = metadata
+            .get("dsn")
+            .and_then(|d| d.get("status"))
+            .and_then(|s| s.as_str())
+            .expect("dsn metadata with the status");
+        assert_eq!(dsn_meta, "5.1.1");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_an_invalid_mailstore_address_and_survives_a_dead_pool() {
+        let Some(pool) = pool("ipg_worker_runtime").await else {
+            return;
+        };
+        // An unparseable gRPC endpoint must fail construction (never a
+        // worker that cannot even dial).
+        let error = match InboundDeliveryWorker::new(
+            pool.clone(),
+            "::: not a uri :::",
+            "mail.test".into(),
+        ) {
+            Ok(_) => panic!("an invalid MAILSTORE_GRPC_ADDR must fail construction"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("invalid MAILSTORE_GRPC_ADDR"),
+            "{error}"
+        );
+
+        // A sweep against a closed pool is an Err the run loop logs and
+        // survives: the worker keeps polling until shutdown instead of
+        // dropping accepted mail.
+        let closed = pool.clone();
+        closed.close().await;
+        let worker = InboundDeliveryWorker::new(closed, "http://127.0.0.1:1", "mail.test".into())
+            .map_err(|e| anyhow::anyhow!("valid construction failed: {e}"))
+            .expect("valid construction with a syntactically valid endpoint");
+        assert!(
+            worker.run_once().await.is_err(),
+            "a closed pool must surface as a sweep error"
+        );
+        pool.close().await;
+    }
 }

@@ -364,6 +364,52 @@ mod tests {
         let default_cfg = ScheduleConfig::default();
         assert_eq!(default_cfg.interval, Duration::from_secs(6 * 60 * 60));
     }
+
+    #[tokio::test]
+    async fn spawn_survives_a_failing_tick_and_keeps_polling() {
+        // A tick whose DB access fails (here: a closed pool) must be logged
+        // and must NOT kill the spawned poller — the next tick retries.
+        let Some(pool) = test_pool("scheduler_spawn_error").await else {
+            return;
+        };
+        pool.close().await;
+        let handle = spawn(
+            pool,
+            ScheduleConfig {
+                interval: Duration::from_millis(10),
+            },
+            resolver_returning(Ok("{}")),
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !handle.is_finished(),
+            "a failed tick must never terminate the poller"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_google_secret_missing_the_refresh_token_is_refused_before_any_network_call() {
+        let Some(pool) = test_pool("scheduler_google_no_refresh").await else {
+            return;
+        };
+        // Both endpoints point at a dead port: the ONLY failure may be the
+        // missing-key refusal, never a partial credential reaching OAuth.
+        insert_credential(&pool, "g-nort", "google", "ref-nort", true).await;
+        let result = run_once(
+            &pool,
+            &resolver_returning(Ok("{\"client_id\": \"id\", \"client_secret\": \"sec\"}")),
+        )
+        .await;
+        result.expect("the tick itself must succeed");
+        let (last_error, failures) = credential_state(&pool, "g-nort").await;
+        assert_eq!(
+            last_error.as_deref(),
+            Some("missing refresh_token"),
+            "the third required key is enforced exactly like the first two"
+        );
+        assert_eq!(failures, 1);
+    }
     // ── poll success + secret-shape arms against a loopback SNDS mock ──────
 
     /// A canned HTTP/1.1 server: one response for every connection.
