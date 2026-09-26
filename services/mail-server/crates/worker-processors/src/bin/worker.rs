@@ -1195,4 +1195,49 @@ mod tests {
         );
         db.close().await;
     }
+
+    /// The production connect path builds a WORKING pool: the exact
+    /// `PgConnectOptions` tunings (statement cache, acquire/idle/lifetime
+    /// limits) must still serve queries against the configured database.
+    #[tokio::test]
+    async fn connect_db_serves_queries_with_production_tunings() -> Result<()> {
+        let Some(url) = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let pool = connect_db(&url).await.expect("the test server connects");
+        let one: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("the pool must serve a query with statement caching enabled");
+        assert_eq!(one, 1);
+        pool.close().await;
+        Ok(())
+    }
+
+    /// With OTLP disabled, `init_tracing` installs the structured-JSON
+    /// fallback subscriber and reports no guard. (Single-shot: the global
+    /// subscriber slot is taken by the first install, so this test must be
+    /// the only caller in the binary's test binary.)
+    #[test]
+    fn init_tracing_falls_back_to_json_logging_without_otlp() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let saved = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let guard = std::panic::catch_unwind(init_tracing);
+        match saved {
+            Some(v) => std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v),
+            None => std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        }
+        // `None` = the fallback path ran (no OTLP guard to flush). A panic
+        // here would mean a global subscriber was already installed — an
+        // environment fault, surfaced loudly instead of silently skipped.
+        let guard = guard.expect("the fallback install must not panic");
+        assert!(
+            guard.is_none(),
+            "without OTLP there is no tracing guard to keep alive"
+        );
+    }
 }

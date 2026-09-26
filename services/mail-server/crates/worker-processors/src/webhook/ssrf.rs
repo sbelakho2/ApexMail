@@ -878,4 +878,58 @@ mod residual_ip_literal_tests {
     fn default_delegates_to_new() {
         let _ = SsrfValidator::default();
     }
+
+    /// DNS rebinding: a HOSTNAME whose resolution contains a private
+    /// address is refused even though the URL itself carries no IP literal.
+    /// A MIXED record set (public first, private second) must also be
+    /// refused — every resolved IP is checked, not just the first answer.
+    #[tokio::test]
+    async fn hostname_resolving_to_a_private_ip_is_refused_even_mixed_with_public() {
+        let validator = SsrfValidator::new();
+        let private: IpAddr = IpAddr::from([10, 4, 9, 200]);
+        let public: IpAddr = IpAddr::from([151, 101, 1, 140]);
+
+        // Pure-private resolution (the classic rebinding payload).
+        validator
+            .cache
+            .insert("rebind.example.test".to_string(), vec![private]);
+        let error = validator
+            .validate_and_resolve_url("https://rebind.example.test/hook")
+            .await
+            .expect_err("a hostname resolving private must be refused");
+        assert!(
+            error.to_string().contains("private IP"),
+            "error must name the private resolution: {error}"
+        );
+
+        // Mixed record set: the public answer must not whitewash the
+        // private one.
+        validator
+            .cache
+            .insert("mixed.example.test".to_string(), vec![public, private]);
+        let error = validator
+            .validate_and_resolve_url("https://mixed.example.test/hook")
+            .await
+            .expect_err("ONE private answer must refuse the whole target");
+        assert!(error.to_string().contains("private IP"), "{error}");
+    }
+
+    /// Teredo (2001:0000::/32) embeds an obfuscated IPv4 in its last 32
+    /// bits (XOR 0xffffffff): a Teredo address carrying a PRIVATE embedded
+    /// IPv4 is a private target; one carrying a public IPv4 is not.
+    #[test]
+    fn teredo_embedded_ipv4_is_screened() {
+        // Obfuscated 10.0.0.1 = 0x0a000001 ^ 0xffffffff = 0xf5fffffe.
+        let private_embedded: Ipv6Addr = "2001:0:0:0:0:0:f5ff:fffe".parse().unwrap();
+        assert!(
+            is_private_ipv6(&private_embedded),
+            "a Teredo address embedding a private IPv4 must be refused"
+        );
+        // Obfuscated 8.8.8.8 = 0x08080808 ^ 0xffffffff = 0xf7f7f7f7.
+        let public_embedded: Ipv6Addr = "2001:0:0:0:0:0:f7f7:f7f7".parse().unwrap();
+        assert!(
+            !is_private_ipv6(&public_embedded),
+            "a Teredo address embedding a public IPv4 is not private"
+        );
+    }
 }

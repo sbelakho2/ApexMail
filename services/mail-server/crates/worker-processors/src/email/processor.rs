@@ -16,7 +16,7 @@ use rand::Rng;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use std::sync::Mutex;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -1504,7 +1504,15 @@ pub struct EmailProcessor {
     transport: HybridTransport,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
-    shutdown_notify: Arc<Notify>,
+    /// Level-triggered shutdown signal. `Notify::notify_waiters` is edge-
+    /// triggered: a background task that was mid-DB-call (not parked on
+    /// `notified()`) when `stop()` fired never received the wake and stayed
+    /// parked for a full 60 s reconcile interval after shutdown — observed
+    /// as tasks outliving `stop()` (leaky tests) and the poll loop missing
+    /// the wake when `notify_waiters` raced a batch. A `watch` channel
+    /// stores the shutdown state, so every task observes it at its NEXT
+    /// await point, however late it arrives.
+    shutdown: Arc<watch::Sender<bool>>,
     /// Last wall-clock time (ms) queue-depth metrics were exported.
     queue_metrics_last_emit_ms: AtomicI64,
 
@@ -1573,7 +1581,7 @@ impl EmailProcessor {
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
             queue_metrics_last_emit_ms: AtomicI64::new(0),
-            shutdown_notify: Arc::new(Notify::new()),
+            shutdown: Arc::new(watch::channel(false).0),
             suppression_cache: Cache::builder()
                 .max_capacity(SUPPRESSION_CACHE_MAX_SIZE)
                 .time_to_live(SUPPRESSION_CACHE_TTL)
@@ -1601,13 +1609,13 @@ impl EmailProcessor {
         // lifetime and stops with the shutdown notification.
         {
             let metrics_self = Arc::clone(&self);
-            let shutdown = Arc::clone(&self.shutdown_notify);
+            let mut shutdown = self.shutdown.subscribe();
             tokio::spawn(async move {
                 loop {
                     metrics_self.record_queue_depth_metrics().await;
                     tokio::select! {
                         _ = sleep(Duration::from_secs(15)) => {}
-                        _ = shutdown.notified() => break,
+                        _ = shutdown.changed() => break,
                     }
                 }
             });
@@ -1624,7 +1632,7 @@ impl EmailProcessor {
         // governance/observability; the claim reclaims them on demand too.
         {
             let reconcile_self = Arc::clone(&self);
-            let shutdown = Arc::clone(&self.shutdown_notify);
+            let mut shutdown = self.shutdown.subscribe();
             tokio::spawn(async move {
                 loop {
                     reconcile_self.reconcile_stuck_parents().await;
@@ -1638,7 +1646,7 @@ impl EmailProcessor {
                     }
                     tokio::select! {
                         _ = sleep(Duration::from_secs(60)) => {}
-                        _ = shutdown.notified() => break,
+                        _ = shutdown.changed() => break,
                     }
                 }
             });
@@ -1667,7 +1675,9 @@ impl EmailProcessor {
     pub async fn stop(&self) -> ProcessorResult<()> {
         info!("Stopping email processor");
         self.is_running.store(false, Ordering::SeqCst);
-        self.shutdown_notify.notify_waiters();
+        // Level-triggered: the stored `true` is observed by every background
+        // task at its next await point, however late it arrives.
+        let _ = self.shutdown.send(true);
 
         // Wait for active jobs
         let max_wait = Duration::from_secs(30);
@@ -1692,6 +1702,7 @@ impl EmailProcessor {
     /// still managed by the existing `active_jobs` atomic, but the semaphore
     /// provides an additional hard cap and a load-shedding cooldown.
     async fn poll_loop(&self) {
+        let mut shutdown = self.shutdown.subscribe();
         while self.is_running.load(Ordering::SeqCst) {
             // ── Error rate cooldown ────────────────────────────
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
@@ -1737,7 +1748,7 @@ impl EmailProcessor {
                     self.backpressure.observe_backlog(0);
                     tokio::select! {
                         _ = sleep(self.config.base.poll_interval) => {}
-                        _ = self.shutdown_notify.notified() => break,
+                        _ = shutdown.changed() => break,
                     }
                 }
                 Ok(jobs) => {
@@ -13448,18 +13459,20 @@ mod residual_arms_db_tests {
             .await
             .expect("loop exits")
             .expect("clean exit");
-        sqlx::query("UPDATE email_queue SET scheduled_at = NULL WHERE id = $1")
+        sqlx::query("UPDATE email_queue SET scheduled_at = NULL, metadata = metadata - 'requeue_reason' WHERE id = $1")
             .bind(fixture.queue_id)
             .execute(&pool)
             .await
             .expect("make the row claimable again");
         install_fault(&pool, "requeue_write", "email_queue", "UPDATE").await;
         // Target ONLY the requeue write (the claim's UPDATE must keep
-        // working): the requeue is the write that stamps requeue_reason.
+        // working): the requeue is the write that stamps requeue_reason,
+        // and the stale phase-1 reason has been stripped above so the
+        // claim's jsonb_set(lease_token) cannot trip the trigger either.
         sqlx::query(
             "CREATE OR REPLACE FUNCTION wpf_requeue_write_UPDATE() RETURNS trigger AS $$ \
              BEGIN \
-               IF NEW.metadata->>'requeue_reason' IS NOT NULL THEN \
+               IF NEW.status = 'pending' AND NEW.metadata->>'requeue_reason' IS NOT NULL THEN \
                  RAISE EXCEPTION 'injected fault requeue_write'; \
                END IF; \
                RETURN NEW; \
@@ -13547,6 +13560,22 @@ mod residual_arms_db_tests {
         .await
         .expect("reset row");
         install_fault(&pool, "suppress_write", "email_queue", "UPDATE").await;
+        // Target ONLY the suppression write: the claim's UPDATE (status
+        // 'processing') and the release write (status 'pending') must keep
+        // working — only the handler's terminal 'suppressed' flip fails.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION wpf_suppress_write_UPDATE() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.status = 'suppressed' THEN \
+                 RAISE EXCEPTION 'injected fault suppress_write'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("retarget suppression fault fn");
         set_fault(&pool, "suppress_write", true).await;
 
         processor.is_running.store(true, Ordering::SeqCst);
@@ -14516,6 +14545,46 @@ mod residual_arms_db_tests {
             .expect("no error");
             assert!(inserted.is_none());
         }
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Audit item 12's prohibition is type-level and total: provider/SMTP
+    /// ACCEPTANCE records NEITHER a sales outcome NOR a sender-health
+    /// ledger row — not even for a fully sales-provenanced row with a
+    /// resolvable queue id and recipient. A producer that slips acceptance
+    /// through would fabricate a `delivered`-adjacent fact the audit
+    /// explicitly forbids.
+    #[tokio::test]
+    async fn provider_acceptance_records_neither_outcome_nor_ledger_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_acceptance_prohibition").await else { return Ok(()) };
+        let seed = seed_sales(&pool, "prohibition").await;
+        let outcome = record_sales_outcome_if_linked(
+            &pool,
+            &seed.queue_id.to_string(),
+            SalesDeliveryEvent::ProviderAccepted,
+            "smtp",
+        )
+        .await
+        .expect("no error");
+        assert!(
+            outcome.is_none(),
+            "acceptance must never produce a sales outcome"
+        );
+        let ledger = record_sender_event_if_linked(
+            &pool,
+            &seed.queue_id.to_string(),
+            SalesDeliveryEvent::ProviderAccepted,
+            "recipient@example.com",
+        )
+        .await
+        .expect("no error");
+        assert!(
+            ledger.is_none(),
+            "acceptance must never produce a sender-health ledger row"
+        );
         pool.close().await;
         Ok(())
     }

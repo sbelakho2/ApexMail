@@ -117,6 +117,13 @@ mod db_tests {
         crate::test_support::canonical_pool("warmup_graduation", "wp_graduation").await
     }
 
+    /// A SEPARATE scratch database: the genesis test wipes `audit_logs`,
+    /// which would race the other graduation test's audit-row assertions if
+    /// both shared one database (nextest runs tests in parallel processes).
+    async fn genesis_db() -> Option<sqlx::PgPool> {
+        crate::test_support::canonical_pool("warmup_graduation_genesis", "wp_grad_genesis").await
+    }
+
     async fn seed_ip(db: &sqlx::PgPool, id: &str, days: i64, status: &str) {
         sqlx::query(
             "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
@@ -189,6 +196,44 @@ mod db_tests {
         .await
         .unwrap();
         assert_eq!(audit, 1, "no duplicate audit rows on the second pass");
+        db.close().await;
+        Ok(())
+    }
+
+    /// The hash chain's GENESIS: on a deployment whose `audit_logs` is empty
+    /// there is no previous hash to chain onto. The graduation must still
+    /// commit, writing its audit row with a NULL `previous_hash` and a full
+    /// sha256 hex digest — a genesis that errored would make the very first
+    /// warmup graduation of a fresh deployment impossible.
+    #[tokio::test]
+    async fn graduation_is_the_genesis_link_of_an_empty_audit_chain(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(db) = genesis_db().await else { return Ok(()) };
+        sqlx::query("DELETE FROM audit_logs")
+            .execute(&db)
+            .await
+            .expect("empty the audit chain");
+        seed_ip(&db, "grad-genesis", 75, "warming").await;
+
+        let graduated = graduate_mature_warmup_ips(&db).await.expect("genesis pass");
+        assert_eq!(graduated, vec!["grad-genesis".to_string()]);
+
+        let (previous_hash, hash): (Option<String>, String) = sqlx::query_as(
+            "SELECT previous_hash, hash FROM audit_logs \
+             WHERE action = 'ip.warmup_graduated' AND resource_id = 'grad-genesis'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("genesis audit row");
+        assert!(
+            previous_hash.is_none(),
+            "an empty chain has no previous hash: {previous_hash:?}"
+        );
+        assert_eq!(
+            hash.len(),
+            64,
+            "the genesis hash is still a complete sha256 hex digest: {hash}"
+        );
         db.close().await;
         Ok(())
     }

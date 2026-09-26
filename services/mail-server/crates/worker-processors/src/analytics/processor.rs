@@ -1928,4 +1928,263 @@ mod residual_arms {
             .expect("clean exit");
         pool.close().await;
     }
+
+    fn buffered_event(id: &str, tenant: &str) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: id.to_string(),
+            tenant_id: tenant.to_string(),
+            event_type: "sent".to_string(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: None,
+            metadata: None,
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// `stop()`'s final flush with NON-EMPTY buffers under a write outage
+    /// hits the failure arm: the flush error is reported (logged), stop
+    /// still succeeds, and — the invariant — the drained buffers are
+    /// RESTORED, so a broken shutdown flush loses nothing. (An empty-buffer
+    /// stop no-ops before touching the database and cannot prove this.)
+    #[tokio::test]
+    async fn stop_flush_failure_with_buffered_events_restores_and_reports(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_stop_flush_fail2").await else { return Ok(()) };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let tenant = unique_tenant();
+        let evt = buffered_event("stop-flush-1", &tenant);
+        processor.update_aggregation(&evt);
+        processor
+            .event_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(evt);
+
+        sqlx::query("ALTER TABLE analytics_hourly RENAME TO analytics_hourly_gone")
+            .execute(&pool)
+            .await
+            .expect("break analytics_hourly");
+
+        let stopped = processor.stop().await;
+        assert!(
+            stopped.is_ok(),
+            "stop must report, never propagate, the flush failure"
+        );
+        assert_eq!(
+            processor
+                .event_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "a failed final flush restores the buffer — nothing is lost"
+        );
+
+        sqlx::query("ALTER TABLE analytics_hourly_gone RENAME TO analytics_hourly")
+            .execute(&pool)
+            .await
+            .expect("restore analytics_hourly");
+        processor
+            .flush_buffers()
+            .await
+            .expect("the restored event flushes after the outage");
+        let sent = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(sent), 0)::bigint FROM analytics_hourly WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("hourly totals");
+        assert_eq!(sent, 1, "the retained event was persisted by the retry");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The flush loop's AGE trigger: a single buffered event (far below
+    /// MIN_FLUSH_BATCH_SIZE) whose clock exceeds MAX_BUFFER_AGE is flushed
+    /// on the next tick — low-volume tenants must not wait for a full batch.
+    #[tokio::test] // real time: the loop parks on a real interval
+    async fn age_based_flush_pushes_sub_minimum_batches(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_age_flush").await else { return Ok(()) };
+        let mut config = test_config();
+        config.base.flush_interval = Duration::from_millis(20);
+        let processor = Arc::new(AnalyticsProcessor::new(pool.clone(), redis_pool(), config));
+        let tenant = unique_tenant();
+        // A REAL claimed row: its numeric id is the buffered event id, so
+        // the post-flush marking can actually match it.
+        let row_id = enqueue_event(&pool, &tenant, "sent", None, None).await;
+        let evt = buffered_event(&row_id, &tenant);
+        processor.update_aggregation(&evt);
+        processor
+            .event_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(evt);
+        // Backdate the flush clock past MAX_BUFFER_AGE.
+        *processor
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(
+            std::time::Instant::now()
+                .checked_sub(MAX_BUFFER_AGE + Duration::from_secs(1))
+                .expect("a fresh Instant is older than the buffer age"),
+        );
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.flush_loop().await }
+        });
+
+        let start = std::time::Instant::now();
+        let drained = loop {
+            if processor
+                .event_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+            {
+                break true;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(drained, "the stale sub-minimum batch must be age-flushed");
+
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("flush loop exits")
+            .expect("clean exit");
+        let sent = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(sent), 0)::bigint FROM analytics_hourly WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("hourly totals");
+        assert_eq!(sent, 1, "the age-flushed event was persisted");
+        let processed: bool =
+            sqlx::query_scalar("SELECT processed FROM analytics_queue WHERE id = $1")
+                .bind(row_id.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("claim row");
+        assert!(processed, "the age-flushed event was marked processed");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The `mark_events_processed` failure arm: with the claim table gone,
+    /// the flush still SUCCEEDS (the aggregations are already persisted)
+    /// and the buffer stays drained — the marking bookkeeping failure is
+    /// logged, never allowed to fail or unwind the persisted write.
+    #[tokio::test]
+    async fn mark_processed_failure_degrades_without_failing_the_flush(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_mark_fail").await else { return Ok(()) };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let tenant = unique_tenant();
+        let evt = buffered_event("mark-fail-1", &tenant);
+        processor.update_aggregation(&evt);
+        processor
+            .event_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(evt);
+
+        sqlx::query("ALTER TABLE analytics_queue RENAME TO analytics_queue_gone")
+            .execute(&pool)
+            .await
+            .expect("break analytics_queue");
+
+        let result = processor.flush_buffers().await;
+        assert!(
+            result.is_ok(),
+            "a marking failure must not fail the flush: {result:?}"
+        );
+        assert!(
+            processor
+                .event_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "the persisted events stay drained (NOT restored — that would double-write)"
+        );
+        let sent = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(sent), 0)::bigint FROM analytics_hourly WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("hourly totals");
+        assert_eq!(sent, 1, "the aggregation was persisted before the marking failure");
+
+        sqlx::query("ALTER TABLE analytics_queue_gone RENAME TO analytics_queue")
+            .execute(&pool)
+            .await
+            .expect("restore analytics_queue");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// `restore_buffers` restarts the age-based flush clock exactly when an
+    /// EMPTY buffer receives restored events (so a failed flush is retried
+    /// by age even under zero traffic), and never touches the clock when
+    /// the events were already buffered meanwhile.
+    #[tokio::test]
+    async fn restore_buffers_restarts_the_age_clock_from_empty(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_restore_clock").await else { return Ok(()) };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let evt = buffered_event("restore-1", "t-restore");
+
+        *processor
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        processor.restore_buffers(vec![evt.clone()], HashMap::new());
+        assert!(
+            processor
+                .oldest_buffered_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some(),
+            "restoring into an empty buffer restarts the age clock"
+        );
+
+        // A second restore of the SAME id is skipped (already buffered) and
+        // leaves the clock untouched.
+        let before = *processor
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        processor.restore_buffers(vec![evt], HashMap::new());
+        let after = *processor
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(before, after, "a no-op restore must not reset the clock");
+        assert_eq!(
+            processor
+                .event_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1,
+            "the duplicate id is not buffered twice"
+        );
+        pool.close().await;
+        Ok(())
+    }
 }

@@ -251,6 +251,7 @@ mod tests {
 #[cfg(test)]
 mod overload_tests {
     use super::*;
+    use std::sync::Arc;
 
     /// A saturated controller rejects the next acquire instead of queueing
     /// unboundedly, and counts the shed job. `start_paused` makes the 500 ms
@@ -313,5 +314,50 @@ mod overload_tests {
         });
         assert_eq!(bp.utilization(), 0.0);
         assert_eq!(bp.in_flight(), 0);
+    }
+
+    /// A waiter that arrives while every permit is taken BLOCKS briefly and
+    /// is admitted the moment capacity frees — it is neither shed (no
+    /// rejection counted) nor stranded. The current-thread runtime + yield
+    /// loop guarantees the waiter is parked on the semaphore before the
+    /// permit drops, so no sleeping and no 500 ms timeout race.
+    #[tokio::test]
+    async fn blocked_acquire_is_admitted_when_capacity_frees() {
+        let bp = Arc::new(Backpressure::new(BackpressureConfig {
+            max_concurrency: 1,
+            max_backlog: 1_000,
+            cooldown: Duration::from_secs(60),
+        }));
+        let permit = bp.acquire().await.expect("the only permit");
+        assert_eq!(bp.available(), 0);
+
+        let waiter = {
+            let bp = Arc::clone(&bp);
+            tokio::spawn(async move {
+                // The permit borrows the local controller, so only the
+                // admission verdict crosses the task boundary.
+                let permit = bp.acquire().await;
+                permit.is_some()
+            })
+        };
+        // Hand control to the waiter until it parks inside acquire()'s
+        // blocking fallback (current-thread runtime: yields run it to its
+        // next await point).
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(waiter.is_finished(), false, "no capacity yet — must wait");
+
+        drop(permit);
+        let admitted = waiter.await.expect("waiter task");
+        assert!(
+            admitted,
+            "freed capacity must be handed to the blocked acquirer"
+        );
+        assert_eq!(
+            bp.total_rejected(),
+            0,
+            "a blocked-then-admitted acquire is never counted as shed"
+        );
     }
 }

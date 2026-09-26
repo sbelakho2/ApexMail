@@ -1099,8 +1099,8 @@ mod adversarial_tests {
 
     #[derive(Clone, Copy, Default)]
     pub(super) struct ClaimOffsets {
-        scheduled_secs: Option<i64>,
-        locked_secs: Option<i64>,
+        pub(super) scheduled_secs: Option<i64>,
+        pub(super) locked_secs: Option<i64>,
     }
 
     pub(super) async fn insert_queue_row(
@@ -1168,7 +1168,7 @@ mod adversarial_tests {
         .expect("queue state")
     }
 
-    async fn delivery_rows(pool: &PgPool, webhook_id: &str) -> i64 {
+    pub(super) async fn delivery_rows(pool: &PgPool, webhook_id: &str) -> i64 {
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = $1",
         )
@@ -3643,6 +3643,94 @@ mod residual_arms {
         )
         .await;
         assert!(!matched, "an absent row must never satisfy the predicate");
+        Ok(())
+    }
+
+    /// The success flush's write-failure arms: a delivery-record INSERT
+    /// fault aborts the batch transaction (insert arm AND commit arm in one
+    /// lifecycle). The contract: the queue row is rolled back intact (the
+    /// fence delete never commits), no delivery record exists, and after
+    /// the outage clears the SAME pending success flushes cleanly.
+    #[tokio::test]
+    async fn success_flush_insert_and_commit_failures_degrade_then_recover(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_res_flush_fail").await else {
+            return Ok(());
+        };
+        let processor = processor(pool.clone(), orch_config());
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({}),
+            1,
+            "flush-token",
+            ClaimOffsets {
+                scheduled_secs: None,
+                locked_secs: None,
+            },
+        )
+        .await;
+        let success = PendingSuccess {
+            job: WebhookJob {
+                id: row.clone(),
+                claim_token: Some("flush-token".to_string()),
+                ..job_for(&webhook_id, &tenant, "https://example.test/hook")
+            },
+            result: WebhookDeliveryResult::success(200, 5, Some("ok".to_string())),
+        };
+
+        crate::test_support::install_fault_trigger(
+            &pool,
+            "wh_dlv_insert",
+            "webhook_deliveries",
+            "INSERT",
+        )
+        .await;
+        crate::test_support::set_fault(&pool, "wh_dlv_insert", true).await;
+
+        processor
+            .pending_successes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(success.clone());
+        processor.flush_pending_successes().await;
+
+        // The failed INSERT aborted the transaction: the fenced DELETE never
+        // committed, so the queue row survives exactly as it was and nothing
+        // was recorded.
+        let (status, _, _) = queue_state(&pool, &row)
+            .await
+            .expect("queue row survives the aborted flush");
+        assert_eq!(status, "pending", "the rollback leaves the row untouched");
+        assert_eq!(delivery_rows(&pool, &webhook_id).await, 0);
+        assert!(
+            processor
+                .pending_successes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "the failed batch is not silently re-queued; the lease reclaim + dedup key arbitrate the retry"
+        );
+
+        // Recovery: the same success flushes cleanly once the outage clears.
+        crate::test_support::set_fault(&pool, "wh_dlv_insert", false).await;
+        processor
+            .pending_successes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(success);
+        processor.flush_pending_successes().await;
+        assert_eq!(
+            delivery_rows(&pool, &webhook_id).await,
+            1,
+            "the recovered flush records the delivery"
+        );
+        let gone = queue_state(&pool, &row).await;
+        assert!(gone.is_none(), "the successful flush deletes the claimed row");
+        pool.close().await;
         Ok(())
     }
 }

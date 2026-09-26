@@ -753,6 +753,38 @@ mod tests {
         );
     }
 
+    /// A `</body>` printed by a LATE script (document.write AFTER the real
+    /// body close) is the last literal occurrence: the inserter must REJECT
+    /// it, rescan backwards past it, and inject before the REAL `</body>` —
+    /// never inside the script's raw text, where the "pixel" would become
+    /// JavaScript source instead of an image.
+    #[test]
+    fn tracking_pixel_rescans_past_a_late_script_fake_body_close() {
+        let _guard = with_test_secret();
+        // The script's '</body>' is the LAST literal occurrence in the doc.
+        let html = r#"<html><body><p>Hello</p></body><script>document.write('</body>');</script>"#;
+        let job = make_test_job();
+        let config = make_test_config();
+
+        let result = add_tracking_pixel(html, &job, &config);
+        let real_close = result.find("</body><script>").expect("the real body close survives");
+        let pixel_pos = result.find("track.example.com").expect("pixel present");
+        assert!(
+            pixel_pos < real_close,
+            "pixel must sit before the REAL </body>, not after it: {result}"
+        );
+        // The injected pixel must not land inside the script's raw text.
+        let script_open = result.find("<script>").expect("script preserved");
+        assert!(
+            !(pixel_pos > script_open && pixel_pos < result.find("</script>").unwrap_or(usize::MAX)),
+            "pixel must never be injected into script content: {result}"
+        );
+        assert!(
+            result.contains("</script>"),
+            "the document stays well-formed: {result}"
+        );
+    }
+
     #[test]
     fn test_rewrite_links() {
         let _guard = with_test_secret();

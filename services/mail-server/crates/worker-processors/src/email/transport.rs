@@ -2826,6 +2826,31 @@ mod reply_parsing_tests {
             "550 plain failure"
         );
     }
+
+    /// The secret filter is deliberately NARROW: only a long token made of
+    /// base64-ALPHABET characters is dropped. A long token containing a
+    /// separator (`_`, `-`, `:`) is evidence — a message id, a queue id, a
+    /// tenant slug — and must survive redaction, or every diagnostic that
+    /// quotes it loses its identifying payload.
+    #[test]
+    fn long_non_base64_tokens_are_evidence_not_secrets_and_survive() {
+        let long_token = format!("mid_{}", "x".repeat(50));
+        let text = format!("550 rejected {long_token} over quota");
+        let cleaned = redact_error_text(&text, false);
+        assert!(
+            cleaned.contains(&long_token),
+            "a long non-base64 token must survive: {cleaned}"
+        );
+        assert!(cleaned.contains("over quota"));
+
+        // The same-length base64-shaped neighbour IS dropped.
+        let b64_token = "QUJD".repeat(15);
+        let cleaned_b64 = redact_error_text(&format!("550 rejected {b64_token}"), false);
+        assert!(
+            !cleaned_b64.contains(&b64_token),
+            "a base64-shaped secret must be dropped: {cleaned_b64}"
+        );
+    }
 }
 
 #[cfg(test)]
