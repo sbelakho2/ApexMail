@@ -5,3 +5,18 @@
 # (60 min max). Retries absorb one-off scheduling stalls.
 [profile.default]
 slow-timeout = { period = "1800s", terminate-after = 2 }
+
+# Bound how many test processes run at once. At the default parallelism
+# (= nproc) a full-workspace run oversubscribes Postgres: every DB-heavy
+# test process holds several pool connections, and 18-way concurrency
+# pushed demand past max_connections=100 — fixtures died at their 60 s
+# acquire timeout (observed as ~150 sales-autopilot tests failing at
+# exactly 60.0 s in one wave). 12 keeps worst-case demand inside the
+# server limit; on CI runners with fewer cores this cap is inert (it only
+# lowers, never raises, the natural parallelism).
+[test-groups]
+all-tests = { max-threads = 12 }
+
+[[profile.default.overrides]]
+filter = 'all()'
+test-group = 'all-tests'

@@ -8826,7 +8826,7 @@ mod adversarial_auth_tests_3 {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn reset_password_arms_and_success_consume_token_and_change_hash() {
-        let Some(fx) = fx("adv3_reset", 12).await else {
+        let Some(fx) = fx("adv3_reset", 15).await else {
             return;
         };
         let tenant = new_tenant_id();
