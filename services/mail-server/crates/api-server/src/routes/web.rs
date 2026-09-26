@@ -19618,8 +19618,11 @@ mod residual_zero_tests {
         // record without a verification semantic stays honestly pending
         // (never green by accident).
         use data::record_verification_state as state_of;
-        assert!(state_of("_dmarc.example.test", false, false, false, false));
-        assert!(!state_of("_dmarc.example.test", true, true, true, true));
+        // _dmarc's check is dmarc_verified alone: all-false means the record
+        // renders "pending" (honest, never green by accident).
+        assert!(!state_of("_dmarc.example.test", false, false, false, false));
+        // With dmarc_verified the record is verified.
+        assert!(state_of("_dmarc.example.test", true, true, true, true));
         assert!(state_of(
             "sel._domainkey.example.test",
             false,

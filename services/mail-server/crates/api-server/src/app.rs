@@ -4640,7 +4640,15 @@ mod tests {
             .fetch_one(&state.db)
             .await
             .unwrap();
-        assert!(bcrypt::verify("NewValid123!Pass", &stored).unwrap());
+        // The reset flow stores an ARGON2ID hash (apexmail_lib::hash_password),
+        // not bcrypt — bcrypt::verify on it is InvalidHash, not false.
+        assert!(
+            matches!(
+                apexmail_lib::verify_password("NewValid123!Pass", &stored),
+                Ok(true)
+            ),
+            "the new password must verify against the stored argon2id hash"
+        );
         let metadata: serde_json::Value =
             sqlx::query_scalar("SELECT metadata FROM users WHERE id = $1")
                 .bind(user_id)
