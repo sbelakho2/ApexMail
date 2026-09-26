@@ -4590,6 +4590,15 @@ async fn handle_status<W: AsyncWrite + Unpin>(
     }
 
     let mut responses = String::new();
+    // L14(e) on STATUS too: when the STATUSed mailbox is the session's
+    // SELECTed one and the store outgrew the session's capped view, tell the
+    // client explicitly instead of letting EXISTS < STATUS MESSAGES confuse
+    // it silently (same contract as the SELECT-path notice).
+    if mailbox_selected(session) && session.mailbox.eq_ignore_ascii_case(&mailbox) {
+        if let Some(notice) = view_capped_notice(session.exists, mb.exists) {
+            responses.push_str(&notice);
+        }
+    }
     responses.push_str(&format!(
         "* STATUS {} ({})\r\n",
         mailbox_astring(&imap_utf7_encode(&mailbox)),
