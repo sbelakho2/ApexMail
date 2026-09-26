@@ -15659,9 +15659,6 @@ mod residual_zero_tests {
     use crate::routes::web::data::coverage_support;
     use axum::extract::Query as AxumQuery;
     use hmac::Mac;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
     /// Resolve the canonical system tenant id (slug 'system'). The shared
     /// database and per-test clones carry it under a generated id, so every
     /// control-plane fixture must resolve instead of hardcoding.
@@ -18743,7 +18740,6 @@ mod residual_zero_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let system = system_tenant_id(&state.db).await;
         let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
-        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
         crate::routes::fault::arm_write_fault(&state.db, "tenants", "rz_adm_tenant", 0)
             .await
             .expect("arm tenants fault");
@@ -18799,7 +18795,6 @@ mod residual_zero_tests {
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let system = system_tenant_id(&state.db).await;
-        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
         let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
         crate::routes::fault::arm_write_fault(&state.db, "users", "rz_adm_operator", 0)
             .await
@@ -18921,7 +18916,7 @@ mod residual_zero_tests {
             return;
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
-        let (tenant, tag) = coverage_support::tenant_pair("rsf2");
+        let (tenant, _tag) = coverage_support::tenant_pair("rsf2");
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
              VALUES ($1, 'Resume Fault', $2, 'free', 'active', NOW(), NOW())",
@@ -19121,7 +19116,9 @@ mod residual_zero_tests {
                 .lock()
                 .unwrap()
                 .push((path.clone(), api_key, body));
-            let (status, text) = if path == "/enrich" {
+            // axum's Path extractor strips the leading slash: a request to
+            // /enrich arrives here as "enrich".
+            let (status, text) = if path.trim_start_matches('/') == "enrich" {
                 engine
                     .enrich
                     .lock()
@@ -19160,7 +19157,6 @@ mod residual_zero_tests {
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         let system = system_tenant_id(&state.db).await;
         let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
-        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
 
         // All sources enrich: clean success summary.
         let engine = std::sync::Arc::new(MockEngine {
@@ -19195,13 +19191,17 @@ mod residual_zero_tests {
             flash.contains("Discovery run finished: 2 source(s) enriched, 0 failed."),
             "got {flash}"
         );
-        let seen = engine.seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "both sources hit the engine");
-        assert!(
-            seen.iter()
-                .all(|(_, key, _)| key.as_deref() == Some("residual-internal-token")),
-            "the internal service token must ride every engine call: {seen:?}"
-        );
+        // Scoped: the guard must be gone before the phases below re-lock
+        // `seen` (a same-thread std Mutex re-lock deadlocks the runtime).
+        {
+            let seen = engine.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2, "both sources hit the engine");
+            assert!(
+                seen.iter()
+                    .all(|(_, key, _)| key.as_deref() == Some("residual-internal-token")),
+                "the internal service token must ride every engine call: {seen:?}"
+            );
+        }
 
         // Mixed: first source enriches, second fails with a detail body.
         engine.seen.lock().unwrap().clear();
@@ -19263,7 +19263,6 @@ mod residual_zero_tests {
             return;
         };
         let system = system_tenant_id(&pool).await;
-        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
         let (operator, _email) = seed_caller(&pool, &system, "owner").await;
         let engine = std::sync::Arc::new(MockEngine {
             enrich: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -19370,7 +19369,6 @@ mod residual_zero_tests {
         seed_gdpr_request(&pool, &tenant, &gdpr_id).await;
         let system = system_tenant_id(&pool).await;
         let (operator, _email) = seed_caller(&pool, &system, "owner").await;
-        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
 
         let mut tx = pool.begin().await.expect("fixture transaction");
         sqlx::query("UPDATE gdpr_requests SET status = 'in_progress' WHERE id = $1")
@@ -19419,7 +19417,6 @@ mod residual_zero_tests {
         let gdpr_id = format!("gdpr-{}", coverage_support::unique_tag("gf"));
         seed_gdpr_request(&pool, &tenant, &gdpr_id).await;
         let system = system_tenant_id(&pool).await;
-        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
         let (operator, _email) = seed_caller(&pool, &system, "owner").await;
         crate::routes::fault::arm_write_fault(&state.db, "gdpr_requests", "rz_gdpr", 0)
             .await
@@ -19490,7 +19487,6 @@ mod residual_zero_tests {
         )
         .await;
         let system = system_tenant_id(&state.db).await;
-        let (operator2, _email2) = seed_caller(&state.db, &system, "owner").await;
         let (operator2, _email2) = seed_caller(&state.db, &system, "owner").await;
         let response = form_audit_export(
             State(state.clone()),
