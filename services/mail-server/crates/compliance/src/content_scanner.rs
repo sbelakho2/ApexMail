@@ -298,6 +298,21 @@ pub fn regex_failure_count() -> u64 {
     REGEX_FAILURE_COUNTER.load(Ordering::Relaxed)
 }
 
+/// The raw host substring of a URL string, pre-IDNA: everything between
+/// "://" and the first `/`, `?`, `#` or `:` (port). None when the URL has no
+/// authority-looking prefix.
+fn raw_host_of(url_str: &str) -> Option<&str> {
+    let rest = url_str.split_once("://")?.1;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() {
+        return None;
+    }
+    let host = authority.split('@').next_back().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    Some(host)
+}
+
 fn compile_regex(pattern: &str, label: &str) -> Option<Regex> {
     match Regex::new(pattern) {
         Ok(regex) => Some(regex),
@@ -724,11 +739,19 @@ impl ContentScanner {
                             }
                         }
 
-                        // Homograph detection
-                        if HOMOGRAPH_REGEX
-                            .as_ref()
-                            .is_some_and(|regex| regex.is_match(host))
-                        {
+                        // Homograph detection. The confusable scan runs on
+                        // the RAW host substring of the URL string: the url
+                        // crate IDNA-normalises hosts to punycode
+                        // ("аpple.com" -> "xn--pple-43d.com"), which erases
+                        // exactly the characters this detector exists to
+                        // catch — matching on the parsed host could never
+                        // fire.
+                        let raw_host = raw_host_of(url_str);
+                        if raw_host.is_some_and(|raw| {
+                            HOMOGRAPH_REGEX
+                                .as_ref()
+                                .is_some_and(|regex| regex.is_match(raw))
+                        }) {
                             score += 20.0;
                             indicators.push(PhishingIndicator {
                                 indicator_type: PhishingIndicatorType::Url,
@@ -1671,6 +1694,79 @@ mod tests {
         };
         assert!(regex.is_match("Congratulations! You are a winner of $1000!"));
     }
+
+    /// The defensive compile helpers really do degrade (and count the
+    /// failure) when handed an invalid regex — the contract every static
+    /// LazyLock relies on if a pattern is ever edited into invalidity.
+    /// (The Aho-Corasick twin's Err arm is unreachable by construction:
+    /// `AhoCorasick::new` over string slices only fails on memory limits
+    /// that `new` does not apply — asserted below for every candidate
+    /// failure input.)
+    #[test]
+    fn compile_helpers_reject_invalid_patterns_and_count_failures() {
+        let before = regex_failure_count();
+        assert!(
+            compile_regex("(?P<", "unit_invalid_regex").is_none(),
+            "an invalid regex must compile to None"
+        );
+        assert_eq!(
+            regex_failure_count(),
+            before + 1,
+            "the failure counter must tick"
+        );
+        // The valid path still compiles.
+        assert!(compile_regex("ok-pattern", "unit_ok").is_some());
+        assert_eq!(regex_failure_count(), before + 1);
+
+        // Proven unreachable: no pattern slice makes `AhoCorasick::new`
+        // fail (empty list, empty pattern, mixed) — so `compile_aho`'s
+        // error arm cannot be exercised through any input and the helper
+        // degrades exactly like compile_regex should a future aho-corasick
+        // release introduce fallible cases.
+        assert!(compile_aho(&[], "unit_probe").is_some());
+        assert!(compile_aho(&["x", ""], "unit_probe").is_some());
+        assert!(compile_aho(&[""], "unit_probe").is_some());
+        assert_eq!(regex_failure_count(), before + 1, "no aho failures");
+    }
+
+    /// URL heuristics: excessive subdomains and confusable (homograph)
+    /// characters in the host each raise the phishing score with a named
+    /// indicator.
+    #[test]
+    fn excessive_subdomains_and_homograph_hosts_are_flagged() {
+        let scanner = ContentScanner::new(dummy_pool(), dummy_config());
+
+        let many_dots = scanner.analyze_phishing(&email_with(
+            "invoice",
+            "billing@example.com",
+            "",
+            "See http://a.b.c.d.e.example.com/pay",
+        ));
+        assert!(
+            many_dots
+                .indicators
+                .iter()
+                .any(|i| i.description == "Excessive subdomains"),
+            "5 host labels must trip the excessive-subdomain arm: {:?}",
+            many_dots.indicators
+        );
+
+        // Cyrillic 'а' (U+0430) inside the host: homograph arm.
+        let homograph = scanner.analyze_phishing(&email_with(
+            "security",
+            "billing@example.com",
+            "",
+            "Visit http://\u{0430}pple.com/verify now",
+        ));
+        assert!(
+            homograph
+                .indicators
+                .iter()
+                .any(|i| i.description == "Homograph attack suspected"),
+            "a confusable host must trip the homograph arm: {:?}",
+            homograph.indicators
+        );
+    }
 }
 
 // ─── DB-backed adversarial tests ────────────────────────────────────────────
@@ -1938,5 +2034,33 @@ mod db_tests {
             ScanVerdict::Clean | ScanVerdict::Suspicious | ScanVerdict::Blocked
         ));
         assert!(result.actions.len() == 1, "exactly one action is recorded");
+    }
+
+    /// A stored policy whose `blocked_patterns` array is EMPTY contributes no
+    /// patterns and must not fail the scan (the empty-pattern skip arm).
+    #[tokio::test]
+    async fn a_policy_with_no_blocked_patterns_is_skipped() {
+        let Some((pool, scanner)) = scanner("empty_patterns").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        sqlx::query(
+            "INSERT INTO content_policies (id, tenant_id, name, rules, enabled)
+             VALUES (gen_random_uuid(), $1, 'empty-policy', $2, true)",
+        )
+        .bind(&tenant)
+        .bind(serde_json::json!({"blocked_patterns": []}))
+        .execute(&pool)
+        .await
+        .expect("seed empty policy");
+        let result = scanner
+            .scan_email(&email(&tenant, "hello", "plain body"))
+            .await
+            .expect("scan with an empty policy succeeds");
+        assert!(
+            result.policy.compliant,
+            "no patterns -> no violations: {:?}",
+            result.policy
+        );
     }
 }

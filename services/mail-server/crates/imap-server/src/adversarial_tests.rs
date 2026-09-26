@@ -4670,3 +4670,534 @@ async fn idle_event_failure_paths_stay_quiet() {
     assert!(out.contains("OK IDLE terminated"), "{out:?}");
     h.shutdown().await;
 }
+
+// ── residual session arms ───────────────────────────────────────────────────
+
+/// FETCH with a failing get_message answers a tagged NO naming the backend
+/// failure (L12) instead of emitting a response missing the requested
+/// attributes.
+#[tokio::test]
+async fn fetch_body_failure_maps_to_a_tagged_no() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "body-fail",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("get_message");
+    let out = h.cmd("FETCH 1 (BODY[])").await;
+    assert!(out.contains(" NO "), "body failure must be a NO: {out:?}");
+    assert!(
+        out.contains("Server busy") || out.contains("get_message"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A failed \Seen flag update (after one retry) is a warn, not an error:
+/// the FETCH response already advertised the flag.
+#[tokio::test]
+async fn fetch_seen_update_failure_is_swallowed_after_retry() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "seen-fail",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("set_flags");
+    let out = h.cmd("FETCH 1 (BODY[])").await;
+    assert!(out.contains("OK"), "the FETCH itself must succeed: {out:?}");
+    assert!(out.contains("FETCH"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// FETCH with the FAST macro resolves InternalDate/Rfc822Size/Envelope and
+/// the parenthesised item form reaches the tokenizer's open-paren arm.
+#[tokio::test]
+async fn fetch_fast_macro_and_parenthesised_items() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "fast",
+        "from@x.test",
+        Default::default(),
+        1_700_000_000,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("FETCH 1 FAST").await;
+    assert!(out.contains("INTERNALDATE"), "{out:?}");
+    assert!(out.contains("RFC822.SIZE"), "{out:?}");
+    assert!(out.contains("FLAGS"), "{out:?}");
+
+    let out = h
+        .cmd("FETCH 1 (INTERNALDATE RFC822.SIZE ENVELOPE FLAGS)")
+        .await;
+    assert!(out.contains("OK"), "{out:?}");
+    assert!(out.contains("INTERNALDATE"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// A wire-level STORE echoes the resulting flags and completes with the
+/// updated count.
+#[tokio::test]
+async fn store_echoes_flags_and_reports_the_updated_count() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "store",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("STORE 1 +FLAGS (\\Flagged \\Seen)").await;
+    assert!(out.contains("STORE completed, 1 updated"), "{out:?}");
+    assert!(out.contains("FETCH (FLAGS"), "{out:?}");
+    assert!(out.contains("\\Flagged"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// EXPUNGE emits descending EXPUNGE lines and the EXISTS afterwards.
+#[tokio::test]
+async fn expunge_emits_expunge_and_exists_lines() {
+    let mut h = Harness::new();
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "from@x.test", Default::default(), 0);
+    h.mock
+        .add_message("acct-1", "INBOX", "b", "from@x.test", Default::default(), 0);
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let out = h.cmd("STORE 1 +FLAGS (\\Deleted)").await;
+    assert!(out.contains("OK"), "{out:?}");
+    let out = h.cmd("EXPUNGE").await;
+    assert!(out.contains("EXPUNGE completed"), "{out:?}");
+    assert!(out.contains("* 1 EXPUNGE"), "{out:?}");
+    assert!(out.contains("* 1 EXISTS"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// CLOSE with a failing expunge answers NO and keeps the mailbox selected.
+#[tokio::test]
+async fn close_expunge_failure_answers_no_and_stays_selected() {
+    let mut h = Harness::new();
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "from@x.test", Default::default(), 0);
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("expunge");
+    let out = h.cmd("CLOSE").await;
+    assert!(
+        out.contains("NO") && out.contains("CLOSE failed"),
+        "{out:?}"
+    );
+    // Still selected: a follow-up NOOP on the mailbox answers normally.
+    h.mock.clear_failures();
+    let out = h.cmd("NOOP").await;
+    assert!(out.contains("OK NOOP"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// APPEND into the SELECTED mailbox updates the session view and emits the
+/// EXISTS line.
+#[tokio::test]
+async fn append_to_the_selected_mailbox_emits_exists() {
+    let mut h = Harness::new();
+    // The selected INBOX must exist and hold one message.
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "seed",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let body = b"From: a@x.test\r\nSubject: appended\r\n\r\nhi\r\n";
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} APPEND INBOX {{{}}}", body.len()))
+        .await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("append continuation");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+    h.send_raw(body).await;
+    h.send_line("").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("APPEND completed"), "{out:?}");
+    assert!(out.contains("* 2 EXISTS"), "the session view grew: {out:?}");
+    h.shutdown().await;
+}
+
+/// SELECT with an empty mailbox argument is a tagged BAD.
+#[tokio::test]
+async fn select_without_a_mailbox_name_is_a_bad() {
+    let mut h = Harness::new();
+    h.login("user@x.test", "pw").await;
+    let out = h.cmd("SELECT \"\"").await;
+    assert!(
+        out.contains("BAD") && out.contains("Mailbox name required"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// RENAME without both names is a tagged BAD.
+#[tokio::test]
+async fn rename_requires_both_names() {
+    let mut h = Harness::new();
+    h.login("user@x.test", "pw").await;
+    let out = h.cmd("RENAME only-one-arg").await;
+    assert!(
+        out.contains("BAD") && out.contains("RENAME requires old and new name"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// LSUB renders an existing subscribed mailbox with an empty delimiter as
+/// NIL.
+#[tokio::test]
+async fn lsub_renders_empty_delimiter_as_nil() {
+    let mut h = Harness::new();
+    h.mock.add_mailbox("acct-1", "Flatbox", 1);
+    h.mock.set_mailbox_row(
+        "acct-1",
+        mail_proto::Mailbox {
+            name: "Flatbox".into(),
+            delimiter: "".into(),
+            attributes: vec!["\\HasNoChildren".into()],
+            uidvalidity: 1,
+            uidnext: 1,
+            exists: 0,
+            recent: 0,
+            unseen: 0,
+        },
+    );
+    h.login("user@x.test", "pw").await;
+    let out = h.cmd("SUBSCRIBE Flatbox").await;
+    assert!(out.contains("OK"), "{out:?}");
+    let out = h.cmd("LSUB \"\" \"*\"").await;
+    assert!(out.contains("LSUB completed"), "{out:?}");
+    assert!(
+        out.contains("* LSUB (\\HasNoChildren) NIL \"Flatbox\""),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// STATUS reports the view-cap notice when the store outgrew the session's
+/// snapshot (F: STATUS never refreshes the view, so the mismatch is real).
+#[tokio::test]
+async fn status_reports_the_view_cap_notice() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "one",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    // Grow the store without touching the session: STATUS compares the
+    // session's snapshot against the store and must say so.
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "two",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    let out = h.cmd("STATUS INBOX (MESSAGES)").await;
+    assert!(out.contains("STATUS completed"), "{out:?}");
+    assert!(out.contains("MESSAGES 2"), "{out:?}");
+    // The view-cap notice fires because the store outgrew the session view.
+    assert!(
+        out.contains("[ALERT] Mailbox has 2 messages; only the first 1 are visible"),
+        "cap notice expected: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A refresh whose listing fails falls back to an empty diff and the
+/// command still completes (STORE drives refresh_session_view).
+#[tokio::test]
+async fn store_survives_a_failed_view_refresh() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "one",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    h.mock.fail("list_messages");
+    let out = h.cmd("STORE 1 +FLAGS (\\Seen)").await;
+    assert!(
+        out.contains("STORE completed"),
+        "the store must complete despite the failed refresh: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A command that STARTS with a literal has no tag; the reader treats the
+/// whole assembled text as the command under a generic `*` tag.
+#[tokio::test]
+async fn a_command_starting_with_a_literal_gets_the_star_tag() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.login("user@x.test", "pw").await;
+    // `{5}` announces 5 bytes; the payload + rest follow the continuation.
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} {{5}}")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("literal continuation");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+    h.send_raw(b"hello").await;
+    h.send_line("").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(
+        out.contains("BAD"),
+        "a tagless literal command is refused: {out:?}"
+    );
+    // The reader's tagless-command arm answers under the generic `*` tag.
+    assert!(
+        out.contains("\n* BAD") || out.contains("\r\n* BAD"),
+        "the refusal must carry the generic `*` tag: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// EOF right after a literal's bytes (before the rest-line) ends the
+/// session cleanly (Ok(None) from the command reader).
+#[tokio::test]
+async fn eof_after_literal_bytes_ends_the_session() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.login("user@x.test", "pw").await;
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} LOGIN {{5}}")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("continuation");
+    h.send_raw(b"hello").await;
+    // Half-close the client (shutdown of the write direction) without ever
+    // sending the rest-line: the server's command reader must observe EOF
+    // while completing the literal and end the session quietly.
+    {
+        use tokio::io::AsyncWriteExt;
+        h.io.get_mut().shutdown().await.expect("client half-close");
+    }
+    let result = tokio::time::timeout(Duration::from_secs(5), h.server).await;
+    assert!(result.is_ok(), "the session must end on EOF: {result:?}");
+}
+
+/// AUTHENTICATE whose continuation line never arrives (EOF) bails with an
+/// explicit error instead of hanging.
+#[tokio::test]
+async fn authenticate_eof_during_the_continuation_fails_the_session() {
+    // Pre-auth state: AUTHENTICATE is only legal before LOGIN.
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    let mut greeting = Vec::new();
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        h.io.read_until(b'\n', &mut greeting),
+    )
+    .await
+    .expect("greeting");
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} AUTHENTICATE PLAIN")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("authenticate continuation request");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+    // Cut the connection: the reader observes EOF, handle_authenticate bails
+    // with the documented error, and serve degrades it to a tagged BAD
+    // before ending the session.
+    drop(h.io);
+    // The session must end promptly: the documented bail fires (its BAD
+    // write fails with a broken pipe, which ends serve with that error).
+    let result = tokio::time::timeout(Duration::from_secs(5), h.server)
+        .await
+        .expect("session ends after EOF");
+    let serve_result = result.expect("join");
+    assert!(
+        format!("{serve_result:?}").contains("Broken pipe")
+            || format!("{serve_result:?}").contains("broken pipe")
+            || serve_result.is_err(),
+        "serve surfaces the write failure: {serve_result:?}"
+    );
+}
+
+/// The \Seen retry-failure warn arm needs the message body fetch to
+/// succeed; combined with `fetch_seen_update_failure_is_swallowed_after_retry`
+/// this also exercises the chunked body path with bodies of varied sizes.
+#[tokio::test]
+async fn fetch_returns_bodies_of_varied_sizes_intact() {
+    let mut h = Harness::new();
+    for (idx, size) in [1usize, 70000, 200_000].into_iter().enumerate() {
+        let body = vec![b'x'; size];
+        let uid = h.mock.add_message(
+            "acct-1",
+            "INBOX",
+            &format!("sized-{idx}"),
+            "from@x.test",
+            Default::default(),
+            0,
+        );
+        h.mock.set_body("acct-1", "INBOX", uid, &body);
+    }
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+    // 3 messages, one body larger than the duplex buffer: the interleaved
+    // literal writing must preserve exact octet counts.
+    let out = h.cmd("FETCH 1:* BODY.PEEK[]").await;
+    let expected: usize = [1usize, 70000, 200_000].iter().sum();
+    let announced: usize = out
+        .match_indices("BODY[] {")
+        .filter_map(|(i, _)| {
+            let rest = &out[i + 8..];
+            let end = rest.find('}')?;
+            rest[..end].parse::<usize>().ok()
+        })
+        .sum();
+    assert_eq!(announced, expected, "every literal must announce its size");
+    h.shutdown().await;
+}
+
+/// IDLE delivers untagged EXISTS when a message arrives mid-idle: the event
+/// path produces non-empty output and the session view advances.
+#[tokio::test]
+async fn idle_event_delivers_exists_and_advances_the_view() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "seed",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+
+    // Arrivals happen while idling: the next event triggers the EXISTS.
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "arrived",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    // Announce the arrival the way the mailstore would.
+    let tx = h.mock.events_sender("acct-1", "INBOX");
+    let _ = tx.send(MailboxEvent {
+        event: Some(mail_proto::mailbox_event::Event::MailboxUpdated(
+            mail_proto::MailboxUpdated {
+                mailbox: Some(mail_proto::Mailbox {
+                    name: "INBOX".to_string(),
+                    uidnext: 3,
+                    exists: 2,
+                    ..Default::default()
+                }),
+            },
+        )),
+    });
+
+    // The untagged EXISTS arrives asynchronously: poll bounded until it is
+    // observed, then terminate the IDLE cleanly.
+    let mut saw_exists = false;
+    for _ in 0..50 {
+        let mut line = Vec::new();
+        let read = tokio::time::timeout(
+            Duration::from_millis(200),
+            h.io.read_until(b'\n', &mut line),
+        )
+        .await;
+        match read {
+            Ok(Ok(n)) if n > 0 => {
+                if line.starts_with(b"* 2 EXISTS") {
+                    saw_exists = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(saw_exists, "the arrival must be announced");
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// A dying event stream (sender dropped) marks the IDLE wait dead: DONE
+/// still terminates the session cleanly afterwards.
+#[tokio::test]
+async fn idle_survives_a_dead_event_stream_until_done() {
+    let mut h = Harness::new();
+    h.mock.add_message(
+        "acct-1",
+        "INBOX",
+        "seed",
+        "from@x.test",
+        Default::default(),
+        0,
+    );
+    h.login("user@x.test", "pw").await;
+    h.select("INBOX").await;
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.io.read_until(b'\n', &mut cont))
+        .await
+        .expect("idle continuation");
+    assert!(cont.starts_with(b"+"), "{cont:?}");
+
+    // Kill the mailbox event source: the stream yields None and the loop
+    // marks it dead (no further events are expected, DONE still works).
+    h.mock.end_event_stream("acct-1", "INBOX");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}

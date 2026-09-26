@@ -821,8 +821,6 @@ async fn flush_early_returns_are_ok_when_redis_cannot_answer() {
     let _guard = SERIAL.lock().await;
     let _cross = crate::routes::test_support::redis_wal_serial().await;
     test_log_subscriber();
-    let _guard = SERIAL.lock().await;
-    let _cross = crate::routes::test_support::redis_wal_serial().await;
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;

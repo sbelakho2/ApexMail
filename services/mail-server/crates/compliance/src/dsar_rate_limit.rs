@@ -531,4 +531,308 @@ mod tests {
             .await;
         assert!(is_allowed(&fallback), "fallback allowed, got {fallback:?}");
     }
+
+    /// A pool wired to a port with nothing listening: every Redis step
+    /// errors and the limiter degrades to the in-memory window without
+    /// surfacing an error to the caller (the warn arms run, the check is
+    /// still answered).
+    #[tokio::test]
+    async fn dead_redis_pool_degrades_every_path_to_in_memory() {
+        let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .builder()
+            .expect("dead redis builder")
+            .max_size(1)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .expect("dead redis pool");
+        let cfg_small = DsarRateLimitConfig {
+            per_user: 1,
+            per_tenant: 1,
+            verify_attempts: 1,
+            ..test_config()
+        };
+        let limiter = DsarRateLimiter::new(cfg_small, Some(dead));
+
+        // record_submission_success: both consume_key calls fail with a warn
+        // (never propagated), and nothing is consumed anywhere.
+        limiter
+            .record_submission_success("dead@example.test", "t-dead")
+            .await;
+        let status = limiter
+            .check_submission("dead@example.test", "t-dead")
+            .await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::Allowed),
+            "failed consumption must not silently consume quota, got {status:?}"
+        );
+
+        // check_and_consume (verification): pool.get() fails -> in-memory.
+        let status = limiter.check_verification("tok-dead").await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::Allowed),
+            "first in-memory verification attempt must be allowed, got {status:?}"
+        );
+        let status = limiter.check_verification("tok-dead").await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::VerificationRateLimited { .. }),
+            "the in-memory fallback must still enforce the cap, got {status:?}"
+        );
+    }
+
+    /// Live Redis: a tenant-level limit surfaces as `TenantRateLimited`, and
+    /// a wrong-type counter key makes INCR error so verification falls back
+    /// to the in-memory window mid-flight (the INCR-error arm).
+    #[tokio::test]
+    async fn live_redis_tenant_limit_and_wrong_type_incr_fallback() {
+        let Some(redis) = crate::test_support::configured_redis() else {
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        let cfg = DsarRateLimitConfig {
+            per_user: 5,
+            user_window_secs: 86400,
+            per_tenant: 1,
+            tenant_window_secs: 86400,
+            verify_attempts: 5,
+            verify_window_secs: 3600,
+        };
+        let limiter = DsarRateLimiter::new(cfg.clone(), Some(redis.clone()));
+        let tenant = format!("t-tenant-limited-{}", std::process::id());
+        let tenant_key = limiter.tenant_key(&tenant);
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&tenant_key)
+                .query_async(&mut *conn)
+                .await;
+            let _: i64 = redis::cmd("INCR")
+                .arg(&tenant_key)
+                .query_async(&mut *conn)
+                .await
+                .expect("seed tenant counter");
+        }
+        // The tenant counter is at its cap: the check must report the
+        // TENANT variant (checked after the user level).
+        let status = limiter
+            .check_submission(
+                &format!("tenant-limited-{0}@example.test", std::process::id()),
+                &tenant,
+            )
+            .await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::TenantRateLimited { .. }),
+            "over the tenant quota must be TenantRateLimited, got {status:?}"
+        );
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&tenant_key)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        // GET error on a LIVE connection: seed the user key as a wrong-type
+        // string; the peek's GET errors and the check falls back to the
+        // in-memory window (which is empty, so still allowed).
+        let hostile_email = format!("wrongtype-{0}@example.test", std::process::id());
+        let hostile_key = format!("dsar:user:{}:{today}", hash_email(&hostile_email));
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            redis::cmd("SET")
+                .arg(&hostile_key)
+                .arg("not-a-counter")
+                .query_async::<()>(&mut *conn)
+                .await
+                .expect("seed wrong-type user key");
+        }
+        let status = limiter
+            .check_submission(&hostile_email, "t-wrongtype")
+            .await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::Allowed),
+            "a failed peek must fall back to the empty in-memory window, got {status:?}"
+        );
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&hostile_key)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        // INCR failure on a LIVE connection: a wrong-type key (string) makes
+        // the verification INCR error and the check falls back to the
+        // in-memory window — which still enforces the cap.
+        let wrong_key = format!("dsar:verify:wrongtype-{}:x", std::process::id());
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            redis::cmd("SET")
+                .arg(&wrong_key)
+                .arg("not-a-counter")
+                .query_async::<()>(&mut *conn)
+                .await
+                .expect("seed wrong-type key");
+        }
+        // check_verification builds `dsar:verify:{hash}:{hour}`; a direct
+        // check_and_consume against the wrong-type key exercises the
+        // INCR-error arm through the same code path.
+        let status = limiter
+            .check_and_consume_key(&wrong_key, 5, RateLimitKind::Verification, 3600)
+            .await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::Allowed),
+            "the fallback grants the first attempt, got {status:?}"
+        );
+        let status = limiter
+            .check_and_consume_key(&wrong_key, 1, RateLimitKind::Verification, 3600)
+            .await;
+        assert!(
+            matches!(status, DsarRateLimitStatus::VerificationRateLimited { .. }),
+            "the in-memory fallback enforces the cap after the INCR error, got {status:?}"
+        );
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&wrong_key)
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+
+    /// Live Redis: verification attempts past the cap surface as
+    /// `VerificationRateLimited` from the REDIS counter itself (count >
+    /// max after INCR).
+    #[tokio::test]
+    async fn live_redis_verification_cap_reports_the_verification_variant() {
+        let Some(redis) = crate::test_support::configured_redis() else {
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let cfg = DsarRateLimitConfig {
+            per_user: 1,
+            user_window_secs: 86400,
+            per_tenant: 100,
+            tenant_window_secs: 86400,
+            verify_attempts: 2,
+            verify_window_secs: 3600,
+        };
+        let limiter = DsarRateLimiter::new(cfg, Some(redis.clone()));
+        let token_hash = format!("tok-cap-{}", std::process::id());
+        // Two attempts consume the cap; the third INCR lands past it.
+        assert!(matches!(
+            limiter.check_verification(&token_hash).await,
+            DsarRateLimitStatus::Allowed
+        ));
+        assert!(matches!(
+            limiter.check_verification(&token_hash).await,
+            DsarRateLimitStatus::Allowed
+        ));
+        assert!(matches!(
+            limiter.check_verification(&token_hash).await,
+            DsarRateLimitStatus::VerificationRateLimited { .. }
+        ));
+    }
+
+    /// A loopback RESP server that answers INCR and TTL, then drops the
+    /// connection before EXPIRE: the TTL-repair loss is a WARN, not an
+    /// error — the counter itself stays valid (L1 degradation contract).
+    #[tokio::test]
+    async fn consume_key_treats_a_failed_expire_as_a_logged_loss() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock redis");
+        let addr = listener.local_addr().expect("mock addr");
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // Serve exactly two RESP requests (INCR, TTL), then close.
+            for reply in [b":1\r\n".to_vec(), b":-1\r\n".to_vec()] {
+                read_one_resp_request(&mut sock).await;
+                let _ = sock.write_all(&reply).await;
+            }
+            sock.shutdown().await.ok();
+        });
+
+        let pool = deadpool_redis::Config::from_url(format!("redis://{addr}"))
+            .builder()
+            .expect("mock pool builder")
+            .max_size(1)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .expect("mock redis pool");
+        let limiter = DsarRateLimiter::new(test_config(), Some(pool));
+        // record_submission_success runs INCR + TTL + EXPIRE against the
+        // mock; the EXPIRE hits the closed connection and must be swallowed
+        // (warn) rather than failing the call.
+        limiter
+            .record_submission_success("expire-drop@example.test", "t-expire-drop")
+            .await;
+        server.abort();
+    }
+
+    /// Read one complete RESP request (array of bulk strings) from the
+    /// socket, discarding the bytes. Returns on error/EOF too — the mock
+    /// only needs framing, not parsing.
+    async fn read_one_resp_request<S>(sock: &mut S)
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut byte = [0u8; 1];
+        // Read the type byte; anything but '*' is treated as an inline cmd.
+        if sock.read_exact(&mut byte).await.is_err() {
+            return;
+        }
+        if byte[0] != b'*' {
+            // Inline command: read to CRLF.
+            let mut line = Vec::new();
+            let _ = read_to_newline(sock, &mut line).await;
+            return;
+        }
+        // Read the array length line.
+        let mut len_line = Vec::new();
+        if read_to_newline(sock, &mut len_line).await.is_err() {
+            return;
+        }
+        let len_text = String::from_utf8_lossy(&len_line);
+        let argc: usize = len_text.trim().parse().unwrap_or(0);
+        for _ in 0..argc {
+            let mut marker = [0u8; 1];
+            if sock.read_exact(&mut marker).await.is_err() {
+                return;
+            }
+            let mut arg_line = Vec::new();
+            if read_to_newline(sock, &mut arg_line).await.is_err() {
+                return;
+            }
+            let arg_len: usize = String::from_utf8_lossy(&arg_line)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            let mut body = vec![0u8; arg_len + 2]; // payload + CRLF
+            if sock.read_exact(&mut body).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Byte-wise read-to-newline over a plain AsyncRead (no BufRead bound).
+    async fn read_to_newline<S>(sock: &mut S, out: &mut Vec<u8>) -> std::io::Result<()>
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut byte = [0u8; 1];
+        loop {
+            let n = sock.read(&mut byte).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            out.push(byte[0]);
+            if byte[0] == b'\n' {
+                return Ok(());
+            }
+        }
+    }
 }

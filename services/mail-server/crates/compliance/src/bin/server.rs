@@ -178,6 +178,15 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
+    wait_for_shutdown_signal(ctrl_c, terminate).await;
+}
+
+/// The select between the two shutdown sources, split out so tests can drive
+/// each arm with fabricated futures.
+async fn wait_for_shutdown_signal(
+    ctrl_c: impl std::future::Future<Output = ()>,
+    terminate: impl std::future::Future<Output = ()>,
+) {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
@@ -196,17 +205,53 @@ async fn shutdown_signal() {
 /// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
 /// 8. Statutory ledger sweeps (payroll/expenses/bank statement lines) — every 5min
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
-    let mut gdpr_ticker = interval(Duration::from_secs(30));
-    let mut rotation_ticker = interval(Duration::from_secs(3600));
-    let mut expiry_ticker = interval(Duration::from_secs(300));
-    let mut archive_ticker = interval(Duration::from_secs(86400));
-    let mut retention_ticker = interval(Duration::from_secs(86400));
-    let mut sweep_ticker = interval(Duration::from_secs(86400));
-    let mut outbox_flush_ticker = interval(Duration::from_secs(60));
+    run_cron_jobs_with_intervals(
+        state,
+        outbox_flusher,
+        CronIntervals {
+            gdpr: Duration::from_secs(30),
+            rotation: Duration::from_secs(3600),
+            expiry: Duration::from_secs(300),
+            archive: Duration::from_secs(86400),
+            retention: Duration::from_secs(86400),
+            sweep: Duration::from_secs(86400),
+            outbox_flush: Duration::from_secs(60),
+            ledger: Duration::from_secs(300),
+        },
+    )
+    .await;
+}
+
+/// Tick periods for the eight cron jobs, in declaration order. Split from
+/// [`run_cron_jobs`] so tests can drive every job arm in milliseconds.
+#[derive(Clone, Copy)]
+struct CronIntervals {
+    gdpr: Duration,
+    rotation: Duration,
+    expiry: Duration,
+    archive: Duration,
+    retention: Duration,
+    sweep: Duration,
+    outbox_flush: Duration,
+    ledger: Duration,
+}
+
+async fn run_cron_jobs_with_intervals(
+    state: Arc<AppState>,
+    outbox_flusher: DsrOutboxFlusher,
+    intervals: CronIntervals,
+) {
+    let mut gdpr_ticker = interval(intervals.gdpr);
+    let mut rotation_ticker = interval(intervals.rotation);
+    let mut expiry_ticker = interval(intervals.expiry);
+    let mut archive_ticker = interval(intervals.archive);
+    let mut retention_ticker = interval(intervals.retention);
+    let mut sweep_ticker = interval(intervals.sweep);
+    let mut outbox_flush_ticker = interval(intervals.outbox_flush);
     // Host for the payroll/expense/bank statement sweeps: there is no
     // dedicated accounting service; see compliance::ledger_sweep. Bank lines
     // arrive through the compliance route POST /accounting/bank-statements/import.
-    let mut ledger_ticker = interval(Duration::from_secs(300));
+    let mut ledger_ticker = interval(intervals.ledger);
 
     loop {
         tokio::select! {
@@ -349,5 +394,108 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
                         }
                     }
                 }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+//
+// The binary's guts are exercised directly: the cron loop is driven with
+// millisecond intervals against a real canonical database (every job arm
+// runs once against the production SQL), the shutdown select is driven with
+// fabricated signal futures, and the tracing fallback is proven.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compliance::config::ComplianceConfig;
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// A canonical database + the full service state, as the binary builds it.
+    async fn boot_state(test_name: &str) -> Option<(Arc<AppState>, ComplianceConfig)> {
+        let url = test_database_url()?;
+        // The secret manager's KDF contract (the binary normally gets these
+        // from the deploy env; the test provides fixed values).
+        if std::env::var("SECRETS_KDF_SALT").is_err() {
+            std::env::set_var("SECRETS_KDF_SALT", "bin-test-kdf-salt-0123456789");
+        }
+        if std::env::var("SECRETS_ENCRYPTION_KEY").is_err() {
+            std::env::set_var("SECRETS_ENCRYPTION_KEY", "bin-test-master-key-0123456789");
+        }
+        let db_name = format!("apexmail_ci_bin_server_{test_name}");
+        let _pool = match migrator::test_support::fresh_canonical_db(&url, &db_name).await {
+            Ok(pool) => pool?,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let mut config = ComplianceConfig::from_env();
+        config.database_url = url;
+        config.redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_default();
+        config.auth_token = "bin-test-token".into();
+        let (state, _seeds) = compliance::bootstrap::build_state(&config)
+            .await
+            .expect("boot state");
+        Some((state, config))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_cron_job_arm_runs_against_the_canonical_schema() {
+        let Some((state, config)) = boot_state("cron_matrix").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
+
+        // All eight tickers fire their first tick immediately and then every
+        // 5 ms: one loop pass exercises every job arm against real SQL.
+        let task = tokio::spawn(run_cron_jobs_with_intervals(
+            state.clone(),
+            outbox_flusher,
+            CronIntervals {
+                gdpr: Duration::from_millis(5),
+                rotation: Duration::from_millis(5),
+                expiry: Duration::from_millis(5),
+                archive: Duration::from_millis(5),
+                retention: Duration::from_millis(5),
+                sweep: Duration::from_millis(5),
+                outbox_flush: Duration::from_millis(5),
+                ledger: Duration::from_millis(5),
+            },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        let _ = state.db.close().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_returns_on_the_ctrl_c_arm() {
+        let fired = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_shutdown_signal(std::future::ready(()), std::future::pending()),
+        )
+        .await;
+        assert!(fired.is_ok(), "a ready ctrl_c future must end the wait");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_returns_on_the_terminate_arm() {
+        let fired = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_shutdown_signal(std::future::pending(), std::future::ready(())),
+        )
+        .await;
+        assert!(fired.is_ok(), "a ready terminate future must end the wait");
+    }
+
+    #[test]
+    fn tracing_fallback_initialises_without_otlp() {
+        // The OTLP exporter is env-gated and off in tests: init_tracing must
+        // take the structured-logging fallback and return None (no guard).
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let guard = init_tracing();
+        assert!(guard.is_none(), "OTLP disabled => no tracing guard");
     }
 }

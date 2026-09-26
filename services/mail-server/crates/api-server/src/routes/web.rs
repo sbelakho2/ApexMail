@@ -634,27 +634,26 @@ mod mfa_fallback {
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    fn prune_expired(map: &mut HashMap<String, Window>) {
-        map.retain(|_, window| window.started.elapsed().as_secs() < WINDOW_SECS);
+    /// Lock the store, RECOVERING from a poisoned mutex instead of failing
+    /// open. Every mutation on this map is an infallible insert/remove, so a
+    /// poisoned lock cannot imply corrupt data — and the old `else { return
+    /// false/() }` arms silently disabled the brute-force bound exactly when
+    /// some other thread had panicked mid-verify. Recovering keeps the bound
+    /// alive; the map is at worst a few stale windows that pruning expires.
+    fn lock_store() -> std::sync::MutexGuard<'static, HashMap<String, Window>> {
+        store()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `true` when the challenge has hit the attempt cap in this window.
-    pub fn locked(key: &str) -> bool {
-        let Ok(map) = store().lock() else {
-            return false;
-        };
-        map.get(key).is_some_and(|window| {
-            window.started.elapsed().as_secs() < WINDOW_SECS
-                && window.count >= super::MFA_VERIFY_MAX_ATTEMPTS
-        })
+    fn prune_expired(map: &mut HashMap<String, Window>, now: Instant) {
+        map.retain(|_, window| now.duration_since(window.started).as_secs() < WINDOW_SECS);
     }
 
-    /// Record one wrong code (starts a fresh window on first failure).
-    pub fn record_failure(key: &str) {
-        let Ok(mut map) = store().lock() else {
-            return;
-        };
-        prune_expired(&mut map);
+    /// Pure core of the failure recorder, clock-injected so the window-reset
+    /// and cap-restart branches are directly testable.
+    fn record_on(map: &mut HashMap<String, Window>, key: &str, now: Instant) {
+        prune_expired(map, now);
         if map.len() >= MAX_KEYS && !map.contains_key(key) {
             // Cap reached without room: restart from a clean slate rather
             // than growing without bound.
@@ -662,19 +661,124 @@ mod mfa_fallback {
         }
         let window = map.entry(key.to_string()).or_insert(Window {
             count: 0,
-            started: Instant::now(),
+            started: now,
         });
-        if window.started.elapsed().as_secs() >= WINDOW_SECS {
+        if now.duration_since(window.started).as_secs() >= WINDOW_SECS {
             window.count = 0;
-            window.started = Instant::now();
+            window.started = now;
         }
         window.count += 1;
     }
 
+    /// Pure core of the lock check, clock-injected for tests.
+    fn locked_on(map: &HashMap<String, Window>, key: &str, now: Instant) -> bool {
+        map.get(key).is_some_and(|window| {
+            now.duration_since(window.started).as_secs() < WINDOW_SECS
+                && window.count >= super::MFA_VERIFY_MAX_ATTEMPTS
+        })
+    }
+
+    /// `true` when the challenge has hit the attempt cap in this window.
+    pub fn locked(key: &str) -> bool {
+        locked_on(&lock_store(), key, Instant::now())
+    }
+
+    /// Record one wrong code (starts a fresh window on first failure).
+    pub fn record_failure(key: &str) {
+        record_on(&mut lock_store(), key, Instant::now());
+    }
+
     /// Clear the counter (successful verify).
     pub fn clear(key: &str) {
-        if let Ok(mut map) = store().lock() {
-            map.remove(key);
+        lock_store().remove(key);
+    }
+
+    #[cfg(test)]
+    mod fallback_tests {
+        use super::super::MFA_VERIFY_MAX_ATTEMPTS;
+        use super::*;
+
+        /// The window reset and cap restart are clock-driven; a backdated
+        /// `Instant` (a real timestamp minus the window length) exercises
+        /// them without any sleeping. The whole probe runs while holding the
+        /// store lock, so a concurrent `record_failure` from another test
+        /// thread cannot interleave: it blocks, then observes the restored
+        /// map.
+        #[test]
+        fn window_reset_and_cap_restart_are_bounded_and_recover() {
+            let mut map = store()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            let past = now
+                .checked_sub(std::time::Duration::from_secs(WINDOW_SECS + 1))
+                .expect("backdated instant");
+
+            // A window that started before the window horizon is expired:
+            // unlocked (its count no longer counts), and the touch resets it
+            // to a fresh single-failure window instead of accumulating
+            // forever.
+            let key = "apexmail:mfa_verify_failures:fallback-window-reset";
+            map.insert(
+                key.to_string(),
+                Window {
+                    count: MFA_VERIFY_MAX_ATTEMPTS,
+                    started: past,
+                },
+            );
+            assert!(
+                !locked_on(&map, key, now),
+                "an expired window no longer locks the challenge"
+            );
+            record_on(&mut map, key, now);
+            assert_eq!(
+                map.get(key).map(|w| w.count),
+                Some(1),
+                "the touch restarted the expired window from zero"
+            );
+            assert!(!locked_on(&map, key, now));
+
+            // A foreign full window that is still fresh does not block a new
+            // key, and locking clears only the touched key.
+            let fresh = "apexmail:mfa_verify_failures:fallback-fresh";
+            record_on(&mut map, fresh, now);
+            for _ in 0..MFA_VERIFY_MAX_ATTEMPTS {
+                record_on(&mut map, fresh, now);
+            }
+            assert!(locked_on(&map, fresh, now));
+            let probe = "apexmail:mfa_verify_failures:fallback-probe";
+            assert!(!locked_on(&map, probe, now), "unknown keys are unlocked");
+
+            // Cap: MAX_KEYS distinct keys leave no room — the next NEW key
+            // restarts from a clean slate instead of growing unbounded.
+            let saved: Vec<(String, Window)> = map
+                .iter()
+                .map(|(k, w)| {
+                    (
+                        k.clone(),
+                        Window {
+                            count: w.count,
+                            started: w.started,
+                        },
+                    )
+                })
+                .collect();
+            map.clear();
+            for index in 0..MAX_KEYS {
+                record_on(&mut map, &format!("filler-{index}"), now);
+            }
+            assert_eq!(map.len(), MAX_KEYS);
+            record_on(&mut map, "the-overflow-key", now);
+            assert_eq!(map.len(), 1, "the cap restart dropped every tracked window");
+            assert_eq!(
+                map.get("the-overflow-key").map(|w| w.count),
+                Some(1),
+                "the triggering key still records its first failure"
+            );
+            map.clear();
+            for (key, window) in saved {
+                map.insert(key, window);
+            }
         }
     }
 }
@@ -1739,8 +1843,17 @@ fn verify_password(hash: &str, password: &str) -> bool {
     }
 }
 
+/// Hash a password with the CANONICAL Argon2id hasher — the same
+/// `apexmail_lib` primitive the JSON register/reset flows use. The SSR
+/// surface previously hashed with bcrypt here while `verify_password`
+/// accepts both, which produced two divergent behaviors: console-created
+/// credentials carried a different hash format than API-created ones, and
+/// bcrypt's hard 72-BYTE ceiling rejected 73–128-character passwords the
+/// shared 12–128-character policy explicitly allows — the operator saw a
+/// misleading "temporarily unavailable" flash instead of their password
+/// being accepted.
 fn hash_password(password: &str) -> Result<String, String> {
-    bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| format!("hash failure: {e}"))
+    apexmail_lib::hash_password(password).map_err(|e| format!("hash failure: {e}"))
 }
 
 /// Postgres unique-constraint violation (SQLSTATE 23505). The signup
@@ -2305,41 +2418,34 @@ async fn form_signup(
         );
     }
 
-    let password_hash = match hash_password(&password) {
-        Ok(hash) => hash,
-        Err(_) => {
-            return redirect_error(
-                "Registration is temporarily unavailable.",
-                "/signup",
-                &state.config,
-            )
-        }
-    };
-    // tenants.id is VARCHAR(26) (ULID, migration 064) — a UUID does not
-    // fit; generate a 26-char text id and bind tenant ids as text.
-    // users.id, however, is UUID (migration 052): a text nanoid fails the
-    // INSERT with `invalid input syntax for type uuid` — generate a UUID
-    // for the user id (same convention as the JSON register flow).
-    let tenant_id = apexmail_lib::id::generate_id("", 26);
-    let user_id = Uuid::new_v4();
-    let slug_source = company.to_lowercase();
-    let slug: String = slug_source
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(48)
-        .collect();
-    let now = Utc::now();
-    let verification_token = Uuid::new_v4().to_string();
-    // The token is stored as its SHA-256 digest — exactly like the JSON
-    // register flow and form_forgot_password. The raw token only ever
-    // exists in the emailed verification link.
-    let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
-
     // Tenant + user + verification email commit atomically: a queue
     // failure rolls the account back instead of stranding an owner who
-    // can never receive their verification link.
+    // can never receive their verification link. Hashing rides the same
+    // pipeline (first, before any database work) so its only failure —
+    // a hasher fault — lands on the same honest "unavailable" flash.
     let result: Result<(), &'static str> = async {
+        let password_hash = hash_password(&password).map_err(|_| "unavailable")?;
         let mut tx = state.db.begin().await.map_err(|_| "unavailable")?;
+
+        // tenants.id is VARCHAR(26) (ULID, migration 064) — a UUID does not
+        // fit; generate a 26-char text id and bind tenant ids as text.
+        // users.id, however, is UUID (migration 052): a text nanoid fails the
+        // INSERT with `invalid input syntax for type uuid` — generate a UUID
+        // for the user id (same convention as the JSON register flow).
+        let tenant_id = apexmail_lib::id::generate_id("", 26);
+        let user_id = Uuid::new_v4();
+        let slug: String = company
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(48)
+            .collect();
+        let now = Utc::now();
+        // The token is stored as its SHA-256 digest — exactly like the JSON
+        // register flow and form_forgot_password. The raw token only ever
+        // exists in the emailed verification link.
+        let verification_token = Uuid::new_v4().to_string();
+        let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
 
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
@@ -2648,42 +2754,47 @@ async fn form_reset_password(
         );
     }
 
-    let new_hash = match hash_password(&password) {
-        Ok(hash) => hash,
-        Err(_) => {
-            return redirect_error(
-                "Could not reset the password. Try again.",
-                "/forgot-password",
-                &state.config,
-            )
-        }
-    };
-
-    // Revoke live sessions BEFORE rotating the credential (fail closed).
+    // Revoke live sessions BEFORE rotating the credential (fail closed),
+    // then rotate through one pipeline: hashing, the optimistic UPDATE,
+    // and storage faults all land on the same honest flashes, with the
+    // consumed/expired-token race separated by its sentinel.
     revoke_user_sessions(&state, &tenant_id, &user_id).await;
 
-    let update = sqlx::query(
-        "UPDATE users
-         SET password_hash = $1,
-             metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
-             updated_at = NOW()
-         WHERE id = $2::uuid
-           AND status = 'active'
-           AND metadata->>'password_reset_token_hash' = $3",
-    )
-    .bind(&new_hash)
-    .bind(&user_id)
-    .bind(&token_hash)
-    .execute(&state.db)
+    let outcome: Result<(), &'static str> = async {
+        let new_hash = hash_password(&password).map_err(|_| "unavailable")?;
+        let update = sqlx::query(
+            "UPDATE users
+             SET password_hash = $1,
+                 metadata = metadata - 'password_reset_token_hash' - 'password_reset_token' - 'password_reset_expires' - 'password_reset_iat',
+                 updated_at = NOW()
+             WHERE id = $2::uuid
+               AND status = 'active'
+               AND metadata->>'password_reset_token_hash' = $3",
+        )
+        .bind(&new_hash)
+        .bind(&user_id)
+        .bind(&token_hash)
+        .execute(&state.db)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "web reset password update failed");
+            "unavailable"
+        })?;
+        if update.rows_affected() != 1 {
+            // The token was consumed (or the row changed) between the
+            // lookup and this guarded write.
+            return Err("expired");
+        }
+        Ok(())
+    }
     .await;
-
-    match update {
-        Ok(result) if result.rows_affected() == 1 => redirect_success(
+    match outcome {
+        Ok(()) => redirect_success(
             "Your password has been reset. Sign in with your new password.",
             "/login",
             &state.config,
         ),
-        Ok(_) => redirect_error(
+        Err("expired") => redirect_error(
             "That reset link is invalid or has expired.",
             "/forgot-password",
             &state.config,
@@ -2804,69 +2915,63 @@ async fn form_change_password(
             )
         }
     }
-    let new_hash = match hash_password(&new_password) {
-        Ok(hash) => hash,
-        Err(_) => {
-            return redirect_error(
-                "Could not update the password. Try again.",
-                "/settings/profile",
-                &state.config,
-            )
-        }
-    };
-    // Revoke every live session (other tabs, stolen cookies) so a session
-    // hijacked before the change cannot survive it — same contract as the
-    // password-reset path. The current session is re-established by the
-    // redirect target's login flow.
-    revoke_user_sessions(
-        &state,
-        &user.tenant_id,
-        user.user_id.as_deref().unwrap_or_default(),
-    )
-    .await;
-
-    // users.id is UUID (canonical migration 052): cast the String bind.
-    let result =
-        sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
-            .bind(&new_hash)
-            .bind(user.user_id.clone().unwrap_or_default())
-            .execute(&state.db)
-            .await;
-    match result {
+    // Rotation pipeline: hash, revoke every live session (other tabs,
+    // stolen cookies — same contract as the password-reset path; the
+    // current session is re-established by the redirect target's login
+    // flow), then the guarded UPDATE. Storage faults and a row that no
+    // longer matches flash honestly instead of lying about success.
+    let outcome: Result<(), &'static str> = async {
+        let new_hash = hash_password(&new_password).map_err(|_| "unavailable")?;
+        revoke_user_sessions(
+            &state,
+            &user.tenant_id,
+            user.user_id.as_deref().unwrap_or_default(),
+        )
+        .await;
+        // users.id is UUID (canonical migration 052): cast the String bind.
+        let update = sqlx::query(
+            "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid",
+        )
+        .bind(&new_hash)
+        .bind(user.user_id.clone().unwrap_or_default())
+        .execute(&state.db)
+        .await
+        .map_err(|error| {
+            tracing::error!(tenant_id = %user.tenant_id, error = %error, "password change failed");
+            "unavailable"
+        })?;
         // `rows_affected()` is checked: a session whose user row was deleted
         // (or whose id no longer resolves) matched zero rows, and the old
         // arm flashed "Password updated" for a password that was never
         // written. The sessions above were already revoked, so failing
         // closed here is the honest outcome.
-        Ok(outcome) if outcome.rows_affected() == 1 => redirect_success(
-            "Password updated. Please sign in again with your new password.",
-            "/login",
-            &state.config,
-        ),
-        Ok(_) => {
+        if update.rows_affected() != 1 {
             tracing::error!(
                 tenant_id = %user.tenant_id,
                 user_id = ?user.user_id,
                 "password change matched no user row; refusing to report success"
             );
-            redirect_error(
-                "Could not update the password for this account. Sign in again.",
-                "/settings/profile",
-                &state.config,
-            )
+            return Err("missing-row");
         }
-        Err(error) => {
-            tracing::error!(
-                tenant_id = %user.tenant_id,
-                error = %error,
-                "password change failed"
-            );
-            redirect_error(
-                "Could not update the password. Try again.",
-                "/settings/profile",
-                &state.config,
-            )
-        }
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => redirect_success(
+            "Password updated. Please sign in again with your new password.",
+            "/login",
+            &state.config,
+        ),
+        Err("missing-row") => redirect_error(
+            "Could not update the password for this account. Sign in again.",
+            "/settings/profile",
+            &state.config,
+        ),
+        Err(_) => redirect_error(
+            "Could not update the password. Try again.",
+            "/settings/profile",
+            &state.config,
+        ),
     }
 }
 
@@ -2890,13 +2995,23 @@ async fn form_mfa_setup(
     };
 
     // users.id is UUID (canonical migration 052): cast the String bind.
-    let enabled: Option<bool> =
-        sqlx::query_scalar::<_, bool>("SELECT mfa_enabled FROM users WHERE id = $1::uuid")
+    // One query resolves BOTH the gate (mfa_enabled) and the otpauth label
+    // (email) — a missing row and an enrolled account share the same
+    // refusal, exactly like the previous two-query shape.
+    let row: Option<(Option<bool>, String)> =
+        sqlx::query_as("SELECT mfa_enabled, email FROM users WHERE id = $1::uuid")
             .bind(&user_id)
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten();
+    let Some((enabled, email)) = row else {
+        return redirect_error(
+            "MFA is already enabled for this account.",
+            &back,
+            &state.config,
+        );
+    };
     if enabled != Some(false) {
         return redirect_error(
             "MFA is already enabled for this account.",
@@ -2905,10 +3020,7 @@ async fn form_mfa_setup(
         );
     }
 
-    let (secret, otpauth) = match generate_totp_secret_and_uri(&user_id, &state.db).await {
-        Ok(pair) => pair,
-        Err(message) => return redirect_error(message, &back, &state.config),
-    };
+    let (secret, otpauth) = generate_totp_secret_and_uri(&email);
 
     let signature = sign_mfa_setup(&state.config, &user_id, &secret);
     let value = encode_mfa_setup_value(&secret, &otpauth, &signature);
@@ -2971,59 +3083,64 @@ async fn form_mfa_confirm(
         );
     }
 
-    let recovery_codes = apexmail_lib::mfa::try_generate_default_recovery_codes()
-        .map_err(|e| format!("failed to generate recovery codes: {e}"))
-        .and_then(|codes| {
-            let hashes: Vec<String> = codes
-                .iter()
-                .map(|code| {
-                    apexmail_lib::mfa::try_hash_recovery_code(code)
-                        .map_err(|e| format!("failed to hash recovery code: {e}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok((codes, hashes))
-        });
-    let (recovery_codes, recovery_hashes) = match recovery_codes {
-        Ok(pair) => pair,
-        Err(message) => {
-            tracing::error!(error = %message, "web mfa confirm: recovery codes failed");
-            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+    // Recovery codes, at-rest encryption, and the guarded UPDATE share one
+    // failure pipeline: every internal fault flashes the same friendly
+    // "Could not enable MFA" (with the cause logged), while the
+    // concurrent-enrollment case — someone else enabled MFA first — gets
+    // its actionable sentinel.
+    #[derive(Debug)]
+    enum ConfirmFailure {
+        AlreadyEnabled,
+        Internal,
+    }
+    let outcome: Result<Vec<String>, ConfirmFailure> = async {
+        let recovery_codes = apexmail_lib::mfa::try_generate_default_recovery_codes()
+            .map_err(|_| ConfirmFailure::Internal)?;
+        let recovery_hashes: Vec<String> = recovery_codes
+            .iter()
+            .map(|code| {
+                apexmail_lib::mfa::try_hash_recovery_code(code)
+                    .map_err(|_| ConfirmFailure::Internal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let aad = format!("user_id={user_id}").into_bytes();
+        let encrypted = apexmail_lib::secret_at_rest::encrypt_at_rest(&setup.secret, &aad)
+            .map_err(|_| ConfirmFailure::Internal)?;
+        let result = sqlx::query(
+            "UPDATE users
+             SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2::jsonb, updated_at = NOW()
+             WHERE id = $3::uuid AND tenant_id = $4 AND COALESCE(mfa_enabled, false) = false",
+        )
+        .bind(&encrypted)
+        .bind(serde_json::to_value(&recovery_hashes).unwrap_or_default())
+        .bind(&user_id)
+        .bind(user.tenant_id.as_str())
+        .execute(&state.db)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "web mfa confirm update failed");
+            ConfirmFailure::Internal
+        })?;
+        if result.rows_affected() != 1 {
+            return Err(ConfirmFailure::AlreadyEnabled);
         }
-    };
-    let aad = format!("user_id={user_id}").into_bytes();
-    let encrypted = match apexmail_lib::secret_at_rest::encrypt_at_rest(&setup.secret, &aad) {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            tracing::error!(error = %error, "web mfa confirm: encryption failed");
-            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
-        }
-    };
-
-    let result = sqlx::query(
-        "UPDATE users
-         SET mfa_secret = $1, mfa_enabled = true, mfa_recovery_hashes = $2::jsonb, updated_at = NOW()
-         WHERE id = $3::uuid AND tenant_id = $4 AND COALESCE(mfa_enabled, false) = false",
-    )
-    .bind(&encrypted)
-    .bind(serde_json::to_value(&recovery_hashes).unwrap_or_default())
-    .bind(&user_id)
-    .bind(user.tenant_id.as_str())
-    .execute(&state.db)
+        Ok(recovery_codes)
+    }
     .await;
-    match result {
-        Ok(result) if result.rows_affected() == 1 => {}
-        Ok(_) => {
+    let recovery_codes = match outcome {
+        Ok(recovery_codes) => recovery_codes,
+        Err(cause @ ConfirmFailure::Internal) => {
+            tracing::error!(?cause, "web mfa confirm failed");
+            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+        }
+        Err(ConfirmFailure::AlreadyEnabled) => {
             return redirect_error(
                 "MFA is already enabled for this account.",
                 &back,
                 &state.config,
-            )
+            );
         }
-        Err(error) => {
-            tracing::error!(error = %error, "web mfa confirm update failed");
-            return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
-        }
-    }
+    };
 
     // Privilege change ⇒ revoke every live session (AR-005 twin).
     revoke_user_sessions(&state, &user.tenant_id, &user_id).await;
@@ -3055,27 +3172,21 @@ async fn form_mfa_confirm(
     response
 }
 
-/// Generate a base32 TOTP secret + otpauth URI for the given user (email
-/// read from the users row for the label).
-async fn generate_totp_secret_and_uri(
-    user_id: &str,
-    db: &sqlx::PgPool,
-) -> Result<(String, String), &'static str> {
-    // users.id is UUID (canonical migration 052): cast the String bind.
-    let email: String =
-        sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1::uuid")
-            .bind(user_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| "Could not start MFA setup. Try again.")?
-            .ok_or("Could not start MFA setup. Try again.")?;
-
+/// Generate a base32 TOTP secret + otpauth URI labelled with the caller's
+/// email (fetched by the handler in the same users query that gates on
+/// `mfa_enabled`, so no second round-trip and no second failure mode).
+///
+/// 20 random bytes map onto EXACTLY 32 base32 characters (160 = 32 × 5, no
+/// padding bits), which makes generation total: the only theoretical failure
+/// was the OS RNG, whose absence is a process-wide abort, not a user-facing
+/// "try again" — matching crypto.rs's treatment of infallible parameters.
+fn generate_totp_secret_and_uri(email: &str) -> (String, String) {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     use rand::TryRngCore;
     let mut bytes = [0u8; 20];
     rand::rngs::OsRng
         .try_fill_bytes(&mut bytes)
-        .map_err(|_| "Could not start MFA setup. Try again.")?;
+        .expect("OS RNG is available on every supported platform");
     let mut secret = String::with_capacity(32);
     let mut buffer: u16 = 0;
     let mut bits_left: u8 = 0;
@@ -3088,10 +3199,11 @@ async fn generate_totp_secret_and_uri(
             bits_left -= 5;
         }
     }
-    if bits_left > 0 {
-        let index = ((buffer << (5 - bits_left)) & 0x1f) as usize;
-        secret.push(ALPHABET[index] as char);
-    }
+    debug_assert_eq!(
+        (bits_left, secret.len()),
+        (0, 32),
+        "160 bits are exactly 32 base32 characters — no padding tail exists"
+    );
 
     let label: String =
         url::form_urlencoded::byte_serialize(format!("ApexMail:{email}").as_bytes()).collect();
@@ -3102,7 +3214,7 @@ async fn generate_totp_secret_and_uri(
         .append_pair("digits", "6")
         .append_pair("period", "30")
         .finish();
-    Ok((secret, format!("otpauth://totp/{label}?{params}")))
+    (secret, format!("otpauth://totp/{label}?{params}"))
 }
 
 /// POST /web/auth/impersonate/end — the CP shell banner's Terminate form.
@@ -3435,11 +3547,23 @@ async fn form_team_invite(
     }
 
     let email = field(&form, "userName").trim().to_lowercase();
+    let role_raw = field(&form, "role");
+    // No granting a role above the caller's own. Evaluated on the RAW value
+    // before the vocabulary check, so an admin who posts `role=owner` is
+    // told precisely why the invitation was refused instead of a generic
+    // "choose a valid role" — the rank gate is defense in depth that can
+    // actually fire.
+    if invite_role_rank(&role_raw) > invite_role_rank(&caller_role) {
+        return redirect_error(
+            "You cannot invite someone to a role above your own.",
+            "/settings/team",
+            &state.config,
+        );
+    }
     // The form offers member/admin only; an unexpected value is rejected
-    // explicitly (never silently downgraded) and the rank check below
-    // forbids granting above the caller regardless.
-    let role = match field(&form, "role").as_str() {
-        "admin" | "member" => field(&form, "role"),
+    // explicitly (never silently downgraded).
+    let role = match role_raw.as_str() {
+        "admin" | "member" => role_raw,
         _ => {
             return redirect_error(
                 "Choose a valid role (member or admin).",
@@ -3448,14 +3572,6 @@ async fn form_team_invite(
             );
         }
     };
-    // No granting a role above the caller's own.
-    if invite_role_rank(&role) > invite_role_rank(&caller_role) {
-        return redirect_error(
-            "You cannot invite someone to a role above your own.",
-            "/settings/team",
-            &state.config,
-        );
-    }
     if !valid_email(&email) {
         return redirect_error(
             "Enter a valid email address.",
@@ -3464,124 +3580,114 @@ async fn form_team_invite(
         );
     }
     // Entitlement capacity gate (transactional): seats are consumed by this
-    // handler, so the check, the open-invitation cap, and the INSERT all run
-    // in ONE transaction with the tenant row locked — two concurrent invites
-    // can never both pass a stale seat count. `seat_count + 1` is the total
-    // after this invitation; the snapshot is override-aware.
-    let entitlement = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return redirect_error(&error.to_string(), "/settings/team", &state.config);
-        }
-    };
-    let mut tx = match state.db.begin().await {
-        Ok(tx) => tx,
-        Err(error) => {
-            tracing::error!(error = %error, "team invite transaction begin failed");
-            return redirect_error(
-                "Could not create the invitation. Try again.",
-                "/settings/team",
-                &state.config,
-            );
-        }
-    };
-    if let Err(error) = sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
-        .bind(user.tenant_id.as_str())
-        .fetch_optional(&mut *tx)
-        .await
-    {
-        tracing::error!(error = %error, "team invite tenant lock failed");
-        let _ = tx.rollback().await;
-        return redirect_error(
-            "Could not create the invitation. Try again.",
-            "/settings/team",
-            &state.config,
-        );
+    // handler, so the snapshot, the seat check, the open-invitation cap, and
+    // the INSERT all run in ONE pipeline against one locked tenant row — two
+    // concurrent invites can never both pass a stale seat count. Internal
+    // faults (pool, locks, counts, the insert, the commit) share one honest
+    // "try again" flash with the cause logged; the operator-actionable cases
+    // (entitlement failures, the invitation ceiling) keep their own messages.
+    enum InviteFailure {
+        Entitlement(crate::error::ApiError),
+        Limit,
+        Internal,
     }
-    let seat_count: i64 =
-        match sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
-            .bind(user.tenant_id.as_str())
-            .fetch_one(&mut *tx)
+    let outcome: Result<(), InviteFailure> = async {
+        let entitlement = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Err(InviteFailure::Entitlement(error)),
+        };
+        let mut tx = state
+            .db
+            .begin()
             .await
+            .map_err(|_| InviteFailure::Internal)?;
+        if let Err(error) = sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+            .bind(user.tenant_id.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            tracing::error!(error = %error, "team invite tenant lock failed");
+            return Err(InviteFailure::Internal);
+        }
+        let seat_count: i64 =
+            match sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
+                .bind(user.tenant_id.as_str())
+                .fetch_one(&mut *tx)
+                .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::error!(error = %error, "team seat count failed");
+                    return Err(InviteFailure::Internal);
+                }
+            };
+        if let Err(error) = crate::entitlements::gate_capacity(
+            &entitlement,
+            billing_entitlements::CapacityKey::TeamMembers,
+            seat_count + 1,
+        ) {
+            return Err(InviteFailure::Entitlement(error));
+        }
+
+        // Outstanding-invitation cap: at most MAX_OPEN_INVITATIONS_PER_TENANT
+        // un-accepted invitations may exist per tenant. Count failures fail
+        // CLOSED.
+        let open_invites: i64 = match sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
+        )
+        .bind(user.tenant_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
         {
             Ok(count) => count,
             Err(error) => {
-                tracing::error!(error = %error, "team seat count failed");
-                let _ = tx.rollback().await;
-                return redirect_error(
-                    "Could not create the invitation. Try again.",
-                    "/settings/team",
-                    &state.config,
-                );
+                tracing::error!(error = %error, "team invite count check failed");
+                return Err(InviteFailure::Internal);
             }
         };
-    if let Err(error) = crate::entitlements::gate_capacity(
-        &entitlement,
-        billing_entitlements::CapacityKey::TeamMembers,
-        seat_count + 1,
-    ) {
-        let _ = tx.rollback().await;
-        return redirect_error(&error.to_string(), "/settings/team", &state.config);
-    }
-
-    // Outstanding-invitation cap: at most MAX_OPEN_INVITATIONS_PER_TENANT
-    // un-accepted invitations may exist per tenant. Count failures fail
-    // CLOSED.
-    let open_invites: Result<i64, _> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
-    )
-    .bind(user.tenant_id.as_str())
-    .fetch_one(&mut *tx)
-    .await;
-    match open_invites {
-        Ok(count) if count >= MAX_OPEN_INVITATIONS_PER_TENANT => {
-            let _ = tx.rollback().await;
-            return redirect_error(
-                "Invitation limit reached: clear outstanding invitations before sending more.",
-                "/settings/team",
-                &state.config,
-            );
+        if open_invites >= MAX_OPEN_INVITATIONS_PER_TENANT {
+            return Err(InviteFailure::Limit);
         }
-        Err(error) => {
-            tracing::error!(error = %error, "team invite count check failed");
-            let _ = tx.rollback().await;
-            return redirect_error(
-                "Could not create the invitation. Try again.",
-                "/settings/team",
-                &state.config,
-            );
-        }
-        _ => {}
-    }
-    let result = sqlx::query(
-        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
-                            email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
-    )
-    // users.id is a UUID column (migration 052) — bind a UUID, not a text
-    // nanoid (the insert would fail with invalid uuid syntax).
-    .bind(Uuid::new_v4())
-    .bind(user.tenant_id.as_str())
-    .bind(&email)
-    .bind("!invited-pending-activation") // cannot authenticate until they set a password
-    .bind(role)
-    .execute(&mut *tx)
-    .await;
-    match result {
-        Ok(_) => match tx.commit().await {
-            Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
-            Err(error) => {
-                tracing::error!(error = %error, "team invite commit failed");
-                redirect_error(
-                    "Could not create the invitation. Try again.",
-                    "/settings/team",
-                    &state.config,
-                )
-            }
-        },
-        Err(error) => {
+        let inserted = sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, '', $4, $5, 'invited', false, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        // users.id is a UUID column (migration 052) — bind a UUID, not a text
+        // nanoid (the insert would fail with invalid uuid syntax).
+        .bind(Uuid::new_v4())
+        .bind(user.tenant_id.as_str())
+        .bind(&email)
+        .bind("!invited-pending-activation") // cannot authenticate until they set a password
+        .bind(&role)
+        .execute(&mut *tx)
+        .await;
+        if let Err(error) = inserted {
             tracing::error!(error = %error, "team invite insert failed");
             let _ = tx.rollback().await;
+            return Err(InviteFailure::Internal);
+        }
+        match tx.commit().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                tracing::error!(error = %error, "team invite commit failed");
+                Err(InviteFailure::Internal)
+            }
+        }
+    }
+    .await;
+    match outcome {
+        Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
+        Err(InviteFailure::Entitlement(error)) => {
+            redirect_error(&error.to_string(), "/settings/team", &state.config)
+        }
+        Err(InviteFailure::Limit) => redirect_error(
+            "Invitation limit reached: clear outstanding invitations before sending more.",
+            "/settings/team",
+            &state.config,
+        ),
+        Err(InviteFailure::Internal) => {
+            tracing::error!(email = %email, "team invitation could not be created");
             redirect_error(
                 "Could not create the invitation. Try again.",
                 "/settings/team",
@@ -3892,6 +3998,10 @@ async fn form_template_create(
     // templates.id is VARCHAR(26) — a UUID's 36-char hyphenated form
     // overflows the column; generate a 26-char text id like templates.rs.
     let id = apexmail_lib::id::generate_id("", 26);
+    // A blank subject stores as an EMPTY STRING, not NULL: templates.subject
+    // is NOT NULL, so the previous NULL bind turned every subject-less
+    // create into a generic "could not save" failure the operator could
+    // never fix from the form (which offers no subject requirement).
     let result = sqlx::query(
         "INSERT INTO templates (id, tenant_id, name, subject, html_body, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW(), NOW())",
@@ -3899,11 +4009,7 @@ async fn form_template_create(
     .bind(&id)
     .bind(user.tenant_id.as_str())
     .bind(&name)
-    .bind(if subject.is_empty() {
-        None
-    } else {
-        Some(subject)
-    })
+    .bind(Some(subject.as_str()))
     .bind(&html_body)
     .execute(&state.db)
     .await;
@@ -4280,46 +4386,53 @@ async fn form_domain_verify(
         .await
     {
         Ok(axum::Json(response)) => {
-            let records = [
-                ("SPF", response.spf_verified),
-                ("DKIM", response.dkim_verified),
-                ("DMARC", response.dmarc_verified),
-                ("Return-Path", response.return_path_verified),
-            ];
-            let passed: Vec<&str> = records
-                .iter()
-                .filter(|(_, ok)| *ok)
-                .map(|(name, _)| *name)
-                .collect();
-            let failed: Vec<&str> = records
-                .iter()
-                .filter(|(_, ok)| !*ok)
-                .map(|(name, _)| *name)
-                .collect();
-            let summary = if failed.is_empty() {
-                format!(
-                    "All checks passed ({}) — status is now {}.",
-                    passed.join(", "),
-                    response.status
-                )
-            } else {
-                format!(
-                    "Verified: {}. Not published yet: {} — add the missing records, then verify again.",
-                    if passed.is_empty() {
-                        "none".to_string()
-                    } else {
-                        passed.join(", ")
-                    },
-                    failed.join(", "),
-                )
-            };
-            redirect_success(&summary, &back, &state.config)
+            redirect_success(&domain_verify_flash(&response), &back, &state.config)
         }
         Err(error) => redirect_error(
             &format!("Verification could not run: {error}"),
             &back,
             &state.config,
         ),
+    }
+}
+
+/// The honest per-record flash summary for a domain verification outcome:
+/// all-pass reports the new status, anything less names exactly which
+/// checks failed so the operator knows what to publish. Split from the
+/// handler so both summary shapes are directly assertable.
+fn domain_verify_flash(response: &crate::routes::domains::VerifyResponse) -> String {
+    let records = [
+        ("SPF", response.spf_verified),
+        ("DKIM", response.dkim_verified),
+        ("DMARC", response.dmarc_verified),
+        ("Return-Path", response.return_path_verified),
+    ];
+    let passed: Vec<&str> = records
+        .iter()
+        .filter(|(_, ok)| *ok)
+        .map(|(name, _)| *name)
+        .collect();
+    let failed: Vec<&str> = records
+        .iter()
+        .filter(|(_, ok)| !*ok)
+        .map(|(name, _)| *name)
+        .collect();
+    if failed.is_empty() {
+        format!(
+            "All checks passed ({}) — status is now {}.",
+            passed.join(", "),
+            response.status
+        )
+    } else {
+        format!(
+            "Verified: {}. Not published yet: {} — add the missing records, then verify again.",
+            if passed.is_empty() {
+                "none".to_string()
+            } else {
+                passed.join(", ")
+            },
+            failed.join(", "),
+        )
     }
 }
 
@@ -13213,8 +13326,9 @@ mod coverage_auth_admin_tests {
                 .await
                 .unwrap();
         assert!(
-            bcrypt::verify("CorrectHorse2!", &new_hash).unwrap_or(false),
-            "the new password must verify against the stored hash"
+            bcrypt::verify("CorrectHorse2!", &new_hash).unwrap_or(false)
+                || verify_password(&new_hash, "CorrectHorse2!"),
+            "the new password must verify against the stored hash (bcrypt or the canonical argon2id format)"
         );
         let token_cleared: Option<String> =
             sqlx::query_scalar("SELECT metadata->>'password_reset_token_hash' FROM users WHERE LOWER(email) = LOWER($1)")
@@ -13356,7 +13470,11 @@ mod coverage_auth_admin_tests {
                 .fetch_one(&app.db)
                 .await
                 .unwrap();
-        assert!(bcrypt::verify("CorrectHorse2!", &hash).unwrap_or(false));
+        assert!(
+            bcrypt::verify("CorrectHorse2!", &hash).unwrap_or(false)
+                || verify_password(&hash, "CorrectHorse2!"),
+            "the stored hash must verify (bcrypt or the canonical argon2id format)"
+        );
 
         // MFA enrollment: setup cookie, wrong code, then a real code.
         sqlx::query("UPDATE users SET mfa_enabled = false, mfa_secret = NULL WHERE id = $1::uuid")
@@ -15520,5 +15638,4037 @@ mod adversarial_auth_outage_tests {
         };
         let response = form_webhook_create(State(state), Extension(user), headers, body).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+// ─── Residual zero: every remaining uncovered line, proven ────────
+//
+// One test per behaviour from the coverage residual: happy persistence,
+// every validation refusal, every storage-failure arm (fault.rs triggers on
+// a per-test canonical database), cross-tenant id refusals, and hostile
+// payloads — each asserted through the PRG flash, never a 500 and never a
+// lying success.
+#[cfg(test)]
+mod residual_zero_tests {
+    use super::coverage_handler_tests::{
+        body_string, cookie_headers, flash_text, location, set_cookies, signed_bytes_body,
+        signed_form, unsigned_form,
+    };
+    use super::*;
+    use crate::app::test_support::test_config;
+    use crate::routes::web::data::coverage_support;
+    use axum::extract::Query as AxumQuery;
+    use hmac::Mac;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Resolve the canonical system tenant id (slug 'system'). The shared
+    /// database and per-test clones carry it under a generated id, so every
+    /// control-plane fixture must resolve instead of hardcoding.
+    async fn system_tenant_id(pool: &sqlx::PgPool) -> String {
+        sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .expect("system tenant lookup")
+            .expect("a system tenant must exist on the canonical database")
+    }
+
+    /// Seed one ACTIVE user with a given role and return its id, for callers
+    /// whose handlers resolve the caller's role from the database.
+    async fn seed_caller(pool: &sqlx::PgPool, tenant: &str, role: &str) -> (AuthUser, String) {
+        let id = uuid::Uuid::new_v4();
+        let email = format!(
+            "caller-{role}-{}@example.test",
+            coverage_support::unique_tag("rz")
+        );
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Residual Caller', 'x', $4, 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(&email)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("seed caller user");
+        (
+            AuthUser {
+                tenant_id: tenant.to_string(),
+                user_id: Some(id.to_string()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            },
+            email,
+        )
+    }
+
+    /// Block until some statement in THIS test's database is waiting on a
+    /// lock — the deterministic handle for racing a handler against an
+    /// uncommitted fixture transaction (bounded: 2s, 10ms polls).
+    async fn wait_for_blocked_statement(pool: &sqlx::PgPool) {
+        for _ in 0..200 {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() \
+                   AND wait_event_type = 'Lock' AND state = 'active'",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("pg_stat_activity must be readable");
+            if blocked > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no handler statement ever blocked on the fixture lock");
+    }
+
+    /// RFC 6238 TOTP (SHA-256, 6 digits, 30s) — the verifier form_mfa_verify
+    /// and form_mfa_confirm share via `verify_totp_code_guarded`.
+    fn totp_code(secret_base32: &str) -> String {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut key = Vec::new();
+        let mut bits: u64 = 0;
+        let mut bit_count: u32 = 0;
+        for symbol in secret_base32.trim_end_matches('=').bytes() {
+            let value = alphabet
+                .iter()
+                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .expect("base32 alphabet") as u64;
+            bits = (bits << 5) | value;
+            bit_count += 5;
+            if bit_count >= 8 {
+                bit_count -= 8;
+                key.push((bits >> bit_count) as u8);
+                bits &= (1u64 << bit_count) - 1;
+            }
+        }
+        let step = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            / 30;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("hmac key");
+        mac.update(&step.to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        let offset = (result[result.len() - 1] & 0x0f) as usize;
+        let code = u32::from_be_bytes([
+            result[offset] & 0x7f,
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ]);
+        format!("{:06}", code % 1_000_000)
+    }
+
+    fn random_base32_secret() -> String {
+        use rand::TryRngCore;
+        let mut bytes = [0u8; 20];
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut bytes)
+            .expect("os rng");
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut secret = String::with_capacity(32);
+        let mut buffer: u16 = 0;
+        let mut bits_left: u8 = 0;
+        for byte in bytes {
+            buffer = (buffer << 8) | u16::from(byte);
+            bits_left += 8;
+            while bits_left >= 5 {
+                let index = ((buffer >> (bits_left - 5)) & 0x1f) as usize;
+                secret.push(alphabet[index] as char);
+                bits_left -= 5;
+            }
+        }
+        secret
+    }
+
+    // ── Consent: the forged-GET guard ──────────────────────────────
+
+    #[tokio::test]
+    async fn consent_get_refuses_a_referer_it_cannot_parse() {
+        let state = coverage_support::dead_state().await;
+        let request = ConsentRequest {
+            choice: Some("all".into()),
+            return_to: Some("/dashboard".into()),
+        };
+        let mut headers = HeaderMap::new();
+        // No Sec-Fetch-Site: the guard falls back to the Referer, which must
+        // parse as a URL. Garbage parses as nothing → refusal, no cookie.
+        headers.insert(header::REFERER, "not a url at all".parse().unwrap());
+        let response = consent_get(State(state.clone()), Query(request), headers).await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert!(
+            !set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("apexmail_consent=")),
+            "an unparsable referer must not record consent"
+        );
+    }
+
+    // ── MFA fallback counter + redis arms ──────────────────────────
+
+    #[tokio::test]
+    async fn mfa_brute_force_bound_survives_a_redis_outage() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_mfa_fallback").await else {
+            return;
+        };
+        // A dead redis (port 1, lazy) drives every get/incr into the
+        // in-process fallback: the bound must still engage at 10 wrong codes
+        // and clear on success.
+        let state = crate::app::test_support::test_state_over_with_config_and_redis(
+            pool,
+            test_config(),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            !mfa_verify_locked(&state, &user_id).await,
+            "a fresh challenge is unlocked"
+        );
+        for _ in 0..MFA_VERIFY_MAX_ATTEMPTS - 1 {
+            record_mfa_verify_failure(&state, &user_id).await;
+        }
+        assert!(!mfa_verify_locked(&state, &user_id).await);
+        record_mfa_verify_failure(&state, &user_id).await;
+        assert!(
+            mfa_verify_locked(&state, &user_id).await,
+            "the fallback must lock after the 10th wrong code"
+        );
+        clear_mfa_verify_failures(&state, &user_id).await;
+        assert!(!mfa_verify_locked(&state, &user_id).await);
+    }
+
+    #[tokio::test]
+    async fn session_revocation_reaches_a_live_redis() {
+        let Some(app) = coverage_support::rsa_state("web_res_revoke_redis").await else {
+            return;
+        };
+        // Both writes go through when Redis is up (the outage arms are
+        // covered by the fallback test above).
+        let tenant = coverage_support::tenant_pair("rvk").0;
+        let user_id = uuid::Uuid::new_v4().to_string();
+        revoke_user_sessions(&app, &tenant, &user_id).await;
+        clear_mfa_verify_failures(&app, &user_id).await;
+        let key = format!("apexmail:session_revoked_after:{tenant}:{user_id}");
+        let mut conn = app.redis.get().await.expect("test redis must be reachable");
+        let stored: Option<i64> = deadpool_redis::redis::AsyncCommands::get(&mut conn, &key)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_some(),
+            "revoke_user_sessions must write the revocation watermark"
+        );
+    }
+
+    // ── CSRF render reuse + multipart parser edges ─────────────────
+
+    #[test]
+    fn csrf_render_reuses_a_still_valid_cookie() {
+        let config = test_config();
+        let (headers, token) = cookie_headers(&config);
+        let reused = form_csrf_for_render(&headers, &config);
+        assert!(!reused.minted, "a valid csrf cookie must be reused");
+        assert_eq!(reused.token, token);
+    }
+
+    #[test]
+    fn multipart_part_without_a_name_attribute_is_skipped() {
+        let body = b"--b\r\nContent-Disposition: form-data\r\n\r\nanon\r\n--b\r\nContent-Disposition: form-data; name=\"csv\"\r\n\r\nemail\n--b--\r\n";
+        let form = parse_multipart(body, "multipart/form-data; boundary=b").expect("parses");
+        assert_eq!(form.pairs.len(), 1, "the anonymous part is dropped");
+        assert_eq!(form.pairs[0].0, "csv");
+    }
+
+    // ── Signup: duplicate race, faults, and the 128-char policy ────
+
+    #[tokio::test]
+    async fn signup_racing_a_duplicate_registration_flashes_already_registered() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_signup_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let fixture_tenant = format!("rzfix{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Race Fixture', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&fixture_tenant)
+        .bind(format!("slug-{fixture_tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let email = format!("race-{}@example.test", coverage_support::unique_tag("sr"));
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Race Fixture', 'x', 'member', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&fixture_tenant)
+        .bind(&email)
+        .execute(&mut *tx)
+        .await
+        .expect("uncommitted fixture user");
+
+        let (headers, token) = cookie_headers(&state.config);
+        let mut form = HashMap::new();
+        form.insert("name".to_string(), "Race Founder".to_string());
+        form.insert("company_name".to_string(), "Race Co".to_string());
+        form.insert("email".to_string(), email.clone());
+        form.insert("password".to_string(), "CorrectHorse2!".to_string());
+        form.insert("_csrf".to_string(), token);
+        let task_state = state.clone();
+        let task =
+            tokio::spawn(
+                async move { form_signup(State(task_state), headers, None, Form(form)).await },
+            );
+        // The signup INSERT is now blocked on the fixture's uncommitted
+        // unique-index entry. Committing turns the block into the 23505 the
+        // constraint is supposed to produce — deterministically.
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit fixture user");
+        let response = task.await.expect("handler task").into_response();
+        assert!(
+            flash_text(&response, &state.config).contains("already exists"),
+            "the constraint loss must flash honestly, got {:?}",
+            flash_text(&response, &state.config)
+        );
+    }
+
+    #[tokio::test]
+    async fn signup_storage_faults_flash_unavailable_and_write_nothing() {
+        // (a) The users INSERT fails (non-unique database fault): the
+        //     transaction rolls back and the flash says so.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_signup_fault").await else {
+            return;
+        };
+        crate::routes::fault::arm_write_fault(&pool, "users", "rz_signup_users", 0)
+            .await
+            .expect("arm users fault");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tag = coverage_support::unique_tag("sf");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("name", "Fault Founder"),
+                ("company_name", "Fault Co"),
+                ("email", &format!("fault-{tag}@example.test")),
+                ("password", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_signup(State(state.clone()), headers, None, Form(form)).await;
+        assert!(
+            flash_text(&response, &state.config)
+                .contains("Registration is temporarily unavailable"),
+            "got {:?}",
+            flash_text(&response, &state.config)
+        );
+        let users: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE name = 'Fault Founder'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(users, 0, "the failed signup must not persist a user");
+
+        // (b) The verification-email INSERT fails: same rollback, same flash.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_signup_queue").await else {
+            return;
+        };
+        // This fresh database has no system sender to send the verification
+        // email from, so the queue step fails inside the transaction.
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("name", "Queue Founder"),
+                ("company_name", "Queue Co"),
+                ("email", &format!("queue-{tag}@example.test")),
+                ("password", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_signup(State(state.clone()), headers, None, Form(form)).await;
+        assert!(
+            flash_text(&response, &state.config)
+                .contains("Registration is temporarily unavailable"),
+            "got {:?}",
+            flash_text(&response, &state.config)
+        );
+        let rolled_back: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenants WHERE name = 'Queue Co' AND status = 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rolled_back, 0, "a queue failure must roll the tenant back");
+    }
+
+    /// Seed the system sender domain so signup's verification email can be
+    /// queued (same DKIM env convention as coverage_auth_admin_tests, whose
+    /// helper this mirrors; the caller holds DKIM_ENV_MUTEX).
+    async fn seed_signup_sender(db: &sqlx::PgPool) {
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            uuid::Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("system sender seed must insert");
+    }
+
+    #[test]
+    fn signup_accepts_the_whole_documented_128_character_password_range() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let Some(app) = coverage_support::state("web_res_signup_longpw").await else {
+                return;
+            };
+            seed_signup_sender(&app.db).await;
+            // The SSR form hashed with bcrypt, whose hard 72-BYTE ceiling
+            // rejected 73–128-character passwords the shared 12–128-char
+            // policy allows — the operator saw "temporarily unavailable".
+            // The canonical argon2id hasher honours the policy; the longest
+            // legal password must now go through end to end.
+            let long_password = "Aa1!".repeat(32);
+            assert_eq!(long_password.len(), 128);
+            let hash = hash_password(&long_password).expect("argon2 hashes 128 chars");
+            assert!(
+                verify_password(&hash, &long_password),
+                "the stored format must verify through the shared verifier"
+            );
+            let tag = coverage_support::unique_tag("lp");
+            let (headers, form) = signed_form(
+                &app.config,
+                &[
+                    ("name", "Long Password Founder"),
+                    ("company_name", "Long Password Co"),
+                    ("email", &format!("long-{tag}@example.test")),
+                    ("password", long_password.as_str()),
+                ],
+            );
+            let response = form_signup(State(app.clone()), headers, None, Form(form)).await;
+            assert!(
+                flash_text(&response, &app.config).contains("Account created"),
+                "a 128-character password is inside the documented policy, got {:?}",
+                flash_text(&response, &app.config)
+            );
+        });
+    }
+
+    // ── Forgot/reset/change password refusal + fault arms ──────────
+
+    #[tokio::test]
+    async fn forgot_password_deactivation_race_issues_no_token() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_forgot_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, _tag) = coverage_support::tenant_pair("fgr");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Forgot Race', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let email = format!("forgot-{}@example.test", coverage_support::unique_tag("fg"));
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Forgot Race', 'x', 'member', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("fixture user");
+
+        // Fixture: deactivate the row but hold the lock; the handler's
+        // guarded UPDATE re-reads the row after the commit and matches zero.
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("UPDATE users SET status = 'disabled' WHERE email = $1")
+            .bind(&email)
+            .execute(&mut *tx)
+            .await
+            .expect("fixture deactivation");
+        let (headers, token) = cookie_headers(&state.config);
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email.clone());
+        form.insert("_csrf".to_string(), token);
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            form_forgot_password(State(task_state), headers, None, Form(form)).await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit deactivation");
+        let response = task.await.expect("handler task").into_response();
+        // Anti-enumeration posture: same success flash as ever.
+        assert!(
+            flash_text(&response, &state.config).contains("a reset link is on the way"),
+            "got {:?}",
+            flash_text(&response, &state.config)
+        );
+        let tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE metadata->>'password_reset_token_hash' IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tokens, 0, "a deactivated account must not get a token");
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE to_emails = $1::jsonb")
+                .bind(serde_json::json!([email]))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0, "no reset email may be enqueued");
+    }
+
+    #[tokio::test]
+    async fn forgot_password_queue_fault_is_swallowed_without_sending() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_forgot_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, _tag) = coverage_support::tenant_pair("fgq");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Forgot Fault', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let email = format!("fgq-{}@example.test", coverage_support::unique_tag("fq"));
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Forgot Fault', 'x', 'member', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("fixture user");
+        crate::routes::fault::arm_write_fault(&pool, "messages", "rz_forgot_queue", 0)
+            .await
+            .expect("arm messages fault");
+        let (headers, form) = signed_form(&state.config, &[("email", email.as_str())]);
+        let response = form_forgot_password(State(state.clone()), headers, None, Form(form)).await;
+        assert!(
+            flash_text(&response, &state.config).contains("a reset link is on the way"),
+            "the anti-enumeration flash holds even when issuance fails, got {:?}",
+            flash_text(&response, &state.config)
+        );
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE to_emails = $1::jsonb")
+                .bind(serde_json::json!([email]))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0, "the failed issuance must not enqueue anything");
+    }
+
+    async fn seed_reset_target(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        email: &str,
+        token: &str,
+        expires: chrono::DateTime<Utc>,
+        status: &str,
+    ) {
+        let token_hash = crate::routes::helpers::hash_token(token);
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Reset Target', 'x', 'member', $4, true, false, $5::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(tenant)
+        .bind(email)
+        .bind(status)
+        .bind(serde_json::json!({
+            "password_reset_token_hash": token_hash,
+            "password_reset_expires": expires.to_rfc3339(),
+            "password_reset_iat": Utc::now().to_rfc3339(),
+        }))
+        .execute(pool)
+        .await
+        .expect("seed reset target");
+    }
+
+    #[tokio::test]
+    async fn reset_password_refuses_inactive_accounts_and_expired_tokens() {
+        let Some(app) = coverage_support::rsa_state("web_res_reset_refusals").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("rsr");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let token = uuid::Uuid::new_v4().to_string();
+        let email = format!("inactive-{tag}@example.test");
+        seed_reset_target(
+            &app.db,
+            &tenant,
+            &email,
+            &token,
+            Utc::now() + chrono::Duration::hours(1),
+            "disabled",
+        )
+        .await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("email", email.as_str()),
+                ("token", token.as_str()),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_reset_password(State(app.clone()), headers, None, Form(form)).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "This account is not active."
+        );
+
+        // An expired token: valid hash match, but the window closed.
+        let token = uuid::Uuid::new_v4().to_string();
+        let email = format!("expired-{tag}@example.test");
+        seed_reset_target(
+            &app.db,
+            &tenant,
+            &email,
+            &token,
+            Utc::now() - chrono::Duration::minutes(5),
+            "active",
+        )
+        .await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("email", email.as_str()),
+                ("token", token.as_str()),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_reset_password(State(app.clone()), headers, None, Form(form)).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "That reset link has expired. Request a fresh one."
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_password_consumed_token_race_flashes_expired() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_reset_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("rsc");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Reset Race', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let token = uuid::Uuid::new_v4().to_string();
+        let email = format!("race-{tag}@example.test");
+        seed_reset_target(
+            &pool,
+            &tenant,
+            &email,
+            &token,
+            Utc::now() + chrono::Duration::hours(1),
+            "active",
+        )
+        .await;
+
+        // Fixture: consume the token but hold the row lock. The handler's
+        // lookup (committed snapshot) still sees the token; its guarded
+        // UPDATE re-evaluates after the commit and matches zero rows.
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query(
+            "UPDATE users SET metadata = metadata - 'password_reset_token_hash' WHERE email = $1",
+        )
+        .bind(&email)
+        .execute(&mut *tx)
+        .await
+        .expect("fixture token consumption");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("email", email.as_str()),
+                ("token", token.as_str()),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+        );
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            form_reset_password(State(task_state), headers, None, Form(form)).await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit consumption");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "That reset link is invalid or has expired."
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_password_storage_fault_flashes_retry() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_reset_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("rsf");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Reset Fault', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let token = uuid::Uuid::new_v4().to_string();
+        let email = format!("fault-{tag}@example.test");
+        seed_reset_target(
+            &pool,
+            &tenant,
+            &email,
+            &token,
+            Utc::now() + chrono::Duration::hours(1),
+            "active",
+        )
+        .await;
+        // Arm only after the fixture rows exist: the trigger must hit the
+        // handler's guarded UPDATE, not the seeding.
+        crate::routes::fault::arm_write_fault(&pool, "users", "rz_reset_update", 0)
+            .await
+            .expect("arm users fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("email", email.as_str()),
+                ("token", token.as_str()),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_reset_password(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not reset the password. Try again."
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_row_guards_and_faults_flash_honestly() {
+        // (a) The current-password SELECT fails (database unreachable).
+        let dead = coverage_support::dead_state().await;
+        let (headers, form) = signed_form(
+            &dead.config,
+            &[
+                ("current_password", "Whatever1!"),
+                ("new_password", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_change_password(
+            State(dead.clone()),
+            axum::Extension(coverage_support::user("pw-tenant")),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &dead.config),
+            "Could not update the password. Try again."
+        );
+
+        // (b) The user row disappears between the hash SELECT and the
+        //     guarded UPDATE: no success flash may lie.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_pwchange_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("pwc");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'PwChange Race', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let current_hash = hash_password("OldCorrect1!").expect("hash current password");
+        let caller = AuthUser {
+            tenant_id: tenant.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'PwChange', $4, 'owner', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(caller.user_id.clone().unwrap())
+        .bind(&tenant)
+        .bind(format!("pwc-{tag}@example.test"))
+        .bind(&current_hash)
+        .execute(&pool)
+        .await
+        .expect("fixture user");
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("DELETE FROM users WHERE id = $1::uuid")
+            .bind(caller.user_id.clone().unwrap())
+            .execute(&mut *tx)
+            .await
+            .expect("fixture delete");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("current_password", "OldCorrect1!"),
+                ("new_password", "CorrectHorse2!"),
+            ],
+        );
+        let task_state = state.clone();
+        let task_caller = caller.clone();
+        let task = tokio::spawn(async move {
+            form_change_password(
+                State(task_state),
+                axum::Extension(task_caller),
+                headers,
+                Form(form),
+            )
+            .await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit delete");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not update the password for this account. Sign in again."
+        );
+
+        // (c) The UPDATE fails outright (armed fault): same honest retry.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_pwchange_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("pwf");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'PwChange Fault', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let caller = AuthUser {
+            tenant_id: tenant.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'PwChange Fault', $4, 'owner', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(caller.user_id.clone().unwrap())
+        .bind(&tenant)
+        .bind(format!("pwf-{tag}@example.test"))
+        .bind(&current_hash)
+        .execute(&pool)
+        .await
+        .expect("fixture user");
+        // Arm only after the fixture user exists: the trigger must hit the
+        // handler's UPDATE, not the seeding.
+        crate::routes::fault::arm_write_fault(&pool, "users", "rz_pwchange", 0)
+            .await
+            .expect("arm users fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("current_password", "OldCorrect1!"),
+                ("new_password", "CorrectHorse2!"),
+            ],
+        );
+        let response = form_change_password(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not update the password. Try again."
+        );
+    }
+
+    // ── MFA setup/confirm + operator MFA sign-in ───────────────────
+
+    async fn issue_setup_cookie(state: &AppState, user_id: &str) -> (HeaderMap, String) {
+        let secret = random_base32_secret();
+        let signature = sign_mfa_setup(&state.config, user_id, &secret);
+        let value = encode_mfa_setup_value(&secret, "otpauth://totp/test", &signature);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{MFA_SETUP_COOKIE}={value}").parse().unwrap(),
+        );
+        (headers, secret)
+    }
+
+    #[tokio::test]
+    async fn mfa_setup_and_confirm_refusals_and_wrong_code() {
+        let Some(app) = coverage_support::rsa_state("web_res_mfa_refusals").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("mfr");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let (caller, email) = seed_caller(&app.db, &tenant, "owner").await;
+
+        // Setup with an id-less session (API key): no identity, no enrollment.
+        let idless = AuthUser {
+            tenant_id: tenant.clone(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_mfa_setup(
+            State(app.clone()),
+            axum::Extension(idless.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Sign in again to manage MFA."
+        );
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_mfa_confirm(
+            State(app.clone()),
+            axum::Extension(idless),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Sign in again to manage MFA."
+        );
+
+        // Happy setup mints the bound cookie; confirm with a wrong code
+        // refuses without enabling anything.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_mfa_setup(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("Scan the QR code"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let setup_cookie = set_cookies(&response)
+            .iter()
+            .find(|cookie| cookie.starts_with(MFA_SETUP_COOKIE))
+            .expect("the pending-setup cookie rides the redirect")
+            .clone();
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &app.config);
+        let mut confirm_headers = HeaderMap::new();
+        confirm_headers.insert(
+            header::COOKIE,
+            format!("{setup_cookie}; csrf_token={}", csrf.token)
+                .parse()
+                .unwrap(),
+        );
+        let mut form = HashMap::new();
+        form.insert("code".to_string(), "000000".to_string());
+        form.insert("_csrf".to_string(), csrf.token);
+        let response = form_mfa_confirm(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            confirm_headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("That code did not match"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let enabled: bool =
+            sqlx::query_scalar("SELECT COALESCE(mfa_enabled, false) FROM users WHERE email = $1")
+                .bind(&email)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert!(!enabled, "a wrong code must never enable MFA");
+        let _ = tag;
+    }
+
+    #[tokio::test]
+    async fn mfa_confirm_refuses_a_second_enrollment_and_storage_faults() {
+        // (a) Concurrent enrollment: the guarded UPDATE matches zero rows
+        //     when MFA is already on → the actionable sentinel.
+        let Some(app) = coverage_support::rsa_state("web_res_mfa_twice").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("mft");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let (caller, _email) = seed_caller(&app.db, &tenant, "owner").await;
+        sqlx::query("UPDATE users SET mfa_enabled = true WHERE id = $1::uuid")
+            .bind(caller.user_id.clone().unwrap())
+            .execute(&app.db)
+            .await
+            .expect("enable MFA");
+        let (mut headers, secret) =
+            issue_setup_cookie(&app, caller.user_id.as_deref().unwrap()).await;
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &app.config);
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}; csrf_token={}",
+                headers.get(header::COOKIE).unwrap().to_str().unwrap(),
+                csrf.token
+            )
+            .parse()
+            .unwrap(),
+        );
+        let mut form = HashMap::new();
+        form.insert("code".to_string(), totp_code(&secret));
+        form.insert("_csrf".to_string(), csrf.token);
+        let response = form_mfa_confirm(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "MFA is already enabled for this account."
+        );
+
+        // (b) The UPDATE fails (armed fault) → friendly retry, MFA stays off.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_mfa_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over_with_config(
+            pool,
+            coverage_support::rsa_config().await,
+        )
+        .await;
+        let (tenant, tag) = coverage_support::tenant_pair("mff");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let (caller, _email) = seed_caller(&state.db, &tenant, "owner").await;
+        sqlx::query("UPDATE users SET mfa_enabled = false WHERE id = $1::uuid")
+            .bind(caller.user_id.clone().unwrap())
+            .execute(&state.db)
+            .await
+            .expect("disable MFA");
+        // Arm after the fixtures exist: the trigger must hit the handler's
+        // guarded UPDATE, not the seeding.
+        crate::routes::fault::arm_write_fault(&state.db, "users", "rz_mfa_confirm", 0)
+            .await
+            .expect("arm users fault");
+        let (mut headers, secret) =
+            issue_setup_cookie(&state, caller.user_id.as_deref().unwrap()).await;
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{}; csrf_token={}",
+                headers.get(header::COOKIE).unwrap().to_str().unwrap(),
+                csrf.token
+            )
+            .parse()
+            .unwrap(),
+        );
+        let mut form = HashMap::new();
+        form.insert("code".to_string(), totp_code(&secret));
+        form.insert("_csrf".to_string(), csrf.token);
+        let response = form_mfa_confirm(
+            State(state.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not enable MFA. Try again."
+        );
+        let enabled: bool = sqlx::query_scalar(
+            "SELECT COALESCE(mfa_enabled, false) FROM users WHERE id = $1::uuid",
+        )
+        .bind(caller.user_id.unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert!(!enabled, "a failed confirm must not enable MFA");
+    }
+
+    async fn seed_system_operator(app: &AppState, tag: &str) -> (String, String, String) {
+        // The canonical migrations seed the system tenant (slug 'system');
+        // resolve its real id rather than racing an INSERT against it.
+        let system_tenant: String =
+            sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                .fetch_optional(&app.db)
+                .await
+                .expect("system tenant lookup")
+                .expect("the canonical schema must seed the system tenant");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("operator-{tag}@example.test");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'System Operator', 'x', 'owner', 'active', true, true, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&user_id)
+        .bind(&system_tenant)
+        .bind(&email)
+        .execute(&app.db)
+        .await
+        .expect("seed system operator");
+        (user_id, email, random_base32_secret())
+    }
+
+    #[tokio::test]
+    async fn mfa_verify_mints_the_cp_cookie_for_system_operators() {
+        let Some(app) = coverage_support::rsa_state("web_res_mfa_cp").await else {
+            return;
+        };
+        let tag = coverage_support::unique_tag("cpm");
+        let (user_id, email, secret) = seed_system_operator(&app, &tag).await;
+        let encrypted = apexmail_lib::secret_at_rest::encrypt_at_rest(
+            &secret,
+            format!("user_id={user_id}").as_bytes(),
+        )
+        .expect("encrypt operator secret");
+        sqlx::query("UPDATE users SET mfa_secret = $1 WHERE id = $2::uuid")
+            .bind(&encrypted)
+            .bind(&user_id)
+            .execute(&app.db)
+            .await
+            .expect("store operator secret");
+        let challenge = sign_login_challenge(&app.config, &user_id, &email);
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &app.config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "apexmail_login_challenge={challenge}; csrf_token={}",
+                csrf.token
+            )
+            .parse()
+            .unwrap(),
+        );
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email.clone());
+        form.insert("code".to_string(), totp_code(&secret));
+        form.insert("_csrf".to_string(), csrf.token);
+        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        let cookies = set_cookies(&response);
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "operator MFA sign-in must mint the session cookie; cookies {cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("apexmail_cp_session=")),
+            "a system operator completing MFA must get the CP session cookie; cookies {cookies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mfa_verify_flashes_honestly_when_session_signing_fails() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_mfa_broken").await else {
+            return;
+        };
+        let mut config = coverage_support::rsa_config().await;
+        config.jwt_private_key_pem = "not a pem".into();
+        let state = crate::app::test_support::test_state_over_with_config(pool, config).await;
+        let tag = coverage_support::unique_tag("brk");
+        let (user_id, email, secret) = seed_system_operator(&state, &tag).await;
+        let encrypted = apexmail_lib::secret_at_rest::encrypt_at_rest(
+            &secret,
+            format!("user_id={user_id}").as_bytes(),
+        )
+        .expect("encrypt operator secret");
+        sqlx::query("UPDATE users SET mfa_secret = $1 WHERE id = $2::uuid")
+            .bind(&encrypted)
+            .bind(&user_id)
+            .execute(&state.db)
+            .await
+            .expect("store operator secret");
+        let challenge = sign_login_challenge(&state.config, &user_id, &email);
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "apexmail_login_challenge={challenge}; csrf_token={}",
+                csrf.token
+            )
+            .parse()
+            .unwrap(),
+        );
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email);
+        form.insert("code".to_string(), totp_code(&secret));
+        form.insert("_csrf".to_string(), csrf.token);
+        let response = form_mfa_verify(State(state.clone()), headers, Form(form)).await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Sign-in is temporarily unavailable. Try again."
+        );
+    }
+
+    // ── API keys + webhooks: parse and storage failures ────────────
+
+    fn unreadable_multipart_headers(config: &Config) -> HeaderMap {
+        let (mut headers, _) = cookie_headers(config);
+        headers.insert(
+            header::CONTENT_TYPE,
+            // multipart without a boundary: parse_form_body must refuse.
+            "multipart/form-data".parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn api_key_and_webhook_forms_report_unreadable_and_failed_storage() {
+        let Some(app) = coverage_support::state("web_res_key_hook_parse").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("khp");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+
+        // An unreadable body is refused before any validation.
+        let response = form_api_key_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            unreadable_multipart_headers(&app.config),
+            axum::body::Bytes::from_static(b"name=whatever"),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("form could not be read"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let response = form_webhook_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            unreadable_multipart_headers(&app.config),
+            axum::body::Bytes::from_static(b"url=https://ok.example.test"),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("form could not be read"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // The inbound-event subscription requires the inbound_email feature
+        // even when webhook creation itself is allowed.
+        coverage_support::grant_feature(&app.db, &tenant, "webhooks_enabled").await;
+        let (headers, body) = signed_bytes_body(
+            &app.config,
+            &[
+                ("url", "https://hooks.example.test/inbound"),
+                ("events", "inbound"),
+            ],
+        );
+        let response = form_webhook_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            body,
+        )
+        .await;
+        assert!(
+            !flash_text(&response, &app.config).is_empty()
+                && flash_text(&response, &app.config).contains("inbound"),
+            "the missing inbound_email entitlement must be named, got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE url = $1")
+            .bind("https://hooks.example.test/inbound")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "the refused webhook must not be stored");
+    }
+
+    #[tokio::test]
+    async fn webhook_and_api_key_storage_faults_flash_retry_and_write_nothing() {
+        // (a) Webhook count probe fails (table hidden on this test's DB
+        //     AFTER seeding): fail closed, no insert.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_hook_count").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("whc");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "webhooks_enabled").await;
+        crate::routes::fault::hide_table(&pool, "webhooks")
+            .await
+            .expect("hide webhooks");
+        let caller = coverage_support::user(&tenant);
+        let (headers, body) = signed_bytes_body(
+            &state.config,
+            &[("url", "https://hooks.example.test/count")],
+        );
+        let response = form_webhook_create(
+            State(state.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            body,
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not add the webhook. Try again."
+        );
+
+        // (b) The webhook INSERT fails: same honest retry.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_hook_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("whf");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "webhooks_enabled").await;
+        // Arm after seeding: the trigger must hit the handler's INSERT.
+        crate::routes::fault::arm_write_fault(&pool, "webhooks", "rz_hook_insert", 0)
+            .await
+            .expect("arm webhooks fault");
+        let caller = coverage_support::user(&tenant);
+        let (headers, body) = signed_bytes_body(
+            &state.config,
+            &[
+                ("url", "https://hooks.example.test/fault"),
+                ("events", "message.bounced"),
+            ],
+        );
+        let response = form_webhook_create(
+            State(state.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            body,
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not add the webhook. Try again."
+        );
+
+        // (c) The API-key mint fails inside the shared creation path.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_key_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("key");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "api_access").await;
+        // Arm after seeding: the trigger must hit the mint's INSERT.
+        crate::routes::fault::arm_write_fault(&pool, "api_keys", "rz_key_insert", 0)
+            .await
+            .expect("arm api_keys fault");
+        // The mint's shared path authorizes the caller's scopes, so this
+        // caller must carry api-keys:write to reach the INSERT at all.
+        let caller = AuthUser {
+            scopes: vec![
+                "api-keys:write".into(),
+                "messages:send".into(),
+                "messages:read".into(),
+            ],
+            ..coverage_support::user(&tenant)
+        };
+        let (headers, body) = signed_bytes_body(&state.config, &[("name", "Faulty Key")]);
+        let response = form_api_key_create(
+            State(state.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            body,
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not create the key. Try again."
+        );
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE name = 'Faulty Key'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "the failed mint must not persist a key");
+    }
+
+    // ── Team invites: role escalation, capacity, faults ────────────
+
+    #[tokio::test]
+    async fn team_invite_rank_gate_fires_on_the_raw_role_value() {
+        let Some(app) = coverage_support::state("web_res_invite_rank").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("ivr");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        // The caller's CURRENT role comes from the database.
+        let (admin, _admin_email) = seed_caller(&app.db, &tenant, "admin").await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("userName", &format!("victim-{tag}@example.test")),
+                ("role", "owner"),
+            ],
+        );
+        let response = form_team_invite(
+            State(app.clone()),
+            axum::Extension(admin),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "You cannot invite someone to a role above your own."
+        );
+
+        // A garbage role passes the rank gate (rank 0) and dies on the
+        // vocabulary check — both gates are live.
+        let (owner, _owner_email) = seed_caller(&app.db, &tenant, "owner").await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("userName", &format!("other-{tag}@example.test")),
+                ("role", "emperor"),
+            ],
+        );
+        let response = form_team_invite(
+            State(app.clone()),
+            axum::Extension(owner),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Choose a valid role (member or admin)."
+        );
+    }
+
+    #[tokio::test]
+    async fn team_invite_entitlement_and_storage_failures_are_honest() {
+        // (a) Entitlement snapshot failure surfaces the entitlement error.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_invite_snap").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&pool, "plans")
+            .await
+            .expect("hide plans");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("ivs");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let (admin, _email) = seed_caller(&state.db, &tenant, "admin").await;
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("userName", &format!("snap-{tag}@example.test")),
+                ("role", "member"),
+            ],
+        );
+        let response = form_team_invite(
+            State(state.clone()),
+            axum::Extension(admin),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            !flash_text(&response, &state.config).contains("Invitation created"),
+            "a failed snapshot must not invite, got {:?}",
+            flash_text(&response, &state.config)
+        );
+
+        // (b) A seat-capped plan refuses the invite with the capacity error.
+        let Some(app) = coverage_support::state("web_res_invite_cap").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("ivc");
+        let plan = format!("cap-plan-{tag}");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, created_at, updated_at)
+             VALUES ($1, $2, $3, 0, 1000, true, 1, NOW(), NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan)
+        .bind(format!("Cap Plan {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed capped plan");
+        sqlx::query("UPDATE plans SET features = $1::jsonb WHERE name = $2")
+            .bind(serde_json::json!({"max_team_members": 1}))
+            .bind(&plan)
+            .execute(&app.db)
+            .await
+            .expect("cap the plan");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Capped Tenant', $2, $3, 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .bind(&plan)
+        .execute(&app.db)
+        .await
+        .expect("seed capped tenant");
+        let (admin, _email) = seed_caller(&app.db, &tenant, "admin").await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("userName", &format!("capped-{tag}@example.test")),
+                ("role", "member"),
+            ],
+        );
+        let response = form_team_invite(
+            State(app.clone()),
+            axum::Extension(admin),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("team"),
+            "the seat capacity refusal must be surfaced, got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // (c) The INSERT fails (armed fault) → the honest retry flash.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_invite_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("ivf");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let (admin, _email) = seed_caller(&state.db, &tenant, "owner").await;
+        // Arm after seeding: the trigger must hit the invite INSERT.
+        crate::routes::fault::arm_write_fault(&pool, "users", "rz_invite_insert", 0)
+            .await
+            .expect("arm users fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("userName", &format!("fault-{tag}@example.test")),
+                ("role", "member"),
+            ],
+        );
+        let response = form_team_invite(
+            State(state.clone()),
+            axum::Extension(admin),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not create the invitation. Try again."
+        );
+        let invited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
+        )
+        .bind(&tenant)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(invited, 0, "the failed invite must write nothing");
+    }
+
+    // ── Domain verification flash + live verify shapes ─────────────
+
+    #[test]
+    fn domain_verify_flash_names_both_summary_shapes() {
+        let all_pass = crate::routes::domains::VerifyResponse {
+            domain: "example.test".into(),
+            spf_verified: true,
+            dkim_verified: true,
+            dmarc_verified: true,
+            return_path_verified: true,
+            status: "verified".into(),
+        };
+        let flash = domain_verify_flash(&all_pass);
+        assert!(
+            flash.contains("All checks passed (SPF, DKIM, DMARC, Return-Path)"),
+            "{flash}"
+        );
+        assert!(flash.contains("status is now verified"), "{flash}");
+
+        let none_pass = crate::routes::domains::VerifyResponse {
+            domain: "example.test".into(),
+            spf_verified: false,
+            dkim_verified: false,
+            dmarc_verified: false,
+            return_path_verified: false,
+            status: "pending".into(),
+        };
+        let flash = domain_verify_flash(&none_pass);
+        assert!(flash.contains("Verified: none."), "{flash}");
+        assert!(
+            flash.contains("Not published yet: SPF, DKIM, DMARC, Return-Path"),
+            "{flash}"
+        );
+
+        let partial = crate::routes::domains::VerifyResponse {
+            domain: "example.test".into(),
+            spf_verified: true,
+            dkim_verified: false,
+            dmarc_verified: false,
+            return_path_verified: false,
+            status: "pending".into(),
+        };
+        let flash = domain_verify_flash(&partial);
+        assert!(flash.contains("Verified: SPF."), "{flash}");
+    }
+
+    #[tokio::test]
+    async fn domain_verify_and_detail_refuse_unknown_and_malformed_ids() {
+        let Some(app) = coverage_support::rsa_state("web_res_domain_verify").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("dvr");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+
+        // A malformed id is refused before any SQL bind.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_domain_verify(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path("not-a-uuid".into()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "Unknown domain.");
+
+        // A well-formed id that belongs to another tenant cannot be probed:
+        // the verification fails closed with the friendly refusal.
+        let (other_tenant, other_tag) = coverage_support::tenant_pair("dvo");
+        let other = coverage_support::seed_tenant(&app.db, &other_tenant, &other_tag).await;
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_domain_verify(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(other.domain_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).starts_with("Verification could not run:"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // A well-formed unknown id: same refusal shape.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_domain_verify(
+            State(app.clone()),
+            axum::Extension(caller),
+            Path(uuid::Uuid::new_v4().to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).starts_with("Verification could not run:"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Campaign detail for a non-UUID segment renders the static SSR
+        // fallback (the session resolves; only the id parse fails).
+        let user_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(format!("member0-{tag}@example.test"))
+                .fetch_one(&app.db)
+                .await
+                .expect("seeded user");
+        let cookie = session_cookie_for(&app, &user_id, &tenant);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let response = web_campaign_detail(
+            State(app.clone()),
+            Path("new".into()),
+            "/campaigns/new".parse().unwrap(),
+            headers,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = seeded;
+    }
+
+    fn session_cookie_for(state: &AppState, user_id: &str, tenant: &str) -> String {
+        let claims = crate::middleware::auth::JwtClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant.to_string(),
+            scopes: vec!["*".into()],
+            exp: (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+            iat: Utc::now().timestamp(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            typ: Some("session".into()),
+        };
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
+                .expect("test RSA key"),
+        )
+        .expect("sign session");
+        format!("am_session={token}")
+    }
+
+    // ── Kiwi gate: the peer-IP resolution closure ───────────────────
+
+    #[tokio::test]
+    async fn auth_forms_resolve_the_peer_ip_for_the_kiwi_gate() {
+        let state = coverage_support::dead_state().await;
+        // peer_ip = Some(..) drives the extract_public_client_ip closure that
+        // None (every direct handler call) never reaches.
+        let addr: std::net::SocketAddr = "203.0.113.9:4444".parse().unwrap();
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("email", "kiwi-peer@example.test"),
+                ("password", "Whatever1!whatever"),
+            ],
+        );
+        let response = form_forgot_password(
+            State(state.clone()),
+            headers,
+            Some(axum::extract::ConnectInfo(addr)),
+            Form(form),
+        )
+        .await;
+        // The kiwi gate refuses before any storage access; the exact flash
+        // comes from the disabled-gate configuration, so only the PRG shape
+        // is asserted here — the peer-IP closure ran either way.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    // ── Tenant resource forms: field guards + faults ────────────────
+
+    #[tokio::test]
+    async fn resource_create_field_guards_and_schedule_arm() {
+        let Some(app) = coverage_support::state("web_res_fields").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("fld");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+
+        // List update without id/name.
+        let (headers, form) = signed_form(&app.config, &[("id", ""), ("name", "")]);
+        let response = form_list_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Pick a list and give it a name."
+        );
+
+        // Template create: name guard, then subject-less insert (NULL bind).
+        coverage_support::grant_feature(&app.db, &tenant, "custom_templates").await;
+        let (headers, form) = signed_form(
+            &app.config,
+            &[("name", ""), ("subject", "S"), ("html_body", "<p>x</p>")],
+        );
+        let response = form_template_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Give the template a name."
+        );
+        let name = format!("No Subject {tag}");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("name", name.as_str()),
+                ("subject", ""),
+                ("html_body", "<p>x</p>"),
+            ],
+        );
+        let response = form_template_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "Template saved.");
+
+        // Campaign create: name guard with the subject present, then a
+        // scheduled draft (the Some(scheduled_at) arm).
+        let (headers, form) = signed_form(&app.config, &[("name", ""), ("subject", "S")]);
+        let response = form_campaign_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(flash_text(&response, &app.config).contains("name and subject are required"));
+
+        let campaign = format!("Scheduled {tag}");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("name", campaign.as_str()),
+                ("subject", "Hello"),
+                ("scheduled_at", "2027-01-01T08:00:00Z"),
+            ],
+        );
+        let response = form_campaign_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config)
+                .contains("Campaign draft saved with its schedule time."),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Campaign update guards: missing id and missing name/subject.
+        let (headers, form) =
+            signed_form(&app.config, &[("id", ""), ("name", "N"), ("subject", "S")]);
+        let response = form_campaign_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "Missing campaign id.");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", &uuid::Uuid::new_v4().to_string()),
+                ("name", ""),
+                ("subject", ""),
+            ],
+        );
+        let response = form_campaign_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Campaign name and subject are required."
+        );
+    }
+
+    #[tokio::test]
+    async fn template_and_placement_insert_faults_flash_retry() {
+        // (a) Template create INSERT fails.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_tpl_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("tcf");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "custom_templates").await;
+        let caller = coverage_support::user(&tenant);
+        crate::routes::fault::arm_write_fault(&state.db, "templates", "rz_tpl_insert", 0)
+            .await
+            .expect("arm templates fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("name", "Faulty Tpl"),
+                ("subject", "S"),
+                ("html_body", "<p>x</p>"),
+            ],
+        );
+        let response = form_template_create(
+            State(state.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not save the template. Try again."
+        );
+
+        // (b) Placement test INSERT fails.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_place_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("plf");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        crate::routes::fault::arm_write_fault(&state.db, "placement_tests", "rz_place_insert", 0)
+            .await
+            .expect("arm placement_tests fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("name", "Faulty Placement"),
+                ("from_email", &format!("seed-{tag}@example.test")),
+                ("subject", "Placement"),
+                ("html_body", "<p>body</p>"),
+            ],
+        );
+        let response = form_placement_create(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not start the test. Try again."
+        );
+    }
+
+    // ── Campaign recipients + lifecycle ─────────────────────────────
+
+    #[tokio::test]
+    async fn campaign_recipients_validates_list_segment_and_tenant() {
+        let Some(app) = coverage_support::state("web_res_recipients").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("rcp");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let (other_tenant, other_tag) = coverage_support::tenant_pair("rco");
+        let other = coverage_support::seed_tenant(&app.db, &other_tenant, &other_tag).await;
+        let caller = coverage_support::user(&tenant);
+        let campaign_id = seeded.campaign_id.clone();
+
+        // Non-UUID campaign id.
+        let (headers, form) = signed_form(&app.config, &[("list_id", &seeded.list_id)]);
+        let response = form_campaign_recipients(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path("not-a-uuid".into()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "Unknown campaign.");
+
+        // Malformed list id.
+        let (headers, form) = signed_form(&app.config, &[("list_id", "nope")]);
+        let response = form_campaign_recipients(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("Pick one of your lists."),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // A list from another workspace is not wireable.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("list_id", other.list_id.as_str()),
+                ("segment", "subscribed"),
+            ],
+        );
+        let response = form_campaign_recipients(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("not in this workspace"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+    }
+
+    #[tokio::test]
+    async fn campaign_recipients_segment_and_contact_rules() {
+        let Some(app) = coverage_support::state("web_res_recipients2").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("rc2");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        let campaign_id = seeded.campaign_id.clone();
+
+        // An invalid segment filter.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("list_id", seeded.list_id.as_str()),
+                ("segment", "everyone"),
+            ],
+        );
+        let response = form_campaign_recipients(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("valid segment filter"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // The bounced-only selection matches the seeded bounced contact.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[("list_id", seeded.list_id.as_str()), ("segment", "bounced")],
+        );
+        let response = form_campaign_recipients(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        // The seeded list has one subscribed subscriber only, so "bounced"
+        // matches nobody in THIS list → the honest empty-selection refusal.
+        assert!(
+            flash_text(&response, &app.config).contains("That selection matches no contacts"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Storage fault on the wiring job (the DELETE succeeds, the INSERT
+        // raises): honest retry, nothing wired.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_recipients_fault").await else {
+            return;
+        };
+        crate::routes::fault::arm_write_fault(&pool, "campaign_jobs", "rz_recipients", 1)
+            .await
+            .expect("arm campaign_jobs fault");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant2, tag2) = coverage_support::tenant_pair("rcf");
+        let seeded2 = coverage_support::seed_tenant(&state.db, &tenant2, &tag2).await;
+        let caller2 = coverage_support::user(&tenant2);
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("list_id", seeded2.list_id.as_str()),
+                ("segment", "subscribed"),
+            ],
+        );
+        let response = form_campaign_recipients(
+            State(state.clone()),
+            axum::Extension(caller2),
+            Path(seeded2.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not wire the recipients. Try again."
+        );
+        // The aborted transaction leaves exactly the pre-existing (seeded)
+        // wiring — no second job row may have landed.
+        let (wired, pending): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE status = 'pending') \
+             FROM campaign_jobs WHERE campaign_id = $1::uuid",
+        )
+        .bind(&seeded2.campaign_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(wired, 1, "only the seeded wiring remains");
+        assert_eq!(pending, 0, "the failed wiring must not persist a job");
+    }
+
+    #[tokio::test]
+    async fn campaign_lifecycle_races_and_faults_flash_honestly() {
+        // pause: unknown id → workspace-scoped not-found.
+        let Some(app) = coverage_support::state("web_res_lifecycle").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("lif");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_campaign_pause(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(uuid::Uuid::new_v4().to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("could not be found"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // pause: a draft campaign refuses honestly.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_campaign_pause(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(seeded.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("only sending campaigns"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // resume: a draft campaign refuses honestly.
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_campaign_resume(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(seeded.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("only paused campaigns"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // start: a wired audience with zero subscribed contacts refuses.
+        sqlx::query(
+            "INSERT INTO campaign_jobs (id, tenant_id, campaign_id, job_type, status, created_at)
+             VALUES ($1, $2, $3::uuid, $4, 'pending', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&seeded.campaign_id)
+        .bind(recipients_job_type(&seeded.list_id, "bounced"))
+        .execute(&app.db)
+        .await
+        .expect("wire a bounced-only audience");
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_campaign_start(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            Path(seeded.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("no subscribed contacts"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // pause: a concurrent status flip between the gate and the guarded
+        // UPDATE surfaces the race honestly (the fixture transaction holds
+        // the row lock, flips the status, and commits mid-flight).
+        let Some(pool) = crate::test_db::canonical_pool("web_res_lifecycle_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant2, tag2) = coverage_support::tenant_pair("lir");
+        let seeded2 = coverage_support::seed_tenant(&state.db, &tenant2, &tag2).await;
+        let caller2 = coverage_support::user(&tenant2);
+        sqlx::query("UPDATE campaigns SET status = 'sending' WHERE id = $1::uuid")
+            .bind(&seeded2.campaign_id)
+            .execute(&state.db)
+            .await
+            .expect("set sending");
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("UPDATE campaigns SET status = 'completed' WHERE id = $1::uuid")
+            .bind(&seeded2.campaign_id)
+            .execute(&mut *tx)
+            .await
+            .expect("fixture flip");
+        let (headers, form) = signed_form(&state.config, &[]);
+        let task_state = state.clone();
+        let campaign_id2 = seeded2.campaign_id.clone();
+        let task = tokio::spawn(async move {
+            form_campaign_pause(
+                State(task_state),
+                axum::Extension(caller2),
+                Path(campaign_id2),
+                headers,
+                Form(form),
+            )
+            .await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit flip");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "The campaign changed state just now. Reload and retry."
+        );
+
+        // pause: an armed UPDATE fault flashes the retry message.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_lifecycle_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant3, tag3) = coverage_support::tenant_pair("lif3");
+        let seeded3 = coverage_support::seed_tenant(&state.db, &tenant3, &tag3).await;
+        let caller3 = coverage_support::user(&tenant3);
+        sqlx::query("UPDATE campaigns SET status = 'sending' WHERE id = $1::uuid")
+            .bind(&seeded3.campaign_id)
+            .execute(&state.db)
+            .await
+            .expect("set sending");
+        crate::routes::fault::arm_write_fault(&state.db, "campaigns", "rz_lifecycle", 0)
+            .await
+            .expect("arm campaigns fault");
+        let (headers, form) = signed_form(&state.config, &[]);
+        let response = form_campaign_pause(
+            State(state.clone()),
+            axum::Extension(caller3),
+            Path(seeded3.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not update the campaign. Try again."
+        );
+    }
+
+    #[tokio::test]
+    async fn campaign_start_races_and_faults_flash_honestly() {
+        // Wire a real audience, then race the guarded start.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_start_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("str");
+        let seeded = coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        sqlx::query(
+            "INSERT INTO campaign_jobs (id, tenant_id, campaign_id, job_type, status, created_at)
+             VALUES ($1, $2, $3::uuid, $4, 'pending', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&seeded.campaign_id)
+        .bind(recipients_job_type(&seeded.list_id, "subscribed"))
+        .execute(&state.db)
+        .await
+        .expect("wire audience");
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("UPDATE campaigns SET status = 'completed' WHERE id = $1::uuid")
+            .bind(&seeded.campaign_id)
+            .execute(&mut *tx)
+            .await
+            .expect("fixture flip");
+        let (headers, form) = signed_form(&state.config, &[]);
+        let task_state = state.clone();
+        let campaign_id = seeded.campaign_id.clone();
+        let task = tokio::spawn(async move {
+            form_campaign_start(
+                State(task_state),
+                axum::Extension(caller),
+                Path(campaign_id),
+                headers,
+                Form(form),
+            )
+            .await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit flip");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "The campaign changed state just now. Reload and retry."
+        );
+
+        // Armed fault on the start UPDATE.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_start_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant2, tag2) = coverage_support::tenant_pair("stf");
+        let seeded2 = coverage_support::seed_tenant(&state.db, &tenant2, &tag2).await;
+        let caller2 = coverage_support::user(&tenant2);
+        sqlx::query(
+            "INSERT INTO campaign_jobs (id, tenant_id, campaign_id, job_type, status, created_at)
+             VALUES ($1, $2, $3::uuid, $4, 'pending', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant2)
+        .bind(&seeded2.campaign_id)
+        .bind(recipients_job_type(&seeded2.list_id, "subscribed"))
+        .execute(&state.db)
+        .await
+        .expect("wire audience");
+        crate::routes::fault::arm_write_fault(&state.db, "campaigns", "rz_start", 0)
+            .await
+            .expect("arm campaigns fault");
+        let (headers, form) = signed_form(&state.config, &[]);
+        let response = form_campaign_start(
+            State(state.clone()),
+            axum::Extension(caller2),
+            Path(seeded2.campaign_id.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not start the campaign. Try again."
+        );
+    }
+
+    #[test]
+    fn parse_recipients_job_edges_default_honestly() {
+        // An empty list id is refused; an empty segment defaults to the
+        // subscribed filter.
+        assert_eq!(parse_recipients_job("recipients:"), None);
+        assert_eq!(
+            parse_recipients_job("recipients:list-uuid:"),
+            Some(("list-uuid".to_string(), "subscribed".to_string()))
+        );
+        assert_eq!(parse_recipients_job("other:job"), None);
+    }
+
+    // ── Contacts import: cap, parse, storage ────────────────────────
+
+    #[tokio::test]
+    async fn contacts_import_refuses_over_cap_and_unreadable_bodies() {
+        let Some(app) = coverage_support::state("web_res_import_cap").await else {
+            return;
+        };
+        let (tenant, _tag) = coverage_support::tenant_pair("imp");
+        let caller = coverage_support::user(&tenant);
+
+        // An unreadable multipart body is refused before any parsing.
+        let response = form_contacts_import(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            unreadable_multipart_headers(&app.config),
+            axum::body::Bytes::from_static(b"csv=email"),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("form could not be read"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Over the hard row cap: refused with the count spelled out.
+        let mut csv = String::from("email,name\n");
+        for index in 0..=CONTACT_IMPORT_MAX_ROWS {
+            csv.push_str(&format!("row{index}-{tenant}@example.test,Row\n"));
+        }
+        let (headers, body) = signed_bytes_body(&app.config, &[("csv", csv.as_str())]);
+        let response =
+            form_contacts_import(State(app.clone()), axum::Extension(caller), headers, body).await;
+        let flash = flash_text(&response, &app.config);
+        assert!(flash.contains("hard cap is 10000"), "got {flash}");
+    }
+
+    #[tokio::test]
+    async fn contacts_import_storage_fault_commits_nothing() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_import_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("imf");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        crate::routes::fault::arm_write_fault(&state.db, "contacts", "rz_import", 0)
+            .await
+            .expect("arm contacts fault");
+        let csv = "email,name\nfaulty@example.test,Faulty\n";
+        let (headers, body) = signed_bytes_body(&state.config, &[("csv", csv)]);
+        let response =
+            form_contacts_import(State(state.clone()), axum::Extension(caller), headers, body)
+                .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "The import could not be saved. Nothing was committed."
+        );
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM contacts WHERE email = 'faulty@example.test'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(stored, 0, "nothing may be committed on a failed import");
+    }
+
+    // ── Template update: gates, fields, race, fault ─────────────────
+
+    #[tokio::test]
+    async fn template_update_validates_gates_fields_and_versions() {
+        let Some(app) = coverage_support::state("web_res_tpl_update").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("tlu");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        // A plan the catalog does not know falls back to the builtin basic
+        // feature set, which does NOT include custom_templates.
+        sqlx::query("UPDATE tenants SET plan = $1 WHERE id = $2")
+            .bind(format!("unknown-plan-{tag}"))
+            .bind(&tenant)
+            .execute(&app.db)
+            .await
+            .expect("downgrade tenant plan");
+        let caller = coverage_support::user(&tenant);
+        let template_id = format!("tpl-{tag}-0");
+
+        // Entitlement gate first.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", "N"),
+                ("html_body", "<p>x</p>"),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            !flash_text(&response, &app.config).contains("Template saved"),
+            "custom_templates is not granted: got {:?}",
+            flash_text(&response, &app.config)
+        );
+        coverage_support::grant_feature(&app.db, &tenant, "custom_templates").await;
+
+        // Missing id.
+        let (headers, form) = signed_form(&app.config, &[("name", "N"), ("html_body", "<p>x</p>")]);
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "Missing template id.");
+
+        // Empty name.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", ""),
+                ("html_body", "<p>x</p>"),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(flash_text(&response, &app.config).contains("Give the template a name"));
+
+        // Empty body.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", "N"),
+                ("html_body", "  "),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(flash_text(&response, &app.config).contains("Add some HTML content"));
+
+        // Happy path with an explicit subject (the non-empty arm), saving
+        // as v2 with a version snapshot.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", "Renamed Template"),
+                ("subject", "Fresh subject"),
+                ("html_body", "<p>updated</p>"),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("Template saved as v2"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let subject: String = sqlx::query_scalar("SELECT subject FROM templates WHERE id = $1")
+            .bind(&template_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(subject, "Fresh subject");
+
+        // An unknown (never-existed) id stays honestly not-found.
+        let missing_id = format!("tpl-missing-{tag}");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", missing_id.as_str()),
+                ("name", "N"),
+                ("html_body", "<p>x</p>"),
+            ],
+        );
+        let response = form_template_update(
+            State(app.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("could not be found in this workspace"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let _ = seeded;
+    }
+
+    #[tokio::test]
+    async fn template_update_race_and_fault_flash_honestly() {
+        // (a) The template row disappears between the lookup and the
+        //     guarded UPDATE: no version is written and the flash is honest.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_tpl_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("tlr");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "custom_templates").await;
+        let caller = coverage_support::user(&tenant);
+        let template_id = format!("tpl-{tag}-0");
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("DELETE FROM templates WHERE id = $1")
+            .bind(&template_id)
+            .execute(&mut *tx)
+            .await
+            .expect("fixture delete");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("id", template_id.as_str()),
+                ("name", "Renamed"),
+                ("html_body", "<p>updated</p>"),
+            ],
+        );
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            form_template_update(
+                State(task_state),
+                axum::Extension(caller),
+                headers,
+                Form(form),
+            )
+            .await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit delete");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not save the template. Try again."
+        );
+
+        // (b) The UPDATE fails outright.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_tpl_update_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant2, tag2) = coverage_support::tenant_pair("tlt");
+        coverage_support::seed_tenant(&state.db, &tenant2, &tag2).await;
+        coverage_support::grant_feature(&state.db, &tenant2, "custom_templates").await;
+        let caller2 = coverage_support::user(&tenant2);
+        let template_id2 = format!("tpl-{tag2}-0");
+        crate::routes::fault::arm_write_fault(&state.db, "templates", "rz_tpl_update", 0)
+            .await
+            .expect("arm templates fault");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("id", template_id2.as_str()),
+                ("name", "Renamed"),
+                ("html_body", "<p>updated</p>"),
+            ],
+        );
+        let response = form_template_update(
+            State(state.clone()),
+            axum::Extension(caller2),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not save the template. Try again."
+        );
+    }
+
+    // ── Destructive confirmations: every intent arm ─────────────────
+
+    fn confirmation_sig(config: &Config, intent: &str, resource: &str) -> String {
+        ui_foundation::flash::sign_confirmation(
+            &config.csrf_secret,
+            intent,
+            resource,
+            Utc::now().timestamp() + 300,
+        )
+    }
+
+    #[tokio::test]
+    async fn confirm_destructive_covers_every_single_and_bulk_intent() {
+        let Some(app) = coverage_support::state("web_res_confirm_all").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("cnf");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+
+        // delete-list
+        let sig = confirmation_sig(&app.config, "delete-list", &seeded.list_id);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-list"),
+                ("id", seeded.list_id.as_str()),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("1 row(s) processed"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // delete-domain
+        let sig = confirmation_sig(&app.config, "delete-domain", &seeded.domain_id);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-domain"),
+                ("id", seeded.domain_id.as_str()),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("1 row(s) processed"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // delete-contacts-bulk (soft-delete)
+        let contact_ids = format!("{},{}", seeded.contact_id, {
+            let id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, status, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, 'subscribed', NOW(), NOW())",
+            )
+            .bind(&id)
+            .bind(&tenant)
+            .bind(format!("bulk-{tag}@example.test"))
+            .execute(&app.db)
+            .await
+            .expect("seed extra contact");
+            id
+        });
+        let sig = confirmation_sig(&app.config, "delete-contacts-bulk", &contact_ids);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-contacts-bulk"),
+                ("id", contact_ids.as_str()),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("2 contact(s) processed"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+        let deleted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM contacts WHERE tenant_id = $1 AND status = 'deleted'",
+        )
+        .bind(&tenant)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            deleted, 2,
+            "bulk contact delete soft-deletes exactly the picked rows"
+        );
+
+        // delete-lists-bulk
+        let list2 = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO lists (id, tenant_id, name, created_at, updated_at)
+             VALUES ($1::uuid, $2, 'Bulk List 2', NOW(), NOW())",
+        )
+        .bind(&list2)
+        .bind(&tenant)
+        .execute(&app.db)
+        .await
+        .expect("seed second list");
+        let list_ids = format!("{},{}", list2, list2); // duplicate collapses
+        let sig = confirmation_sig(&app.config, "delete-lists-bulk", &list_ids);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-lists-bulk"),
+                ("id", list_ids.as_str()),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("1 list(s) processed"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // A non-operator cannot suspend or delete tenants through /confirm.
+        for intent in ["suspend-tenant", "delete-tenant"] {
+            let sig = confirmation_sig(&app.config, intent, "some-tenant");
+            let (headers, form) = signed_form(
+                &app.config,
+                &[
+                    ("intent", intent),
+                    ("id", "some-tenant"),
+                    ("sig", sig.as_str()),
+                ],
+            );
+            let response = form_confirm_destructive(
+                State(app.clone()),
+                axum::Extension(caller.clone()),
+                headers,
+                Form(form),
+            )
+            .await;
+            assert_eq!(
+                flash_text(&response, &app.config),
+                "Operator access required."
+            );
+        }
+
+        // delete-tenant as operator with an unknown tenant id.
+        let (operator, _op_email) = {
+            let system_tenant: String =
+                sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                    .fetch_optional(&app.db)
+                    .await
+                    .expect("system tenant lookup")
+                    .expect("a system tenant must exist on the canonical database");
+            seed_caller(&app.db, &system_tenant, "owner").await
+        };
+        let sig = confirmation_sig(&app.config, "delete-tenant", "missing-tenant-x");
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-tenant"),
+                ("id", "missing-tenant-x"),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "That tenant could not be found."
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_destructive_storage_fault_flashes_retry() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_confirm_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("cnx");
+        let seeded = coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        let caller = coverage_support::user(&tenant);
+        crate::routes::fault::arm_delete_fault(&state.db, "campaigns", "rz_confirm", 0)
+            .await
+            .expect("arm campaigns delete fault");
+        let sig = confirmation_sig(&state.config, "delete-campaign", &seeded.campaign_id);
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("intent", "delete-campaign"),
+                ("id", seeded.campaign_id.as_str()),
+                ("sig", sig.as_str()),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not delete it. Try again."
+        );
+        let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE id = $1::uuid")
+            .bind(&seeded.campaign_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(still, 1, "the failed delete must not remove the row");
+    }
+
+    // ── Admin CP forms: CSRF matrix + storage faults ────────────────
+
+    #[tokio::test]
+    async fn every_cp_form_refuses_an_unsigned_post() {
+        let app = coverage_support::dead_state().await;
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let headers = HeaderMap::new(); // no csrf_token cookie, no _csrf field
+        macro_rules! bounced {
+            ($call:expr, $back:expr) => {{
+                let response = ($call).await;
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                assert_eq!(location(&response), $back);
+                assert!(
+                    flash_text(&response, &app.config).contains("session expired"),
+                    "expected the CSRF flash, got {:?}",
+                    flash_text(&response, &app.config)
+                );
+            }};
+        }
+        let empty = unsigned_form(&[]);
+        let form = |pairs: &[(&str, &str)]| unsigned_form(pairs);
+        bounced!(
+            form_admin_tenant_create(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("name", "X"), ("domain", "x.example.test")])),
+            ),
+            "/tenants/new"
+        );
+        bounced!(
+            form_admin_operator_create(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("email", "op@example.test")])),
+            ),
+            "/operators/new"
+        );
+        bounced!(
+            form_sales_discovery(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("sources", "src")])),
+            ),
+            "/sales"
+        );
+        bounced!(
+            form_sales_outreach(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("lead_ids", "lead")])),
+            ),
+            "/sales"
+        );
+        bounced!(
+            form_sales_leads_update(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("lead_ids", "lead"), ("status", "qualified")])),
+            ),
+            "/sales"
+        );
+        bounced!(
+            form_admin_alert_ack(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("id", &uuid::Uuid::new_v4().to_string())])),
+            ),
+            "/alerts"
+        );
+        bounced!(
+            form_admin_alert_ack_bulk(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("ids", &uuid::Uuid::new_v4().to_string())])),
+            ),
+            "/alerts"
+        );
+        bounced!(
+            form_admin_tenant_suspend(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("some-tenant".into()),
+                headers.clone(),
+                Form(empty.clone()),
+            ),
+            "/tenants"
+        );
+        bounced!(
+            form_admin_tenant_resume(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("some-tenant".into()),
+                headers.clone(),
+                Form(empty.clone()),
+            ),
+            "/tenants"
+        );
+        bounced!(
+            form_admin_tenant_delete(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("some-tenant".into()),
+                headers.clone(),
+                Form(empty.clone()),
+            ),
+            "/tenants"
+        );
+        bounced!(
+            form_admin_domain_transfer(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("domain", "d.example.test"), ("to_tenant_id", "t")])),
+            ),
+            "/domains"
+        );
+        bounced!(
+            form_sales_discovery_run(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[("sources", "src")])),
+            ),
+            "/sales"
+        );
+        bounced!(
+            form_sales_outreach_launch(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                headers.clone(),
+                Form(form(&[
+                    ("sequence_id", "seq"),
+                    ("autonomy_policy_id", "pol"),
+                    ("contact_ids", "c1"),
+                ])),
+            ),
+            "/sales"
+        );
+        bounced!(
+            form_admin_gdpr_transition(
+                State(app.clone()),
+                axum::Extension(operator.clone()),
+                Path("req-1".into()),
+                headers,
+                Form(form(&[("status", "completed")])),
+            ),
+            "/compliance/gdpr"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_tenant_and_operator_storage_failures_are_honest() {
+        // (a) The tenant INSERT fails (armed fault): retry flash, no row.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_adm_tenant").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        crate::routes::fault::arm_write_fault(&state.db, "tenants", "rz_adm_tenant", 0)
+            .await
+            .expect("arm tenants fault");
+        let tag = coverage_support::unique_tag("adt");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[
+                ("name", &format!("Faulted Tenant {tag}")),
+                ("domain", &format!("{tag}.example.test")),
+            ],
+        );
+        let response = form_admin_tenant_create(
+            State(state.clone()),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not create the tenant. Try again."
+        );
+
+        // (b) Operator invite: no resolvable system tenant → provisioning
+        //     unavailable (tenants hidden on this test's DB).
+        let Some(pool) = crate::test_db::canonical_pool("web_res_adm_operator").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&pool, "tenants")
+            .await
+            .expect("hide tenants");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let operator = coverage_support::user("system");
+        let (headers, form) = signed_form(
+            &state.config,
+            &[("email", "hidden-op@example.test"), ("name", "Ops")],
+        );
+        let response = form_admin_operator_create(
+            State(state.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Provisioning is unavailable. Try again shortly."
+        );
+
+        // (c) Operator invite INSERT fails → retry flash, no row.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_adm_operator2").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        crate::routes::fault::arm_write_fault(&state.db, "users", "rz_adm_operator", 0)
+            .await
+            .expect("arm users fault");
+        let op_email = format!(
+            "faulted-op-{}@example.test",
+            coverage_support::unique_tag("ado")
+        );
+        let (headers, form) = signed_form(&state.config, &[("email", op_email.as_str())]);
+        let response = form_admin_operator_create(
+            State(state.clone()),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not create the invitation. Try again."
+        );
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
+            .bind(&op_email)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "the failed invite must not persist");
+    }
+
+    #[tokio::test]
+    async fn tenant_suspend_resume_and_alerts_report_faults_and_missing_rows() {
+        let Some(app) = coverage_support::state("web_res_tenant_lc").await else {
+            return;
+        };
+        // Suspend with an unknown tenant id → not found.
+        let (operator, _email) = {
+            let system_tenant: String =
+                sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                    .fetch_optional(&app.db)
+                    .await
+                    .expect("system tenant lookup")
+                    .expect("a system tenant must exist");
+            seed_caller(&app.db, &system_tenant, "owner").await
+        };
+        let (headers, form) = signed_form(&app.config, &[]);
+        let response = form_admin_tenant_suspend(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path("missing-tenant".into()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "That tenant could not be found."
+        );
+
+        // Leads queue: empty selection refuses; a database error names the
+        // retry instead of a fake success.
+        let (headers, form) =
+            signed_form(&app.config, &[("lead_ids", " , "), ("status", "qualified")]);
+        let response = form_sales_leads_update(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Pick at least one lead in the queue first."
+        );
+        let dead = coverage_support::dead_state().await;
+        let (headers, form) = signed_form(
+            &dead.config,
+            &[("lead_ids", "lead-1"), ("status", "qualified")],
+        );
+        let response = form_sales_leads_update(
+            State(dead.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &dead.config),
+            "The stage change failed. Refresh and retry."
+        );
+
+        // Alerts: a valid uuid against a dead database flashes the retry.
+        let alert_id = uuid::Uuid::new_v4().to_string();
+        let (headers, form) = signed_form(&dead.config, &[("id", alert_id.as_str())]);
+        let response = form_admin_alert_ack(
+            State(dead.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &dead.config),
+            "Could not acknowledge the alert. Try again."
+        );
+        let (headers, form) = signed_form(&dead.config, &[("ids", alert_id.as_str())]);
+        let response = form_admin_alert_ack_bulk(
+            State(dead.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &dead.config),
+            "Could not acknowledge the alerts. Try again."
+        );
+
+        // Resume: an armed UPDATE fault flashes the retry.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_resume_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("rsf2");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Resume Fault', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&state.db)
+        .await
+        .expect("fixture tenant");
+        crate::routes::fault::arm_write_fault(&state.db, "tenants", "rz_resume", 0)
+            .await
+            .expect("arm tenants fault");
+        let (headers, form) = signed_form(&state.config, &[]);
+        let response = form_admin_tenant_resume(
+            State(state.clone()),
+            axum::Extension(operator),
+            Path(tenant.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not resume the tenant. Try again."
+        );
+    }
+
+    // ── Domain transfer surface + typed transfer ────────────────────
+
+    #[test]
+    fn domain_transfer_surface_renders_and_actions_transfer() {
+        // The transfer rotates the domain's DKIM key, which needs the DKIM
+        // encryption key env — the same process-global convention as the
+        // signup suite (DKIM_ENV_MUTEX held for the whole test).
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            domain_transfer_surface_inner().await;
+        });
+    }
+
+    async fn domain_transfer_surface_inner() {
+        let Some(app) = coverage_support::state("web_res_transfer").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("trf");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let (target_tenant, _target_tag) = coverage_support::tenant_pair("trt");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Transfer Target', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&target_tenant)
+        .bind(format!("slug-{target_tenant}"))
+        .execute(&app.db)
+        .await
+        .expect("seed target tenant");
+        let system_tenant: String =
+            sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                .fetch_optional(&app.db)
+                .await
+                .expect("system tenant lookup")
+                .expect("a system tenant must exist");
+        let (operator, _op_email) = seed_caller(&app.db, &system_tenant, "owner").await;
+        let domain_name = format!("{tag}.example.test");
+        let _ = seeded;
+
+        // GET surface: the suggestion page renders for an owned domain.
+        let response = web_admin_domain_transfer(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path(domain_name.clone()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_string(response).await;
+        assert!(
+            body.contains("transfer") || body.contains("Transfer"),
+            "the transfer page must render suggestion data"
+        );
+
+        // GET surface with an empty domain: the JSON logic refuses.
+        let response = web_admin_domain_transfer(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            Path("   ".into()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).starts_with("Transfer check could not run:"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Typed transfer without domain/target refuses.
+        let (headers, form) = signed_form(&app.config, &[("domain", ""), ("to_tenant_id", "")]);
+        let response = form_admin_domain_transfer(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).contains("Domain and target tenant are required"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+
+        // Successful typed transfer: exact confirmation, domain moves.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("domain", domain_name.as_str()),
+                ("to_tenant_id", target_tenant.as_str()),
+                ("confirmation", format!("transfer {domain_name}").as_str()),
+            ],
+        );
+        let response = form_admin_domain_transfer(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        let flash = flash_text(&response, &app.config);
+        assert!(flash.contains("transferred to tenant"), "got {flash}");
+        let owner: String =
+            sqlx::query_scalar("SELECT tenant_id::text FROM domains WHERE name = $1")
+                .bind(&domain_name)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(owner, target_tenant, "the domain really moved");
+
+        // A failing typed transfer (unknown domain) surfaces the service error.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("domain", "never-registered.example.test"),
+                ("to_tenant_id", target_tenant.as_str()),
+                ("confirmation", "transfer never-registered.example.test"),
+            ],
+        );
+        let response = form_admin_domain_transfer(
+            State(app.clone()),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert!(
+            flash_text(&response, &app.config).starts_with("Transfer failed:"),
+            "got {:?}",
+            flash_text(&response, &app.config)
+        );
+    }
+
+    // ── Sales engine live paths over a loopback mock ────────────────
+
+    struct MockEngine {
+        /// Popped per /enrich request: (status, body).
+        enrich: std::sync::Mutex<std::collections::VecDeque<(u16, String)>>,
+        enroll: std::sync::Mutex<(u16, String)>,
+        /// (path, x-api-key header, body) per request.
+        seen: std::sync::Mutex<Vec<(String, Option<String>, String)>>,
+    }
+
+    async fn spawn_mock_engine(engine: std::sync::Arc<MockEngine>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback mock engine");
+        let addr = listener.local_addr().unwrap();
+        async fn record(
+            State(engine): State<std::sync::Arc<MockEngine>>,
+            path: String,
+            headers: HeaderMap,
+            body: String,
+        ) -> (StatusCode, String) {
+            let api_key = headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            engine
+                .seen
+                .lock()
+                .unwrap()
+                .push((path.clone(), api_key, body));
+            let (status, text) = if path == "/enrich" {
+                engine
+                    .enrich
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or((500, "no scripted enrich response".into()))
+            } else {
+                engine.enroll.lock().unwrap().clone()
+            };
+            (StatusCode::from_u16(status).expect("valid status"), text)
+        }
+        let app = axum::Router::new()
+            .route(
+                "/:path",
+                axum::routing::any(
+                    |State(engine): State<std::sync::Arc<MockEngine>>,
+                     Path(path): Path<String>,
+                     headers: HeaderMap,
+                     body: String| async move {
+                        record(State(engine), path, headers, body).await
+                    },
+                ),
+            )
+            .with_state(engine);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn sales_discovery_run_reports_each_source_honestly() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_sales_live").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+        let (operator, _email) = seed_caller(&state.db, &system, "owner").await;
+
+        // All sources enrich: clean success summary.
+        let engine = std::sync::Arc::new(MockEngine {
+            enrich: std::sync::Mutex::new(
+                [
+                    (200u16, "{\"ok\":true}".to_string()),
+                    (200, "{\"ok\":true}".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            enroll: std::sync::Mutex::new((200, "{}".into())),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let base = spawn_mock_engine(engine.clone()).await;
+        let mut config = state.config.clone();
+        config.sales_autopilot_base_url = base;
+        config.internal_service_token = Some("residual-internal-token".into());
+        let engine_state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config.clone())
+                .await;
+        let (headers, form) = signed_form(&config, &[("sources", "alpha.test, beta.test")]);
+        let response = form_sales_discovery_run(
+            State(engine_state.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        let flash = flash_text(&response, &config);
+        assert!(
+            flash.contains("Discovery run finished: 2 source(s) enriched, 0 failed."),
+            "got {flash}"
+        );
+        let seen = engine.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "both sources hit the engine");
+        assert!(
+            seen.iter()
+                .all(|(_, key, _)| key.as_deref() == Some("residual-internal-token")),
+            "the internal service token must ride every engine call: {seen:?}"
+        );
+
+        // Mixed: first source enriches, second fails with a detail body.
+        engine.seen.lock().unwrap().clear();
+        engine
+            .enrich
+            .lock()
+            .unwrap()
+            .push_back((200, "{\"ok\":true}".into()));
+        engine
+            .enrich
+            .lock()
+            .unwrap()
+            .push_back((422, "domain unreachable".into()));
+        let (headers, form) = signed_form(&config, &[("sources", "alpha.test, beta.test")]);
+        let response = form_sales_discovery_run(
+            State(engine_state.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        let flash = flash_text(&response, &config);
+        assert!(
+            flash.contains("1 source(s) enriched, 1 failed")
+                && flash.contains("beta.test: domain unreachable"),
+            "got {flash}"
+        );
+
+        // Empty failure body: the status code is reported instead.
+        engine.seen.lock().unwrap().clear();
+        engine
+            .enrich
+            .lock()
+            .unwrap()
+            .push_back((200, "{\"ok\":true}".into()));
+        engine
+            .enrich
+            .lock()
+            .unwrap()
+            .push_back((500, String::new()));
+        let (headers, form) = signed_form(&config, &[("sources", "alpha.test, beta.test")]);
+        let response = form_sales_discovery_run(
+            State(engine_state.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        let flash = flash_text(&response, &config);
+        assert!(
+            flash.contains("beta.test: engine returned 500 Internal Server Error"),
+            "got {flash}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sales_outreach_launch_reports_the_engine_verdict() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_outreach_live").await else {
+            return;
+        };
+        let system = system_tenant_id(&pool).await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+        let engine = std::sync::Arc::new(MockEngine {
+            enrich: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            enroll: std::sync::Mutex::new((200, "{\"accepted\":2,\"rejected\":1}".into())),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let base = spawn_mock_engine(engine.clone()).await;
+        let mut config = test_config();
+        config.sales_autopilot_base_url = base;
+        config.internal_service_token = Some("residual-internal-token".into());
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool, config.clone()).await;
+
+        // Success: accepted/rejected counts surface verbatim; the
+        // experiment id rides the payload when posted.
+        let (headers, form) = signed_form(
+            &config,
+            &[
+                ("sequence_id", "seq-1"),
+                ("autonomy_policy_id", "pol-1"),
+                ("contact_ids", "c1,c2,c3"),
+                ("experiment_id", "exp-9"),
+            ],
+        );
+        let response = form_sales_outreach_launch(
+            State(state.clone()),
+            axum::Extension(operator.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &config),
+            "Outreach enrollment accepted: 2 accepted, 1 rejected."
+        );
+        let seen = engine.seen.lock().unwrap();
+        let (_, key, body) = &seen[0];
+        assert_eq!(key.as_deref(), Some("residual-internal-token"));
+        let payload: serde_json::Value = serde_json::from_str(body).expect("json payload");
+        assert_eq!(payload["sequenceId"], "seq-1");
+        assert_eq!(payload["autonomyPolicyId"], "pol-1");
+        assert_eq!(payload["experimentId"], "exp-9");
+        assert_eq!(payload["contactIds"][2], "c3");
+        drop(seen);
+
+        // Quota-pause style failure: the engine's structured error surfaces.
+        *engine.enroll.lock().unwrap() = (
+            429,
+            "{\"error\":\"campaign paused: email quota exhausted\"}".into(),
+        );
+        let (headers, form) = signed_form(
+            &config,
+            &[
+                ("sequence_id", "seq-1"),
+                ("autonomy_policy_id", "pol-1"),
+                ("lead_ids", "c1"),
+            ],
+        );
+        let response = form_sales_outreach_launch(
+            State(state.clone()),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &config),
+            "Outreach failed: campaign paused: email quota exhausted."
+        );
+    }
+
+    // ── GDPR: race + armed fault ────────────────────────────────────
+
+    async fn seed_gdpr_request(pool: &sqlx::PgPool, tenant: &str, id: &str) {
+        sqlx::query(
+            "INSERT INTO gdpr_requests (id, tenant_id, email, request_type, status, created_at, updated_at)
+             VALUES ($1, $2, $3, 'access', 'pending', NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(format!("gdpr-{}@example.test", coverage_support::unique_tag("gd")))
+        .execute(pool)
+        .await
+        .expect("seed gdpr request");
+    }
+
+    #[tokio::test]
+    async fn gdpr_transition_race_flashes_reload() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_gdpr_race").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, _tag) = coverage_support::tenant_pair("gdr");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Gdpr Race', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let gdpr_id = format!("gdpr-{}", coverage_support::unique_tag("gd"));
+        seed_gdpr_request(&pool, &tenant, &gdpr_id).await;
+        let system = system_tenant_id(&pool).await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+
+        let mut tx = pool.begin().await.expect("fixture transaction");
+        sqlx::query("UPDATE gdpr_requests SET status = 'in_progress' WHERE id = $1")
+            .bind(&gdpr_id)
+            .execute(&mut *tx)
+            .await
+            .expect("fixture transition");
+        let (headers, form) = signed_form(&state.config, &[("status", "completed")]);
+        let task_state = state.clone();
+        let task_id = gdpr_id.clone();
+        let task = tokio::spawn(async move {
+            form_admin_gdpr_transition(
+                State(task_state),
+                axum::Extension(operator),
+                Path(task_id),
+                headers,
+                Form(form),
+            )
+            .await
+        });
+        wait_for_blocked_statement(&pool).await;
+        tx.commit().await.expect("commit transition");
+        let response = task.await.expect("handler task").into_response();
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "The request changed state just now. Reload and retry."
+        );
+    }
+
+    #[tokio::test]
+    async fn gdpr_transition_storage_fault_flashes_retry() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_gdpr_fault").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, _tag) = coverage_support::tenant_pair("gdf");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Gdpr Fault', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("fixture tenant");
+        let gdpr_id = format!("gdpr-{}", coverage_support::unique_tag("gf"));
+        seed_gdpr_request(&pool, &tenant, &gdpr_id).await;
+        let system = system_tenant_id(&pool).await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+        let (operator, _email) = seed_caller(&pool, &system, "owner").await;
+        crate::routes::fault::arm_write_fault(&state.db, "gdpr_requests", "rz_gdpr", 0)
+            .await
+            .expect("arm gdpr_requests fault");
+        let (headers, form) = signed_form(&state.config, &[("status", "in_progress")]);
+        let response = form_admin_gdpr_transition(
+            State(state.clone()),
+            axum::Extension(operator),
+            Path(gdpr_id),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &state.config),
+            "Could not update the request. Try again."
+        );
+    }
+
+    // ── CSV exports: default, days-filtered, outage ─────────────────
+
+    #[tokio::test]
+    async fn audit_export_shapes_default_days_and_outage() {
+        let Some(app) = coverage_support::state("web_res_audit_export").await else {
+            return;
+        };
+        let system_tenant: String =
+            sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                .fetch_optional(&app.db)
+                .await
+                .expect("system tenant lookup")
+                .expect("a system tenant must exist");
+        let (operator, _email) = seed_caller(&app.db, &system_tenant, "owner").await;
+
+        // No filters: the whole-table clause with no binds.
+        let response = form_audit_export(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            AxumQuery(HashMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_string(response).await;
+        assert!(body.starts_with("timestamp,action,resource_type,actor\n"));
+        assert!(body.lines().count() > 1, "the audit chain is not empty");
+
+        // Days-only: the interval clause with no search binds.
+        let mut params = HashMap::new();
+        params.insert("days".to_string(), "30".to_string());
+        let response = form_audit_export(
+            State(app.clone()),
+            axum::Extension(operator.clone()),
+            AxumQuery(params),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Outage: the query fails and the CSV degrades to the header only.
+        let Some(pool) = crate::test_db::canonical_pool("web_res_audit_fault").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&pool, "audit_logs")
+            .await
+            .expect("hide audit_logs");
+        let state = crate::app::test_support::test_state_over_with_config(
+            pool,
+            coverage_support::rsa_config().await,
+        )
+        .await;
+        let system = system_tenant_id(&state.db).await;
+        let (operator2, _email2) = seed_caller(&state.db, &system, "owner").await;
+        let (operator2, _email2) = seed_caller(&state.db, &system, "owner").await;
+        let response = form_audit_export(
+            State(state.clone()),
+            axum::Extension(operator2),
+            AxumQuery(HashMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_string(response).await;
+        assert_eq!(body, "timestamp,action,resource_type,actor\n");
+    }
+
+    #[tokio::test]
+    async fn contacts_export_degrades_to_header_only_on_outage() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_contacts_export").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant, tag) = coverage_support::tenant_pair("cex");
+        coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
+        coverage_support::grant_feature(&state.db, &tenant, "data_export").await;
+        crate::routes::fault::hide_table(&pool, "contacts")
+            .await
+            .expect("hide contacts");
+        let caller = coverage_support::user(&tenant);
+        let response = form_contacts_export(State(state.clone()), axum::Extension(caller)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_string(response).await;
+        assert_eq!(
+            body, "email,name,status\n",
+            "an outage must not fabricate rows"
+        );
+    }
+
+    // ── SSR fallback: field-map clearing + unknown paths ────────────
+
+    #[tokio::test]
+    async fn static_fallback_clears_the_field_map_and_sets_the_csrf_cookie() {
+        let Some(app) = coverage_support::rsa_state("web_res_fallback").await else {
+            return;
+        };
+        // A failed-POST field map + a stale flash cookie ride the request;
+        // the rendered response must clear both and mint its own CSRF pair.
+        let mut field_map = FormFieldMap::new("signup");
+        field_map.set("name", "Submitted Name");
+        field_map.error("email", "Enter a valid email address.");
+        let field_cookie = form_fields_set_cookie(&field_map, &app.config.csrf_secret, false);
+        let flash_cookie = flash_set_cookie(
+            &[FlashMessage::error("Broken")],
+            &app.config.csrf_secret,
+            false,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!(
+                "{field_cookie}; {flash_cookie}",
+                field_cookie = field_cookie.split(';').next().unwrap(),
+                flash_cookie = flash_cookie.split(';').next().unwrap(),
+            )
+            .parse()
+            .unwrap(),
+        );
+        let response = static_ssr_fallback("web", "/signup", &headers, &app.config);
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookies = set_cookies(&response);
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("apexmail_form_fields=")
+                    && cookie.contains("Max-Age=0")),
+            "the consumed field map must be cleared: {cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("csrf_token=")),
+            "a fresh CSRF pair is minted for the rendered page: {cookies:?}"
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("apexmail_flash=")
+                    && cookie.contains("Max-Age=0")),
+            "the stale flash must be cleared: {cookies:?}"
+        );
+        let body = body_string(response).await;
+        assert!(body.contains("Submitted Name"), "field values repopulate");
+    }
+
+    // ── web/data.rs tails ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn campaign_detail_without_a_wired_audience_degrades_honestly() {
+        let Some(app) = coverage_support::state("web_res_detail_noaud").await else {
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("dna");
+        let _seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        // A campaign with NO recipients job at all: no list id, no list
+        // name, and a zero recipient count — never a fabricated audience.
+        let bare_campaign = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Bare subject', 'draft', NOW(), NOW())",
+        )
+        .bind(&bare_campaign)
+        .bind(&tenant)
+        .bind(format!("Bare {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed bare campaign");
+        let detail = data::load_campaign_detail(&app.db, &tenant, &bare_campaign)
+            .await
+            .expect("the campaign detail loads");
+        assert_eq!(detail.list_id, None);
+        assert_eq!(detail.list_name, None);
+        assert_eq!(detail.recipient_count, 0);
+    }
+
+    #[test]
+    fn record_verification_state_covers_every_host_shape() {
+        // The generated record set is entirely prefixed hosts; the pure
+        // classifier proves each prefix maps to its own check and that a
+        // record without a verification semantic stays honestly pending
+        // (never green by accident).
+        use data::record_verification_state as state_of;
+        assert!(state_of("_dmarc.example.test", false, false, false, false));
+        assert!(!state_of("_dmarc.example.test", true, true, true, true));
+        assert!(state_of(
+            "sel._domainkey.example.test",
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!state_of(
+            "sel._domainkey.example.test",
+            false,
+            false,
+            true,
+            true
+        ));
+        // The bounce subdomain carries BOTH the SPF include and the MAIL FROM
+        // MX: either verification makes the record state verified.
+        assert!(state_of("bounce.example.test", false, false, true, false));
+        assert!(state_of("bounce.example.test", false, false, false, true));
+        assert!(!state_of("bounce.example.test", false, false, false, false));
+        // Unknown host shapes never render as verified.
+        assert!(!state_of("apex.example.test", true, true, true, true));
+        assert!(!state_of("random.example.test", true, true, true, true));
+    }
+
+    #[tokio::test]
+    async fn schema_probe_names_missing_required_columns() {
+        let Some(pool) = crate::test_db::canonical_pool("web_res_schema_probe").await else {
+            return;
+        };
+        // Complete schema: no gaps.
+        let missing = data::missing_required_console_schema(&pool)
+            .await
+            .expect("the probe reads the catalog");
+        assert!(
+            missing.is_empty(),
+            "the canonical schema is complete: {missing:?}"
+        );
+        // Drop one required table on this per-test database: the probe must
+        // name every required column of that table.
+        sqlx::query("DROP TABLE invoices CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop invoices on the dedicated database");
+        let missing = data::missing_required_console_schema(&pool)
+            .await
+            .expect("the probe reads the catalog");
+        assert!(
+            missing.iter().any(|entry| entry.starts_with("invoices.")),
+            "the dropped table's required columns are named: {missing:?}"
+        );
     }
 }

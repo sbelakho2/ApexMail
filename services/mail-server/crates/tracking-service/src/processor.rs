@@ -509,7 +509,14 @@ impl EventProcessor {
             metadata,
         };
 
-        self.enqueue_event(&event).await?;
+        // The suppression row IS the durable compliance state; the WAL event
+        // is analytics. Record the durable state FIRST, then attempt the WAL
+        // enqueue best-effort — the old order (WAL before suppression) turned
+        // a Redis outage into a 500 for the MUA's one-click POST while the
+        // suppression row was never even attempted, silently losing consent.
+        // Suppression failure still fails the call (no silent success without
+        // suppression); a WAL failure after a durable row only loses the
+        // analytics event, never the consent change.
         if let Err(sup_err) = self
             .add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref())
             .await
@@ -528,6 +535,14 @@ impl EventProcessor {
                 );
             }
             return Err(sup_err.context("suppression insert failed (retry enqueued)"));
+        }
+        if let Err(wal_err) = self.enqueue_event(&event).await {
+            warn!(
+                error = %wal_err,
+                tenant_id = %event.tenant_id,
+                recipient = %event.recipient,
+                "Unsubscribe WAL enqueue failed after the suppression row was persisted — the analytics event is lost, the consent change is not"
+            );
         }
 
         Ok(())

@@ -253,14 +253,9 @@ async fn soc2_run_collectors(
     let now = Utc::now();
     let start = period_start.unwrap_or(now - Duration::days(1));
     let end = period_end.unwrap_or(now);
-    let summary = state
-        .soc2
-        .run_automated_collectors(start, end)
-        .await
-        .map_err(|e| {
-            error!("soc2 run failed: {e}");
-            err_json(StatusCode::INTERNAL_SERVER_ERROR, "run failed")
-        })?;
+    // The service is infallible: per-collector failures are recorded in the
+    // summary (and in soc2_evidence_collection_runs), never returned.
+    let summary = state.soc2.run_automated_collectors(start, end).await;
     Ok(ok_json(summary))
 }
 
@@ -1789,5 +1784,200 @@ mod db_tests {
             .as_array()
             .expect("documents")
             .is_empty());
+    }
+
+    /// Store-outage matrix: with a CLOSED pool every admin handler that
+    /// touches the database answers its explicit 5xx arm — never a
+    /// fabricated success. (The same handler list as the auth gate above;
+    /// here the token is valid but the store is gone.)
+    #[tokio::test]
+    async fn every_db_handler_answers_its_error_arm_when_the_pool_is_closed() {
+        let Some(pool) =
+            test_support::canonical_pool("admin_broken_matrix", "admin_broken_matrix").await
+        else {
+            return;
+        };
+        pool.close().await;
+        let state = state_with_closed(pool);
+        let headers = auth();
+        let q: Query<LimitQuery> = Query(LimitQuery { limit: Some(10) });
+        let list_q: Query<ListBaaQuery> = Query(ListBaaQuery {
+            tenant_id: Some("t".into()),
+        });
+
+        let codes = vec![
+            status(soc2_seed_controls(State(state.clone()), headers.clone()).await),
+            status(soc2_list_controls(State(state.clone()), headers.clone()).await),
+            status(
+                soc2_get_control(State(state.clone()), headers.clone(), Path("AC-1".into())).await,
+            ),
+            status(
+                soc2_update_status(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("AC-1".into()),
+                    Json(UpdateStatusBody {
+                        status: "in_scope".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                soc2_list_evidence(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("AC-1".into()),
+                    Query(EvidenceQuery { limit: None }),
+                )
+                .await,
+            ),
+            status(
+                hipaa_request_baa(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(RequestBaaBody {
+                        tenant_id: "t".into(),
+                        version: "v1".into(),
+                        actor: "a".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(hipaa_list_baas(State(state.clone()), headers.clone(), list_q).await),
+            status(hipaa_get_baa(State(state.clone()), headers.clone(), Path("b".into())).await),
+            status(
+                hipaa_sign(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("b".into()),
+                    Json(SignBody {
+                        actor: "a".into(),
+                        input: baa_sign_input(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                hipaa_countersign(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("b".into()),
+                    Json(CountersignBody {
+                        actor: "a".into(),
+                        input: baa_countersign_input(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                hipaa_activate(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("b".into()),
+                    Json(ActorBody { actor: "a".into() }),
+                )
+                .await,
+            ),
+            status(
+                hipaa_terminate(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("b".into()),
+                    Json(TerminateBody {
+                        actor: "a".into(),
+                        reason: "done".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                trust_upsert_document(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(document_input("s")),
+                )
+                .await,
+            ),
+            status(trust_list_documents_admin(State(state.clone()), headers.clone()).await),
+            status(
+                trust_supersede_document(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path(("s".into(), "v1".into())),
+                    Json(SupersedeBody { new_id: "n".into() }),
+                )
+                .await,
+            ),
+            status(
+                trust_upsert_subprocessor(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(subprocessor_input("p")),
+                )
+                .await,
+            ),
+            status(trust_list_subprocessors_admin(State(state.clone()), headers.clone()).await),
+            status(
+                trust_remove_subprocessor(State(state.clone()), headers.clone(), Path("p".into()))
+                    .await,
+            ),
+            status(
+                trust_create_incident(
+                    State(state.clone()),
+                    headers.clone(),
+                    Json(incident_input("i")),
+                )
+                .await,
+            ),
+            status(trust_list_incidents_admin(State(state.clone()), headers.clone(), q).await),
+            status(
+                trust_post_incident_update(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("i".into()),
+                    Json(IncidentUpdateBody {
+                        status: "monitoring".into(),
+                        body_md: "b".into(),
+                        posted_by: "a".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                trust_list_incident_updates(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("i".into()),
+                )
+                .await,
+            ),
+            status(trust_list_access_requests(State(state.clone()), headers.clone()).await),
+            status(
+                trust_grant_access(
+                    State(state.clone()),
+                    headers.clone(),
+                    Path("r".into()),
+                    Json(GrantBody {
+                        granted_by: "a".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                trust_revoke_access(State(state.clone()), headers.clone(), Path("r".into())).await,
+            ),
+        ];
+        assert_eq!(codes.len(), 25, "every DB-backed admin handler is listed");
+        for (index, code) in codes.iter().enumerate() {
+            assert!(
+                code.is_client_error() || code.is_server_error(),
+                "handler #{index} must answer 4xx/5xx with a closed pool, got {code}"
+            );
+        }
+    }
+
+    /// Build the app state on an already-CLOSED pool (the outage matrix).
+    fn state_with_closed(pool: sqlx::PgPool) -> Arc<AppState> {
+        test_support::app_state(pool, TOKEN)
     }
 }

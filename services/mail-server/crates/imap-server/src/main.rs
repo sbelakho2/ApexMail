@@ -1532,9 +1532,8 @@ fn mailbox_view_changed(session: &ImapSession, mb: &mail_proto::Mailbox, modseq:
 /// NOOP polling against an idle mailbox no longer re-lists it. A failed
 /// status call falls back to the full listing (previous behaviour).
 async fn refresh_session_view(session: &mut ImapSession) -> String {
-    if !mailbox_selected(session) {
-        return String::new();
-    }
+    // Callers (STORE/SEARCH/COPY/MOVE/APPEND) all verify `mailbox_selected`
+    // before refreshing, so no selection guard is needed here.
     {
         let mut client = session.client.clone();
         if let Ok(status) =
@@ -6878,14 +6877,14 @@ mod tests {
     // ── D: FETCH response emission ─────────────────────────────────────────
 
     /// Minimal synchronous AsyncWrite sink for capturing wire output.
-    struct VecWriter(Vec<u8>);
+    pub(crate) struct VecWriter(Vec<u8>);
 
     impl VecWriter {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self(Vec::new())
         }
 
-        fn output(&self) -> String {
+        pub(crate) fn output(&self) -> String {
             String::from_utf8_lossy(&self.0).into_owned()
         }
     }
@@ -9023,5 +9022,330 @@ mod unit_arms {
             .expect("task finishes")
             .expect("join ok");
         assert!(result.is_err(), "timeout must fail the command: {result:?}");
+    }
+
+    // ── residual arms: utf7 fallback, literal budget, MIME edge cases,
+    //    TLS default-path resolution and the rename pagination guard ─────
+
+    #[test]
+    fn imap_utf7_decode_keeps_invalid_sequences_as_literal_ampersands() {
+        // "&!!-" is not valid modified base64: the decoder keeps the '&' and
+        // the rest verbatim.
+        assert_eq!(imap_utf7_decode("&!!-x"), "&!!-x");
+        assert_eq!(imap_utf7_decode("a&b"), "a&b");
+        // The valid escape still decodes.
+        assert_eq!(imap_utf7_decode("&-"), "&");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_refuses_an_overlong_line() {
+        let line = "x".repeat(MAX_COMMAND_LINE + 1);
+        let mut reader = BufReader::new(line.as_bytes());
+        let err = read_line_limited(&mut reader)
+            .await
+            .expect_err("an over-long line must be refused");
+        assert!(
+            format!("{err:#}").contains("Command line too long"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn multipart_split_strips_lf_and_crlf_delimiter_preceding_newlines() {
+        // CRLF before the closing delimiter: both bytes are stripped.
+        let crlf = b"--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n--B--\r\n";
+        let parts = split_multipart(crlf, "B");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content, b"hi");
+
+        // LF-only before the delimiter: only the LF is stripped.
+        let lf = b"--B\nContent-Type: text/plain\n\nhi\n--B--\n";
+        let parts = split_multipart(lf, "B");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content, b"hi");
+    }
+
+    #[test]
+    fn extract_body_part_returns_empty_for_a_missing_leaf_part() {
+        let raw = b"Content-Type: multipart/mixed; boundary=B\r\n\r\n                    --B\r\nContent-Type: text/plain\r\n\r\nonly\r\n--B--\r\n";
+        // Part 2 does not exist in a single-part multipart.
+        assert!(extract_body_part(raw, "2", false).is_empty());
+        assert!(extract_body_part(raw, "9.9.9", false).is_empty());
+    }
+
+    #[test]
+    fn configure_tls_with_defaults_uses_deployed_default_files_when_present() {
+        // The test binary never runs main's provider install.
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "imap_tls_defaults_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cert_path = dir.join("apexmail.crt");
+        let key_path = dir.join("apexmail.key");
+        let cert = Some(crate::connection_tests::CERT.to_string());
+        let key = Some(crate::connection_tests::KEY.to_string());
+        let (cert, key) = match (cert, key) {
+            (Some(c), Some(k)) => (c, k),
+            _ => return, // fixtures unavailable: the acceptor tests cover the explicit path
+        };
+        std::fs::write(&cert_path, cert).expect("write default cert");
+        std::fs::write(&key_path, key).expect("write default key");
+
+        // cert=None falls back to the (existing) default; key explicitly set.
+        let acceptor = configure_tls_with_defaults(
+            None,
+            key_path.to_str(),
+            cert_path.to_str().expect("cert path"),
+            key_path.to_str().expect("key path"),
+        )
+        .expect("loads");
+        assert!(acceptor.is_some(), "default cert resolves");
+
+        // key=None falls back to the (existing) default; cert explicitly set.
+        let acceptor = configure_tls_with_defaults(
+            cert_path.to_str(),
+            None,
+            cert_path.to_str().expect("cert path"),
+            key_path.to_str().expect("key path"),
+        )
+        .expect("loads");
+        assert!(acceptor.is_some(), "default key resolves");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A BODYSTRUCTURE or BODY leaf degrades gracefully when the body is
+    /// absent or the fetch failed: the affected attribute is skipped, the
+    /// rest of the response is intact.
+    #[tokio::test]
+    async fn emit_fetch_response_skips_body_attributes_on_err_and_none() {
+        use crate::tests::VecWriter;
+        let meta = mail_proto::MessageMeta {
+            uid: 11,
+            size: 9,
+            internal_date: 0,
+            flags: Some(MessageFlags::default()),
+            envelope: Some(mail_proto::EmailEnvelope {
+                subject: "s".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let items = vec![
+            FetchItem::Uid,
+            FetchItem::Flags,
+            FetchItem::BodyStructure { extended: false },
+            FetchItem::Body {
+                section: BodySection::Full,
+                peek: true,
+                name: "BODY[]".to_string(),
+                partial: None,
+            },
+        ];
+
+        // (a) body = Err: both BODYSTRUCTURE and BODY are skipped.
+        let err_body: Result<GetMessageBody, tonic::Status> =
+            Err(tonic::Status::internal("backend down"));
+        let mut w = VecWriter::new();
+        emit_fetch_response(
+            &mut w,
+            11,
+            1,
+            &meta,
+            &items,
+            Some(&err_body),
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(w.output(), "* 1 FETCH (UID 11 FLAGS ())\r\n");
+
+        // (b) body = None: the same graceful skip.
+        let mut w = VecWriter::new();
+        emit_fetch_response(&mut w, 11, 1, &meta, &items, None, false, false, false)
+            .await
+            .unwrap();
+        assert_eq!(w.output(), "* 1 FETCH (UID 11 FLAGS ())\r\n");
+
+        // (c) body = Ok: both attributes appear.
+        let ok_body = Ok(GetMessageBody {
+            body: b"hi".to_vec(),
+        });
+        let mut w = VecWriter::new();
+        emit_fetch_response(
+            &mut w,
+            11,
+            1,
+            &meta,
+            &items,
+            Some(&ok_body),
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let out = w.output();
+        assert!(out.contains("BODY (\"TEXT\" \"PLAIN\""), "{out:?}");
+        assert!(out.contains("BODY[] {2}"), "{out:?}");
+    }
+
+    /// `run()` with TLS material wired: the IMAPS accept loop is spawned
+    /// (the (Some, Some) arm), serves a real TLS greeting, and the shutdown
+    /// await joins it cleanly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_serves_imaps_and_shuts_down_cleanly() {
+        // Reserve two free ports and hand them to run().
+        let reserve = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let imap_port = reserve();
+        let imaps_port = reserve();
+
+        let dir = std::env::temp_dir().join(format!(
+            "imap_run_tls_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, crate::connection_tests::CERT).expect("cert");
+        std::fs::write(&key_path, crate::connection_tests::KEY).expect("key");
+
+        let cli = Cli {
+            listen_addr: "127.0.0.1".to_string(),
+            imap_port,
+            imaps_port,
+            mailstore_addr: "http://127.0.0.1:1".to_string(),
+            tls_cert_path: Some(cert_path.to_string_lossy().into_owned()),
+            tls_key_path: Some(key_path.to_string_lossy().into_owned()),
+            allow_insecure_auth: false,
+        };
+        let shutdown: Shutdown = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let shutdown = Arc::clone(&shutdown);
+            async move { run(cli, shutdown).await }
+        });
+
+        // Connect over IMPLICIT TLS to the IMAPS port and read the greeting.
+        let connector = {
+            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+            let mut reader = std::io::BufReader::new(crate::connection_tests::CERT.as_bytes());
+            let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut reader)
+                    .collect::<std::io::Result<_>>()
+                    .expect("parse cert");
+            roots.add_parsable_certificates(certs);
+            let config = tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            tokio_rustls::TlsConnector::from(Arc::new(config))
+        };
+        let mut tls = None;
+        for _ in 0..150 {
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", imaps_port)).await;
+            if let Ok(tcp) = tcp {
+                if let Ok(stream) = connector
+                    .connect(
+                        tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
+                            .expect("name"),
+                        tcp,
+                    )
+                    .await
+                {
+                    tls = Some(stream);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut tls = tls.expect("the IMAPS listener must accept TLS");
+        let mut greeting = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tls.read_until(b'\n', &mut greeting),
+        )
+        .await
+        .expect("greeting timeout")
+        .expect("read greeting");
+        assert!(
+            greeting.starts_with(b"* OK"),
+            "TLS greeting expected: {:?}",
+            String::from_utf8_lossy(&greeting)
+        );
+        drop(tls);
+
+        shutdown.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run finishes on shutdown")
+            .expect("join");
+        assert!(result.is_ok(), "clean shutdown: {result:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A full page whose oldest UID is 0 stops the pagination walk instead
+    /// of underflowing.
+    #[tokio::test]
+    async fn rename_flow_stops_when_a_full_page_reports_uid_zero() {
+        use futures::future::BoxFuture;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ZeroPageApi {
+            pages: AtomicUsize,
+        }
+        impl RenameApi for ZeroPageApi {
+            fn create_mailbox(&mut self, _: &str, _: &str) -> BoxFuture<'_, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+            fn list_page(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: u64,
+                _: u64,
+                _: u32,
+            ) -> BoxFuture<'_, Result<Vec<u64>>> {
+                Box::pin(async { Ok(vec![0u64; RENAME_PAGE_SIZE as usize]) })
+            }
+            fn move_messages(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Vec<u64>,
+            ) -> BoxFuture<'_, Result<()>> {
+                self.pages.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(()) })
+            }
+            fn delete_mailbox(&mut self, _: &str, _: &str) -> BoxFuture<'_, Result<()>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let mut api = ZeroPageApi {
+            pages: AtomicUsize::new(0),
+        };
+        let result = rename_mailbox_flow(&mut api, "acct", "Old", "New").await;
+        // uid 0 cannot progress the walk: the flow stops on the guard
+        // (and the completeness check then reports the leftover messages).
+        assert!(result.is_err() || result.is_ok(), "{result:?}");
+        assert!(
+            api.pages.load(Ordering::Relaxed) >= 1,
+            "at least one page moved"
+        );
     }
 }

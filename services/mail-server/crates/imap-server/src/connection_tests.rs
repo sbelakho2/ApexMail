@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
 use tokio_rustls::TlsConnector;
 
-const CERT: &str = r#"-----BEGIN CERTIFICATE-----
+pub(crate) const CERT: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDSTCCAjGgAwIBAgIUVwhxJa9wz86lWTzyVQVC9bHNeXUwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDgwOTE5MjIxMVoXDTM2MDgw
 NjE5MjIxMVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
@@ -30,7 +30,7 @@ YzD9bl7yCpnvXHy4p7G0SYXAYkK8DG5FcS/ECTJw/gjMEDsIPLqPHNsC2uaq+C0R
 fwY+YpZkXTmxfHPbSn0EKcbKj1lHFsvSm9ckfUjEJV5vcIk5+TewmU4cEzQloK9v
 MpuYqjOkD826HkH+KCOEK4qVsx1p1MM0ASjES0E=
 -----END CERTIFICATE-----"#;
-const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+pub(crate) const KEY: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqqGeESTeTNPwo
 7NRxeFNuyjGdjHvNfBbxQ8VDhuyF7LwSVuTf5wkFvCySeEch5uInxlxo6p3MmT7m
 K/9/IZ8ToEQaf4IRa8Yyn43czdOYSwCGmH2ZiVJ4OXC/SPf7QpQGctr3Izcwi5lg
@@ -777,6 +777,73 @@ async fn starttls_upgrade_handshake_failure_ends_the_connection_quietly() {
     assert!(
         result.is_ok(),
         "failed upgrade handshake must end quietly: {result:?}"
+    );
+}
+
+// ── residual pre-STARTTLS arms ──────────────────────────────────────────────
+
+/// A command line beyond MAX_COMMAND_LINE before STARTTLS is a read error:
+/// the pre-upgrade loop warns and ends the connection quietly.
+#[tokio::test]
+async fn pre_starttls_oversized_line_ends_the_connection() {
+    let server = start_starttls(test_acceptor(), MockMailstore::new(), false).await;
+    let mut client = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    let _greeting = read_line_tok(&mut client).await;
+    let line = "x".repeat(MAX_COMMAND_LINE + 1);
+    client
+        .write_all(line.as_bytes())
+        .await
+        .expect("oversized write");
+    let result = tokio::time::timeout(Duration::from_secs(10), server.done).await;
+    assert!(
+        result.is_ok() && result.unwrap().is_ok(),
+        "the oversized line must end the pre-STARTTLS session quietly"
+    );
+}
+
+/// AUTHENTICATE whose continuation line never arrives (EOF) bails; the
+/// insecure-auth plaintext loop converts the bail into a tagged BAD and
+/// stays in the loop.
+#[tokio::test]
+async fn insecure_auth_authenticate_error_is_answered_with_a_tagged_bad() {
+    let mock = MockMailstore::new();
+    mock.add_account("user@example.test", "acct-12", "pass");
+    let server = start_starttls(test_acceptor(), mock, true).await;
+    let mut client = tokio::net::TcpStream::connect(server.addr)
+        .await
+        .expect("connect");
+    let _greeting = read_line_tok(&mut client).await;
+    client
+        .write_all(b"a1 AUTHENTICATE PLAIN\r\n")
+        .await
+        .expect("authenticate write");
+    // Read until the continuation prompt arrives (or the connection dies).
+    let mut cont = Vec::new();
+    for _ in 0..50 {
+        cont.clear();
+        let mut chunk = [0u8; 256];
+        match tokio::time::timeout(Duration::from_millis(100), client.read(&mut chunk)).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => cont.extend_from_slice(&chunk[..n]),
+            Ok(Err(e)) => panic!("read failed: {e}"),
+            Err(_) => break, // timeout: nothing more is coming
+        }
+        if cont.starts_with(b"+") {
+            break;
+        }
+    }
+    assert!(
+        cont.starts_with(b"+"),
+        "continuation expected, got {cont:?}"
+    );
+    // Cut the connection mid-continuation.
+    drop(client);
+    let result = tokio::time::timeout(Duration::from_secs(10), server.done).await;
+    assert!(
+        result.is_ok(),
+        "the bailed authenticate must end the session: {result:?}"
     );
 }
 

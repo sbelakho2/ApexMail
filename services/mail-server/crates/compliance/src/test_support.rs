@@ -146,8 +146,12 @@ pub fn audit_logger(pool: &PgPool) -> Arc<crate::audit_logger::AuditLogger> {
 }
 
 pub fn app_state(pool: PgPool, auth_token: &str) -> Arc<AppState> {
+    app_state_with_config(pool, config(auth_token))
+}
+
+/// [`Self::app_state`] with a caller-supplied config (CORS arms etc.).
+pub fn app_state_with_config(pool: PgPool, cfg: crate::config::ComplianceConfig) -> Arc<AppState> {
     ensure_kdf_salt();
-    let cfg = config(auth_token);
     let logger = audit_logger(&pool);
     Arc::new(AppState {
         risk_engine: crate::risk_scoring::RiskScoringEngine::new(pool.clone(), cfg.clone()),

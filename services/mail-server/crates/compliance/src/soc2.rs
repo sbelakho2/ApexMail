@@ -802,7 +802,7 @@ impl Soc2Service {
         &self,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
-    ) -> Result<CollectionRunSummary, String> {
+    ) -> CollectionRunSummary {
         let started_at = Utc::now();
         let mut summary = CollectionRunSummary {
             started_at,
@@ -889,7 +889,7 @@ impl Soc2Service {
             items = summary.items_collected,
             "SOC2 evidence collection run finished"
         );
-        Ok(summary)
+        summary
     }
 }
 

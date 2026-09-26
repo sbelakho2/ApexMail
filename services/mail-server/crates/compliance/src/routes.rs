@@ -4421,4 +4421,347 @@ mod db_tests {
             StatusCode::OK
         );
     }
+
+    // ── Store-outage matrix: every handler's DB-error arm answers with an
+    //    explicit 5xx (never a fabricated success) when its store is down.
+    //    One closed pool drives every Err arm in this file. ────────────────
+
+    fn assert_server_error(code: StatusCode, what: &str) {
+        assert!(
+            code.is_server_error(),
+            "{what} must answer a 5xx on a store outage, got {code}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_handler_reports_an_error_when_its_store_is_down() {
+        let Some(pool) =
+            test_support::canonical_pool("routes_broken_matrix", "routes_broken_matrix").await
+        else {
+            return;
+        };
+        pool.close().await;
+        let state = test_support::app_state(pool, TOKEN);
+        let tenant = test_support::unique_tenant();
+
+        // Risk endpoints.
+        assert_server_error(
+            status(risk_assess(State(state.clone()), auth(), path(&tenant)).await),
+            "risk assess",
+        );
+        assert_server_error(
+            status(risk_profile(State(state.clone()), auth(), path(&tenant)).await),
+            "risk profile",
+        );
+        assert_server_error(
+            status(risk_stats(State(state.clone()), auth()).await),
+            "risk stats",
+        );
+        assert_server_error(
+            status(
+                risk_update_limits(
+                    State(state.clone()),
+                    auth(),
+                    path(&tenant),
+                    Json(asset_limits()),
+                )
+                .await,
+            ),
+            "risk update limits",
+        );
+        assert_server_error(
+            status(
+                risk_resolve_flag(
+                    State(state.clone()),
+                    auth(),
+                    path(&tenant),
+                    Json(json!({"flag_type": "high_bounce_rate", "resolution": "unit"})),
+                )
+                .await,
+            ),
+            "risk resolve flag",
+        );
+        assert_server_error(
+            status(risk_critical_tenants(State(state.clone()), auth()).await),
+            "risk critical tenants",
+        );
+
+        // Scan endpoint.
+        let (code, _) = error_of(
+            scan_content(State(state.clone()), auth(), Json(email_content(&tenant))).await,
+        );
+        assert_server_error(code, "scan content");
+
+        // Audit endpoints.
+        assert_server_error(
+            status(
+                audit_create(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"action": "login", "resource": "user", "tenant_id": &tenant})),
+                )
+                .await,
+            ),
+            "audit create",
+        );
+        assert_server_error(
+            status(audit_query(State(state.clone()), auth(), Json(AuditLogQuery::default())).await),
+            "audit query",
+        );
+        assert_server_error(
+            status(audit_get_entry(State(state.clone()), auth(), path("entry_x")).await),
+            "audit get entry",
+        );
+        assert_server_error(
+            status(
+                audit_verify_chain(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"tenant_id": &tenant})),
+                )
+                .await,
+            ),
+            "audit verify chain",
+        );
+        assert_server_error(
+            status(
+                audit_export(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"tenant_id": &tenant, "format": "json"})),
+                )
+                .await,
+            ),
+            "audit export",
+        );
+        assert_server_error(
+            status(audit_stats(State(state.clone()), auth()).await),
+            "audit stats",
+        );
+
+        // Secret endpoints: the manager surfaces the outage and the handler
+        // maps it through secret_store_error (5xx, exact code depends on the
+        // driver's error text).
+        let (code, _) = error_of(
+            secret_create(
+                State(state.clone()),
+                auth(),
+                Json(secret_create_body(&tenant, "outage-secret")),
+            )
+            .await,
+        );
+        assert_server_error(code, "secret create");
+        let (code, _) = error_of(secret_list(State(state.clone()), auth(), query(&[])).await);
+        assert_server_error(code, "secret list");
+        let (code, _) =
+            error_of(secret_get(State(state.clone()), auth(), path("sup_outage")).await);
+        assert_server_error(code, "secret get");
+        let (code, _) =
+            error_of(secret_versions(State(state.clone()), auth(), path("sup_outage")).await);
+        assert_server_error(code, "secret versions");
+        let (code, _) = error_of(
+            secret_update(
+                State(state.clone()),
+                auth(),
+                path("sup_outage"),
+                Json(SecretUpdateInput {
+                    name: Some("renamed".into()),
+                    rotation_schedule: None,
+                    expires_at: None,
+                }),
+            )
+            .await,
+        );
+        assert_server_error(code, "secret update");
+        let (code, _) =
+            error_of(secret_rotate(State(state.clone()), auth(), path("sup_outage")).await);
+        assert_server_error(code, "secret rotate");
+        let (code, _) = error_of(
+            secret_grant_access(
+                State(state.clone()),
+                auth(),
+                path("sup_outage"),
+                Json(json!({"user_id": "user_x", "access_level": "read"})),
+            )
+            .await,
+        );
+        assert_server_error(code, "secret grant access");
+
+        // GDPR endpoints.
+        assert_server_error(
+            status(
+                gdpr_submit_request(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({
+                        "tenant_id": &tenant,
+                        "request_type": "access",
+                        "email": "outage@example.com",
+                    })),
+                )
+                .await,
+            ),
+            "gdpr submit",
+        );
+        assert_server_error(
+            status(gdpr_stats(State(state.clone()), auth(), query(&[])).await),
+            "gdpr stats",
+        );
+        assert_server_error(
+            status(
+                gdpr_record_consent(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({
+                        "tenant_id": &tenant,
+                        "subscriber_id": "sub_consent_x",
+                        "consent_type": "marketing",
+                        "email": "consent@example.com",
+                        "granted": true,
+                    })),
+                )
+                .await,
+            ),
+            "gdpr record consent",
+        );
+
+        // Breach endpoints.
+        assert_server_error(
+            status(breach_report(State(state.clone()), auth(), Json(breach_input(&tenant))).await),
+            "breach report",
+        );
+        assert_server_error(
+            status(breach_list(State(state.clone()), auth(), path("bl")).await),
+            "breach list",
+        );
+        assert_server_error(
+            status(breach_open_tasks(State(state.clone()), auth(), path("b")).await),
+            "breach open tasks",
+        );
+    }
+
+    /// CORS: the router builds with a valid configured origin (exact match)
+    /// and — F-15 — fails CLOSED (deny all) on an unparseable one, without
+    /// panicking either way.
+    #[tokio::test]
+    async fn cors_origin_configuration_arms() {
+        let Some(pool) = test_support::canonical_pool("routes_cors", "routes_cors").await else {
+            return;
+        };
+        let mut cfg = crate::config::ComplianceConfig::from_env();
+        cfg.auth_token = TOKEN.into();
+        cfg.cors_origin = "https://app.apexmail.ee".into();
+        let _router = create_router(test_support::app_state_with_config(pool.clone(), cfg));
+
+        let mut bad = crate::config::ComplianceConfig::from_env();
+        bad.auth_token = TOKEN.into();
+        // A NUL byte cannot appear in a header value: the parse must fail and
+        // the layer must deny all origins instead of falling open.
+        bad.cors_origin = "\u{0}not-a-valid-origin".into();
+        let _router = create_router(test_support::app_state_with_config(pool, bad));
+    }
+
+    /// The rate-limited arms of the DSAR endpoints: the per-user quota (1)
+    /// turns the second submission into an explicit 429, and the verification
+    /// limiter answers 429 once its attempt window is exhausted.
+    #[tokio::test]
+    async fn dsar_rate_limit_arms_return_429_with_retry_after() {
+        let Some(state) = state("dsar_429").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let email = format!("rl-{}@example.com", uuid::Uuid::new_v4().simple());
+
+        let submit = |state: &Arc<AppState>| {
+            gdpr_submit_request(
+                State(state.clone()),
+                auth(),
+                Json(json!({
+                    "tenant_id": &tenant,
+                    "request_type": "access",
+                    "email": &email,
+                })),
+            )
+        };
+        assert_eq!(
+            status(submit(&state).await),
+            StatusCode::CREATED,
+            "first allowed"
+        );
+
+        let second = error_of(submit(&state).await);
+        assert_eq!(second.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second.1["error"], "rate_limited");
+        assert!(
+            second.1["retry_after"].as_u64().is_some(),
+            "retry_after must be present: {}",
+            second.1
+        );
+
+        // The in-memory verification limiter (5 attempts) answers 429 once
+        // the attempt window is exhausted — even with an invalid token, the
+        // attempt itself is consumed (the brute-force guard).
+        let (request, _token) = state
+            .gdpr
+            .submit_request(
+                &tenant,
+                crate::types::DataSubjectRequestType::Erasure,
+                "verify-rl@example.com",
+            )
+            .await
+            .expect("seed request for verify");
+        for attempt in 0..8 {
+            let result = gdpr_verify_request(
+                State(state.clone()),
+                auth(),
+                path(&request.id),
+                Json(json!({
+                    "token": "not-the-real-token",
+                    "email": "verify-rl@example.com",
+                })),
+            )
+            .await;
+            if matches!(result, Err((StatusCode::TOO_MANY_REQUESTS, _))) {
+                assert!(attempt >= 4, "the cap must allow the configured attempts");
+                return;
+            }
+        }
+        panic!("the verification limiter never answered 429");
+    }
+
+    /// A processed export downloads as JSON; an unknown export id 404s.
+    #[tokio::test]
+    async fn export_download_serves_stored_exports_and_404s_unknown() {
+        let Some(state) = state("download").await else {
+            return;
+        };
+        assert_eq!(
+            status(gdpr_download_export(State(state.clone()), auth(), path("missing")).await),
+            StatusCode::NOT_FOUND
+        );
+
+        let tenant = test_support::unique_tenant();
+        let (request, _token) = state
+            .gdpr
+            .submit_request(
+                &tenant,
+                crate::types::DataSubjectRequestType::Access,
+                "dl@example.com",
+            )
+            .await
+            .expect("seed access request");
+        state
+            .gdpr
+            .process_request(&request.id)
+            .await
+            .expect("process export");
+        let export_id: String =
+            sqlx::query_scalar("SELECT id FROM gdpr_exports WHERE request_id = $1")
+                .bind(&request.id)
+                .fetch_one(&state.db)
+                .await
+                .expect("the processed export row exists");
+        let response = gdpr_download_export(State(state.clone()), auth(), path(&export_id)).await;
+        assert_eq!(status(response), StatusCode::OK);
+    }
 }

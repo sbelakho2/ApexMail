@@ -581,7 +581,7 @@ pub(crate) mod test_support {
             .await
             .ok()?;
         sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
-            .bind("tracking-service:redis-db8-serial")
+            .bind("tracking-service:redis-wal")
             .execute(&pool)
             .await
             .ok()?;

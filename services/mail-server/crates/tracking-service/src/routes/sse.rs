@@ -832,12 +832,17 @@ mod tests {
                 .query_async(&mut *conn)
                 .await;
         }
-        if let Some(counts) = LOCAL_CONN_COUNTS
+        // Bind BEFORE the `if let`: the scrutinee's MutexGuard temporary
+        // lives until the end of the whole if-let statement (edition 2021),
+        // and `local_conn_dec` locks the same mutex — holding the guard
+        // across the loop deadlocked the test thread whenever the fallback
+        // counter actually held slots (i.e. every live-Redis run).
+        let held = LOCAL_CONN_COUNTS
             .lock()
             .expect("local conn-counts lock")
             .get(&tenant)
-            .cloned()
-        {
+            .cloned();
+        if let Some(counts) = held {
             for _ in 0..counts {
                 local_conn_dec(&tenant);
             }

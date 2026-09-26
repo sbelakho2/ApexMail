@@ -5760,6 +5760,54 @@ pub mod container {
                 container_check(&evidence, "signature_present[META-INF/signatures.xml]").is_fail()
             );
         }
+        /// XML resource limits: an unterminated document, nesting beyond the
+        /// depth cap and text beyond the total cap are all refused with named
+        /// errors.
+        #[test]
+        fn xml_tree_parser_limits_are_enforced_with_named_errors() {
+            // Unexpected end of document.
+            let err = parse_xml_tree("<ds:Signature><a><b>text").expect_err("eof refused");
+            assert!(err.contains("unexpected end of XML document"), "{err}");
+
+            // Nesting depth beyond the cap (65 nested elements).
+            let deep = format!("<root>{}text{}</root>", "<a>".repeat(80), "</a>".repeat(80));
+            let err = parse_xml_tree(&deep).expect_err("depth refused");
+            assert!(err.contains("nesting depth limit"), "{err}");
+
+            // Total text beyond the cap: 3 MiB of text in small chunks.
+            let chunk = "x".repeat(4096);
+            let mut xml = String::from("<root>");
+            for _ in 0..800 {
+                xml.push_str(&format!("<t>{chunk}</t>"));
+            }
+            xml.push_str("</root>");
+            let err = parse_xml_tree(&xml).expect_err("text flood refused");
+            assert!(err.contains("text limit"), "{err}");
+        }
+
+        /// ASiC member classification: only META-INF/signatures*.xml files are
+        /// signatures; everything else (including META-INF/ oddities) is not.
+        #[test]
+        fn signature_file_classification_rejects_non_signature_paths() {
+            assert!(is_signature_file("META-INF/signatures.xml"));
+            assert!(is_signature_file("META-INF/signatures001.xml"));
+            assert!(!is_signature_file("META-INF/signatures.xml.bak"));
+            assert!(!is_signature_file("document.txt"));
+            assert!(!is_signature_file("META-INF/other.xml"));
+            assert!(!is_signature_file("META-INF/signatures.xmlx"));
+        }
+
+        /// The digest backend refuses SHA-1 and unknown URIs while mapping the
+        /// modern SHA-2 family.
+        #[test]
+        fn digest_bytes_maps_sha2_and_refuses_sha1_and_unknown() {
+            let data = b"digest me";
+            assert!(digest_bytes(URI_SHA256, data).is_some());
+            assert!(digest_bytes(URI_SHA384, data).is_some());
+            assert!(digest_bytes(URI_SHA512, data).is_some());
+            assert!(digest_bytes(URI_SHA1, data).is_none(), "SHA-1 is refused");
+            assert!(digest_bytes("http://unknown.digest/", data).is_none());
+        }
     }
 }
 
@@ -6045,5 +6093,19 @@ mod signing_unit_tests {
         // RSA-style carries an explicit NULL.
         let rsa = der::algorithm_identifier("1.2.840.113549.1.1.11").expect("encode");
         assert!(rsa.windows(2).any(|window| window == [0x05, 0x00]));
+    }
+
+    /// An OID arc whose base-128 value overflows u64 is refused, not
+    /// silently wrapped.
+    #[test]
+    fn decode_oid_rejects_an_overflowing_arc() {
+        // 10 continuation bytes of 0xFF each shift in 70 high bits: the
+        // accumulator provably exceeds u64::MAX >> 7 on the last byte.
+        let mut content = vec![0x02_u8];
+        content.extend_from_slice(&[0xFF_u8; 11]);
+        let mut tlv_bytes = vec![0x06_u8, content.len() as u8];
+        tlv_bytes.extend_from_slice(&content);
+        let tlv = parse_one(tlv_bytes);
+        assert!(matches!(der::decode_oid(&tlv), Err(DerError::InvalidOid)));
     }
 }

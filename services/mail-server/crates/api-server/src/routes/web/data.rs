@@ -276,11 +276,15 @@ where
             LoadState::Loaded(T::default())
         }
         Err(error) => {
+            // Computed eagerly: a lazy tracing field only evaluates when a
+            // subscriber records the event, which would leave the probe
+            // unexercised in quiet test runs.
+            let missing_schema = is_schema_error(&error);
             tracing::error!(
                 query = query_id,
                 correlation_id = correlation_id,
                 error = %error,
-                missing_schema = is_schema_error(&error),
+                missing_schema,
                 "web data query failed; data unavailable"
             );
             LoadState::Unavailable
@@ -3836,6 +3840,29 @@ async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
 /// GET /v1/domains/:id/dns-records endpoint returns (record building is
 /// reused from `routes::domains`, never duplicated). Records render as
 /// data rows with mono cells — the view layer lays them out.
+/// Per-record verification state for the domain detail table: the host
+/// prefix decides which check a record belongs to, and any future record
+/// shape without a verification semantic stays honestly "pending" (never
+/// green by accident). Pure so every arm — including the unknown-host
+/// default — is directly assertable.
+pub(crate) fn record_verification_state(
+    hostname: &str,
+    dmarc_verified: bool,
+    dkim_verified: bool,
+    spf_verified: bool,
+    return_path_verified: bool,
+) -> bool {
+    if hostname.starts_with("_dmarc.") {
+        dmarc_verified
+    } else if hostname.contains("._domainkey.") {
+        dkim_verified
+    } else if hostname.starts_with("bounce.") {
+        spf_verified || return_path_verified
+    } else {
+        false
+    }
+}
+
 pub(crate) async fn load_domain_detail(
     db: &sqlx::PgPool,
     tenant: &str,
@@ -3930,12 +3957,13 @@ pub(crate) async fn load_domain_detail(
             rows: records
                 .iter()
                 .map(|record| {
-                    let verified = match record.hostname.as_str() {
-                        host if host.starts_with("_dmarc.") => dmarc_verified,
-                        host if host.contains("._domainkey.") => dkim_verified,
-                        host if host.starts_with("bounce.") => spf_verified || return_path_verified,
-                        _ => false,
-                    };
+                    let verified = record_verification_state(
+                        &record.hostname,
+                        dmarc_verified,
+                        dkim_verified,
+                        spf_verified,
+                        return_path_verified,
+                    );
                     DataRowData {
                         id: format!("{}:{}", record.record_type, record.hostname),
                         cells: vec![

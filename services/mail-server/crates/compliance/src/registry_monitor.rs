@@ -48,10 +48,10 @@ impl Recurrence {
             Recurrence::Monthly => {
                 let m = from.month() + 1;
                 if m > 12 {
-                    let next_year = from.year() + 1;
-                    NaiveDate::from_ymd_opt(next_year, 1, from.day())
-                        .or_else(|| NaiveDate::from_ymd_opt(next_year, 1, 28))
-                        .unwrap_or(from)
+                    // Year rollover: the target month is January, which has
+                    // 31 days, so the source day (1..=31) always exists and
+                    // no clamp fallback is reachable.
+                    NaiveDate::from_ymd_opt(from.year() + 1, 1, from.day()).unwrap_or(from)
                 } else {
                     NaiveDate::from_ymd_opt(from.year(), m, from.day())
                         .or_else(|| NaiveDate::from_ymd_opt(from.year(), m, 28))
@@ -209,6 +209,12 @@ impl ScheduledRegistryMonitor {
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.check_interval = interval;
         self
+    }
+
+    /// Test seam: the configured tick period (compiled only under test).
+    #[cfg(test)]
+    fn check_interval_snapshot(&self) -> Duration {
+        self.check_interval
     }
 
     pub fn monitor(&self) -> &RegistryMonitor {
@@ -561,5 +567,130 @@ mod tests {
         let due = monitor.check_monthly(NaiveDate::from_ymd_opt(2026, 7, 15).unwrap());
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].notice_id, "REG-EDGE");
+    }
+
+    // ── residual-arm coverage: recurrence rollovers, category/failed lookups,
+    //    the scheduler seam and the default registry code ───────────────────
+
+    #[test]
+    fn next_due_quarterly_and_monthly_roll_over_the_year_end() {
+        // Quarterly across the year boundary (Oct 31 -> Jan 31 next year).
+        let q = Recurrence::Quarterly.next_due(NaiveDate::from_ymd_opt(2026, 10, 31).unwrap());
+        assert_eq!(q, NaiveDate::from_ymd_opt(2027, 1, 31).unwrap());
+        // Quarterly where the target month is shorter than the source day:
+        // Jan 31 + 3 months clamps to Apr 28, and Nov 30 + 3 months clamps
+        // to the (non-leap) Feb 28 — both take the or_else arm.
+        let q_clamped =
+            Recurrence::Quarterly.next_due(NaiveDate::from_ymd_opt(2026, 1, 31).unwrap());
+        assert_eq!(q_clamped, NaiveDate::from_ymd_opt(2026, 4, 28).unwrap());
+        let q_feb = Recurrence::Quarterly.next_due(NaiveDate::from_ymd_opt(2026, 11, 30).unwrap());
+        assert_eq!(q_feb, NaiveDate::from_ymd_opt(2027, 2, 28).unwrap());
+        // Monthly with a day the next month lacks: Jan 30 clamps to Feb 28.
+        assert_eq!(
+            Recurrence::Monthly.next_due(NaiveDate::from_ymd_opt(2026, 1, 30).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 2, 28).unwrap()
+        );
+        // Monthly across the year boundary (Dec 15 -> Jan 15 next year).
+        let m = Recurrence::Monthly.next_due(NaiveDate::from_ymd_opt(2026, 12, 15).unwrap());
+        assert_eq!(m, NaiveDate::from_ymd_opt(2027, 1, 15).unwrap());
+        // A same-year monthly step and a same-year quarterly step.
+        assert_eq!(
+            Recurrence::Monthly.next_due(NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 5, 30).unwrap()
+        );
+        assert_eq!(
+            Recurrence::Quarterly.next_due(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 5, 1).unwrap()
+        );
+        // Annual on Feb 29 clamps to Feb 28 of the next year.
+        assert_eq!(
+            Recurrence::Annual.next_due(NaiveDate::from_ymd_opt(2028, 2, 29).unwrap()),
+            NaiveDate::from_ymd_opt(2029, 2, 28).unwrap()
+        );
+        // One-time notices are their own next due date.
+        assert_eq!(
+            Recurrence::OneTime.next_due(NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()),
+            NaiveDate::from_ymd_opt(2026, 9, 21).unwrap()
+        );
+    }
+
+    #[test]
+    fn check_monthly_rolls_into_january_for_december_reference() {
+        let mut monitor = RegistryMonitor::new();
+        monitor.add_notice(sample_notice(
+            "REG-DEC-END",
+            "Year-end filing",
+            NaiveDate::from_ymd_opt(2026, 12, 20).unwrap(),
+            Recurrence::Monthly,
+        ));
+        // A December reference builds the window end from the NEXT YEAR's
+        // January 1 (the rollover arm) minus one day.
+        let due = monitor.check_monthly(NaiveDate::from_ymd_opt(2026, 12, 15).unwrap());
+        assert_eq!(due.len(), 1, "a late-December notice is inside the window");
+        assert_eq!(due[0].notice_id, "REG-DEC-END");
+    }
+
+    #[test]
+    fn complete_notice_reports_unknown_ids_and_category_lookup_filters() {
+        let mut monitor = RegistryMonitor::new();
+        assert!(
+            !monitor.complete_notice("REG-NEVER"),
+            "an unknown notice must not report completion"
+        );
+        monitor.add_notice(sample_notice(
+            "REG-CAT",
+            "Categorised",
+            NaiveDate::from_ymd_opt(2026, 6, 30).unwrap(),
+            Recurrence::Annual,
+        ));
+        let pending = monitor.notices_by_category(NoticeStatus::Pending);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].notice_id, "REG-CAT");
+        assert!(monitor
+            .notices_by_category(NoticeStatus::InProgress)
+            .is_empty());
+        monitor.complete_notice("REG-CAT");
+        assert_eq!(
+            monitor.notices_by_category(NoticeStatus::Completed).len(),
+            1,
+            "the completed notice is found by its new status"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_monitor_seam_and_default_drive_the_monthly_loop() {
+        // Default: the production registry code.
+        let monitor = ScheduledRegistryMonitor::default();
+        assert_eq!(monitor.registry_code(), "16588745");
+        assert_eq!(
+            monitor.check_interval_snapshot(),
+            Duration::from_secs(30 * 24 * 3600)
+        );
+
+        // with_interval overrides the tick period; monitor_mut exposes the
+        // inner registry for seeding.
+        let mut monitor = ScheduledRegistryMonitor::new("12345678".into())
+            .with_interval(Duration::from_millis(10));
+        assert_eq!(monitor.check_interval_snapshot(), Duration::from_millis(10));
+        monitor.monitor_mut().add_notice(sample_notice(
+            "REG-OVERDUE",
+            "Already late",
+            // Long past: flagged by the loop's overdue arm.
+            NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            Recurrence::OneTime,
+        ));
+        monitor.monitor_mut().add_notice(sample_notice(
+            "REG-DUE-NOW",
+            "Due this month",
+            Utc::now().date_naive(),
+            Recurrence::Monthly,
+        ));
+
+        // Drive the loop: the first tick fires immediately, the second after
+        // one 10 ms period — both arms (overdue warn + due-this-month info)
+        // execute against real notices. Aborted after 50 ms.
+        let task = tokio::spawn(async move { monitor.run_monthly().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
     }
 }
