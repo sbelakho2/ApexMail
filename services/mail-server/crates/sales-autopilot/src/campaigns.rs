@@ -1581,9 +1581,14 @@ impl CampaignManager {
             return Err(SalesError::CampaignNotFound(id));
         }
 
-        let mut added = 0usize;
-        for email in emails {
-            let normalized = normalize_recipient_email(&email);
+        // Validate EVERY address before writing ANY row. The per-email insert
+        // loop previously committed valid prefixes and THEN returned
+        // InvalidInput for a later bad address — the caller was told the
+        // request failed while the recipient list had silently grown. The
+        // refusal must be all-or-nothing.
+        let mut normalized_emails = Vec::with_capacity(emails.len());
+        for email in &emails {
+            let normalized = normalize_recipient_email(email);
             if normalized.is_empty() {
                 continue;
             }
@@ -1594,6 +1599,11 @@ impl CampaignManager {
                     "invalid recipient email: {email}"
                 )));
             }
+            normalized_emails.push(normalized);
+        }
+
+        let mut added = 0usize;
+        for normalized in normalized_emails {
             let result = sqlx::query(
                 "INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING",
             )
@@ -3364,5 +3374,589 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coverage-wave adversarial proofs: the dispatcher-wired dry run, the
+// frequency-cap funnel window, hostile recipient lists and concurrent
+// starts of the SAME campaign. Run by default; soft-skip only when the
+// canonical test database is unconfigured.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod coverage_wave_campaigns {
+    use super::*;
+    use crate::dispatcher::ProductionCampaignDispatcher;
+    use crate::test_db::{canonical_test_pool, unique_test_tenant};
+    use billing_service::send_admission::SendAdmissionBackend;
+
+    /// Unlimited, suppression-free admission backend so the dry run can use
+    /// the REAL dispatcher without live billing storage.
+    #[derive(Debug, Default)]
+    struct UnlimitedAdmission;
+
+    #[async_trait::async_trait]
+    impl SendAdmissionBackend for UnlimitedAdmission {
+        async fn record_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+        ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError>
+        {
+            Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: 0,
+                duplicate: false,
+            })
+        }
+
+        async fn rollback_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+            _recorded_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), billing_service::usage::UsageError> {
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            _canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn wave_dispatch_config(domain: &str) -> crate::config::DispatchConfig {
+        crate::config::DispatchConfig {
+            from_email: format!("sales@{domain}"),
+            from_name: "Coverage Wave".into(),
+            unsubscribe_secret: "campaign-wave-unsubscribe-secret-0123456789".into(),
+            public_base_url: "http://127.0.0.1:3010".into(),
+            unsubscribe_redirect_url: None,
+            dispatch_interval_secs: 30,
+            dispatch_batch_size: 100,
+            dispatch_concurrency: 1,
+        }
+    }
+
+    async fn wave_dispatcher(
+        pool: &PgPool,
+        domain: &str,
+    ) -> ProductionCampaignDispatcher {
+        ProductionCampaignDispatcher::new(
+            wave_dispatch_config(domain),
+            pool.clone(),
+            std::sync::Arc::new(UnlimitedAdmission),
+        )
+        .expect("the wave dispatch config is configured")
+    }
+
+    /// Insert the platform `tenants` row platform-table FKs require.
+    async fn seed_platform_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'starter', 'active') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("test {tenant}"))
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("insert platform tenant row");
+    }
+
+    /// A verified + DKIM-ready `domains` row for the dispatcher's sender
+    /// domain, so `sender_domain_ready` answers true for this tenant only.
+    async fn seed_verified_domain(pool: &PgPool, tenant: &str, domain: &str) {
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
+             ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'wave-selector', \
+                     'wave-public', 'dkim:v1:wave-test')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(domain)
+        .execute(pool)
+        .await
+        .expect("insert verified domain");
+    }
+
+    /// Seed the platform `templates` row `fetch_template` reads (ids are
+    /// VARCHAR(26)).
+    async fn seed_template(pool: &PgPool, tenant: &str) -> String {
+        let template_id = format!("tpl_{}", &Uuid::new_v4().simple().to_string()[..16]);
+        sqlx::query(
+            "INSERT INTO templates (id, tenant_id, name, slug, subject, html_body, text_body) \
+             VALUES ($1, $2, 'Wave Template', $3, 'Hello {{first_name}}', \
+                     '<p>Hi {{name}}</p>', 'Hi {{first_name}}')",
+        )
+        .bind(&template_id)
+        .bind(tenant)
+        .bind(&template_id)
+        .execute(pool)
+        .await
+        .expect("insert template");
+        template_id
+    }
+
+    /// A contact whose email point is `valid` AND whose CRM profile (the
+    /// `sales_leads` view: full_name/job_title from the contact, company from
+    /// the account) is complete, so the dry run can personalize previews.
+    async fn seed_lead_contact(pool: &PgPool, tenant: &str, email: &str) -> Uuid {
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'LeadCo', $3)",
+        )
+        .bind(account_id)
+        .bind(tenant)
+        .bind(format!("{account_id}.example"))
+        .execute(pool)
+        .await
+        .expect("insert account");
+        let contact_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, job_title, legacy_lead_id) \
+             VALUES ($1, $2, $3, 'Ada Lovelace', 'CTO', $4)",
+        )
+        .bind(contact_id)
+        .bind(tenant)
+        .bind(account_id)
+        .bind(format!("lead_{}", &contact_id.simple().to_string()[..20]))
+        .execute(pool)
+        .await
+        .expect("insert contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, \
+                  verification, confidence) \
+             VALUES ($1, $2, $3, 'email', $4, LOWER($4), 'valid', 0.9)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(contact_id)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("insert verified point");
+        contact_id
+    }
+
+    async fn cleanup_wave(pool: &PgPool, tenant: &str) {
+        for statement in [
+            "DELETE FROM sales_actions WHERE tenant_id = $1",
+            "DELETE FROM sales_step_executions WHERE tenant_id = $1",
+            "DELETE FROM sales_enrollments WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_steps WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_versions WHERE tenant_id = $1",
+            "DELETE FROM sales_sequences WHERE tenant_id = $1",
+            "DELETE FROM sales_contact_points WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+            "DELETE FROM sales_campaign_recipients WHERE campaign_id IN \
+                 (SELECT id FROM sales_campaigns WHERE tenant_id = $1)",
+            "DELETE FROM sales_campaigns WHERE tenant_id = $1",
+            "DELETE FROM templates WHERE tenant_id = $1",
+            "DELETE FROM domains WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// The dry run with a WIRED dispatcher: sender readiness, template
+    /// resolution and personalized CAN-SPAM previews are reported — and an
+    /// unverified sender domain or a missing template becomes an explicit
+    /// warning, never a silent skip.
+    #[tokio::test]
+    async fn dry_run_with_dispatcher_reports_sender_template_and_previews() {
+        let Some(pool) = canonical_test_pool("campaigns::wave::dry_run_dispatcher").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-wave-dry");
+        let bare_tenant = unique_test_tenant("camp-wave-bare");
+        seed_platform_tenant(&pool, &tenant).await;
+        seed_platform_tenant(&pool, &bare_tenant).await;
+        let domain = format!(
+            "wavedry-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        seed_verified_domain(&pool, &tenant, &domain).await;
+        let template_id = seed_template(&pool, &tenant).await;
+        let mgr = CampaignManager::new(10, pool.clone());
+        let dispatcher = wave_dispatcher(&pool, &domain).await;
+
+        let email = format!("ada-{}@leadco.example", &tenant[..12]);
+        seed_lead_contact(&pool, &tenant, &email).await;
+        let campaign = mgr
+            .create_campaign(tenant.clone(), "Wired dry".into(), template_id.clone(), "all".into())
+            .await
+            .unwrap();
+        mgr.add_recipients(&tenant, campaign.id, vec![email.clone()])
+            .await
+            .unwrap();
+
+        let report = mgr
+            .dry_run(&tenant, campaign.id, 10, Some(&dispatcher))
+            .await
+            .expect("the wired dry run succeeds");
+        assert_eq!(report["dry_run"], true);
+        let sender = &report["sender"];
+        assert_eq!(sender["from"], format!("sales@{domain}"));
+        assert_eq!(sender["domain_verified"], true, "{report}");
+        assert_eq!(report["template"]["subject"], "Hello {{first_name}}");
+        assert_eq!(report["template"]["has_html"], true);
+        // The preview is personalized and carries the signed CAN-SPAM link.
+        let preview = report["preview"].as_array().expect("preview array");
+        assert_eq!(preview.len(), 1, "{report}");
+        assert_eq!(preview[0]["email"], email);
+        let subject = preview[0]["subject"].as_str().unwrap_or_default();
+        assert_eq!(subject, "Hello Ada", "first_name personalization: {report}");
+        let link = preview[0]["unsubscribe_link"].as_str().unwrap_or_default();
+        assert!(link.starts_with("http://127.0.0.1:3010/u/"), "{report}");
+        let warnings = report["warnings"].as_array().unwrap();
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("dispatcher not configured")),
+            "a wired dispatcher must not warn about itself: {report}"
+        );
+        // A dry run stamps nothing in the send ledger.
+        let stamped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_campaign_recipients \
+             WHERE campaign_id = $1 AND sent_at IS NOT NULL",
+        )
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stamped, 0, "dry run never stamps the ledger");
+
+        // A tenant WITHOUT a verified sender domain gets the explicit
+        // readiness warning naming the refusal reason a real start would hit.
+        let bare_campaign = mgr
+            .create_campaign(
+                bare_tenant.clone(),
+                "Bare dry".into(),
+                template_id.clone(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        let report = mgr
+            .dry_run(&bare_tenant, bare_campaign.id, 10, Some(&dispatcher))
+            .await
+            .unwrap();
+        assert_eq!(report["sender"]["domain_verified"], false, "{report}");
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("not verified/DKIM-ready")),
+            "{report}"
+        );
+
+        // A missing template is a warning, not an error.
+        let no_template = mgr
+            .create_campaign(
+                tenant.clone(),
+                "No template".into(),
+                "tpl_missing_wave".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        let report = mgr
+            .dry_run(&tenant, no_template.id, 10, Some(&dispatcher))
+            .await
+            .unwrap();
+        assert!(
+            report["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("template not renderable")),
+            "{report}"
+        );
+
+        // The dry run is tenant-scoped: a foreign tenant cannot even read it.
+        assert!(mgr
+            .dry_run(&bare_tenant, campaign.id, 10, Some(&dispatcher))
+            .await
+            .is_err());
+
+        cleanup_wave(&pool, &tenant).await;
+        cleanup_wave(&pool, &bare_tenant).await;
+    }
+
+    /// The weekly frequency cap (fix I-2) counts sends across ALL of the
+    /// tenant's campaigns in a rolling 7-day window: a recipient with three
+    /// sends this week is `frequency_capped`, not `due`, and becomes due when
+    /// the window rolls past.
+    #[tokio::test]
+    async fn frequency_cap_counts_cross_campaign_sends_in_a_rolling_week() {
+        let Some(pool) = canonical_test_pool("campaigns::wave::frequency_cap").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-wave-cap");
+        let mgr = CampaignManager::new(10, pool.clone());
+        let email = "capped@wave.example";
+
+        let campaign = mgr
+            .create_campaign(tenant.clone(), "Capped".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+        mgr.add_recipients(&tenant, campaign.id, vec![email.into()])
+            .await
+            .unwrap();
+
+        // Three sends of the SAME address within the last 7 days, spread
+        // across three other campaigns of this tenant.
+        let mut helper_campaigns = Vec::new();
+        for index in 0..3 {
+            let helper = mgr
+                .create_campaign(tenant.clone(), format!("Helper {index}"), "t".into(), "all".into())
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO sales_campaign_recipients (campaign_id, email, sent_at) \
+                 VALUES ($1, $2, NOW())",
+            )
+            .bind(helper.id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .unwrap();
+            helper_campaigns.push(helper.id);
+        }
+
+        let funnel = mgr
+            .recipient_funnel_counts(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.total, 1);
+        assert_eq!(funnel.already_sent, 0, "the campaign's own row is unsent");
+        assert_eq!(
+            funnel.frequency_capped, 1,
+            "three sends this week exhaust the cap"
+        );
+        assert_eq!(funnel.due, 0, "a capped recipient is not due");
+
+        let report = mgr
+            .dry_run(&tenant, campaign.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(report["recipients"]["frequency_capped"], 1, "{report}");
+        assert_eq!(report["recipients"]["due"], 0, "{report}");
+
+        // The window rolls: sends older than 7 days no longer count.
+        sqlx::query(
+            "UPDATE sales_campaign_recipients SET sent_at = NOW() - INTERVAL '8 days' \
+             WHERE email = $1 AND campaign_id = ANY($2)",
+        )
+        .bind(email)
+        .bind(&helper_campaigns)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let funnel = mgr
+            .recipient_funnel_counts(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.frequency_capped, 0, "an expired window frees the cap");
+        assert_eq!(funnel.due, 1);
+
+        // The cap is per tenant: the same address in ANOTHER tenant's
+        // campaign does not consume this tenant's budget.
+        let other = unique_test_tenant("camp-wave-cap-o");
+        let other_campaign = mgr
+            .create_campaign(other.clone(), "Other tenant".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_campaign_recipients (campaign_id, email, sent_at) \
+             VALUES ($1, $2, NOW())",
+        )
+        .bind(other_campaign.id)
+        .bind(email)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let funnel = mgr
+            .recipient_funnel_counts(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.due, 1, "another tenant's sends never cap this one");
+
+        for t in [&tenant, &other] {
+            cleanup_wave(&pool, t).await;
+        }
+    }
+
+    /// Recipient-list hygiene: a whitespace-only address is SKIPPED (not an
+    /// error, not a row), a syntactically invalid address is refused with the
+    /// address named, and the refusal is all-or-nothing — a rejected batch
+    /// persists nothing.
+    #[tokio::test]
+    async fn add_recipients_skips_blank_and_refuses_invalid_all_or_nothing() {
+        let Some(pool) = canonical_test_pool("campaigns::wave::recipient_hygiene").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-wave-hyg");
+        let mgr = CampaignManager::new(10, pool.clone());
+        let campaign = mgr
+            .create_campaign(tenant.clone(), "Hygiene".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+
+        // Blank entries are skipped; the valid one is added.
+        let added = mgr
+            .add_recipients(
+                &tenant,
+                campaign.id,
+                vec!["   ".into(), "\t".into(), "ok@wave.example".into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(added, 1, "only the valid address is added");
+        let stats = mgr.get_stats(&tenant, campaign.id).await.unwrap();
+        assert_eq!(stats["recipients"], 1);
+
+        // An invalid address is refused WITH the address named — and the
+        // refusal is all-or-nothing: the valid address in the same batch
+        // must NOT have been persisted behind a 400.
+        let error = mgr
+            .add_recipients(
+                &tenant,
+                campaign.id,
+                vec!["second@wave.example".into(), "bad@no-dot".into()],
+            )
+            .await
+            .expect_err("an invalid address must be refused");
+        assert!(error.to_string().contains("bad@no-dot"), "{error}");
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT email FROM sales_campaign_recipients WHERE campaign_id = $1 ORDER BY email",
+        )
+        .bind(campaign.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec!["ok@wave.example".to_string()],
+            "a refused batch writes nothing: the caller is told the request failed, \
+             so the recipient list must not have silently grown: {rows:?}"
+        );
+
+        cleanup_wave(&pool, &tenant).await;
+    }
+
+    /// Two concurrent starts of the SAME campaign (both admitted under the
+    /// tenant lock as ONE durable operation) are idempotent: both succeed,
+    /// both report the same operation id, and exactly one sequence,
+    /// enrollment and queued send action exist.
+    #[tokio::test]
+    async fn concurrent_starts_of_the_same_campaign_are_one_operation() {
+        let Some(pool) = canonical_test_pool("campaigns::wave::same_campaign_race").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-wave-race");
+        let mgr = CampaignManager::new(10, pool.clone());
+        let email = format!("race-{}@example.com", &tenant[..12]);
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, \
+                  verification, confidence) \
+             VALUES ($1, $2, $3, 'email', $4, LOWER($4), 'valid', 0.9)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM sales_contacts WHERE tenant_id = $1 LIMIT 1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let campaign = mgr
+            .create_campaign(tenant.clone(), "Same race".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+        mgr.add_recipients(&tenant, campaign.id, vec![email])
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(
+            mgr.start_campaign_operation(&tenant, campaign.id),
+            mgr.start_campaign_operation(&tenant, campaign.id),
+        );
+
+        // Both admissions belong to the SAME durable operation: both calls
+        // succeed and report the same operation id.
+        let (first, second) = (first.expect("first start"), second.expect("second start"));
+        assert_eq!(first.1.phase, CampaignStartPhase::Active, "{first:?}");
+        assert_eq!(second.1.phase, CampaignStartPhase::Active, "{second:?}");
+        assert_eq!(
+            first.1.operation_id, second.1.operation_id,
+            "both starts are the same durable operation"
+        );
+
+        // Exactly one of everything materialized.
+        let sequences: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_sequences \
+             WHERE tenant_id = $1 AND legacy_campaign_id = $2",
+        )
+        .bind(&tenant)
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sequences, 1, "one compatibility sequence");
+        let enrollments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_enrollments WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(enrollments, 1, "exactly one enrollment");
+        let actions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_actions \
+             WHERE tenant_id = $1 AND action_type = 'send_step'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actions, 1, "exactly one queued send action");
+
+        cleanup_wave(&pool, &tenant).await;
     }
 }

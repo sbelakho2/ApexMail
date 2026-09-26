@@ -1935,8 +1935,7 @@ mod tests {
     /// router can be driven inside `#[tokio::test]` without nesting
     /// runtimes. Handlers that reach the database fail; the tests below
     /// assert on the pre-database behavior (auth, scoping, 501/503).
-    fn lazy_test_app_with_config(config: crate::config::SalesConfig) -> Router {
-        let db = PgPoolOptions::new()
+    pub(super) fn lazy_test_app_with_config(config: crate::config::SalesConfig) -> Router {        let db = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
@@ -1965,7 +1964,7 @@ mod tests {
         router(state)
     }
 
-    fn lazy_test_app() -> Router {
+    pub(super) fn lazy_test_app() -> Router {
         lazy_test_app_with_config(crate::config::SalesConfig::default())
     }
 
@@ -3686,5 +3685,1473 @@ mod gate_and_validation_tests {
             "unknown job refused: {}",
             resp.status()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coverage-wave adversarial proofs: the arms the earlier waves never drove —
+// the public unsubscribe contract variants, the Redis rate-limit path, the
+// inbox/calendar/discovery surfaces end to end, and LIKE-injection in the
+// companies filter. Run by default; soft-skip only when the canonical test
+// database is unconfigured.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod coverage_wave_routes {
+    use super::tests::{lazy_test_app, test_app};
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use billing_service::send_admission::SendAdmissionBackend;
+    use tower::ServiceExt;
+
+    /// Unlimited, suppression-free admission backend so route tests can drive
+    /// the REAL dispatcher without live billing storage (mirrors the fake in
+    /// `dispatcher::tests`).
+    #[derive(Debug, Default)]
+    struct UnlimitedAdmission;
+
+    #[async_trait::async_trait]
+    impl SendAdmissionBackend for UnlimitedAdmission {
+        async fn record_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+        ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError>
+        {
+            Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: 0,
+                duplicate: false,
+            })
+        }
+
+        async fn rollback_send_usage(
+            &self,
+            _tenant_id: &str,
+            _quantity: i64,
+            _event_id: Uuid,
+            _recorded_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), billing_service::usage::UsageError> {
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            _canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn route_dispatch_config() -> crate::config::DispatchConfig {
+        crate::config::DispatchConfig {
+            from_email: "sales@routes-wave.example".into(),
+            from_name: "Coverage Wave".into(),
+            unsubscribe_secret: "route-wave-unsubscribe-secret-0123456789abcdef".into(),
+            public_base_url: "http://127.0.0.1:3010".into(),
+            unsubscribe_redirect_url: None,
+            dispatch_interval_secs: 30,
+            dispatch_batch_size: 100,
+            dispatch_concurrency: 1,
+        }
+    }
+
+    /// Canonical-pool app with a custom `SalesConfig` (the existing harnesses
+    /// hardcode the default config).
+    async fn canonical_app_with_config(
+        test_name: &str,
+        config: crate::config::SalesConfig,
+    ) -> Option<Router> {
+        let db = crate::test_db::canonical_test_pool(test_name).await?;
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("failed to create lazy test redis pool");
+        let state = AppState {
+            db: db.clone(),
+            redis,
+            config,
+            crm: CrmBackend::postgres(db.clone()),
+            enrichment: EnrichmentService::mock(),
+            campaigns: CampaignManager::new(10, db.clone()),
+            dispatcher: None,
+            calendar: CalendarService::new(db.clone()),
+            inbox: InboxManager::new(db.clone()),
+            service_token: "test-key".into(),
+            rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(MessageStrategist::new(
+                db,
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
+        };
+        Some(router(state))
+    }
+
+    /// Canonical-pool app with the production dispatcher wired (the real
+    /// enqueue pipeline; unlimited test admission).
+    async fn canonical_app_with_dispatcher(test_name: &str) -> Option<Router> {
+        let db = crate::test_db::canonical_test_pool(test_name).await?;
+        let dispatcher = ProductionCampaignDispatcher::new(
+            route_dispatch_config(),
+            db.clone(),
+            Arc::new(UnlimitedAdmission),
+        )
+        .expect("the route-wave dispatch config is configured");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("failed to create lazy test redis pool");
+        let state = AppState {
+            db: db.clone(),
+            redis,
+            config: Default::default(),
+            crm: CrmBackend::postgres(db.clone()),
+            enrichment: EnrichmentService::mock(),
+            campaigns: CampaignManager::new(10, db.clone()),
+            dispatcher: Some(Arc::new(dispatcher)),
+            calendar: CalendarService::new(db.clone()),
+            inbox: InboxManager::new(db.clone()),
+            service_token: "test-key".into(),
+            rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(MessageStrategist::new(
+                db,
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
+        };
+        Some(router(state))
+    }
+
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The next weekday (`Weekday::Mon`) at least `min_days_out` days ahead,
+    /// so calendar fixtures never depend on today's position in the week.
+    fn next_weekday_at(
+        weekday: chrono::Weekday,
+        min_days_out: i64,
+        hour: u32,
+        minute: u32,
+    ) -> chrono::DateTime<chrono::Utc> {
+        use chrono::Datelike;
+        let mut day = chrono::Utc::now().date_naive() + chrono::Duration::days(min_days_out);
+        while day.weekday() != weekday {
+            day += chrono::Duration::days(1);
+        }
+        day.and_hms_opt(hour, minute, 0)
+            .expect("valid wall clock")
+            .and_utc()
+    }
+
+    /// RFC 3339 with a `Z` designator (never `+00:00`): a raw `+` in a query
+    /// string decodes as a space and would corrupt the timestamp.
+    fn query_ts(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// Insert the platform `tenants` row a platform-table FK (suppressions,
+    /// messages, domains) requires for a raw `unique_test_tenant` id.
+    async fn seed_platform_tenant(db: &PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'starter', 'active') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("test {tenant}"))
+        .bind(format!("slug-{tenant}"))
+        .execute(db)
+        .await
+        .expect("insert platform tenant row");
+    }
+
+    // ── Public unsubscribe contract ──────────────────────────────────────
+
+    /// RFC 8058: the POST body MUST be exactly `List-Unsubscribe=One-Click`
+    /// (CRLF-tolerant). Anything else is a 400 that must NOT redeem a token —
+    /// and an invalid token on the correct body is a 400 naming the token, not
+    /// a 5xx and never a silent success.
+    #[tokio::test]
+    async fn unsubscribe_post_guards_the_one_click_body_and_invalid_tokens() {
+        // Wrong body shapes are refused before anything is redeemed. (A
+        // CRLF/whitespace-padded correct body is deliberately ACCEPTED —
+        // the handler trims — so it is not in the hostile list.)
+        for hostile in ["", "List-Unsubscribe=Two-Click", "GET"] {
+            let Some(app) = test_app("routes_wave_unsub_body").await else {
+                return;
+            };
+            let resp = app
+                .oneshot(
+                    Request::post("/u/not-a-real-token")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(hostile.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "hostile one-click body {hostile:?} must be refused"
+            );
+            let body = json_body(resp).await;
+            assert_eq!(body["error"], "Invalid request body", "{body}");
+        }
+
+        // The correct body with an invalid token is an honest 400 that names
+        // the problem — with no legacy secret configured the v1 verifier is
+        // skipped, but that must not become a 5xx.
+        let Some(app) = test_app("routes_wave_unsub_invalid").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                Request::post("/u/not-a-real-token")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("List-Unsubscribe=One-Click"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid or expired unsubscribe token"),
+            "{body}"
+        );
+    }
+
+    /// A configured `SALES_UNSUBSCRIBE_REDIRECT_URL` replaces the branded
+    /// page: a GET unsubscribe still suppresses the address AND redirects to
+    /// the operator's target.
+    #[tokio::test]
+    async fn unsubscribe_get_redirects_to_the_configured_target_after_suppressing() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_unsub_redirect_db").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-unsub-red");
+        seed_platform_tenant(&db, &tenant).await;
+        let mut config = crate::config::SalesConfig::default();
+        config.dispatch.unsubscribe_redirect_url = Some("https://brand.example/goodbye".into());
+        let Some(app) = canonical_app_with_config("routes_wave_unsub_redirect", config).await
+        else {
+            return;
+        };
+
+        let token = crate::dispatcher::create_unsubscribe_token(&db, &tenant, "clicker@example.com")
+            .await
+            .expect("v2 token");
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/u/{token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "a configured redirect target must be honoured, got {}",
+            resp.status()
+        );
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://brand.example/goodbye"),
+            "the redirect must go to the configured target"
+        );
+
+        // The redirect happened AFTER the suppression, not instead of it.
+        let suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant)
+        .bind("clicker@example.com")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(suppressed, 1, "redirect must not skip the suppression");
+
+        for statement in [
+            "DELETE FROM sales_unsubscribes WHERE tenant_id = $1",
+            "DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1",
+            "DELETE FROM suppressions WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        }
+    }
+
+    // ── Redis-backed enrichment rate limit through the real router ──────
+
+    /// 30 enrichment calls per tenant per minute — enforced through the REAL
+    /// Redis Lua path (the in-memory fallback is covered elsewhere). Request
+    /// 31 is a 429; the limiter counts BEFORE input validation, so the cheap
+    /// bad-email body proves the window without 31 persisted enrichments.
+    #[tokio::test]
+    async fn enrichment_rate_limit_429s_the_thirty_first_request_via_redis() {
+        let Some(app) = test_app("routes_wave_rate_limit").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-ratelimit");
+        let mut saw_429_early = false;
+        for index in 0..31u32 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::post("/enrich")
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant.clone())
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({ "email": "bad" })).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = resp.status();
+            if index < 30 {
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "request {index} is inside the window (bad email is the 400)"
+                );
+                assert_ne!(status, StatusCode::TOO_MANY_REQUESTS);
+            } else {
+                assert_eq!(
+                    status,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "request 31 must hit the Redis-backed rate limit"
+                );
+                saw_429_early = true;
+            }
+        }
+        assert!(saw_429_early, "the 31st request must be the 429");
+
+        // A DIFFERENT tenant has its own window: not rate-limited.
+        let other = crate::test_db::unique_test_tenant("routes-ratelimit-b");
+        let resp = app
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", other)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "email": "bad" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the window is per tenant"
+        );
+    }
+
+    // ── Inbox read model ─────────────────────────────────────────────────
+
+    /// GET /inbox filters by category (the unknown category lands in
+    /// `other`), is tenant-scoped, and paginates with clamping.
+    #[tokio::test]
+    async fn inbox_listing_is_category_filtered_tenant_scoped_and_paged() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_inbox_db").await else {
+            return;
+        };
+        let Some(app) = test_app("routes_wave_inbox").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-inbox");
+        let other = crate::test_db::unique_test_tenant("routes-inbox-other");
+        for (sender, category) in [
+            ("lead1@example.com", "lead"),
+            ("spam1@example.com", "spam"),
+            ("optout1@example.com", "unsubscribe"),
+            ("misc1@example.com", "other"),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+                 VALUES ($1, $2, $3, 'seeded', $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(sender)
+            .bind(category)
+            .execute(&db)
+            .await
+            .expect("seed inbox message");
+        }
+        sqlx::query(
+            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+             VALUES ($1, $2, 'foreign@example.com', 'seeded', 'lead')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&other)
+        .execute(&db)
+        .await
+        .expect("seed foreign inbox message");
+
+        let get = |url: &'static str, tenant: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::get(url)
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let all = json_body(get("/inbox", tenant.clone()).await).await;
+        assert_eq!(all.as_array().unwrap().len(), 4, "{all}");
+
+        let spam = json_body(get("/inbox?category=spam", tenant.clone()).await).await;
+        assert_eq!(spam.as_array().unwrap().len(), 1, "{spam}");
+        assert_eq!(spam[0]["category"], "spam");
+
+        let optout = json_body(get("/inbox?category=unsubscribe", tenant.clone()).await).await;
+        assert_eq!(optout.as_array().unwrap().len(), 1, "{optout}");
+
+        // An unknown category string maps to the `other` bucket, not an error
+        // and not "everything".
+        let nonsense = json_body(get("/inbox?category=telepathy", tenant.clone()).await).await;
+        assert_eq!(nonsense.as_array().unwrap().len(), 1, "{nonsense}");
+        assert_eq!(nonsense[0]["category"], "other");
+
+        // Hostile pagination clamps instead of erroring.
+        let paged = json_body(get("/inbox?limit=2&offset=0", tenant.clone()).await).await;
+        assert_eq!(paged.as_array().unwrap().len(), 2, "{paged}");
+        let clamped = json_body(get("/inbox?limit=-5&offset=99999", tenant.clone()).await).await;
+        assert!(clamped.as_array().unwrap().is_empty(), "{clamped}");
+
+        // The foreign tenant sees only its own message.
+        let foreign = json_body(get("/inbox", other.clone()).await).await;
+        assert_eq!(foreign.as_array().unwrap().len(), 1, "{foreign}");
+        assert_eq!(foreign[0]["tenant_id"], other);
+
+        for t in [&tenant, &other] {
+            let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1")
+                .bind(t)
+                .execute(&db)
+                .await;
+        }
+    }
+
+    // ── Inbox reply through the real dispatcher ──────────────────────────
+
+    /// POST /inbox/:id/reply with the production dispatcher wired: the reply
+    /// is enqueued through the platform pipeline exactly once, the `replied`
+    /// flag commits with it, and a replay is an idempotent duplicate.
+    #[tokio::test]
+    async fn inbox_reply_enqueues_exactly_once_through_the_platform_pipeline() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_reply_db").await else {
+            return;
+        };
+        let Some(app) = canonical_app_with_dispatcher("routes_wave_reply").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-reply");
+        seed_platform_tenant(&db, &tenant).await;
+        // The reply's legacy sender is the deployment-wide
+        // `SALES_CAMPAIGN_FROM_EMAIL`; its domain must be verified+DKIM-ready
+        // for the fixture tenant or the enqueue honestly refuses.
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
+             ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, 'routes-wave.example', 'verified', true, true, true, \
+                     'wave-selector', 'wave-public', 'dkim:v1:wave-test')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("seed verified sender domain");
+        let inbox_id = Uuid::new_v4();
+        let sender = format!("prospect-{}@example.com", &inbox_id.simple().to_string()[..8]);
+        sqlx::query(
+            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+             VALUES ($1, $2, $3, 'Re: demo', 'positive')",
+        )
+        .bind(inbox_id)
+        .bind(&tenant)
+        .bind(&sender)
+        .execute(&db)
+        .await
+        .expect("seed inbox message");
+
+        let post_reply = |app: Router, body: serde_json::Value| {
+            let tenant = tenant.clone();
+            async move {
+                app.oneshot(
+                    Request::post(format!("/inbox/{inbox_id}/reply"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let first = post_reply(
+            app.clone(),
+            serde_json::json!({ "body": "Thanks for the demo!" }),
+        )
+        .await;
+        assert_eq!(
+            first.status(),
+            StatusCode::ACCEPTED,
+            "reply enqueues: {}",
+            serde_json::to_string(&json_body(first).await).unwrap_or_default()
+        );
+        let body = json_body(first).await;
+        assert_eq!(body["queued"], true, "{body}");
+        assert_eq!(body["replied"], true);
+        assert_eq!(body["to"], sender);
+        let message_id = body["messageId"].as_str().expect("messageId").to_string();
+
+        // The platform rows exist and the flag committed with the enqueue.
+        let replied: bool =
+            sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(inbox_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(replied, "the flag commits atomically with the enqueue");
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(queued, 1);
+
+        // A replay does NOT send a second reply.
+        let replay = post_reply(app.clone(), serde_json::json!({ "body": "duplicate attempt" }))
+            .await;
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        let body = json_body(replay).await;
+        assert_eq!(body["duplicate"], true, "{body}");
+        assert_eq!(body["queued"], false);
+        assert_eq!(
+            body["messageId"].as_str().unwrap(),
+            message_id,
+            "the replay reports the original message"
+        );
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(messages, 1, "exactly one reply per inbox message");
+
+        // Cross-tenant: another tenant cannot reply to (or even see) it.
+        let foreign = app
+            .oneshot(
+                Request::post(format!("/inbox/{inbox_id}/reply"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", crate::test_db::unique_test_tenant("routes-reply-o"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "body": "steal" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND, "tenant-scoped");
+
+        for statement in [
+            "DELETE FROM email_queue WHERE tenant_id = $1",
+            "DELETE FROM messages WHERE tenant_id = $1",
+            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
+            "DELETE FROM domains WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        }
+    }
+
+    /// The reply route's honest refusals: a platform-suppressed correspondent
+    /// and a syntactically invalid sender are 400s that leave the message
+    /// unanswered, an unknown message is a 404, and an oversized body is
+    /// refused before any enqueue work.
+    #[tokio::test]
+    async fn inbox_reply_refuses_suppressed_invalid_and_oversized_requests() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_reply_bad_db").await
+        else {
+            return;
+        };
+        let Some(app) = canonical_app_with_dispatcher("routes_wave_reply_bad").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-reply-bad");
+        seed_platform_tenant(&db, &tenant).await;
+
+        let suppressed_inbox = Uuid::new_v4();
+        let invalid_inbox = Uuid::new_v4();
+        for (id, sender) in [(suppressed_inbox, "bounced@example.com"), (invalid_inbox, "no-at-sign")] {
+            sqlx::query(
+                "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+                 VALUES ($1, $2, $3, 'hi', 'other')",
+            )
+            .bind(id)
+            .bind(&tenant)
+            .bind(sender)
+            .execute(&db)
+            .await
+            .expect("seed inbox message");
+        }
+        // Platform-level hard bounce for the suppressed correspondent. The
+        // reply is 1:1 correspondence, so only THIS list blocks it.
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
+             VALUES ($1, $2, 'bounced@example.com', 'hard_bounce', 'platform', NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("sup", 22))
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("platform-suppress the correspondent");
+
+        let reply = |inbox: Uuid, body: serde_json::Value, tenant: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post(format!("/inbox/{inbox}/reply"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // (a) Suppressed correspondent: 400, nothing enqueued, flag untouched.
+        let resp = reply(
+            suppressed_inbox,
+            serde_json::json!({ "body": "hello?" }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("suppressed"),
+            "{body}"
+        );
+        let replied: bool =
+            sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(suppressed_inbox)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(!replied, "a refused reply leaves the message unanswered");
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(messages, 0, "no message for a suppressed correspondent");
+
+        // (b) A sender that is not a valid email is refused before any quota.
+        let resp = reply(
+            invalid_inbox,
+            serde_json::json!({ "body": "hello?" }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a valid email"),
+            "{body}"
+        );
+
+        // (c) Unknown message id: tenant-scoped 404, never a 500.
+        let resp = reply(
+            Uuid::new_v4(),
+            serde_json::json!({ "body": "hello?" }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // (d) An oversized reply is refused by length before any work.
+        let oversized = "x".repeat(100_001);
+        let resp = reply(
+            suppressed_inbox,
+            serde_json::json!({ "body": oversized }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exceeds the maximum"),
+            "{body}"
+        );
+
+        for statement in [
+            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
+            "DELETE FROM suppressions WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        }
+    }
+
+    // ── Calendar surface ─────────────────────────────────────────────────
+
+    /// The calendar event lifecycle through the router: creation validates
+    /// ordering, recency and legacy working hours; listing is tenant-scoped
+    /// and clamps hostile pagination; cancellation is tenant-scoped.
+    #[tokio::test]
+    async fn calendar_event_lifecycle_is_validated_tenant_scoped_and_cancellable() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_calendar_db").await
+        else {
+            return;
+        };
+        let Some(app) = test_app("routes_wave_calendar").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-cal");
+        let other = crate::test_db::unique_test_tenant("routes-cal-other");
+        let start = next_weekday_at(chrono::Weekday::Mon, 14, 10, 0);
+        let end = start + chrono::Duration::minutes(30);
+
+        let post_event = |body: serde_json::Value, tenant: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::post("/calendar/events")
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let created = post_event(
+            serde_json::json!({
+                "title": "Discovery call",
+                "attendees": ["prospect@example.com"],
+                "start_at": start.to_rfc3339(),
+                "end_at": end.to_rfc3339(),
+            }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK, "valid event books");
+        let event = json_body(created).await;
+        let event_id = event["id"].as_str().expect("event id").to_string();
+        assert_eq!(event["title"], "Discovery call");
+        assert!(
+            event["meeting_link"].as_str().unwrap_or_default().len() > 0,
+            "a conferencing link is generated: {event}"
+        );
+
+        // end_at <= start_at is a 400 naming the rule.
+        let resp = post_event(
+            serde_json::json!({
+                "title": "Backwards",
+                "start_at": start.to_rfc3339(),
+                "end_at": start.to_rfc3339(),
+            }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("end_at must be after start_at"));
+
+        // A past start is refused.
+        let resp = post_event(
+            serde_json::json!({
+                "title": "Time travel",
+                "start_at": (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
+                "end_at": chrono::Utc::now().to_rfc3339(),
+            }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Outside the legacy working hours (default 09:00–17:00) is refused.
+        let late = next_weekday_at(chrono::Weekday::Mon, 14, 20, 0);
+        let resp = post_event(
+            serde_json::json!({
+                "title": "Midnight oil",
+                "start_at": late.to_rfc3339(),
+                "end_at": (late + chrono::Duration::minutes(30)).to_rfc3339(),
+            }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "outside hours");
+
+        // Header/payload tenant mismatch is refused before any write.
+        let resp = post_event(
+            serde_json::json!({
+                "title": "Smuggled",
+                "start_at": start.to_rfc3339(),
+                "end_at": end.to_rfc3339(),
+                "tenant_id": other,
+            }),
+            tenant.clone(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Listing: owner sees one event (the default window is now..+7d, so
+        // query an explicit range covering the fixture), hostile pagination
+        // clamps, the foreign tenant sees nothing.
+        let window = format!(
+            "from={}&to={}",
+            (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339_opts(
+                chrono::SecondsFormat::Secs,
+                true
+            ),
+            (chrono::Utc::now() + chrono::Duration::days(60))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        );
+        let listed = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/calendar?{window}"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let events = json_body(listed).await;
+        assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+        let paged = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get(format!("/calendar?{window}&limit=-3&offset=5"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(paged.as_array().unwrap().is_empty(), "{paged}");
+        let foreign = json_body(
+            app.clone()
+                .oneshot(
+                    Request::get("/calendar")
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", other.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(foreign.as_array().unwrap().is_empty(), "{foreign}");
+
+        // Cancellation is tenant-scoped: the owner can cancel, the foreign
+        // tenant and an unknown id are 404s.
+        let cancel = |id: Uuid, tenant: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::delete(format!("/calendar/events/{id}"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let foreign_cancel = cancel(event_id.parse().unwrap(), other.clone()).await;
+        assert_eq!(foreign_cancel.status(), StatusCode::NOT_FOUND);
+        let unknown_cancel = cancel(Uuid::new_v4(), tenant.clone()).await;
+        assert_eq!(unknown_cancel.status(), StatusCode::NOT_FOUND);
+        let own_cancel = cancel(event_id.parse().unwrap(), tenant.clone()).await;
+        assert_eq!(own_cancel.status(), StatusCode::OK);
+        let body = json_body(own_cancel).await;
+        assert_eq!(body["cancelled"], true);
+        assert_eq!(body["id"], event_id);
+
+        for t in [&tenant, &other] {
+            for statement in [
+                "DELETE FROM sales_calendar_events WHERE tenant_id = $1",
+                "DELETE FROM sales_meetings WHERE tenant_id = $1",
+            ] {
+                let _ = sqlx::query(statement).bind(t).execute(&db).await;
+            }
+        }
+    }
+
+    /// Slot discovery: garbage dates and timezones are 400s, legacy UTC mode
+    /// offers the 09:00–17:00 half-hour grid on a weekday, IANA mode offers
+    /// nothing on a weekend and DST-correct local slots on a weekday.
+    #[tokio::test]
+    async fn calendar_slots_validate_input_and_honour_timezone_policy() {
+        let Some(app) = test_app("routes_wave_slots").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-slots");
+        let monday = next_weekday_at(chrono::Weekday::Mon, 21, 12, 0);
+        let sunday = next_weekday_at(chrono::Weekday::Sun, 21, 12, 0);
+
+        let get_slots = |query: String| {
+            let app = app.clone();
+            let tenant = tenant.clone();
+            async move {
+                app.oneshot(
+                    Request::get(format!("/calendar/slots?{query}"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // An unparseable date is a 400, never a silent "today".
+        let resp = get_slots("date=not-a-timestamp".to_string()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("RFC 3339"));
+
+        // An unparseable IANA zone is a 400 naming the input.
+        let resp = get_slots(format!(
+            "date={}&timezone=Mars/Olympus",
+            query_ts(monday)
+        ))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(json_body(resp).await["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("IANA"));
+
+        // Header/payload tenant mismatch is refused.
+        let resp = get_slots(format!("date={}&tenant_id=smuggled-tenant", query_ts(monday))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Legacy UTC mode: the 09:00–17:00 half-hour grid on a weekday.
+        let resp = get_slots(format!("date={}", query_ts(monday))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let slots = json_body(resp).await;
+        let slots = slots.as_array().expect("legacy slots array");
+        assert_eq!(slots.len(), 16, "8 working hours of 30-minute slots");
+        let first_start: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(slots[0]["start"].clone()).unwrap();
+        assert_eq!(first_start.format("%H:%M").to_string(), "09:00");
+        let last_end: chrono::DateTime<chrono::Utc> =
+            serde_json::from_value(slots[15]["end"].clone()).unwrap();
+        assert_eq!(last_end.format("%H:%M").to_string(), "17:00");
+
+        // IANA mode: a Sunday is outside the Mon–Fri working week — empty,
+        // not an error; a weekday yields DST-correct local slots labelled
+        // with the requested zone.
+        let resp = get_slots(format!(
+            "date={}&timezone=Europe/Tallinn",
+            query_ts(sunday)
+        ))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sunday_slots = json_body(resp).await;
+        assert!(
+            sunday_slots.as_array().unwrap().is_empty(),
+            "a Sunday has no slots: {sunday_slots}"
+        );
+
+        let resp = get_slots(format!(
+            "date={}&timezone=Europe/Tallinn",
+            query_ts(monday)
+        ))
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tallinn = json_body(resp).await;
+        let tallinn = tallinn.as_array().expect("tallinn slots array");
+        assert!(!tallinn.is_empty(), "a Monday has slots in Europe/Tallinn");
+        for slot in tallinn {
+            assert_eq!(slot["timezone"], "Europe/Tallinn");
+            assert!(slot["local_start"].is_string(), "{slot}");
+            assert!(slot["start"].is_string(), "{slot}");
+        }
+    }
+
+    // ── Discovery surface ────────────────────────────────────────────────
+
+    /// The full offline discovery job: a first-party job is created queued,
+    /// runs to completed importing the tenant's own accounts, is readable
+    /// tenant-scoped, and refuses a second run once terminal.
+    #[tokio::test]
+    async fn discovery_first_party_job_creates_runs_and_completes_offline() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_disc_db").await else {
+            return;
+        };
+        let Some(app) = test_app("routes_wave_disc").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-disc");
+        let other = crate::test_db::unique_test_tenant("routes-disc-other");
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'Acme Disc Co', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(format!("disc-{}.example", &tenant[..12]))
+        .execute(&db)
+        .await
+        .expect("seed account");
+
+        let auth = |builder: axum::http::request::Builder, tenant: String| {
+            builder
+                .header("x-api-key", "test-key")
+                .header("x-tenant-id", tenant)
+                .header("content-type", "application/json")
+        };
+
+        let create = app
+            .clone()
+            .oneshot(
+                auth(Request::post("/discovery/jobs"), tenant.clone())
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "sources": ["first_party"],
+                            "keywords": ["Acme"],
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK, "job is created queued");
+        let job = json_body(create).await;
+        let job_id = job["jobId"].as_str().expect("jobId").to_string();
+        assert_eq!(job["status"], "queued", "{job}");
+
+        // The tenant-scoped status endpoint shows the queued job; the foreign
+        // tenant gets nothing.
+        let status = app
+            .clone()
+            .oneshot(
+                auth(Request::get(format!("/discovery/jobs/{job_id}")), tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(json_body(status).await["status"], "queued");
+        let foreign = app
+            .clone()
+            .oneshot(
+                auth(Request::get(format!("/discovery/jobs/{job_id}")), other.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            foreign.status().is_client_error(),
+            "a foreign tenant cannot read the job: {}",
+            foreign.status()
+        );
+
+        // One bounded batch completes the first-party job and surfaces the
+        // tenant's own account as a candidate. `imported` counts only
+        // PROMOTIONS (candidates turned into NEW accounts) — a first-party
+        // candidate already IS the account, so it must be discovered without
+        // being re-imported.
+        let run = app
+            .clone()
+            .oneshot(
+                auth(Request::post(format!("/discovery/jobs/{job_id}/run")), tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.status(), StatusCode::OK, "the batch runs");
+        let ran = json_body(run).await;
+        assert_eq!(ran["status"], "completed", "{ran}");
+        assert!(
+            ran["discovered"].as_i64().unwrap_or(0) >= 1,
+            "the tenant's own account is discovered: {ran}"
+        );
+        assert_eq!(
+            ran["imported"], 0,
+            "a first-party candidate must not be re-imported over the live account: {ran}"
+        );
+        let accounts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_accounts WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(accounts, 1, "discovery must not duplicate the account");
+
+        // A terminal job refuses a second run.
+        let rerun = app
+            .oneshot(
+                auth(
+                    Request::post(format!("/discovery/jobs/{job_id}/run")),
+                    tenant.clone(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rerun.status().is_client_error(),
+            "a completed job must not run again: {}",
+            rerun.status()
+        );
+
+        for statement in [
+            "DELETE FROM sales_discovery_candidates WHERE tenant_id = $1",
+            "DELETE FROM sales_source_runs WHERE tenant_id = $1",
+            "DELETE FROM sales_discovery_jobs WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        }
+    }
+
+    /// An unknown source name is refused with a 400 that NAMES it: the old
+    /// fallback-to-every-configured-source would run a paid provider because
+    /// of a typo.
+    #[tokio::test]
+    async fn discovery_job_creation_refuses_unknown_source_names() {
+        let Some(app) = test_app("routes_wave_disc_unknown").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-disc-typo");
+        let resp = app
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "sources": ["totally_bogus_source"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("totally_bogus_source"),
+            "the refusal must name the unknown source: {body}"
+        );
+    }
+
+    // ── Companies LIKE-injection ─────────────────────────────────────────
+
+    /// The industry filter escapes LIKE metacharacters: a `%`/`_` filter
+    /// matches its literal self (nothing), not every company.
+    #[tokio::test]
+    async fn companies_industry_filter_escapes_like_wildcards() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_companies_db").await
+        else {
+            return;
+        };
+        let Some(app) = test_app("routes_wave_companies").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-companies");
+        let other = crate::test_db::unique_test_tenant("routes-companies-o");
+        sqlx::query(
+            "INSERT INTO enriched_companies (id, tenant_id, domain, company_name, industry, confidence_score) \
+             VALUES ($1, $2, 'wildcard.example', 'Wildcard Co', 'saas', 0.9)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&db)
+        .await
+        .expect("seed enriched company");
+
+        let get = |query: String, tenant: String| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::get(format!("/companies?{query}"))
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let plain = json_body(get(String::new(), tenant.clone()).await).await;
+        assert_eq!(plain.as_array().unwrap().len(), 1, "{plain}");
+        assert_eq!(plain[0]["industry"], "saas");
+
+        // A bare `%` filter would match every industry unescaped.
+        let percent = json_body(get("industry=%25".to_string(), tenant.clone()).await).await;
+        assert!(
+            percent.as_array().unwrap().is_empty(),
+            "a % filter must match the literal %, not everything: {percent}"
+        );
+        let underscore = json_body(get("industry=_".to_string(), tenant.clone()).await).await;
+        assert!(
+            underscore.as_array().unwrap().is_empty(),
+            "a _ filter must match the literal _, not any character"
+        );
+        // A real substring still matches.
+        let substring = json_body(get("industry=sa".to_string(), tenant.clone()).await).await;
+        assert_eq!(substring.as_array().unwrap().len(), 1, "{substring}");
+        // Tenant isolation holds on every variant.
+        let foreign = json_body(get(String::new(), other).await).await;
+        assert!(foreign.as_array().unwrap().is_empty(), "{foreign}");
+
+        let _ = sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+    }
+
+    // ── Honest health + tenant-header shapes ─────────────────────────────
+
+    /// With an unreachable database `/health` reports 503 degraded — the
+    /// k8s probe must see the degradation, not a green 200.
+    #[tokio::test]
+    async fn health_reports_degraded_when_the_database_is_unreachable() {
+        // `lazy_test_app` never connects: the health probe must answer 503
+        // with database "down" instead of hanging or lying.
+        let app = lazy_test_app();
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(resp).await;
+        assert_eq!(body["status"], "degraded", "{body}");
+        assert_eq!(body["database"], "down", "{body}");
+    }
+
+    /// The tenant header contract: a whitespace-only header is a 400, and a
+    /// VALID header with surrounding whitespace is trimmed (not rejected, not
+    /// taken literally).
+    #[tokio::test]
+    async fn tenant_header_whitespace_is_trimmed_and_blank_is_rejected() {
+        let app = lazy_test_app();
+        let blank = app
+            .clone()
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "   ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+
+        let padded = app
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "  tenant-a  ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Trimmed to `tenant-a`, past auth, fails on the dead lazy database —
+        // a 400 would mean the padding leaked into the tenant id.
+        assert!(
+            padded.status().is_server_error(),
+            "padded tenant id must be trimmed, got {}",
+            padded.status()
+        );
+    }
+
+    // ── Campaign start: the honest non-active report through the router ──
+
+    /// A start whose every recipient is rejected reports the durable
+    /// verification_pending phase AND the per-recipient enrollment outcome in
+    /// the HTTP response — an operator must see a partial start, not a bare
+    /// status. A retry resumes the SAME durable operation id.
+    #[tokio::test]
+    async fn campaign_start_reports_verification_pending_and_enrollment_outcome() {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_start_db").await else {
+            return;
+        };
+        let Some(app) = test_app("routes_wave_start").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-start");
+        let create = app
+            .clone()
+            .oneshot(
+                Request::post("/campaigns")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "Honest start",
+                            "template_id": "tmpl_wave",
+                            "audience": "all",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::OK);
+        let campaign = json_body(create).await;
+        let campaign_id = campaign["id"].as_str().unwrap().to_string();
+
+        // The recipient has NO verified contact point: enrollment must reject
+        // it (unverified_contact) and the start must NOT activate.
+        let recipients = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/recipients"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "emails": ["unverified-recipient@example.com"]
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recipients.status(), StatusCode::OK);
+
+        let start = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/start"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(start.status(), StatusCode::OK);
+        let started = json_body(start).await;
+        assert_eq!(started["status"], "draft", "not active: {started}");
+        assert_eq!(
+            started["start"]["state"], "verification_pending",
+            "the durable phase is reported, not hidden: {started}"
+        );
+        assert!(
+            started["start"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("verification_pending"),
+            "{started}"
+        );
+        assert_eq!(
+            started["enrollment"]["rejected"], 1,
+            "the per-recipient outcome is surfaced: {started}"
+        );
+        assert_eq!(
+            started["enrollment"]["rejectionReasons"]["unverified_contact"], 1,
+            "{started}"
+        );
+        let operation_id = started["start"]["operationId"]
+            .as_str()
+            .expect("durable operation id")
+            .to_string();
+
+        // A retry resumes the SAME durable operation.
+        let retry = app
+            .oneshot(
+                Request::post(format!("/campaigns/{campaign_id}/start"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let retried = json_body(retry).await;
+        assert_eq!(retried["start"]["state"], "verification_pending");
+        assert_eq!(
+            retried["start"]["operationId"].as_str().unwrap(),
+            operation_id,
+            "the retry resumes the same durable operation"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+            .bind(campaign_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
     }
 }

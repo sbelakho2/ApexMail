@@ -3367,4 +3367,484 @@ mod tests {
         assert_eq!(messages, 0, "a refusal must write no message");
         assert_eq!(queued, 0, "a refusal must enqueue nothing");
     }
+
+    // -----------------------------------------------------------------------
+    // Coverage-wave adversarial proofs: internal-action revalidation,
+    // unreadable policy inputs, contact-point resolution fallbacks, the
+    // sender-health fail-closed matrix, and the touch-reservation lifecycle.
+    // -----------------------------------------------------------------------
+
+    /// An INTERNAL action has no external effect to protect: revalidation is
+    /// allowed with zero gates re-read — even with the kill switch engaged,
+    /// the address suppressed and the verification regressed. Those states
+    /// must stop SENDS, not freeze internal bookkeeping.
+    #[tokio::test]
+    async fn internal_actions_revalidate_to_allowed_without_touching_any_gate() {
+        let Some(pool) = live_pool("decision_engine::wave::internal_action").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-internal");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let mut ctx = send_context(&fixture, fixture.policy_input());
+        ctx.action = DecisionAction::CollectEvidence;
+        let outcome = decide(&pool, ctx).await.unwrap();
+
+        let revalidation = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            revalidation.allowed,
+            "an internal action needs no execution gates: {:?}",
+            revalidation.reasons
+        );
+        assert!(
+            revalidation.checked.is_empty(),
+            "no gate may be re-read for an internal action: {:?}",
+            revalidation.checked
+        );
+
+        // Everything going wrong at once still does not block internal work:
+        // there is no external effect to protect.
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = TRUE WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_contact_points SET verification = 'invalid' WHERE id = $1")
+            .bind(fixture.contact_point_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let still_allowed = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            still_allowed.allowed,
+            "internal bookkeeping is not a send: {:?}",
+            still_allowed.reasons
+        );
+    }
+
+    /// Recorded policy INPUTS are recipient facts re-evaluated at revalidation
+    /// time. If the audit row cannot be deserialized at all, the gate fails
+    /// CLOSED with the corruption named — never silently allowed.
+    #[tokio::test]
+    async fn revalidation_fails_closed_when_recorded_policy_inputs_are_unreadable() {
+        let Some(pool) = live_pool("decision_engine::wave::unreadable_inputs").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-unreadable");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        // Corrupt the audit trail the legal gate re-reads.
+        let corrupted = sqlx::query(
+            "UPDATE sales_contact_policy_decisions \
+             SET inputs = '\"not a policy input\"' WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .rows_affected();
+        assert!(corrupted >= 1, "the audit row to corrupt must exist");
+
+        let revalidation = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !revalidation.allowed,
+            "unreadable policy inputs must fail closed: {:?}",
+            revalidation.reasons
+        );
+        assert!(
+            revalidation
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("legal_policy_input_unreadable")),
+            "{:?}",
+            revalidation.reasons
+        );
+    }
+
+    /// When the direct links are missing (no linked action, no step-execution
+    /// decision, no decision_id on the enrollment, no point on the
+    /// enrollment), revalidation must STILL find the contact's newest email
+    /// point and newest enrollment through the fallback carriers — and the
+    /// suppression and human-reply gates must fire on what it finds.
+    #[tokio::test]
+    async fn revalidation_resolves_points_and_enrollments_through_the_fallbacks() {
+        let Some(pool) = live_pool("decision_engine::wave::fallbacks").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-fallback");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+
+        // Sever EVERY direct carrier: the step-execution link, the
+        // enrollment's own contact point, and the audit row's point
+        // reference. No sales_actions row exists for a bare decide, and the
+        // fixture enrollment carries no decision_id. The audit row itself
+        // stays (readable inputs, keyed only by contact) — exactly the
+        // degraded-shape case the fallback carriers exist for.
+        sqlx::query("UPDATE sales_step_executions SET decision_id = NULL WHERE id = $1")
+            .bind(fixture.step_execution_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_enrollments SET contact_point_id = NULL WHERE id = $1")
+            .bind(fixture.enrollment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE sales_contact_policy_decisions SET contact_point_id = NULL \
+             WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Every gate is still re-read: the contact's newest email point is
+        // found via the last-resort carrier and feeds the real gates.
+        let clean = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            clean.allowed,
+            "the fallback resolution must find the healthy point: {:?}",
+            clean.reasons
+        );
+        assert!(clean.checked.contains(&GATE_SUPPRESSION), "{:?}", clean.checked);
+        assert!(
+            clean.checked.contains(&GATE_ADDRESS_VERIFICATION),
+            "{:?}",
+            clean.checked
+        );
+
+        // The fallback-fed gates actually FIRE: an unsubscribe after the
+        // decision stops the send.
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let suppressed = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(!suppressed.allowed, "the fallback point feeds the gate");
+        assert!(
+            suppressed
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("suppressed:")),
+            "{:?}",
+            suppressed.reasons
+        );
+        sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // And a human reply on the enrollment — found via the contact's
+        // newest-enrollment fallback — blocks the next touch too.
+        sqlx::query("UPDATE sales_enrollments SET has_human_reply = TRUE WHERE id = $1")
+            .bind(fixture.enrollment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replied = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(!replied.allowed);
+        assert!(
+            replied
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("human_reply:")),
+            "{:?}",
+            replied.reasons
+        );
+    }
+
+    /// The sender-health matrix, fail closed in every direction: a sender
+    /// that was never health-assessed, a paused sender, and a sender below
+    /// the minimum score are all refused — at decide time AND through an
+    /// approved decision's revalidation.
+    #[tokio::test]
+    async fn sender_health_fails_closed_when_missing_paused_or_low_score() {
+        let Some(pool) = live_pool("decision_engine::wave::sender_matrix").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-sender");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+
+        let mut assessed = send_context(&fixture, fixture.policy_input());
+        assessed.selected_sender = Some(fixture.sender_id);
+        let mut never_assessed = send_context(&fixture, fixture.policy_input());
+        let unassessed_sender = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sender_identities \
+                 (id, tenant_id, pool, from_email, from_name, domain, status, daily_limit) \
+             VALUES ($1, $2, 'sales_outbound', $3, 'Unassessed', 'example.com', 'active', 100)",
+        )
+        .bind(unassessed_sender)
+        .bind(&tenant)
+        .bind(format!("unassessed-{unassessed_sender}@example.com"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        never_assessed.selected_sender = Some(unassessed_sender);
+
+        // (a) Never assessed: fail closed, never "assume healthy".
+        let outcome = decide(&pool, never_assessed).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied, "{outcome:?}");
+        assert!(outcome.block_reasons.iter().any(|reason| reason
+            .starts_with("sender_health_denied:")
+            && reason.contains("never been health-assessed")), "{outcome:?}");
+
+        // (b) Below the minimum score: refused with the numbers named.
+        let low_sender = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sender_identities \
+                 (id, tenant_id, pool, from_email, from_name, domain, status, daily_limit) \
+             VALUES ($1, $2, 'sales_outbound', $3, 'Low Score', 'example.com', 'active', 100)",
+        )
+        .bind(low_sender)
+        .bind(&tenant)
+        .bind(format!("low-{low_sender}@example.com"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_sender_health \
+                 (id, tenant_id, sender_identity_id, health_score, state) \
+             VALUES (gen_random_uuid(), $1, $2, 0.01, 'healthy')",
+        )
+        .bind(&tenant)
+        .bind(low_sender)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut low = send_context(&fixture, fixture.policy_input());
+        low.selected_sender = Some(low_sender);
+        let outcome = decide(&pool, low).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(outcome.block_reasons.iter().any(|reason| reason
+            .starts_with("sender_health_denied:")
+            && reason.contains("below the minimum")), "{outcome:?}");
+
+        // (c) Paused: refused at decide time, and an ALREADY-APPROVED
+        // decision cannot ride over a pause that happened after approval.
+        let healthy_first = decide(&pool, assessed.clone()).await.unwrap();
+        assert_eq!(healthy_first.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(
+            &pool,
+            healthy_first.decision_id,
+            fixture.step_execution_id,
+        )
+        .await;
+        sqlx::query("UPDATE sales_decisions SET review_status = 'approved' WHERE id = $1")
+            .bind(healthy_first.decision_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let approved = revalidate_execution(&pool, healthy_first.decision_id)
+            .await
+            .unwrap();
+        assert!(approved.allowed, "{:?}", approved.reasons);
+
+        sqlx::query(
+            "UPDATE sales_sender_health SET state = 'paused' WHERE sender_identity_id = $1",
+        )
+        .bind(fixture.sender_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let after_pause = decide(&pool, assessed).await.unwrap();
+        assert_eq!(after_pause.enforcement, Enforcement::Denied);
+        assert!(after_pause
+            .block_reasons
+            .iter()
+            .any(|reason| reason.starts_with("sender_health_denied:")
+                && reason.contains("paused")));
+        let reapproved = revalidate_execution(&pool, healthy_first.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !reapproved.allowed,
+            "an approval must not defeat a paused sender"
+        );
+    }
+
+    /// The touch-budget reservation fails closed on an unknown account,
+    /// `release_decision_touch_tx` is a safe no-op for decisions without an
+    /// account (or that do not exist), and a released logical send can be
+    /// re-admitted.
+    #[tokio::test]
+    async fn touch_reservations_fail_closed_and_release_is_a_safe_noop() {
+        let Some(pool) = live_pool("decision_engine::wave::reservation_noop").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-reserve");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+
+        // An unknown account is an ERROR, never a silent refusal.
+        {
+            let mut tx = pool.begin().await.unwrap();
+            let error = reserve_account_touch_tx(
+                &mut tx,
+                &tenant,
+                Uuid::new_v4(),
+                "sa-send:unknown-account",
+            )
+            .await
+            .expect_err("an unknown account must fail closed");
+            assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+            tx.rollback().await.unwrap();
+        }
+
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+        let admitted = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(admitted.allowed, "{:?}", admitted.reasons);
+        let logical_send = format!("sa-send:{}", fixture.step_execution_id);
+
+        // Release through the review-transition helper: the slot frees.
+        {
+            let mut tx = pool.begin().await.unwrap();
+            release_decision_touch_tx(&mut tx, &tenant, outcome.decision_id)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM sales_account_touch_reservations \
+             WHERE account_id = $1 AND logical_send = $2",
+        )
+        .bind(fixture.account_id)
+        .bind(&logical_send)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "released", "the release frees the slot");
+
+        // And the released logical send is re-admittable.
+        let readmitted = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(readmitted.allowed, "{:?}", readmitted.reasons);
+
+        // No-op releases: a decision with no account, and a decision that
+        // does not exist. Neither may error.
+        let mut accountless = send_context(&fixture, fixture.policy_input());
+        accountless.account_id = None;
+        let accountless = decide(&pool, accountless).await.unwrap();
+        {
+            let mut tx = pool.begin().await.unwrap();
+            release_decision_touch_tx(&mut tx, &tenant, accountless.decision_id)
+                .await
+                .unwrap();
+            release_decision_touch_tx(&mut tx, &tenant, Uuid::new_v4())
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
+
+    /// The early read-only budget gate counts BOTH realised touches and live
+    /// reservations: a decision that merely revalidated (and holds a
+    /// reservation) consumes part of the weekly budget.
+    #[tokio::test]
+    async fn check_frequency_budget_counts_reservations_and_realised_touches() {
+        let Some(pool) = live_pool("decision_engine::wave::budget_gate").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("wave-budget");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+
+        assert!(
+            check_frequency_budget(&pool, &tenant, fixture.account_id)
+                .await
+                .unwrap(),
+            "a fresh account has budget"
+        );
+
+        // The full default budget of realised touches exhausts the gate.
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, account_id, outcome, occurred_at) \
+             SELECT gen_random_uuid(), $1, $2, 'delivered', NOW() \
+             FROM generate_series(1, $3)",
+        )
+        .bind(&tenant)
+        .bind(fixture.account_id)
+        .bind(DEFAULT_WEEKLY_ACCOUNT_BUDGET)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !check_frequency_budget(&pool, &tenant, fixture.account_id)
+                .await
+                .unwrap(),
+            "DEFAULT_WEEKLY_ACCOUNT_BUDGET realised touches exhaust the gate"
+        );
+        sqlx::query("DELETE FROM sales_outcomes WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // A live reservation alone counts too: 1 reservation + 14 realised
+        // touches = the full budget of 15.
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+        let admitted = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(admitted.allowed, "{:?}", admitted.reasons);
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, account_id, outcome, occurred_at) \
+             SELECT gen_random_uuid(), $1, $2, 'delivered', NOW() \
+             FROM generate_series(1, $3)",
+        )
+        .bind(&tenant)
+        .bind(fixture.account_id)
+        .bind(DEFAULT_WEEKLY_ACCOUNT_BUDGET - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !check_frequency_budget(&pool, &tenant, fixture.account_id)
+                .await
+                .unwrap(),
+            "live reservations count toward the weekly budget"
+        );
+    }
 }
