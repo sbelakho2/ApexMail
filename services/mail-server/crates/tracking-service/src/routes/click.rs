@@ -493,19 +493,7 @@ mod tests {
         }
 
         async fn wal_entries_for(pool: &deadpool_redis::Pool, needle: &str) -> Vec<String> {
-            let Ok(mut conn) = pool.get().await else {
-                return Vec::new();
-            };
-            redis::cmd("LRANGE")
-                .arg(REDIS_WAL_KEY)
-                .arg(0)
-                .arg(-1)
-                .query_async::<Vec<String>>(&mut *conn)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|entry| entry.contains(needle))
-                .collect()
+            test_support::wal_entries_containing(pool, needle).await
         }
 
         /// Give the fire-and-forget recorder time to (wrongly) enqueue.

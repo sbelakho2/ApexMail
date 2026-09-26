@@ -361,6 +361,67 @@ pub(crate) mod test_support {
         format!("tenant_{label}_{}_{n}", std::process::id())
     }
 
+    /// A URL whose database number is `db` (same server as `base`).
+    ///
+    /// Every live-test pool in this crate goes through this: the WAL /
+    /// suppression-retry keys are raw (not key-prefixed), so the crate owns
+    /// a dedicated logical database — 8, the DB `redis_wal_serial` has
+    /// always documented — instead of the shared, uncoordinated DB 0 that
+    /// every other crate's suite defaults to.
+    pub(crate) fn redis_url_in_db(base: &str, db: u32) -> Option<String> {
+        match url::Url::parse(base) {
+            Ok(mut parsed) => {
+                parsed.set_path(&db.to_string());
+                Some(parsed.to_string())
+            }
+            Err(_) => Some(format!("{}/{}", base.trim_end_matches('/'), db)),
+        }
+    }
+
+    /// The dedicated logical Redis DB (8) for tracking-service live tests,
+    /// or `None` when `TEST_REDIS_URL` is unset.
+    pub(crate) fn live_test_redis_url() -> Option<String> {
+        redis_url_in_db(&std::env::var("TEST_REDIS_URL").ok()?, 8)
+    }
+
+    /// Read the Redis WAL and keep envelopes containing `needle`.
+    ///
+    /// A transient pooled-connection error is retried on a short bounded
+    /// backoff: the old single-shot reader swallowed errors into an empty
+    /// vec, so a Redis hiccup under a full-workspace run was
+    /// indistinguishable from "the event was never recorded" and failed the
+    /// assertion spuriously. A successful (possibly empty) read returns
+    /// immediately — emptiness assertions stay fast, and a genuinely dead
+    /// Redis still yields an empty vec after the bound instead of hanging.
+    pub(crate) async fn wal_entries_containing(
+        pool: &deadpool_redis::Pool,
+        needle: &str,
+    ) -> Vec<String> {
+        use crate::processor::REDIS_WAL_KEY;
+        use std::time::Duration;
+        for _ in 0..16u32 {
+            match pool.get().await {
+                Ok(mut conn) => {
+                    if let Ok(entries) = redis::cmd("LRANGE")
+                        .arg(REDIS_WAL_KEY)
+                        .arg(0)
+                        .arg(-1)
+                        .query_async::<Vec<String>>(&mut *conn)
+                        .await
+                    {
+                        return entries
+                            .into_iter()
+                            .filter(|e| e.contains(needle))
+                            .collect();
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Vec::new()
+    }
+
     pub(crate) fn test_config(trusted_proxies: &[&str]) -> Config {
         Config {
             server: ServerConfig {
@@ -589,12 +650,14 @@ pub(crate) mod test_support {
     }
 
     /// State wired to the live test Redis (`TEST_REDIS_URL`, workspace
-    /// convention). Returns `None` (soft-skip) when unset or unreachable.
+    /// convention, pinned to the crate's dedicated logical DB 8 — see
+    /// [`redis_url_in_db`]). Returns `None` (soft-skip) when unset or
+    /// unreachable.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn live_redis_state(
         trusted_proxies: &[&str],
     ) -> Option<(AppState, deadpool_redis::Pool)> {
-        let url = std::env::var("TEST_REDIS_URL").ok()?;
+        let url = live_test_redis_url()?;
         let pool = deadpool_redis::Config::from_url(&url)
             .builder()
             .ok()?
@@ -627,7 +690,7 @@ pub(crate) mod test_support {
     pub(crate) async fn live_redis_pg_state(
         trusted_proxies: &[&str],
     ) -> Option<(AppState, deadpool_redis::Pool, sqlx::PgPool)> {
-        let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
+        let redis_url = live_test_redis_url()?;
         let db_url = std::env::var("TEST_DATABASE_URL").ok()?;
 
         let redis = deadpool_redis::Config::from_url(&redis_url)

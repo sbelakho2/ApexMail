@@ -73,7 +73,8 @@ fn state_with_db(db: sqlx::PgPool, redis: deadpool_redis::Pool) -> AppState {
             max_connections: 1,
         },
         redis: RedisConfig {
-            url: std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into()),
+            url: crate::routes::test_support::live_test_redis_url()
+                .unwrap_or_else(|| "redis://127.0.0.1:1".into()),
             key_prefix: "tracking:".into(),
             pool_size: 2,
         },
@@ -143,7 +144,7 @@ fn lazy_dead_db() -> sqlx::PgPool {
 /// Live Redis + dead Postgres (fast-fail pool): for handler tests that
 /// assert honest 5xx answers when the database cannot persist.
 async fn live_redis_dead_db_state() -> Option<AppState> {
-    let url = std::env::var("TEST_REDIS_URL").ok()?;
+    let url = crate::routes::test_support::live_test_redis_url()?;
     let redis = deadpool_redis::Config::from_url(&url)
         .builder()
         .ok()?

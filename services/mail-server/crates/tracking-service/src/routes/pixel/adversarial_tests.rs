@@ -59,19 +59,7 @@ fn tracking_token(tenant: &str, message: &str, recipient: &str) -> String {
 }
 
 async fn wal_entries_for(pool: &deadpool_redis::Pool, needle: &str) -> Vec<String> {
-    let Ok(mut conn) = pool.get().await else {
-        return Vec::new();
-    };
-    redis::cmd("LRANGE")
-        .arg(REDIS_WAL_KEY)
-        .arg(0)
-        .arg(-1)
-        .query_async::<Vec<String>>(&mut *conn)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|e| e.contains(needle))
-        .collect()
+    test_support::wal_entries_containing(pool, needle).await
 }
 
 async fn drop_wal_entries(pool: &deadpool_redis::Pool, needle: &str) {

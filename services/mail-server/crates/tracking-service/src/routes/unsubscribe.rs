@@ -1279,18 +1279,10 @@ mod tests {
             }
 
             async fn wal_unsub_events(redis: &deadpool_redis::Pool, tenant: &str) -> Vec<String> {
-                let Ok(mut conn) = redis.get().await else {
-                    return Vec::new();
-                };
-                redis::cmd("LRANGE")
-                    .arg(REDIS_WAL_KEY)
-                    .arg(0)
-                    .arg(-1)
-                    .query_async::<Vec<String>>(&mut *conn)
+                test_support::wal_entries_containing(redis, tenant)
                     .await
-                    .unwrap_or_default()
                     .into_iter()
-                    .filter(|e| e.contains(tenant) && e.contains("unsubscribed"))
+                    .filter(|e| e.contains("unsubscribed"))
                     .collect()
             }
 

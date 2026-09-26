@@ -18,19 +18,13 @@ async fn canonical_pool(test_name: &str) -> Option<sqlx::PgPool> {
 
 /// A URL whose database number is `db` (same server as TEST_REDIS_URL).
 /// The WAL/retry keys are raw (not key-prefixed), so a distinct database
-/// isolates these tests from the shared route-handler tests.
-fn redis_url_in_db(base: &str, db: u32) -> String {
-    match url::Url::parse(base) {
-        Ok(mut parsed) => {
-            parsed.set_path(&db.to_string());
-            parsed.to_string()
-        }
-        Err(_) => format!("{}/{}", base.trim_end_matches('/'), db),
-    }
-}
+/// isolates these tests from the shared route-handler tests. Shared with
+/// the route tests via `test_support` so every live pool in this crate
+/// lands on the same logical DB (8).
+use crate::routes::test_support::redis_url_in_db;
 
 fn live_redis() -> Option<RedisPool> {
-    let url = redis_url_in_db(&std::env::var("TEST_REDIS_URL").ok()?, 8);
+    let url = redis_url_in_db(&std::env::var("TEST_REDIS_URL").ok()?, 8)?;
     let pool = deadpool_redis::Config::from_url(&url)
         .builder()
         .ok()?

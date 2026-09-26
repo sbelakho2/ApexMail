@@ -66,7 +66,7 @@ fn dead_redis() -> deadpool_redis::Pool {
 }
 
 fn live_redis() -> Option<deadpool_redis::Pool> {
-    deadpool_redis::Config::from_url(std::env::var("TEST_REDIS_URL").ok()?)
+    deadpool_redis::Config::from_url(crate::routes::test_support::live_test_redis_url()?)
         .builder()
         .ok()?
         .max_size(4)
@@ -294,7 +294,8 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
 
     // Under-length id → refused before any decode.
@@ -338,7 +339,8 @@ async fn oversized_and_non_http_targets_are_refused() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_len");
 
@@ -408,7 +410,8 @@ async fn bot_click_still_redirects_but_records_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_bot");
     let message = unique("msg");
@@ -469,7 +472,8 @@ async fn per_link_url_cache_failure_does_not_break_the_redirect() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_lnk");
     let message = unique("msg");
@@ -526,7 +530,8 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
 
     // Cached "0" → deny, with a DEAD database proving the DB is not consulted.
     let tenant = unique("tn_c0");
@@ -574,7 +579,8 @@ async fn database_error_denies_for_one_request_and_caches_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let tenant = unique("tn_dberr");
     let message = unique("msg");
     let domain = "never-seen-before.example";
@@ -617,7 +623,8 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let Some(db) = live_pg("click_domain_auth").await else {
         eprintln!("skipping: set TEST_DATABASE_URL");
         return;
@@ -750,7 +757,8 @@ async fn fallback_host_is_authorized_without_any_database() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+    let redis_url =
+        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_fb");
     let message = unique("msg");
