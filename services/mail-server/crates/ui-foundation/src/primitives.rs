@@ -317,6 +317,11 @@ pub struct Input<'a> {
     /// Form field name. Without it the input is invisible to `FormData`
     /// serialization, so `data-api-form` handlers would submit `{}`.
     pub name: Option<&'a str>,
+    /// DOM id. With a `Label`'s `html_for` carrying the same value the pair
+    /// is programmatically associated (`<label for=…>` ↔ `<input id=…>`);
+    /// the error paragraph's id derives from it so `aria-describedby`
+    /// stays unique per control.
+    pub id: Option<&'a str>,
 }
 
 impl<'a> Input<'a> {
@@ -327,12 +332,23 @@ impl<'a> Input<'a> {
         } else {
             ""
         };
-        let _error_id = "input-error";
-        let aria_error = if self.error.is_some() {
-            " aria-invalid=\"true\" aria-describedby=\"input-error\""
-        } else {
-            ""
+        // The error paragraph id is derived from the input id so multiple
+        // errored inputs on one page never share a duplicate id, and
+        // `aria-describedby` always points at the paragraph THIS render
+        // emits right after the control.
+        let error_id = match self.id {
+            Some(id) => format!("{id}-error"),
+            None => "input-error".to_string(),
         };
+        let aria_error = if self.error.is_some() {
+            format!(" aria-invalid=\"true\" aria-describedby=\"{error_id}\"")
+        } else {
+            String::new()
+        };
+        let id_attr = self
+            .id
+            .map(|value| format!(" id=\"{}\"", value))
+            .unwrap_or_default();
         let autocomplete_attr = self
             .autocomplete
             .map(|value| format!(" autocomplete=\"{}\"", value))
@@ -346,20 +362,29 @@ impl<'a> Input<'a> {
         } else {
             ""
         };
+        // Batch-2 a11y fix: the attributes used to be concatenated INSIDE
+        // the class attribute's quotes (a malformed tag that browsers only
+        // parsed by accident, and which made `autocomplete` a class token
+        // instead of an attribute). Every attribute now sits where it
+        // belongs: classes in class=, the rest as real attributes.
         let input_markup = format!(
-            "<input type=\"{}\"{} value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
-            self.input_type,
-            name_attr,
-            self.value,
-            self.placeholder,
-            input_variant_class(resolved_variant),
-            input_size_class(self.size),
-            disabled,
-            aria_error,
-            autocomplete_attr,
-            required_attr,
-            resolved_variant,
-            self.size,
+            "<input type=\"{input_type}\"{name}{id} value=\"{value}\" placeholder=\"{placeholder}\" class=\"{classes}\"{disabled}{aria_error}{autocomplete_attr}{required_attr} data-variant=\"{variant}\" data-size=\"{size}\" />",
+            input_type = self.input_type,
+            name = name_attr,
+            id = id_attr,
+            value = self.value,
+            placeholder = self.placeholder,
+            classes = format!(
+                "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
+                input_variant_class(resolved_variant),
+                input_size_class(self.size),
+            ),
+            disabled = disabled,
+            aria_error = aria_error,
+            autocomplete_attr = autocomplete_attr,
+            required_attr = required_attr,
+            variant = resolved_variant,
+            size = self.size,
         );
 
         let base = if self.left_icon.is_some() || self.right_icon.is_some() {
@@ -374,7 +399,7 @@ impl<'a> Input<'a> {
 
         if let Some(error) = self.error {
             return format!(
-                "<div>{base}<p id=\"input-error\" class=\"text-xs text-destructive\" role=\"alert\">{error}</p></div>"
+                "<div>{base}<p id=\"{error_id}\" class=\"text-xs text-destructive\" role=\"alert\">{error}</p></div>"
             );
         }
 
@@ -392,11 +417,17 @@ pub struct Textarea<'a> {
     pub show_count: bool,
     /// Form field name (see `Input::name`).
     pub name: Option<&'a str>,
+    /// DOM id for `<label for=…>` association (see `Input::id`); the
+    /// character-count span's id derives from it when `show_count` is set.
+    pub id: Option<&'a str>,
 }
 
 impl<'a> Textarea<'a> {
     pub fn render_html(&self) -> String {
-        let char_count_id = "textarea-char-count";
+        let char_count_id = match self.id {
+            Some(id) => format!("{id}-count"),
+            None => "textarea-char-count".to_string(),
+        };
         let describedby = if self.show_count {
             format!(" aria-describedby=\"{}\"", char_count_id)
         } else {
@@ -406,8 +437,13 @@ impl<'a> Textarea<'a> {
             .name
             .map(|value| format!(" name=\"{}\"", value))
             .unwrap_or_default();
+        let id_attr = self
+            .id
+            .map(|value| format!(" id=\"{}\"", value))
+            .unwrap_or_default();
         let textarea = format!(
-            "<textarea{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            id_attr,
             name_attr,
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
@@ -503,6 +539,9 @@ pub struct Select<'a> {
     /// When set, choosing an option re-navigates with this query parameter
     /// updated (list-page filters) instead of only updating `data-value`.
     pub filter_param: Option<&'a str>,
+    /// DOM id for the combobox trigger button so an external
+    /// `<label for=…>` can name it (a11y). `None` keeps the legacy render.
+    pub id: Option<&'a str>,
 }
 
 impl<'a> Select<'a> {
@@ -603,12 +642,17 @@ impl<'a> Select<'a> {
         } else {
             ""
         };
+        let id_attr = self
+            .id
+            .map(|value| format!(" id=\"{}\"", value))
+            .unwrap_or_default();
 
         format!(
-            "<div data-open=\"{}\"{}{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-[9px_9px_7px_7px] border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
+            "<div data-open=\"{}\"{}{}><button{} type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-[9px_9px_7px_7px] border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
             self.open,
             name_attrs,
             filter_attrs,
+            id_attr,
             expanded, listbox_id,
             activedescendant,
             trigger_keyboard_attrs,
@@ -768,6 +812,10 @@ pub struct Label<'a> {
     pub optional: bool,
     pub variant: &'a str,
     pub size: &'a str,
+    /// The labelled control's DOM id — emitted as the `for` attribute so
+    /// `<label>`/`<input>` are programmatically associated (a11y). `None`
+    /// keeps the label descriptive-only (the legacy render).
+    pub html_for: Option<&'a str>,
 }
 
 impl<'a> Label<'a> {
@@ -782,8 +830,13 @@ impl<'a> Label<'a> {
         } else {
             ""
         };
+        let for_attr = self
+            .html_for
+            .map(|value| format!(" for=\"{}\"", value))
+            .unwrap_or_default();
         format!(
-            "<label class=\"text-sm font-medium leading-none {} {}\">{}{}{}</label>",
+            "<label{} class=\"text-sm font-medium leading-none {} {}\">{}{}{}</label>",
+            for_attr,
             label_variant_class(self.variant),
             label_size_class(self.size),
             self.text,
@@ -2739,7 +2792,7 @@ mod tests {
             right_icon: None,
             submit: true,
         };
-        let input = Input {
+        let input = Input { id: None,
             input_type: "email",
             value: "",
             placeholder: "you@example.com",
@@ -2849,7 +2902,7 @@ mod tests {
 
     #[test]
     fn input_supports_icons_and_error_state() {
-        let html = Input {
+        let html = Input { id: None,
             input_type: "text",
             value: "bad",
             placeholder: "email",
@@ -2876,7 +2929,7 @@ mod tests {
 
     #[test]
     fn input_supports_disabled_size_and_default_states() {
-        let html = Input {
+        let html = Input { id: None,
             input_type: "email",
             value: "owner@apexmail.ee",
             placeholder: "you@example.com",
@@ -2899,7 +2952,7 @@ mod tests {
 
     #[test]
     fn textarea_supports_resize_and_counter() {
-        let html = Textarea {
+        let html = Textarea { id: None,
             value: "abc",
             placeholder: "Write",
             variant: "default",
@@ -2920,7 +2973,7 @@ mod tests {
     /// receive an empty `{}` payload.
     #[test]
     fn named_fields_render_name_attributes() {
-        let input = Input {
+        let input = Input { id: None,
             input_type: "email",
             value: "",
             placeholder: "contact@example.com",
@@ -2937,7 +2990,7 @@ mod tests {
         .render_html();
         assert!(input.contains("name=\"email\""));
 
-        let textarea = Textarea {
+        let textarea = Textarea { id: None,
             value: "",
             placeholder: "Paste HTML",
             variant: "default",
@@ -2949,7 +3002,7 @@ mod tests {
         .render_html();
         assert!(textarea.contains("<textarea name=\"html_body\""));
 
-        let select = Select {
+        let select = Select { id: None,
             placeholder: "Select audience",
             value_label: Some("VIP Customers"),
             variant: "default",
@@ -2972,7 +3025,7 @@ mod tests {
         assert!(select.contains("data-value=\"vip\""));
 
         // Unnamed fields must not render a stale/empty name attribute.
-        let unnamed = Input {
+        let unnamed = Input { id: None,
             input_type: "text",
             value: "",
             placeholder: "filter",
@@ -3010,7 +3063,7 @@ mod tests {
 
     #[test]
     fn label_supports_required_optional_and_variants() {
-        let html = Label {
+        let html = Label { html_for: None,
             text: "Email",
             required: true,
             optional: false,
@@ -3071,7 +3124,7 @@ mod tests {
 
     #[test]
     fn closed_select_still_ships_option_dom_with_values() {
-        let html = Select {
+        let html = Select { id: None,
             placeholder: "Select plan",
             value_label: Some("Starter"),
             variant: "default",
@@ -3177,7 +3230,7 @@ mod tests {
 
     #[test]
     fn select_supports_trigger_and_open_menu() {
-        let html = Select {
+        let html = Select { id: None,
             placeholder: "Select plan",
             value_label: Some("Enterprise"),
             variant: "success",

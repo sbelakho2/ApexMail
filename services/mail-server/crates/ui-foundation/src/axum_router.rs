@@ -14,7 +14,7 @@
 
 use crate::leptos_views;
 use crate::view_data::{
-    CampaignEditData, FormFieldData, ListPageData, MfaSetupData, SalesPageData,
+    CampaignEditData, FormFieldData, ListEditData, ListPageData, MfaSetupData, SalesPageData,
 };
 
 /// Server-loaded page data for one route request.
@@ -24,6 +24,8 @@ pub struct RouteData {
     pub list: Option<ListPageData>,
     /// Campaign edit form values (server-filled from the campaigns row).
     pub campaign_edit: Option<CampaignEditData>,
+    /// List edit form values (server-filled from the lists row).
+    pub list_edit: Option<ListEditData>,
     /// Pending TOTP setup (QR + secret) for the CP security page.
     pub mfa_setup: Option<MfaSetupData>,
     /// Sales-autopilot control data for `/sales`.
@@ -904,17 +906,22 @@ pub fn render_route_with_form_fields_and_csrf(
         match surface {
             "web" => {
                 let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
+                let title = route_document_title(surface, path);
 
                 match path {
                     "/login" | "/signup" | "/forgot-password" | "/reset-password"
-                    | "/verify-email" | "/" | "/not-found" => leptos_views::web_root_layout(&inner),
+                    | "/verify-email" | "/" | "/not-found" => {
+                        leptos_views::web_root_layout(&inner, &title)
+                    }
                     _ => leptos_views::web_root_layout(
                         &leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf_token),
+                        &title,
                     ),
                 }
             }
             "control-plane" => {
                 let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
+                let title = route_document_title(surface, path);
                 let page = match path {
                     "/login" => inner,
                     _ => {
@@ -928,7 +935,7 @@ pub fn render_route_with_form_fields_and_csrf(
                         )
                     }
                 };
-                leptos_views::control_plane_root_layout(&page)
+                leptos_views::control_plane_root_layout_with_title(&page, &title)
             }
             "marketing" | "marketing-zola" => marketing_static_document(surface, path)
                 .map(normalize_marketing_static_document)
@@ -1525,7 +1532,44 @@ fn extract_query_param(link: &str, key: &str) -> Option<String> {
     None
 }
 
-fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
+/// The document `<title>` for a route: "{Page} — ApexMail" (batch-2
+/// per-page-titles fix — the root layouts no longer hardcode one site-wide
+/// title). The page name comes from the manifest route name for web paths
+/// (with detail/edit pattern fallbacks) and the control-plane route context
+/// for CP paths (which already covers the /cp aliases).
+pub fn route_document_title(surface: &str, path: &str) -> String {
+    let page = match surface {
+        "control-plane" => control_plane_route_context(path).0,
+        _ => web_route_page_name(path),
+    };
+    format!("{page} — ApexMail")
+}
+
+/// The page name for a web-surface path: the manifest route name, or a
+/// sensible name for the detail/edit pattern routes the manifest spells
+/// with concrete ids.
+fn web_route_page_name(path: &str) -> &'static str {
+    if let Some(route) = crate::routing::surface_routes("web")
+        .into_iter()
+        .find(|route| route.path == path)
+    {
+        return route.name;
+    }
+    match path {
+        p if p.starts_with("/campaigns/") && p.ends_with("/edit") => "Edit Campaign",
+        p if p.starts_with("/campaigns/") => "Campaign Detail",
+        p if p.starts_with("/lists/") && p.ends_with("/edit") => "Edit List",
+        p if p.starts_with("/lists/") => "List Detail",
+        p if p.starts_with("/domains/") => "Domain Detail",
+        p if p.starts_with("/inbox-placement/") && p.ends_with("/edit") => "Edit Placement Test",
+        p if p.starts_with("/inbox-placement/") => "Placement Test Detail",
+        p if p.starts_with("/templates/") && p.ends_with("/edit") => "Edit Template",
+        p if p.starts_with("/templates/") => "Template Detail",
+        _ => "ApexMail",
+    }
+}
+
+pub fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
     match path {
         "/" => ("Control Plane", "ApexMail administration and monitoring."),
         "/cp" | "/dashboard" => (
@@ -1825,8 +1869,17 @@ fn render_web(
         p if p.starts_with("/domains/") => {
             data_backed_inner(p, data).unwrap_or_else(leptos_views::web_domains_page)
         }
-        // /lists/{id} and /lists/{id}/edit — previously dead links (404).
-        p if p.starts_with("/lists/") && p.ends_with("/edit") => leptos_views::web_list_edit_page(),
+        // /lists/{id}/edit — data-backed like /campaigns/{id}/edit: with
+        // server-loaded values the form carries the hidden id + prefilled
+        // name so POST /web/lists/update can actually save (batch-2
+        // list-edit fix). Without data (anonymous / no row) the static
+        // no-values form renders — it cannot claim a list it did not load.
+        p if p.starts_with("/lists/") && p.ends_with("/edit") => {
+            match data.and_then(|d| d.list_edit.as_ref()) {
+                Some(edit) => leptos_views::web_list_edit_page_with_values(edit),
+                None => leptos_views::web_list_edit_page(),
+            }
+        }
         p if p.starts_with("/lists/new") => leptos_views::web_lists_new_page(),
         p if p.starts_with("/lists/") => leptos_views::web_list_detail_page(),
         _ => return None,
@@ -2093,15 +2146,21 @@ mod tests {
 
     #[test]
     fn control_plane_cp_aliases_render() {
-        for path in [
-            "/cp",
-            "/cp/tenants",
-            "/cp/infra",
-            "/cp/security",
-            "/cp/audit",
+        // Batch-2 titles fix: every CP document titles from its route
+        // context ("Page — ApexMail") instead of the hardcoded site title.
+        for (path, title) in [
+            ("/cp", "Dashboard — ApexMail"),
+            ("/cp/tenants", "Tenants — ApexMail"),
+            ("/cp/infra", "Infrastructure — ApexMail"),
+            ("/cp/security", "Security Settings — ApexMail"),
+            ("/cp/audit", "Audit Logs — ApexMail"),
         ] {
             let html = render_route("control-plane", path).unwrap();
-            assert!(html.contains("<title>ApexMail Control Plane</title>"));
+            assert!(
+                html.contains(&format!("<title>{title}</title>")),
+                "{path} must carry the route title {title:?}: {}",
+                &html[html.find("<title>").unwrap_or(0)..][..80]
+            );
         }
     }
 
@@ -2185,6 +2244,34 @@ mod tests {
         assert!(edit.contains("Edit List"));
         assert!(edit.contains("action=\"/web/lists/update\""));
         assert!(edit.contains("method=\"post\""));
+        // Batch-2 list-edit fix + titles fix: the no-data render is the
+        // static no-values form (no fabricated id), titled per route.
+        assert!(!edit.contains("name=\"id\""));
+        assert!(edit.contains("<title>Edit List — ApexMail</title>"));
+
+        // With server-loaded values the form carries the hidden id and the
+        // prefilled name so POST /web/lists/update can save.
+        let data = RouteData {
+            list_edit: Some(ListEditData {
+                id: "3f9d6fbe-6bd8-4e04-9c0d-1a2b3c4d5e6f".into(),
+                name: "Launch Waitlist".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (edit_data, _) = render_route_with_form_fields_and_csrf(
+            "web",
+            "/lists/3f9d6fbe-6bd8-4e04-9c0d-1a2b3c4d5e6f/edit",
+            None,
+            None,
+            &[],
+            Some(&data),
+            None,
+            None,
+        )
+        .expect("data-backed list edit route should render");
+        assert!(edit_data.contains("name=\"id\" value=\"3f9d6fbe-6bd8-4e04-9c0d-1a2b3c4d5e6f\""));
+        assert!(edit_data.contains("value=\"Launch Waitlist\""));
     }
 
     #[test]
@@ -2750,6 +2837,7 @@ mod tests {
             list: Some(data),
             sales: None,
             campaign_edit: None,
+            list_edit: None,
             mfa_setup: None,
         }
     }
@@ -2815,7 +2903,13 @@ mod tests {
             }
             let html = render_route_with_data("control-plane", path, None, None, &[], Some(&data))
                 .unwrap_or_else(|| panic!("control-plane {path} must render with data"));
-            assert!(html.contains("<title>ApexMail Control Plane</title>"));
+            // Batch-2 titles fix: every CP document titles "Page — ApexMail"
+            // from the route context instead of the hardcoded site title.
+            assert!(
+                html.contains("<title>") && html.contains(" — ApexMail</title>"),
+                "{path} must carry a per-page title"
+            );
+            assert!(!html.contains("<title>ApexMail Control Plane</title>"));
         }
 
         // No data ⇒ the static pages render unchanged (unit-test fallback).
@@ -2864,7 +2958,8 @@ mod tests {
                 html_body: "<p>Hello</p>".into(),
                 scheduled_at: "2026-09-01T09:00".into(),
             }),
-            mfa_setup: None,
+                        list_edit: None,
+mfa_setup: None,
         };
         let html =
             render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
@@ -2885,6 +2980,7 @@ mod tests {
             list: None,
             sales: None,
             campaign_edit: None,
+            list_edit: None,
             mfa_setup: Some(crate::view_data::MfaSetupData {
                 secret: "JBSWY3DPEHPK3PXP".into(),
                 otpauth: "otpauth://totp/ApexMail:ops%40apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail".into(),
@@ -3081,6 +3177,7 @@ mod tests {
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
+            list_edit: None,
                 mfa_setup: None,
             }),
         )
@@ -3140,6 +3237,7 @@ mod tests {
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
+            list_edit: None,
                 mfa_setup: None,
             }),
         )
@@ -3557,7 +3655,9 @@ mod tests {
         )
         .unwrap();
         assert!(cp_no_email.contains("action=\"/web/cp/login\""));
-        assert!(cp_no_email.contains("Authorize Access"));
+        // Batch-2 CP-login copy fix: the jargon "Authorize Access" button
+        // became the plain "Sign in".
+        assert!(cp_no_email.contains("<span>Sign in</span>"));
 
         // With email it renders the challenge (the router threads the token).
         let cp_mfa = render_inner(

@@ -331,6 +331,50 @@
       }
     },
     {
+      "id": "web-lists-l_1-desktop",
+      "surface": "web",
+      "route": "/lists/l_1",
+      "htmlFile": "web-lists-l_1.html",
+      "snapshotFile": "web-lists-l_1-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-lists-l_1-mobile",
+      "surface": "web",
+      "route": "/lists/l_1",
+      "htmlFile": "web-lists-l_1.html",
+      "snapshotFile": "web-lists-l_1-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-lists-l_1-edit-desktop",
+      "surface": "web",
+      "route": "/lists/l_1/edit",
+      "htmlFile": "web-lists-l_1-edit.html",
+      "snapshotFile": "web-lists-l_1-edit-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-lists-l_1-edit-mobile",
+      "surface": "web",
+      "route": "/lists/l_1/edit",
+      "htmlFile": "web-lists-l_1-edit.html",
+      "snapshotFile": "web-lists-l_1-edit-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
       "id": "web-templates-desktop",
       "surface": "web",
       "route": "/templates",

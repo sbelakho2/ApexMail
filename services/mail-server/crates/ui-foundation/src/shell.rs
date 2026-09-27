@@ -349,6 +349,9 @@ pub struct OperationalBanner<'a> {
 pub struct ControlPlaneShell<'a> {
     pub mobile_menu_open: bool,
     pub user_role: &'a str,
+    /// Chrome title in the sticky header. Rendered as a styled `<p>`, NOT an
+    /// `<h1>`: the page content renders the document's single `<h1>`
+    /// (batch-2 one-h1-per-page fix).
     pub page_title: &'a str,
     pub page_description: &'a str,
     pub banners: Vec<OperationalBanner<'a>>,
@@ -393,7 +396,7 @@ impl<'a> ControlPlaneShell<'a> {
                 {banner_markup}\
                 <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-baseline gap-3 min-w-0\">\
-                        <h1 class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</h1>\
+                        <p class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</p>\
                         <p class=\"hidden sm:block text-xs font-medium text-surface-500 truncate\">{page_description}</p>\
                     </div>\
                 </header>\

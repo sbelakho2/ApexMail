@@ -5591,13 +5591,36 @@ input::placeholder,
 }
 
 .apex-receipt .ok {
-  color: rgb(var(--success));
+  color: rgb(var(--success-700));
   font-weight: 700;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .apex-receipt .ok {
+    color: rgb(var(--success-400));
+  }
+}
+
+html.dark .apex-receipt .ok {
+  color: rgb(var(--success-400));
 }
 
 .apex-receipt .on {
   color: rgb(var(--primary));
   font-weight: 700;
+}
+
+/* Dark receipts sit on zinc-950 where --primary (220,38,38) is sub-AA —
+   step to brand-300 (252,165,165) there. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .apex-receipt .on {
+    color: rgb(var(--brand-300));
+  }
+}
+
+html.dark .apex-receipt .on {
+  color: rgb(var(--brand-300));
 }
 
 /* ARCH on inputs/auth fields (the crown at the top of every field). */

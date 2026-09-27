@@ -208,6 +208,32 @@ pub struct CampaignEditData {
     pub scheduled_at: String,
 }
 
+/// Prefilled list editor state for `/lists/{id}/edit` (loaded server-side
+/// from the lists row). Mirrors [`CampaignEditData`]: the view emits the
+/// hidden `id` plus the prefilled name so `POST /web/lists/update` can
+/// actually update the row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListEditData {
+    pub id: String,
+    pub name: String,
+    /// Optional list description (empty when the row has none).
+    pub description: String,
+    /// Optional created timestamp (empty when unknown).
+    pub created_at: String,
+}
+
+/// Server-loaded list detail state for `/lists/{id}`: the real list name
+/// plus its subscriber counts (rendered verbatim — "unavailable" when a
+/// count could not be read, never a fabricated zero).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListDetailData {
+    pub id: String,
+    pub name: String,
+    pub subscribers: String,
+    pub subscribed: String,
+    pub unsubscribed: String,
+}
+
 /// Pending TOTP setup, carried from `POST /web/auth/mfa/setup` to the
 /// security page through a short-lived signed cookie (never the URL).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

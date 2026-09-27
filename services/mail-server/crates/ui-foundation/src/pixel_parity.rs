@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn input_html_class_parity() {
-        let inp = Input {
+        let inp = Input { id: None,
             input_type: "text",
             variant: "default",
             size: "default",

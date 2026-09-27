@@ -17,6 +17,20 @@ pub mod ssr;
 pub mod tokens;
 pub mod view_data;
 
+// ─── UI/UX CI gates (test-only) ────────────────────────────────────────
+// Gate A: golden skeletons. Gate B: chrome consistency. Gate D: form
+// hygiene. Gate I: link integrity. Shared helpers in gate_support.
+#[cfg(test)]
+mod chrome_tests;
+#[cfg(test)]
+mod form_hygiene_tests;
+#[cfg(test)]
+mod gate_support;
+#[cfg(test)]
+mod golden_tests;
+#[cfg(test)]
+mod link_integrity_tests;
+
 #[cfg(test)]
 mod migration_tests;
 

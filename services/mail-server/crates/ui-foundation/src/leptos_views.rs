@@ -31,23 +31,32 @@ fn ui_icon(name: &str, class_name: &str) -> String {
 pub(crate) const WEB_ROOT_HTML_CLASSES: &str = "__variable_712c26 __variable_60443c";
 pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px] leading-[1.55]";
 
-/// Pixel-identical reproduction of the web root layout contract.
+/// Pixel-identical reproduction of the web root layout contract, now with a
+/// per-page document title ("{Page} — ApexMail"; batch-2 titles fix).
+///
+/// The root layout no longer emits its own `<main id="app-main">`: every
+/// inner view (dashboard shell, auth shell, home, not-found) renders THE
+/// single `<main id="app-main">` landmark, so documents no longer nest two
+/// (batch-2 single-main fix). The former landmark's `min-h-screen
+/// bg-background` styling moved onto the `<body>` so pages without the
+/// dashboard shell keep the full-height background.
 /// The console ships ZERO JavaScript: CSP is `script-src 'none'` (set by
 /// `browser_html_response`), so no script tags are rendered here. Dark
 /// mode comes purely from the stylesheet's `prefers-color-scheme` rules.
-pub fn web_root_layout(child_html: &str) -> String {
+pub fn web_root_layout(child_html: &str, title: &str) -> String {
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\" class=\"{html_classes}\">\
-<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail</title>\
+<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
-    <body class=\"{body_classes}\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a><main id=\"app-main\" class=\"min-h-screen bg-background\">{child_html}</main>\
+    <body class=\"{body_classes} min-h-screen bg-background\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}\
 </body>\
 </html>",
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
+        title = html_escape(title),
         child_html = child_html,
     )
 }
@@ -55,16 +64,28 @@ pub fn web_root_layout(child_html: &str) -> String {
 /// Pixel-identical reproduction of the control-plane root layout contract.
 /// Zero JavaScript: CSP is `script-src 'none'`; dark mode via
 /// `prefers-color-scheme` in globals.css only.
+///
+/// The one-argument form keeps the exact legacy title semantics for the
+/// out-of-router callers that cannot know a route context (the api-server's
+/// 501 page and the error-page contracts); every routed control-plane
+/// document goes through [`control_plane_root_layout_with_title`] with the
+/// route's "Page — ApexMail" title (batch-2 titles fix).
 pub fn control_plane_root_layout(child_html: &str) -> String {
+    control_plane_root_layout_with_title(child_html, "Control Plane — ApexMail")
+}
+
+/// Control-plane root layout with the per-page document title.
+pub fn control_plane_root_layout_with_title(child_html: &str, title: &str) -> String {
     format!(
         "<!DOCTYPE html>\
 <html lang=\"en\">\
-<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>ApexMail Control Plane</title>\
+<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
 <body class=\"antialiased bg-background text-surface-950\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}</body>\
 </html>",
+        title = html_escape(title),
         child_html = child_html,
     )
 }
@@ -148,7 +169,9 @@ pub fn control_plane_app_layout_with_role(
 
 /// Pixel-identical reproduction of the web landing page contract.
 pub fn web_home_page() -> String {
-    "<main class=\"min-h-screen bg-surface-50 text-surface-950\">\
+    // The page's own <main> is the document's single landmark (batch-2
+    // single-main fix — the root layout no longer adds one).
+    "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 text-surface-950\">\
 <section class=\"mx-auto flex min-h-screen w-full max-w-7xl flex-col justify-center px-6 py-16 lg:px-8\">\
 <div class=\"grid gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center\">\
 <div class=\"max-w-3xl\">\
@@ -172,7 +195,9 @@ pub fn web_home_page() -> String {
 
 /// Pixel-identical reproduction of the web not-found contract.
 pub fn web_not_found_page() -> String {
-    "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-50\">\
+    // The page's own <main> is the document's single landmark (batch-2
+    // single-main fix — the root layout no longer adds one).
+    "<main id=\"app-main\" class=\"flex min-h-screen flex-col items-center justify-center bg-surface-50\">\
 <div class=\"text-center\">\
 <h1 class=\"text-8xl font-bold text-surface-950 tracking-tighter\">404</h1>\
 <p class=\"mt-4 text-xl text-surface-600 font-medium\">Page not found</p>\
@@ -1051,7 +1076,7 @@ fn render_campaign_editor_page(
     // Native <select> — no combobox JS; the value is serialized by the
     // browser when the form is submitted.
     let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
-    let content_input = Textarea {
+    let content_input = Textarea { id: Some("campaign-content"),
         value: "",
         placeholder: "Paste your HTML content here...",
         variant: "default",
@@ -1071,13 +1096,13 @@ fn render_campaign_editor_page(
         title = title,
         draft_badge = draft_badge,
         primary_action_label = primary_action_label,
-        name_label = Label { text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
-        subject_label = Label { text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("subject") }.render_html(),
-        audience_label = Label { text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        name_label = Label { html_for: Some("campaign-name"), text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        name_input = Input { id: Some("campaign-name"), input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
+        subject_label = Label { html_for: Some("campaign-subject"), text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        subject_input = Input { id: Some("campaign-subject"), input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("subject") }.render_html(),
+        audience_label = Label { html_for: None, text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
         audience_select = audience_select,
-        content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
+        content_label = Label { html_for: Some("campaign-content"), text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
         content_input = content_input,
         preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
         save_button = save_button,
@@ -2474,6 +2499,35 @@ pub fn marketing_page(child_html: &str) -> String {
     )
 }
 
+/// The marketing surface's real 404 view inside the marketing shell: the
+/// homepage hero previously masqueraded as the 404 body, telling visitors
+/// the page they asked for exists. Consumed by the api-server's marketing
+/// not-found render path.
+pub fn marketing_not_found_page() -> String {
+    let inner = "<section class=\"py-24 px-4 text-center\">\
+<p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">404</p>\
+<h1 class=\"mt-4 text-4xl font-bold tracking-tighter text-surface-950\">Page not found</h1>\
+<p class=\"mt-4 text-sm font-medium text-surface-600\">The page you are looking for does not exist or has moved.</p>\
+<a href=\"/\" class=\"mt-8 inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold text-white shadow-premium transition-colors hover:bg-brand-700\">Back to the homepage</a>\
+</section>";
+    let header = crate::marketing::MarketingHeader {
+        is_scrolled: false,
+        mobile_menu_open: false,
+        active_dropdown: None,
+    };
+    format!(
+        "<!DOCTYPE html>\
+<html lang=\"en\">\
+<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<title>Page not found | ApexMail</title>\
+<link rel=\"stylesheet\" href=\"/assets/marketing.css\"></head>\
+<body class=\"font-apex antialiased\">{header}<main class=\"flex-1\">{child}</main>\
+<footer data-marketing-shell=\"footer\"></footer></body></html>",
+        header = header.render_html(),
+        child = inner,
+    )
+}
+
 /// Pixel-identical reproduction of the API Console page from marketing-zola.
 pub fn marketing_api_console_page() -> String {
     let console = crate::marketing::MarketingApiConsole {
@@ -2547,8 +2601,12 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
     // Zero JavaScript: auth forms are native `method="post"` submissions to
     // the /web/auth/* PRG routes; feedback arrives via the signed flash
     // cookie rendered on the following GET.
+    //
+    // The auth shell's <main> is the document's single landmark (batch-2
+    // single-main fix — the root layout no longer adds one); the id keeps
+    // the skip link and the #flash anchor targeted at it.
     format!(
-        "<main class=\"min-h-screen bg-surface-50 relative flex items-center justify-center p-6\">\
+        "<main id=\"app-main\" class=\"min-h-screen bg-surface-50 relative flex items-center justify-center p-6\">\
         <div class=\"absolute inset-0 z-0 opacity-[0.03] pointer-events-none ui-dot-grid\"></div>\
         <div class=\"relative z-10 w-full max-w-[400px]\">\
         <div class=\"bg-white rounded-xl shadow-premium border border-surface-200/60 overflow-hidden\">\
@@ -2840,7 +2898,10 @@ pub fn web_verify_email_page_with_state(
                 "Verification complete",
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
+            // Batch-2 dead-link fix: /pricing is a marketing-only route that
+            // does not resolve on the web surface — point at the absolute
+            // marketing URL instead.
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"https://apexmail.ee/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
@@ -2902,34 +2963,17 @@ pub fn web_verify_email_page_with_state(
 
 /// Dashboard overview page with summary cards.
 pub fn web_dashboard_page() -> String {
-    // Spiral-Lock DNA: the dashboard's flagship data block — the 270°
-    // delivery-health dial + the monoline stroke chart (peaks carry the
-    // terminal point). The mark's geometry as data.
+    // Batch-2 honesty fix: the static fallback previously fabricated a
+    // 98.9% delivery-health dial and a "representative" 14-day send-volume
+    // series — figures the static page cannot know. The data-backed
+    // dashboard renders real KPIs; this no-data fallback now states that
+    // delivery health is unavailable — not 100%, not zero.
     let dna_block = format!(
-        "<div class=\"flex items-center gap-8 pb-2\">{}{}</div>",
-        crate::charts::render_dial(0.989, "delivery · 30d", "98.9%", true),
-        // Representative 14-day send-volume strokes until the data layer
-        // binds live series (peaks ≥80% carry the terminal point).
-        crate::charts::render_monoline_bar_chart(
-            &[
-                ("d1".into(), 22.0),
-                ("d2".into(), 38.0),
-                ("d3".into(), 30.0),
-                ("d4".into(), 55.0),
-                ("d5".into(), 44.0),
-                ("d6".into(), 82.0),
-                ("d7".into(), 60.0),
-                ("d8".into(), 48.0),
-                ("d9".into(), 66.0),
-                ("d10".into(), 58.0),
-                ("d11".into(), 74.0),
-                ("d12".into(), 92.0),
-                ("d13".into(), 70.0),
-                ("d14".into(), 64.0),
-            ],
-            420,
-            96,
-        )
+        "<div class=\"rounded-sm border border-surface-200 bg-surface-50 p-4\">\
+<p class=\"apex-klabel mb-1\">delivery · 30d</p>\
+<p class=\"text-lg font-bold text-surface-950 tracking-tight\">unavailable</p>\
+<p class=\"mt-1 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health and send-volume charts load from your own send events — nothing has been fabricated here, and an absent figure is not zero.</p>\
+</div>"
     );
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
@@ -3281,10 +3325,10 @@ pub fn web_contacts_new_page() -> String {
 </form>\
 </section>\
 </div>",
-        email_label = Label { text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        email_input = Input { input_type: "email", variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("email") }.render_html(),
-        name_label = Label { text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
+        email_label = Label { html_for: Some("contact-email"), text: "Email", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        email_input = Input { id: Some("contact-email"), input_type: "email", autocomplete: Some("email"), variant: "default", size: "default", placeholder: "contact@example.com", value: "", left_icon: None, right_icon: None, error: None, disabled: false, required: true, name: Some("email") }.render_html(),
+        name_label = Label { html_for: Some("contact-name"), text: "Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        name_input = Input { id: Some("contact-name"), input_type: "text", variant: "default", size: "default", placeholder: "Jane Doe", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Add Contact", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
     )
 }
@@ -3366,8 +3410,11 @@ pub fn web_lists_page() -> String {
     )
 }
 
-/// List detail page. Metrics are server-rendered placeholders; the
-/// delete action routes through the signed /confirm page (no JavaScript).
+/// STATIC list detail page — the demo-data fallback ONLY (batch-2
+/// list-detail fix). It renders when a non-UUID demo id (`/lists/l_launch`,
+/// `/lists/l_vip`) is requested and hardcodes the demo list; a REAL list id
+/// is data-backed through `web_list_detail_page_with_values` (api-server's
+/// `web_list_detail` handler) and never shows this page.
 pub fn web_list_detail_page() -> String {
     "<div class=\"space-y-6\" data-page=\"list-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
@@ -3388,8 +3435,11 @@ pub fn web_list_detail_page() -> String {
 </div></div>".to_string()
 }
 
-/// List edit page: real form against `PUT /v1/lists/{id}` via the
-/// urlencoded POST to /web/lists/update.
+/// STATIC list edit page — the no-data fallback ONLY (batch-2 list-edit
+/// fix). It posts name-only to /web/lists/update (which honestly refuses
+/// without an id); a real `/lists/{id}/edit` render goes through
+/// `web_list_edit_page_with_values`, which carries the hidden id and the
+/// prefilled name so the save actually saves.
 pub fn web_list_edit_page() -> String {
     format!(
         "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
@@ -3398,7 +3448,7 @@ pub fn web_list_edit_page() -> String {
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
-        name_label = Label {
+        name_label = Label { html_for: Some("list-edit-name"),
             text: "List Name",
             variant: "default",
             size: "default",
@@ -3406,7 +3456,7 @@ pub fn web_list_edit_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input {
+        name_input = Input { id: Some("list-edit-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -3435,15 +3485,26 @@ pub fn web_list_edit_page() -> String {
     )
 }
 
-pub fn web_lists_new_page() -> String {
+/// List edit page with server-loaded values (batch-2 list-edit fix): the
+/// form carries the list's id (hidden) and the prefilled name, and POSTs to
+/// the real update handler — previously the form posted only `name` with no
+/// `id`, so every save was rejected with "Pick a list and give it a name."
+pub fn web_list_edit_page_with_values(edit: &crate::view_data::ListEditData) -> String {
     format!(
-        "<div class=\"max-w-2xl\">\
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
-<form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
+        "<div class=\"max-w-2xl\" data-page=\"list-edit\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li class=\"text-surface-900 font-medium\">Edit List</li></ol></nav>\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Edit List</h1>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/lists/update\">\
+<input type=\"hidden\" name=\"id\" value=\"{id}\" />\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
+        id = html_escape(&edit.id),
         name_label = Label {
+            html_for: Some("list-edit-name"),
             text: "List Name",
             variant: "default",
             size: "default",
@@ -3452,6 +3513,83 @@ pub fn web_lists_new_page() -> String {
         }
         .render_html(),
         name_input = Input {
+            id: Some("list-edit-name"),
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            placeholder: "e.g. Newsletter Subscribers",
+            value: &edit.name,
+            left_icon: None,
+            right_icon: None,
+            error: None,
+            disabled: false,
+            autocomplete: None,
+            required: true,
+            name: Some("name"),
+        }
+        .render_html(),
+        save_button = Button {
+            variant: "default",
+            size: "default",
+            label: "Save Changes",
+            disabled: false,
+            loading: false,
+            left_icon: None,
+            right_icon: None,
+            submit: true
+        }
+        .render_html(),
+    )
+}
+
+/// Data-backed list detail page (batch-2 list-detail fix): the name, the
+/// subscriber KPIs, and the Edit/Delete actions carry the REAL list id —
+/// the static demo hardcoded `l_launch`, so a real list's Delete button
+/// targeted a list that did not exist.
+pub fn web_list_detail_page_with_values(detail: &crate::view_data::ListDetailData) -> String {
+    format!(
+        "<div class=\"space-y-6\" data-page=\"list-detail\">\
+<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
+<li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
+<li class=\"text-surface-500\">/</li>\
+<li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
+<div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>{name}</h1>\
+<p class=\"text-sm text-muted-foreground\">Subscribers and settings for this list. Reload the page to see fresh counts.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">\
+<a href=\"/lists/{id}/edit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a>\
+<a href=\"/confirm?intent=delete-list&amp;id={id}&amp;return_to=%2Flists\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete List</a>\
+</div></div>\
+<div class=\"grid gap-6 md:grid-cols-3\">\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribers</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribers}</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Subscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{subscribed}</p></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Unsubscribed</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">{unsubscribed}</p></div>\
+</div></div>",
+        name = html_escape(&detail.name),
+        id = html_escape(&detail.id),
+        subscribers = html_escape(&detail.subscribers),
+        subscribed = html_escape(&detail.subscribed),
+        unsubscribed = html_escape(&detail.unsubscribed),
+    )
+}
+
+pub fn web_lists_new_page() -> String {
+    format!(
+        "<div class=\"max-w-2xl\">\
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Create List</h1>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/lists\">\
+<div class=\"space-y-2\">{name_label}{name_input}</div>\
+<div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
+</form></div>",
+        name_label = Label { html_for: Some("list-new-name"),
+            text: "List Name",
+            variant: "default",
+            size: "default",
+            required: true,
+            optional: false
+        }
+        .render_html(),
+        name_input = Input { id: Some("list-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -3518,15 +3656,15 @@ pub fn web_templates_new_page() -> String {
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"space-y-2\">{subject_label}{subject_input}</div>\
 <div class=\"space-y-2\">\
-<label class=\"text-sm font-medium leading-none\">HTML Content</label>\
-<textarea name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"Paste your HTML template here...\"></textarea>\
+<label class=\"text-sm font-medium leading-none\" for=\"template-new-content\">HTML Content</label>\
+<textarea id=\"template-new-content\" name=\"html_body\" class=\"flex min-h-[300px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono resize-vertical\" placeholder=\"Paste your HTML template here...\"></textarea>\
 </div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label { text: "Template Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
-        subject_label = Label { text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
-        subject_input = Input { input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("subject") }.render_html(),
+        name_label = Label { html_for: Some("template-new-name"), text: "Template Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        name_input = Input { id: Some("template-new-name"), input_type: "text", variant: "default", size: "default", placeholder: "e.g. Welcome Email", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
+        subject_label = Label { html_for: Some("template-new-subject"), text: "Default Subject", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        subject_input = Input { id: Some("template-new-subject"), input_type: "text", variant: "default", size: "default", placeholder: "Subject line...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("subject") }.render_html(),
         save_button = Button { variant: "default", size: "default", label: "Save Template", disabled: false, loading: false, left_icon: None, right_icon: None, submit: true }.render_html(),
     )
 }
@@ -3659,7 +3797,7 @@ pub fn web_inbox_placement_new_page() -> String {
 <input id=\"placement-name\" name=\"name\" type=\"text\" required maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Q1 onboarding sequence — variant A\" /></div>\
 <div class=\"grid gap-4 md:grid-cols-2\">\
 <div><label for=\"placement-from\" class=\"block text-sm font-medium text-surface-700\">From email</label>\
-<input id=\"placement-from\" name=\"from_email\" type=\"email\" required class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"hello@yourdomain.com\" /></div>\
+<input id=\"placement-from\" name=\"from_email\" type=\"email\" required autocomplete=\"email\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"hello@yourdomain.com\" /></div>\
 <div><label for=\"placement-from-name\" class=\"block text-sm font-medium text-surface-700\">From name (optional)</label>\
 <input id=\"placement-from-name\" name=\"from_name\" type=\"text\" maxlength=\"120\" class=\"mt-1 w-full rounded-sm border-surface-300 focus:border-primary focus:ring-primary text-sm\" placeholder=\"Acme Sales\" /></div>\
 </div>\
@@ -3805,7 +3943,7 @@ pub fn web_domains_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        domain_label = Label {
+        domain_label = Label { html_for: Some("domain-new-name"),
             text: "Domain",
             variant: "default",
             size: "default",
@@ -3813,7 +3951,7 @@ pub fn web_domains_new_page() -> String {
             optional: false
         }
         .render_html(),
-        domain_input = Input {
+        domain_input = Input { id: Some("domain-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -3967,7 +4105,7 @@ pub fn web_settings_team_page() -> String {
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
 <form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/team/invite\">\
 <div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
-<input id=\"invite-email\" name=\"userName\" type=\"email\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
+<input id=\"invite-email\" name=\"userName\" type=\"email\" required autocomplete=\"email\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
 <div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-role\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Role</label>\
 <select id=\"invite-role\" name=\"role\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button>\
@@ -3979,18 +4117,24 @@ pub fn web_settings_team_page() -> String {
 
 /// Billing settings page.
 pub fn web_settings_billing_page() -> String {
+    // Batch-2 honesty fix: this static fallback used to fabricate a plan
+    // ("Free Tier", "$0/month") and a usage figure ("0 of 1,000 emails
+    // sent") it cannot know. Figures it cannot read now say
+    // "unavailable" — never a fabricated zero — and the plan-change form
+    // states up front what submitting it actually does (see the matching
+    // flash copy in api-server's billing twins).
     format!(
         "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Billing</h1>\
 <section data-view-state=\"ready\" class=\"space-y-6\">\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
 <h3 class=\"text-lg font-bold mb-2\">Current Plan</h3>\
-<p class=\"text-sm text-muted-foreground\">Free Tier</p>\
-<p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
+<p class=\"text-3xl font-bold mt-4\">unavailable<span class=\"text-sm font-normal text-muted-foreground\"> — live figures load with your account data</span></p>\
+<p class=\"mt-3 text-sm text-muted-foreground\">Plan changes are arranged with the billing team. Submitting the request below records a change request for them — nothing is charged from this page and no checkout session opens here.</p>\
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"apex-klabel mb-2\" for=\"upgrade-plan\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
 <select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Developer — €29/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
-<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
+<button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Request plan change</button>\
 </form>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
@@ -4000,22 +4144,24 @@ pub fn web_settings_billing_page() -> String {
 <svg class=\"h-5 w-5\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect width=\"20\" height=\"14\" x=\"2\" y=\"5\" rx=\"2\"/><line x1=\"2\" x2=\"22\" y1=\"10\" y2=\"10\"/></svg>\
 </div>\
 <div class=\"flex-1 min-w-[9rem]\">\
-<p class=\"text-sm font-semibold text-surface-950\">No payment method on file</p>\
-<p class=\"text-xs text-surface-500\">Add a credit card or ACH to enable paid plans</p>\
+<p class=\"text-sm font-semibold text-surface-950\">Payment methods are managed with the billing team</p>\
+<p class=\"text-xs text-surface-500\">The request below asks the billing team to open the secure portal for you — card details are never entered on this page</p>\
 </div>\
 <div class=\"flex flex-col gap-2 w-full sm:w-auto shrink-0\">\
-<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Add Payment Method</button></form>\
+<form class=\"inline\" method=\"post\" action=\"/web/billing/portal\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all border border-surface-300 text-surface-700 hover:bg-surface-100 h-10 px-4 py-2\">Request portal access</button></form>\
 </div>\
 </div>\
 </div>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Usage This Month</h3>\
 {progress}\
-<p class=\"text-sm text-muted-foreground mt-2\">0 of 1,000 emails sent</p>\
+<p class=\"text-sm text-muted-foreground mt-2\">Usage for this month is unavailable here — not zero. The live figure loads with your account data.</p>\
 </div>\
 </section>\
 <section data-view-state=\"empty\" hidden><div class=\"rounded-sm border border-surface-200 bg-card p-12 text-center shadow-premium\"><p class=\"text-lg font-bold text-surface-950\">No billing data available</p><p class=\"text-sm text-muted-foreground mt-1\">Billing information will appear once you start sending emails.</p></div></section>\
 </div>",
-        progress = Progress { value: 0, variant: "default", size: "default", animated: false, show_value: true }.render_html(),
+        // No fabricated "0%" readout on the static fallback — the meter is
+        // a chassis; the unavailable copy carries the uncertainty.
+        progress = Progress { value: 0, variant: "default", size: "default", animated: false, show_value: false }.render_html(),
     )
 }
 
@@ -4076,7 +4222,7 @@ pub fn web_settings_profile_page() -> String {
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
 <div class=\"flex gap-3\">{update_button}</div>\
 </form></div></div>",
-        name_label = Label {
+        name_label = Label { html_for: Some("profile-name"),
             text: "Name",
             variant: "default",
             size: "default",
@@ -4084,7 +4230,7 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input {
+        name_input = Input { id: Some("profile-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4094,12 +4240,12 @@ pub fn web_settings_profile_page() -> String {
             right_icon: None,
             error: None,
             disabled: false,
-            autocomplete: None,
+            autocomplete: Some("name"),
             required: true,
             name: Some("name"),
         }
         .render_html(),
-        email_label = Label {
+        email_label = Label { html_for: Some("profile-email"),
             text: "Email",
             variant: "default",
             size: "default",
@@ -4107,7 +4253,7 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        email_input = Input {
+        email_input = Input { id: Some("profile-email"),
             input_type: "email",
             variant: "default",
             size: "default",
@@ -4117,7 +4263,7 @@ pub fn web_settings_profile_page() -> String {
             right_icon: None,
             error: None,
             disabled: true,
-            autocomplete: None,
+            autocomplete: Some("email"),
             required: true,
             name: Some("email"),
         }
@@ -4133,7 +4279,7 @@ pub fn web_settings_profile_page() -> String {
             submit: true
         }
         .render_html(),
-        current_label = Label {
+        current_label = Label { html_for: Some("current-password"),
             text: "Current Password",
             variant: "default",
             size: "default",
@@ -4141,7 +4287,7 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        current_input = Input {
+        current_input = Input { id: Some("current-password"),
             input_type: "password",
             variant: "default",
             size: "default",
@@ -4151,12 +4297,12 @@ pub fn web_settings_profile_page() -> String {
             right_icon: None,
             error: None,
             disabled: false,
-            autocomplete: None,
+            autocomplete: Some("current-password"),
             required: true,
             name: Some("current_password"),
         }
         .render_html(),
-        new_label = Label {
+        new_label = Label { html_for: Some("new-password"),
             text: "New Password",
             variant: "default",
             size: "default",
@@ -4164,7 +4310,7 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        new_input = Input {
+        new_input = Input { id: Some("new-password"),
             input_type: "password",
             variant: "default",
             size: "default",
@@ -4174,7 +4320,7 @@ pub fn web_settings_profile_page() -> String {
             right_icon: None,
             error: None,
             disabled: false,
-            autocomplete: None,
+            autocomplete: Some("new-password"),
             required: true,
             name: Some("new_password"),
         }
@@ -4415,7 +4561,7 @@ pub fn control_plane_tenants_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label {
+        name_label = Label { html_for: Some("tenant-new-name"),
             text: "Tenant Name",
             variant: "default",
             size: "default",
@@ -4423,7 +4569,7 @@ pub fn control_plane_tenants_new_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input {
+        name_input = Input { id: Some("tenant-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4438,7 +4584,7 @@ pub fn control_plane_tenants_new_page() -> String {
             name: Some("name"),
         }
         .render_html(),
-        domain_label = Label {
+        domain_label = Label { html_for: Some("tenant-new-domain"),
             text: "Primary Domain",
             variant: "default",
             size: "default",
@@ -4446,7 +4592,7 @@ pub fn control_plane_tenants_new_page() -> String {
             optional: false
         }
         .render_html(),
-        domain_input = Input {
+        domain_input = Input { id: Some("tenant-new-domain"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4524,7 +4670,7 @@ pub fn control_plane_operators_new_page() -> String {
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label {
+        name_label = Label { html_for: Some("operator-new-name"),
             text: "Name",
             variant: "default",
             size: "default",
@@ -4532,7 +4678,7 @@ pub fn control_plane_operators_new_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input {
+        name_input = Input { id: Some("operator-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4547,7 +4693,7 @@ pub fn control_plane_operators_new_page() -> String {
             name: Some("name"),
         }
         .render_html(),
-        email_label = Label {
+        email_label = Label { html_for: Some("operator-new-email"),
             text: "Email",
             variant: "default",
             size: "default",
@@ -4555,8 +4701,9 @@ pub fn control_plane_operators_new_page() -> String {
             optional: false
         }
         .render_html(),
-        email_input = Input {
+        email_input = Input { id: Some("operator-new-email"),
             input_type: "email",
+            autocomplete: Some("email"),
             variant: "default",
             size: "default",
             placeholder: "admin@apexmail.ee",
@@ -4565,7 +4712,6 @@ pub fn control_plane_operators_new_page() -> String {
             right_icon: None,
             error: None,
             disabled: false,
-            autocomplete: None,
             required: true,
             name: Some("email"),
         }
@@ -5434,27 +5580,26 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 /// `#login-password`) from the behavior baseline manifest.
 pub fn control_plane_login_page(csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
+    // Batch-2 copy fix: plain field names ("Email", "Password"), and the
+    // dead "Maintain session security" checkbox is gone (the login handler
+    // never read it — a control that did nothing must not render).
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/web/cp/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"apex-klabel\" for=\"login-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Access Password</label>\
+<label class=\"apex-klabel\" for=\"login-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
 <input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
-<div class=\"flex items-center gap-2 py-1\">\
-<input id=\"rememberMe\" name=\"rememberMe\" type=\"checkbox\" checked class=\"h-4 w-4 rounded border-surface-300 text-primary focus:ring-primary transition-all cursor-pointer\" />\
-<label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
-</div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign in</span>{arrow}</button>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),
@@ -5476,25 +5621,36 @@ mod tests {
 
     #[test]
     fn web_root_layout_matches_nextjs_structure() {
-        let html = web_root_layout("<p>test</p>");
+        // Batch-2 titles fix: the root layout takes the per-page document
+        // title instead of the hardcoded "ApexMail".
+        let html = web_root_layout("<p>test</p>", "Dashboard — ApexMail");
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains(&format!(
             "<html lang=\"en\" class=\"{}\">",
             WEB_ROOT_HTML_CLASSES
         )));
-        assert!(html.contains("<title>ApexMail</title>"));
+        assert!(html.contains("<title>Dashboard — ApexMail</title>"));
         assert!(html.contains("Modern email infrastructure for developers"));
-        assert!(html.contains(&format!("<body class=\"{}\">", WEB_ROOT_BODY_CLASSES)));
+        // Batch-2 single-main fix: the former landmark's styling moved onto
+        // the <body> and the root layout no longer emits a <main>.
+        assert!(html.contains(&format!(
+            "<body class=\"{} min-h-screen bg-background\">",
+            WEB_ROOT_BODY_CLASSES
+        )));
+        assert!(!html.contains("<main"));
         assert!(html.contains("<a href=\"#app-main\""));
-        assert!(html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">"));
         assert!(html.contains("<p>test</p>"));
         assert!(html.contains("</html>"));
     }
 
     #[test]
     fn control_plane_root_layout_matches_nextjs_structure() {
+        // Batch-2 titles fix: the routed render passes the per-page title;
+        // the one-argument form keeps the generic control-plane title.
         let html = control_plane_root_layout("<p>test</p>");
-        assert!(html.contains("<title>ApexMail Control Plane</title>"));
+        assert!(html.contains("<title>Control Plane — ApexMail</title>"));
+        let titled = control_plane_root_layout_with_title("<p>test</p>", "Tenants — ApexMail");
+        assert!(titled.contains("<title>Tenants — ApexMail</title>"));
         assert!(html.contains("<body class=\"antialiased bg-background text-surface-950\">"));
         assert!(html.contains("<p>test</p>"));
     }
@@ -5649,7 +5805,7 @@ mod tests {
     #[test]
     fn root_layouts_reference_no_scripts() {
         for html in [
-            web_root_layout("<p>test</p>"),
+            web_root_layout("<p>test</p>", "Dashboard — ApexMail"),
             control_plane_root_layout("<p>test</p>"),
         ] {
             assert!(
@@ -6674,6 +6830,10 @@ mod tests {
         assert!(html.contains("rounded-[16px_16px_9px_9px]") /* ARCH (mark DNA) */);
         // H1 consistency: every console page title is text-2xl.
         assert!(!html.contains("text-3xl font-bold tracking-tight text-surface-950"));
+        // Batch-2 honesty fix: the no-data fallback must not fabricate a
+        // delivery rate — "unavailable", never a dial claiming 98.9%.
+        assert!(!html.contains("98.9"));
+        assert!(html.contains("unavailable"));
     }
 
     // ─── Design-report implementation guards ──────────────────────
@@ -6950,8 +7110,14 @@ mod tests {
         let html = web_settings_billing_page();
         assert!(html.contains("Billing"));
         assert!(html.contains("Current Plan"));
-        assert!(html.contains("Free Tier"));
-        assert!(html.contains("Upgrade Plan"));
+        // Batch-2 honesty fix: the static fallback no longer fabricates a
+        // plan/price/usage — it states "unavailable", not a fake Free Tier
+        // $0 or "0 of 1,000 emails".
+        assert!(!html.contains("Free Tier"));
+        assert!(!html.contains("$0"));
+        assert!(!html.contains("0 of 1,000 emails"));
+        assert!(html.contains("unavailable"));
+        assert!(html.contains("Request plan change"));
         assert!(html.contains("Usage This Month"));
     }
 
@@ -7125,23 +7291,60 @@ mod tests {
 
     #[test]
     fn all_web_pages_produce_valid_html() {
+        // Batch-2 titles fix: each wrap carries its route's document title.
         let pages = vec![
-            web_root_layout(&web_home_page()),
-            web_root_layout(&web_dashboard_layout(&web_campaigns_new_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_dedicated_ips_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_dashboard_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_campaigns_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_contacts_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_lists_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_templates_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_reports_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_analytics_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_events_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_domains_page(), "")),
-            web_root_layout(&web_dashboard_layout(&web_settings_page(), "")),
-            web_root_layout(&web_login_page("")),
-            web_root_layout(&web_signup_page("")),
-            web_root_layout(&web_not_found_page()),
+            web_root_layout(&web_home_page(), "Home — ApexMail"),
+            web_root_layout(
+                &web_dashboard_layout(&web_campaigns_new_page(), ""),
+                "New Campaign — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_dedicated_ips_page(), ""),
+                "Dedicated IPs — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_dashboard_page(), ""),
+                "Dashboard — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_campaigns_page(), ""),
+                "Campaigns — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_contacts_page(), ""),
+                "Contacts — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_lists_page(), ""),
+                "Lists — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_templates_page(), ""),
+                "Templates — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_reports_page(), ""),
+                "Reports — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_analytics_page(), ""),
+                "Analytics — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_events_page(), ""),
+                "Events — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_domains_page(), ""),
+                "Domains — ApexMail",
+            ),
+            web_root_layout(
+                &web_dashboard_layout(&web_settings_page(), ""),
+                "Settings — ApexMail",
+            ),
+            web_root_layout(&web_login_page(""), "Login — ApexMail"),
+            web_root_layout(&web_signup_page(""), "Signup — ApexMail"),
+            web_root_layout(&web_not_found_page(), "Page not found — ApexMail"),
         ];
         for (i, html) in pages.iter().enumerate() {
             assert!(

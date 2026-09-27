@@ -171,11 +171,14 @@ mod tests {
 
     #[test]
     fn counts_declared_routes() {
-        assert_eq!(declared_route_count("web"), Some(33));
+        // Batch-2 list-detail fix: /lists/{id} and /lists/{id}/edit serve
+        // real pages (data-backed when a session renders them), so the
+        // baseline manifest now carries their canonical patterns.
+        assert_eq!(declared_route_count("web"), Some(35));
         assert_eq!(declared_route_count("control-plane"), Some(30));
         assert_eq!(declared_route_count("marketing"), Some(18));
         assert_eq!(declared_route_count("marketing-zola"), Some(36));
-        assert_eq!(total_route_count(), 117);
+        assert_eq!(total_route_count(), 119);
     }
 
     #[test]

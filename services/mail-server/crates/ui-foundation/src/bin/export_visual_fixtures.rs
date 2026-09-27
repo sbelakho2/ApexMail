@@ -98,6 +98,18 @@ fn route_file_stem(route: &str) -> String {
     route.trim_start_matches('/').replace('/', "-")
 }
 
+/// Fixed CSRF secret for the exported fixtures (batch-2 form-hygiene
+/// triage): the full-route export previously rendered with NO secret, so
+/// every POST form shipped without its `name="_csrf"` input and the
+/// form-hygiene gate counted those artifacts as missing-csrf findings.
+/// Production always renders with a secret; fixtures must represent
+/// production. The fixed value keeps exports deterministic.
+const FIXTURE_CSRF_SECRET: &str = "ui-foundation-fixture-secret-0123456789abcdef";
+
+fn render_fixture_route(surface: &str, route: &str) -> Option<String> {
+    axum_router::render_route_with_query(surface, route, None, Some(FIXTURE_CSRF_SECRET))
+}
+
 fn auth_html_file(id: &str) -> String {
     format!("{id}.html")
 }
@@ -255,7 +267,7 @@ fn export_auth_fixtures(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (id, surface, route) in AUTH_FIXTURES {
         let html_file = auth_html_file(id);
-        let html = axum_router::render_route(surface, route)
+        let html = render_fixture_route(surface, route)
             .unwrap_or_else(|| panic!("missing renderer for [{}] {}", surface, route));
         write_fixture_html(out_dir, &html_file, &html)?;
 
@@ -282,7 +294,7 @@ fn export_marketing_fixtures(
     for (surface, route) in MARKETING_FIXTURES {
         let html_file = marketing_html_file(surface, route);
         let route_stem = route_file_stem(route);
-        let html = axum_router::render_route(surface, route)
+        let html = render_fixture_route(surface, route)
             .unwrap_or_else(|| panic!("missing renderer for [{}] {}", surface, route));
         write_fixture_html(out_dir, &html_file, &html)?;
 
@@ -308,7 +320,7 @@ fn export_full_route_fixtures(
     for surface in ui_foundation::routing::surface_ids() {
         for route in ui_foundation::routing::surface_routes(surface) {
             let html_file = full_route_html_file(surface, route.path);
-            let html = axum_router::render_route(surface, route.path)
+            let html = render_fixture_route(surface, route.path)
                 .unwrap_or_else(|| panic!("missing renderer for [{}] {}", surface, route.path));
             write_fixture_html(out_dir, &html_file, &html)?;
 

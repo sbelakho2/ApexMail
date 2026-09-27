@@ -74,9 +74,14 @@ fn assert_no_stripe_browser_embed(label: &str, html: &str) {
 fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
     match route.surface {
         "web" => {
+            // Batch-2 titles fix: the document title is "{Page} — ApexMail"
+            // per route, no longer the hardcoded "ApexMail".
             assert!(
-                html.contains("<title>ApexMail</title>"),
-                "[web] {} missing web title",
+                html.contains(&format!(
+                    "<title>{}</title>",
+                    crate::axum_router::route_document_title("web", route.pattern)
+                )),
+                "[web] {} missing per-page web title",
                 route.pattern
             );
             assert!(
@@ -87,16 +92,20 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
                 "[web] {} missing web html font classes",
                 route.pattern
             );
+            // Batch-2 single-main fix: the former root-layout landmark's
+            // background styling moved onto the <body>.
             assert!(
                 html.contains(&format!(
-                    "<body class=\"{}\">",
+                    "<body class=\"{} min-h-screen bg-background\">",
                     leptos_views::WEB_ROOT_BODY_CLASSES
                 )),
                 "[web] {} missing web body class",
                 route.pattern
             );
+            // The single landmark's id may sit anywhere in the opening tag
+            // (dashboard shell emits class first).
             assert!(
-                html.contains("<main id=\"app-main\" class=\"min-h-screen bg-background\">"),
+                html.contains("<main") && html.contains("id=\"app-main\""),
                 "[web] {} missing web main wrapper",
                 route.pattern
             );
@@ -126,9 +135,14 @@ fn assert_surface_wrapper(route: &ssr::SsrRoute, html: &str) {
             }
         }
         "control-plane" => {
+            // Batch-2 titles fix: the CP document title follows the route
+            // context ("Page — ApexMail").
             assert!(
-                html.contains("<title>ApexMail Control Plane</title>"),
-                "[control-plane] {} missing control-plane title",
+                html.contains(&format!(
+                    "<title>{}</title>",
+                    crate::axum_router::route_document_title("control-plane", route.pattern)
+                )),
+                "[control-plane] {} missing per-page control-plane title",
                 route.pattern
             );
             assert!(
@@ -305,7 +319,7 @@ fn migration_primitives_render_valid_html() {
     assert!(html.contains("<table"), "Table missing <table> tag");
     assert!(html.contains("Col"), "Table missing column label");
 
-    let input = primitives::Input {
+    let input = primitives::Input { id: None,
         input_type: "text",
         variant: "default",
         size: "default",
