@@ -402,17 +402,47 @@ pub(crate) async fn seed_plan(pool: &PgPool, name: &str, price_id: &str) {
 /// the whole suite (pending metering events, Stripe deadletters): a drain or
 /// a clear-and-scan in one process otherwise races another's. A session-level
 /// Postgres advisory lock on the admin database; released when the pool drops.
-pub(crate) async fn redis_keys_guard(admin_url: &str, lock_name: &str) -> Option<sqlx::PgPool> {
+///
+/// PANICS on connect or lock failure: the old silent-None behavior turned a
+/// lost lock into a silently unsynchronized suite, and exactly-once
+/// assertions then failed (or worse, passed by luck) under load. By the time
+/// a test holds a provisioned env, the database is proven reachable — a
+/// guard that cannot be taken is an infrastructure failure, not a skip.
+pub(crate) async fn redis_keys_guard(admin_url: &str, lock_name: &str) -> sqlx::PgPool {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(30))
         .connect(admin_url)
         .await
-        .ok()?;
+        .unwrap_or_else(|error| {
+            panic!("redis_keys_guard({lock_name}): admin pool connect failed: {error}")
+        });
     sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
         .bind(format!("billing-shared-redis:{lock_name}"))
         .execute(&pool)
         .await
-        .ok()?;
-    Some(pool)
+        .unwrap_or_else(|error| {
+            panic!("redis_keys_guard({lock_name}): advisory lock failed: {error}")
+        });
+    pool
+}
+
+/// Wipe the SHARED pending-metering keyspace. Call while holding the
+/// metering guard, before seeding: leftovers from an earlier crashed run
+/// would otherwise be swept by the next drain and break exact count
+/// assertions (`meter:pending:*` is suite-global by design).
+pub(crate) async fn clear_pending_metering_keys(redis: &deadpool_redis::Pool) {
+    let mut conn = redis.get().await.expect("redis pool for keyspace wipe");
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg("meter:pending:*")
+        .query_async(&mut *conn)
+        .await
+        .expect("scan pending keys");
+    for key in keys {
+        let _: () = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .expect("delete stale pending key");
+    }
 }

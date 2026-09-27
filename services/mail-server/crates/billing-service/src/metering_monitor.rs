@@ -498,6 +498,7 @@ mod tests {
         let env = &owned;
         let _metering_guard =
             crate::test_support::redis_keys_guard(&owned.admin_url, "metering").await;
+        crate::test_support::clear_pending_metering_keys(&env.state.redis).await;
         crate::test_support::seed_tenant(&env.pool, "mtcov_mon_drain", "growth").await;
 
         // Two pending events (one valid, one malformed) mirror the recovery

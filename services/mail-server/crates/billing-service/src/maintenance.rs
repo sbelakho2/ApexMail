@@ -4195,7 +4195,7 @@ mod coverage_adversarial {
     /// key it can see — including another test process's — so two drains
     /// racing make each other's counts wrong. A session-level advisory lock
     /// on the admin database; released when the pool drops.
-    async fn metering_keys_guard(admin_url: &str) -> Option<sqlx::PgPool> {
+    async fn metering_keys_guard(admin_url: &str) -> sqlx::PgPool {
         crate::test_support::redis_keys_guard(admin_url, "metering").await
     }
 
@@ -5688,6 +5688,7 @@ mod coverage_adversarial {
     env_test!(metering_drain_replay_never_double_counts, |env| {
         let _drain_guard = METER_DRAIN_LOCK.lock().await;
         let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        crate::test_support::clear_pending_metering_keys(&env.redis).await;
         let tenant = "mtcov_drain_replay";
         seed_tenant(env, tenant, "free", "active").await;
         let raw_id = "mtcov-replay-raw-1";
@@ -7512,6 +7513,7 @@ mod coverage_adversarial {
 
     env_test!(metering_drain_recovers_pending_events_exactly_once, |env| {
         let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        crate::test_support::clear_pending_metering_keys(&env.redis).await;
         let tenant = "mtcov_drain";
         seed_tenant_plan(env, tenant, "growth", "active").await;
         let raw_id = "evt_mtcov_drain_0001";
@@ -8053,6 +8055,7 @@ mod coverage_adversarial {
     env_test!(metering_drain_discards_malformed_and_fails_loudly, |env| {
         let _drain_guard = METER_DRAIN_LOCK.lock().await;
         let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        crate::test_support::clear_pending_metering_keys(&env.redis).await;
 
         // This test owns the `w6c-` prefix inside the pending keyspace:
         // clear leftovers from previous runs first (the drain consumes the
