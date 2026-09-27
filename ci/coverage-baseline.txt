@@ -27,7 +27,6 @@
 # removed and every gated suite is exercised, including the three that need a
 # live ClickHouse). The campaign also found and fixed production bugs the
 # suites had never reached. Truncated to two decimals.
-93.29
 
 # 2026-09-15: raised 84.48 → 93.29 after the audit-fix + long-tail waves
 # measured 93.2930% over 9,200 tests (all green, 0 skipped; lcov from
@@ -78,4 +77,18 @@
 # cookies clobbered by HeaderMap::insert in form_logout and
 # form_impersonate_end, and sales add_recipients mutating the recipient
 # list behind a 400.
-95.00
+
+# 2026-09-27 (wave 6): raised 95.00 → 95.59 after the wave-6 campaign
+# measured 95.5911% over 10,985 tests (all green, 0 skipped, 0 TIMEOUT,
+# measured with --no-fail-fast). Wave 6 covered the worst remaining files:
+# queue-provider failover arms, api-server rate_limiter/audit_log, the
+# compliance crate (XBRL taxonomy/instance, GDPR automation, retention
+# sweep), billing maintenance/overage real-tick drivers, ha backup/failover
+# routes, and the five previously 0%-covered binary mains driven as
+# black-box lifecycle tests. Real-bug haul: the metrics exporter never
+# listened in api-server, tracking-service AND the mta
+# (install_recorder vs install — /metrics dead since it was written), full
+# backups impossible in ha (allowlist mismatch), the oldest-unresolved
+# overage metric folding with .min(), and a silently-lossy shared-keyspace
+# test guard.
+95.59
