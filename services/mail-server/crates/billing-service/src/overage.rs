@@ -375,8 +375,17 @@ async fn sweep_subscription_periods(
     let (unresolved_count, oldest_end) = unresolved;
     if unresolved_count > 0 {
         if let Some(oldest_end) = oldest_end {
+            // Fold with the needs_review age `refresh_pricing_snapshots`
+            // computed moments earlier — OVERWRITING it (the previous form)
+            // hid an older needs_review period behind a younger unbilled
+            // one, so the aging metric under-reported the real backlog.
+            // "Oldest unresolved" is the MAXIMUM age across both states.
+            let age_secs = (Utc::now() - oldest_end).num_seconds().max(0);
             result.oldest_unresolved_age_secs =
-                Some((Utc::now() - oldest_end).num_seconds().max(0));
+                Some(match result.oldest_unresolved_age_secs {
+                    Some(existing) => existing.max(age_secs),
+                    None => age_secs,
+                });
         }
     }
 
@@ -515,8 +524,11 @@ async fn refresh_pricing_snapshots(state: &AppState, result: &mut OverageSweepRe
             result.pricing_needs_review += count as u64;
             if let Some(oldest) = oldest {
                 let age_secs = (Utc::now() - oldest).num_seconds().max(0);
+                // "Oldest unresolved" is the MAXIMUM age — the previous
+                // `.min()` folded toward the YOUNGEST review period, the
+                // opposite of what the metric documents.
                 result.oldest_unresolved_age_secs = match result.oldest_unresolved_age_secs {
-                    Some(existing) => Some(existing.min(age_secs)),
+                    Some(existing) => Some(existing.max(age_secs)),
                     None => Some(age_secs),
                 };
             }
@@ -3965,4 +3977,1222 @@ mod coverage_adversarial {
             None => std::env::remove_var("OVERAGE_INVOICING_ENABLED"),
         }
     }
+
+    // -------------------------------------------------------------------
+    // W6C adversarial coverage: sweep pagination/failure isolation, the
+    // snapshot backfill and mismatch arms, PAYG adoption, and the wallet /
+    // lease / Stripe fault arms of the collection ladder.
+    // -------------------------------------------------------------------
+
+    async fn break_table(env: &Env, table: &str) {
+        sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_w6c_broken"))
+            .execute(&env.pool)
+            .await
+            .expect("break table");
+    }
+
+    async fn restore_table(env: &Env, table: &str) {
+        let _ = sqlx::query(&format!(
+            "ALTER TABLE {table}_w6c_broken RENAME TO {table}"
+        ))
+        .execute(&env.pool)
+        .await;
+    }
+
+    async fn seed_plan(env: &Env, name: &str, limit: i64, features: serde_json::Value) {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_monthly, email_limit,
+                                api_call_limit, features)
+             VALUES ('pln_w6c_' || $2, $2, $2, 900, $3, 100000, $4)
+             ON CONFLICT (name) DO UPDATE SET email_limit = EXCLUDED.email_limit,
+                 features = EXCLUDED.features, price_monthly = EXCLUDED.price_monthly",
+        )
+        .bind(name)
+        .bind(name)
+        .bind(limit)
+        .bind(features)
+        .execute(&env.pool)
+        .await
+        .expect("seed plan");
+    }
+
+    // The page-size boundary: with more than SWEEP_PAGE unbilled periods the
+    // sweep MUST continue past the first page through the keyset cursor —
+    // a broken cursor silently drops every period beyond row 500 — and ONE
+    // failing period must be isolated (recorded with backoff) while the
+    // rest of the sweep still progresses.
+    env_test!(sweep_pages_past_page_size_and_isolates_failures, |env| {
+        // 505 no-usage periods across distinct tenants: every one resolves
+        // to `skipped` (no overage), exercising the full pagination loop.
+        let tenants: Vec<String> = (0..505).map(|i| format!("ovpg_{i:04}")).collect();
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status)
+             SELECT t, 'W6C page ' || t, 'growth', 'active' FROM unnest($1::text[]) AS t",
+        )
+        .bind(&tenants)
+        .execute(&env.pool)
+        .await
+        .expect("seed page tenants");
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO billing_periods
+                 (tenant_id, usage_kind, period_start, period_end, currency, plan_name,
+                  email_allowance, overage_rate_millicents)
+             SELECT t, 'subscription', $2 - INTERVAL '30 days', $2, 'EUR', 'growth', 1000, 35
+             FROM unnest($1::text[]) AS t",
+        )
+        .bind(&tenants)
+        .bind(now - chrono::Duration::days(2))
+        .execute(&env.pool)
+        .await
+        .expect("seed page periods");
+
+        // One zero-rated period WITH overage and an address: skipped only at
+        // the amount<=0 arm, never billed.
+        seed_tenant(env, "ovpg_zero_rate", "growth").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind("ovpg_zero_rate")
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        send_emails(env, "ovpg_zero_rate", 1200, now - chrono::Duration::days(3)).await;
+        let zero_rate = seed_billing_period(
+            env,
+            "ovpg_zero_rate",
+            Some("growth"),
+            Some(1000),
+            Some(0),
+            "EUR",
+            now - chrono::Duration::days(2),
+        )
+        .await;
+
+        // One REAL failure: with `invoices` gone the creation blows up; the
+        // sweep must record the failure on the period and move on.
+        let failing_tenant = "ovpg_fail";
+        seed_tenant(env, failing_tenant, "growth").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(failing_tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        send_emails(env, failing_tenant, 1500, now - chrono::Duration::days(3)).await;
+        let failing = seed_billing_period(
+            env,
+            failing_tenant,
+            Some("growth"),
+            Some(1000),
+            Some(35),
+            "EUR",
+            now - chrono::Duration::days(2),
+        )
+        .await;
+
+        break_table(env, "invoices").await;
+        let mut result = OverageSweepResult::default();
+        sweep_subscription_periods(&env.state, &mut result)
+            .await
+            .expect("the sweep itself never aborts on one bad period");
+        restore_table(env, "invoices").await;
+
+        assert_eq!(
+            result.periods_checked, 507,
+            "every unbilled period on BOTH pages was visited: {result:?}"
+        );
+        assert_eq!(result.failed_periods, 1, "{result:?}");
+        assert_eq!(result.skipped_no_overage, 506, "{result:?}");
+        let (attempts, next): (i32, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT sweep_attempts, next_sweep_attempt_at FROM billing_periods WHERE id = $1",
+        )
+        .bind(failing.id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("failing period");
+        assert_eq!(attempts, 1, "the failure is recorded with an attempt");
+        assert!(next.is_some(), "the failing period backs off before retry");
+
+        // The zero-rated period was skipped (amount 0 is never billed).
+        assert_eq!(period_state(env, zero_rate.id).await, "skipped");
+    });
+
+    // Failure bookkeeping must not panic when the period row is
+    // unwritable: the sweep's isolation path degrades to a warning instead
+    // of aborting the whole pass.
+    env_test!(period_failure_recording_survives_a_broken_table, |env| {
+        break_table(env, "billing_periods").await;
+        // Must not panic; the error is swallowed into the warn path.
+        record_period_sweep_failure(&env.pool, Uuid::new_v4(), "boom").await;
+        restore_table(env, "billing_periods").await;
+    });
+
+    // needs_review periods stay VISIBLE: they are counted and their age is
+    // folded into the unresolved-age metric (the smaller of the two wins).
+    env_test!(needs_review_periods_surface_their_age, |env| {
+        let tenant = "ovcov_review_age";
+        seed_tenant(env, tenant, "growth").await;
+        let now = Utc::now();
+        // Unbilled, 10 days old.
+        sqlx::query(
+            "INSERT INTO billing_periods
+                 (tenant_id, usage_kind, period_start, period_end, currency, plan_name,
+                  email_allowance, overage_rate_millicents)
+             VALUES ($1, 'subscription', $2 - INTERVAL '40 days', $2, 'EUR', 'growth', 1000, 35)",
+        )
+        .bind(tenant)
+        .bind(now - chrono::Duration::days(10))
+        .execute(&env.pool)
+        .await
+        .expect("unbilled period");
+        // needs_review, 20 days old — the YOUNGER unbilled row must not
+        // hide it (the aging metric reports the OLDEST unresolved work).
+        sqlx::query(
+            "INSERT INTO billing_periods
+                 (tenant_id, usage_kind, period_start, period_end, currency,
+                  invoice_state, last_sweep_error)
+             VALUES ($1, 'subscription', $2 - INTERVAL '50 days', $2, 'EUR', 'needs_review',
+                     'needs review: pricing unresolved')",
+        )
+        .bind(tenant)
+        .bind(now - chrono::Duration::days(20))
+        .execute(&env.pool)
+        .await
+        .expect("review period");
+
+        let mut result = OverageSweepResult::default();
+        sweep_subscription_periods(&env.state, &mut result)
+            .await
+            .expect("sweep");
+        assert_eq!(result.pricing_needs_review, 1, "{result:?}");
+        let age = result
+            .oldest_unresolved_age_secs
+            .expect("unresolved work is visible");
+        let twenty_days = chrono::Duration::days(20).num_seconds();
+        assert!(
+            age >= twenty_days && age <= twenty_days + 60,
+            "oldest unresolved age must fold in the older needs_review row (~20d), got {age}s"
+        );
+    });
+
+    // A legacy period with an EMPTY pricing snapshot is backfilled ONCE
+    // from the authoritative per-plan records under the period lock — the
+    // invoice is priced at the resolved rate and the snapshot is frozen on
+    // the period row.
+    env_test!(empty_snapshot_is_backfilled_from_the_live_plan, |env| {
+        let tenant = "ovcov_backfill";
+        seed_plan(env, "growth", 1000, serde_json::json!({})).await;
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_backfill', 'growth', 'active', NOW() - INTERVAL '30 days',
+                     NOW(), 'cus_backfill')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let now = Utc::now();
+        send_emails(env, tenant, 1500, now - chrono::Duration::days(3)).await;
+        // Snapshot carries NEITHER plan NOR allowance NOR rate — and it
+        // names the subscription whose live row resolves both.
+        let period = BillingPeriodRow {
+            id: Uuid::new_v4(),
+            tenant_id: tenant.to_string(),
+            stripe_subscription_id: Some("sub_backfill".to_string()),
+            period_start: now - chrono::Duration::days(32),
+            period_end: now - chrono::Duration::days(2),
+            plan_name: None,
+            email_allowance: None,
+            overage_rate_millicents: None,
+            currency: "EUR".to_string(),
+        };
+        sqlx::query(
+            "INSERT INTO billing_periods
+                 (id, tenant_id, stripe_subscription_id, usage_kind, period_start, period_end,
+                  currency)
+             VALUES ($1, $2, $3, 'subscription', $4, $5, 'EUR')",
+        )
+        .bind(period.id)
+        .bind(&period.tenant_id)
+        .bind("sub_backfill")
+        .bind(period.period_start)
+        .bind(period.period_end)
+        .execute(&env.pool)
+        .await
+        .expect("seed snapshot-less period");
+
+        let mut result = OverageSweepResult::default();
+        process_subscription_period(&env.state, &period, &mut result)
+            .await
+            .expect("backfill then bill");
+        assert_eq!(result.invoices_created, 1, "{result:?}");
+        let (subtotal, snapshot, state): (i64, serde_json::Value, String) = sqlx::query_as(
+            "SELECT COALESCE(i.subtotal, i.amount)::bigint, p.pricing_snapshot,
+                    p.invoice_state::text
+             FROM billing_periods p JOIN invoices i ON i.id = p.invoice_id
+             WHERE p.id = $1",
+        )
+        .bind(period.id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("period");
+        assert_eq!(subtotal, 18, "500 overage emails at 35 millicents, half-up");
+        assert_eq!(state, "invoiced");
+        assert_eq!(snapshot["backfilled"], serde_json::json!(true));
+        assert_eq!(snapshot["planName"], serde_json::json!("growth"));
+        assert_eq!(snapshot["overageRateMillicents"], serde_json::json!(35));
+    });
+
+    // An aged period whose usage read is ZERO cannot distinguish "no
+    // usage" from "events aged out" — it must surface for review, never be
+    // silently skipped or billed.
+    env_test!(aged_zero_usage_period_is_retained_for_review, |env| {
+        let tenant = "ovcov_aged";
+        seed_tenant(env, tenant, "growth").await;
+        let period = seed_billing_period(
+            env,
+            tenant,
+            Some("growth"),
+            Some(1000),
+            Some(35),
+            "EUR",
+            Utc::now() - chrono::Duration::days(45),
+        )
+        .await;
+        let mut result = OverageSweepResult::default();
+        process_subscription_period(&env.state, &period, &mut result)
+            .await
+            .expect("aged period");
+        assert_eq!(result.aged_needs_review, 1, "{result:?}");
+        assert_eq!(period_state(env, period.id).await, "needs_review");
+        let error: String =
+            sqlx::query_scalar("SELECT last_sweep_error FROM billing_periods WHERE id = $1")
+                .bind(period.id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("period");
+        assert!(
+            error.contains("aged beyond metering retention"),
+            "the review reason names the aging: {error}"
+        );
+    });
+
+    // A plan outside the rate ladder with no snapshot rate is SKIPPED, not
+    // priced from some default.
+    env_test!(plan_without_ladder_rate_is_skipped, |env| {
+        let tenant = "ovcov_gold";
+        seed_tenant(env, tenant, "gold").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let period = seed_billing_period(
+            env,
+            tenant,
+            Some("gold"),
+            Some(1000),
+            None,
+            "EUR",
+            Utc::now() - chrono::Duration::days(2),
+        )
+        .await;
+        send_emails(env, tenant, 1200, Utc::now() - chrono::Duration::days(3)).await;
+        let mut result = OverageSweepResult::default();
+        process_subscription_period(&env.state, &period, &mut result)
+            .await
+            .expect("ladder-less plan");
+        assert_eq!(result.skipped_no_overage, 1, "{result:?}");
+        assert_eq!(period_state(env, period.id).await, "skipped");
+        assert_eq!(
+            result.invoices_created, 0,
+            "no rate means no invoice, never a zero-rated one"
+        );
+    });
+
+    // A non-unique invoice-creation failure propagates: the period stays
+    // unbilled, no outbox row appears, and the caller records the failure.
+    env_test!(invoice_creation_failure_propagates_and_rolls_back, |env| {
+        let tenant = "ovcov_insfail";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let period = seed_billing_period(
+            env,
+            tenant,
+            Some("growth"),
+            Some(1000),
+            Some(35),
+            "EUR",
+            Utc::now() - chrono::Duration::days(2),
+        )
+        .await;
+        send_emails(env, tenant, 1500, Utc::now() - chrono::Duration::days(3)).await;
+
+        break_table(env, "invoices").await;
+        let mut result = OverageSweepResult::default();
+        let error = process_subscription_period(&env.state, &period, &mut result)
+            .await
+            .expect_err("a broken invoices table must fail the period");
+        restore_table(env, "invoices").await;
+        assert!(error.contains("invoice creation failed"), "{error}");
+        assert_eq!(result.invoices_created, 0);
+        assert_eq!(period_state(env, period.id).await, "unbilled",
+            "the failed claim rolled back whole — the period is retried next sweep");
+        let outbox: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM invoice_collection_outbox")
+                .fetch_one(&env.pool)
+                .await
+                .expect("outbox");
+        assert_eq!(outbox, 0, "no collection is enqueued for a failed claim");
+    });
+
+    // The unique-index backstop: when the period's invoice already exists,
+    // it is ADOPTED (single collection) — and when its stored amount
+    // disagrees with the recomputed snapshot pricing the mismatch is
+    // surfaced loudly instead of silently swallowed.
+    env_test!(existing_invoice_amount_mismatch_is_adopted_and_flagged, |env| {
+        let tenant = "ovcov_mismatch";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let period = seed_billing_period(
+            env,
+            tenant,
+            Some("growth"),
+            Some(1000),
+            Some(35),
+            "EUR",
+            Utc::now() - chrono::Duration::days(2),
+        )
+        .await;
+        send_emails(env, tenant, 1500, Utc::now() - chrono::Duration::days(3)).await;
+
+        // A pre-existing invoice for THIS period, in USD and for a stale
+        // amount — the constraint fires, the invoice is adopted once, and
+        // the disagreement is reported.
+        let existing = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, overage_period,
+                                   created_at, updated_at)
+             VALUES ($1, $2, 999, 'USD', 'draft', $3, 999, 0, 999, NOW(), NOW(),
+                     $4, $5, $4, NOW(), NOW())",
+        )
+        .bind(existing)
+        .bind(tenant)
+        .bind(format!("W6C-MISMATCH-{}", existing.simple()))
+        .bind(period.period_start)
+        .bind(period.period_end)
+        .execute(&env.pool)
+        .await
+        .expect("existing invoice");
+
+        let mut result = OverageSweepResult::default();
+        process_subscription_period(&env.state, &period, &mut result)
+            .await
+            .expect("adopt existing invoice");
+        assert_eq!(result.conflicts_existing, 1, "{result:?}");
+        assert_eq!(
+            result.existing_invoice_mismatches, 1,
+            "the USD/999 invoice disagrees with the EUR snapshot: {result:?}"
+        );
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(invoices, 1, "the existing invoice was reused, not duplicated");
+        assert_eq!(period_state(env, period.id).await, "invoiced");
+        let (linked, outbox): (Uuid, i64) = sqlx::query_as(
+            "SELECT invoice_id, (
+                SELECT COUNT(*) FROM invoice_collection_outbox o
+                WHERE o.invoice_id = p.invoice_id AND o.operation = 'collect_usage_invoice')
+             FROM billing_periods p WHERE p.id = $1",
+        )
+        .bind(period.id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("period linkage");
+        assert_eq!(linked, existing, "the period points at the ADOPTED invoice");
+        assert_eq!(outbox, 1, "exactly one collection for the adopted invoice");
+    });
+
+    // PAYG claims adopt an existing month invoice through the same
+    // savepoint recovery — one collection, never two.
+    env_test!(payg_month_adopts_existing_invoice, |env| {
+        let tenant = "ovcov_payg_adopt";
+        seed_tenant(env, tenant, "payg").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let now = Utc::now();
+        let month_start = first_of_month(now) - chrono::Months::new(1);
+        let month_end = first_of_month(now);
+        send_emails(env, tenant, 5_000, month_start + chrono::Duration::days(3)).await;
+
+        let existing = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, overage_period,
+                                   created_at, updated_at)
+             VALUES ($1, $2, 500, 'EUR', 'draft', $3, 500, 0, 500, NOW(), NOW(),
+                     $4, $5, $4, NOW(), NOW())",
+        )
+        .bind(existing)
+        .bind(tenant)
+        .bind(format!("W6C-PAYG-{}", existing.simple()))
+        .bind(month_start)
+        .bind(month_end)
+        .execute(&env.pool)
+        .await
+        .expect("existing payg invoice");
+
+        let mut result = OverageSweepResult::default();
+        process_payg_month(
+            &env.state,
+            tenant,
+            month_start,
+            month_end,
+            &PaygPricing::default(),
+            &mut result,
+        )
+        .await
+        .expect("adopt payg invoice");
+        assert_eq!(result.conflicts_existing, 1, "{result:?}");
+        assert_eq!(result.payg_invoices_created, 0, "{result:?}");
+        let invoices: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoices");
+        assert_eq!(invoices, 1);
+        let (state, linked): (String, Uuid) = sqlx::query_as(
+            "SELECT invoice_state::text, invoice_id FROM billing_periods
+             WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
+        )
+        .bind(tenant)
+        .bind(month_start)
+        .fetch_one(&env.pool)
+        .await
+        .expect("payg period");
+        assert_eq!(state, "invoiced");
+        assert_eq!(linked, existing);
+    });
+
+    // A failing usage read fails the PAYG month loudly (the claim rolls
+    // back and the sweep records the failure) — it is never billed as zero.
+    env_test!(payg_usage_read_failure_rolls_the_claim_back, |env| {
+        let tenant = "ovcov_payg_readfail";
+        seed_tenant(env, tenant, "payg").await;
+        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+        let now = Utc::now();
+        let month_start = first_of_month(now) - chrono::Months::new(1);
+        send_emails(env, tenant, 5_000, month_start + chrono::Duration::days(3)).await;
+
+        break_table(env, "metering_events").await;
+        let mut result = OverageSweepResult::default();
+        let error = process_payg_month(
+            &env.state,
+            tenant,
+            month_start,
+            first_of_month(now),
+            &PaygPricing::default(),
+            &mut result,
+        )
+        .await
+        .expect_err("broken metering table must fail the month");
+        restore_table(env, "metering_events").await;
+        assert!(error.contains("usage query failed"), "{error}");
+        let periods: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_periods WHERE tenant_id = $1 AND usage_kind = 'payg'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("periods");
+        assert_eq!(periods, 0, "the rolled-back claim leaves no period record");
+    });
+
+    // A done outbox operation is not claimable: the ladder returns Ok
+    // without touching the wallet a second time.
+    env_test!(collection_skips_a_completed_outbox_operation, |env| {
+        let tenant = "ovcov_claim_done";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ($1, 9999, 'EUR')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        let invoice_id = seed_invoice(env, tenant, 5000, "EUR").await;
+        seed_outbox(env, invoice_id, tenant, "done", 1, None).await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+
+        let mut wallet_paid = 0u64;
+        let mut pending_dunning = 0u64;
+        collect_usage_invoice(
+            &env.state,
+            &invoice,
+            invoice.period_start,
+            "usage",
+            "overage",
+            &mut wallet_paid,
+            &mut pending_dunning,
+        )
+        .await
+        .expect("unclaimable operation is a clean skip");
+        assert_eq!((wallet_paid, pending_dunning), (0, 0));
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 9999, "a done operation never re-debits");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(status, "draft", "an unowned ladder must not flip the invoice");
+    });
+
+    // An unreadable wallet is a RETRYABLE collection failure: the error is
+    // recorded on the outbox with the lease released — never silently
+    // treated as an empty wallet.
+    env_test!(unreadable_wallet_fails_the_ladder_retryably, |env| {
+        let tenant = "ovcov_wallet_err";
+        seed_tenant(env, tenant, "growth").await;
+        let invoice_id = seed_invoice(env, tenant, 5000, "EUR").await;
+        seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+
+        break_table(env, "wallets").await;
+        let mut wallet_paid = 0u64;
+        let mut pending_dunning = 0u64;
+        let error = collect_usage_invoice(
+            &env.state,
+            &invoice,
+            invoice.period_start,
+            "usage",
+            "overage",
+            &mut wallet_paid,
+            &mut pending_dunning,
+        )
+        .await
+        .expect_err("wallet read failure must propagate");
+        restore_table(env, "wallets").await;
+        assert!(error.contains("wallet application failed"), "{error}");
+        let (status, last_error, owner): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, last_error, owner_token FROM invoice_collection_outbox
+                 WHERE invoice_id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("outbox");
+        assert_eq!(status, "pending", "the failure stays retryable");
+        assert_eq!(owner, None, "the lease was released");
+        let recorded = last_error.unwrap_or_default();
+        assert!(
+            recorded.contains("wallet read failed"),
+            "the recorded error names the wallet: {recorded:?}"
+        );
+    });
+
+    // A wallet held in ANOTHER currency is never spent (mixing currencies
+    // would mint phantom money), and an EMPTY same-currency wallet applies
+    // nothing — both proceed to the dunning handoff, debiting nobody.
+    env_test!(mismatched_and_empty_wallets_are_never_spent, |env| {
+        let tenant = "ovcov_wallet_ccy";
+        seed_tenant(env, tenant, "growth").await;
+        // USD wallet, EUR invoice.
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ($1, 5000, 'USD')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        let eur_invoice = seed_invoice(env, tenant, 3000, "EUR").await;
+        seed_outbox(env, eur_invoice, tenant, "pending", 0, None).await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, eur_invoice)
+            .await
+            .expect("load")
+            .expect("exists");
+
+        let mut wallet_paid = 0u64;
+        let mut pending_dunning = 0u64;
+        collect_usage_invoice(
+            &env.state,
+            &invoice,
+            invoice.period_start,
+            "usage",
+            "overage",
+            &mut wallet_paid,
+            &mut pending_dunning,
+        )
+        .await
+        .expect("mismatch degrades to the dunning path");
+        assert_eq!(pending_dunning, 1, "the invoice went to dunning");
+        assert_eq!(wallet_paid, 0);
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 5000, "a foreign-currency wallet is untouched");
+        let debits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'debit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("transactions");
+        assert_eq!(debits, 0);
+
+        // Empty same-currency wallet: applies zero, still no debit.
+        sqlx::query("UPDATE wallets SET balance = 0, currency = 'EUR' WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("empty wallet");
+        let second = seed_invoice(env, tenant, 700, "EUR").await;
+        seed_outbox(env, second, tenant, "pending", 0, None).await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, second)
+            .await
+            .expect("load")
+            .expect("exists");
+        let mut wallet_paid = 0u64;
+        let mut pending_dunning = 0u64;
+        collect_usage_invoice(
+            &env.state,
+            &invoice,
+            invoice.period_start,
+            "usage",
+            "overage",
+            &mut wallet_paid,
+            &mut pending_dunning,
+        )
+        .await
+        .expect("empty wallet degrades to dunning");
+        assert_eq!(pending_dunning, 1);
+        let debits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'debit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("transactions");
+        assert_eq!(debits, 0, "an empty wallet debits nothing");
+    });
+
+    // A replayed wallet application (the immutable allocation already
+    // exists) debits NOTHING again — the operation rolls back whole.
+    env_test!(wallet_allocation_replay_debits_nothing, |env| {
+        let tenant = "ovcov_wallet_replay";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ($1, 5000, 'EUR')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        let invoice_id = seed_invoice(env, tenant, 3000, "EUR").await;
+        let wallet_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM wallets WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("wallet id");
+        let tx_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO wallet_transactions
+                 (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
+             VALUES ($1, $2, 'credit', 5000, 5000, 'seed grant', 'w6c', NOW())
+             RETURNING id",
+        )
+        .bind(wallet_id)
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("seed transaction");
+        let operation_id = format!("usage_invoice:{invoice_id}:wallet");
+        sqlx::query(
+            "INSERT INTO invoice_payment_allocations
+                 (id, tenant_id, invoice_id, operation_id, source, amount_cents, currency,
+                  wallet_transaction_id)
+             VALUES (gen_random_uuid(), $1, $2, $3, 'wallet', 3000, 'EUR', $4)",
+        )
+        .bind(tenant)
+        .bind(invoice_id)
+        .bind(&operation_id)
+        .bind(tx_id)
+        .execute(&env.pool)
+        .await
+        .expect("seed allocation");
+
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        let applied = apply_wallet_credit(&env.state, &invoice)
+            .await
+            .expect("replay is a clean no-op");
+        assert_eq!(applied, 0, "the allocation already settled this invoice");
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 5000, "no second debit");
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("allocations");
+        assert_eq!(allocations, 1);
+        let debits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'debit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("transactions");
+        assert_eq!(debits, 0);
+    });
+
+    // A settled (non-draft) invoice is never overwritten by the dunning
+    // handoff: the status flip matches nothing, the handoff still commits,
+    // and the outbox completes.
+    env_test!(collection_never_overwrites_a_non_draft_invoice, |env| {
+        let tenant = "ovcov_settled";
+        seed_tenant(env, tenant, "growth").await;
+
+        // Settled: the paid arm, no dunning.
+        let paid = seed_invoice(env, tenant, 2000, "EUR").await;
+        sqlx::query("UPDATE invoices SET status = 'paid', paid_at = NOW() WHERE id = $1")
+            .bind(paid)
+            .execute(&env.pool)
+            .await
+            .expect("settle");
+        seed_outbox(env, paid, tenant, "pending", 0, None).await;
+
+        // Stranded mid-ladder: already pending, outbox still pending.
+        let stranded = seed_invoice(env, tenant, 800, "EUR").await;
+        sqlx::query("UPDATE invoices SET status = 'pending' WHERE id = $1")
+            .bind(stranded)
+            .execute(&env.pool)
+            .await
+            .expect("pend");
+        seed_outbox(env, stranded, tenant, "pending", 0, None).await;
+
+        let stats = resume_pending_collections(&env.state)
+            .await
+            .expect("resume");
+        assert_eq!(stats.resumed, 2, "{stats:?}");
+
+        let paid_status: String =
+            sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+                .bind(paid)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(paid_status, "paid", "the manual settlement was not overwritten");
+        let dunning: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+        assert_eq!(
+            dunning, 1,
+            "only the stranded-pending invoice enters dunning — a settled one never does"
+        );
+        let retry: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT next_retry_at FROM dunning_records WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("dunning retry");
+        assert!(retry.is_some(), "the dunning retry is scheduled");
+        let statuses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT i.status::text, o.status FROM invoices i
+             JOIN invoice_collection_outbox o ON o.invoice_id = i.id ORDER BY i.id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .expect("statuses");
+        assert!(
+            statuses
+                .iter()
+                .all(|(invoice, outbox)| outbox == "done" && invoice != "draft"),
+            "both outbox operations completed without flipping any status: {statuses:?}"
+        );
+    });
+
+    // A stolen lease must abort the finalization WHOLE: the invoice stays
+    // draft, dunning is not entered, and the outbox keeps the thief's
+    // state — the previous owner's completion matches zero rows.
+    env_test!(stolen_lease_aborts_the_finalization, |env| {
+        let tenant = "ovcov_lease";
+        seed_tenant(env, tenant, "growth").await;
+        let invoice_id = seed_invoice(env, tenant, 2000, "EUR").await;
+        seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+
+        let owner = claim_collection_operation(&env.state, invoice_id)
+            .await
+            .expect("claim")
+            .expect("claimable");
+        // A competing collector steals the lease.
+        sqlx::query(
+            "UPDATE invoice_collection_outbox SET owner_token = 'col-thief' WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .execute(&env.pool)
+        .await
+        .expect("steal lease");
+
+        let error = finalize_collection(&env.state, &invoice, "pending", &owner)
+            .await
+            .expect_err("a fenced-off owner must not complete the operation");
+        assert!(error.contains("lease lost or stolen"), "{error}");
+        let (invoice_status, outbox_status, outbox_owner): (String, String, Option<String>) =
+            sqlx::query_as(
+                "SELECT i.status::text, o.status, o.owner_token
+                 FROM invoices i JOIN invoice_collection_outbox o ON o.invoice_id = i.id
+                 WHERE i.id = $1",
+            )
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("state");
+        assert_eq!(invoice_status, "draft", "the whole finalize rolled back");
+        assert_eq!(outbox_status, "in_progress");
+        assert_eq!(outbox_owner.as_deref(), Some("col-thief"));
+        let dunning: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+        assert_eq!(dunning, 0, "no dunning entry from a failed finalization");
+    });
+
+    // The persisted local ↔ external Stripe mapping can never rebind an
+    // invoice that is ALREADY bound to a different Stripe invoice — the
+    // prior binding wins and the collection still completes.
+    env_test!(stripe_mapping_never_rebinds_a_bound_invoice, |env| {
+        let mock = Mock::default();
+        mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_rebind"}"#);
+        mock.route("/v1/invoices", 200, r#"{"id":"in_new"}"#);
+        mock.route("/v1/invoices/in_new/finalize", 200, r#"{"id":"in_new"}"#);
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let tenant = "ovcov_rebind";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_rebind', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
+                     'cus_rebind')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+        let invoice_id = seed_invoice(env, tenant, 1000, "EUR").await;
+        sqlx::query(
+            "UPDATE invoices SET stripe_invoice_id = 'in_prior' WHERE id = $1",
+        )
+        .bind(invoice_id)
+        .execute(&env.pool)
+        .await
+        .expect("pre-bind");
+        seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
+
+        let stats = resume_pending_collections(&env.state)
+            .await
+            .expect("resume");
+        assert_eq!(stats.resumed, 1, "{stats:?}");
+        let (stripe_invoice, outbox): (Option<String>, String) = sqlx::query_as(
+            "SELECT i.stripe_invoice_id, o.status FROM invoices i
+             JOIN invoice_collection_outbox o ON o.invoice_id = i.id WHERE i.id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("invoice");
+        assert_eq!(
+            stripe_invoice.as_deref(),
+            Some("in_prior"),
+            "the prior external binding is never overwritten"
+        );
+        assert_eq!(outbox, "done");
+
+        match previous {
+            (Some(key), Some(url)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+            }
+            _ => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+    });
+
+    // Stripe responses without the identity fields are HARD errors at each
+    // step (item, invoice create, finalize) — never half-recorded mappings.
+    env_test!(stripe_responses_without_ids_or_failures_are_errors, |env| {
+        let mock = Mock::default();
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let tenant = "ovcov_stripe_bad";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_bad', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days',
+                     'cus_bad')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+        let invoice_id = seed_invoice(env, tenant, 100, "EUR").await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+
+        // 1. Item response without an id.
+        mock.route("/v1/invoiceitems", 200, r#"{"object":"invoiceitem"}"#);
+        let error = create_and_finalize_stripe_usage_invoice(
+            &env.state,
+            &invoice,
+            100,
+            "EUR",
+            "usage",
+            Utc::now(),
+            "overage",
+        )
+        .await
+        .expect_err("item without id");
+        assert!(error.contains("item response carried no id"), "{error}");
+
+        // 2. Invoice create response without an id.
+        mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_ok"}"#);
+        mock.route("/v1/invoices", 200, r#"{"object":"invoice"}"#);
+        let error = create_and_finalize_stripe_usage_invoice(
+            &env.state,
+            &invoice,
+            100,
+            "EUR",
+            "usage",
+            Utc::now(),
+            "overage",
+        )
+        .await
+        .expect_err("invoice without id");
+        assert!(error.contains("create response carried no id"), "{error}");
+
+        // 3. Finalize failure.
+        mock.route("/v1/invoices", 200, r#"{"id":"in_bad"}"#);
+        mock.route("/v1/invoices/in_bad/finalize", 500, "card declined");
+        let error = create_and_finalize_stripe_usage_invoice(
+            &env.state,
+            &invoice,
+            100,
+            "EUR",
+            "usage",
+            Utc::now(),
+            "overage",
+        )
+        .await
+        .expect_err("failed finalize");
+        assert!(error.contains("finalize returned 500"), "{error}");
+        assert_eq!(mock.call_count("/v1/invoiceitems"), 3, "each attempt posts the item");
+
+        match previous {
+            (Some(key), Some(url)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+            }
+            _ => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+    });
+
+    // A tenant with NO Stripe customer on file takes the wallet + dunning
+    // path cleanly, even with Stripe fully configured.
+    env_test!(stripe_collection_skips_tenants_without_a_customer, |env| {
+        let mock = Mock::default();
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let tenant = "ovcov_no_customer";
+        seed_tenant(env, tenant, "growth").await;
+        let invoice_id = seed_invoice(env, tenant, 400, "EUR").await;
+        let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+            .await
+            .expect("load")
+            .expect("exists");
+        let none = create_and_finalize_stripe_usage_invoice(
+            &env.state,
+            &invoice,
+            400,
+            "EUR",
+            "usage",
+            Utc::now(),
+            "overage",
+        )
+        .await
+        .expect("no customer is not an error");
+        assert!(none.is_none(), "no Stripe customer → wallet+dunning path");
+        assert_eq!(mock.call_count("/v1/invoiceitems"), 0, "no HTTP call was made");
+
+        match previous {
+            (Some(key), Some(url)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+            }
+            _ => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+    });
+
+    // The paid-subscription gate reads the DB, caches, and only a real
+    // invalidation re-reads — the quota ceiling must follow plan changes
+    // within one cache generation.
+    env_test!(paid_subscription_gate_caches_until_invalidated, |env| {
+        let tenant = "ovcov_gate";
+        seed_plan(env, "growth", 1000, serde_json::json!({})).await;
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end)
+             VALUES ($1, 'sub_gate', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+
+        invalidate_subscription_cache(tenant);
+        assert!(
+            tenant_has_active_paid_subscription(&env.pool, tenant)
+                .await
+                .expect("gate"),
+            "an active subscription on a priced plan is a paid subscription"
+        );
+
+        // Downgrade: the cache still answers true until invalidated.
+        sqlx::query(
+            "UPDATE stripe_subscriptions SET status = 'canceled' WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("cancel");
+        assert!(
+            tenant_has_active_paid_subscription(&env.pool, tenant)
+                .await
+                .expect("cached gate"),
+            "within the TTL the cached answer is served"
+        );
+        invalidate_subscription_cache(tenant);
+        assert!(
+            !tenant_has_active_paid_subscription(&env.pool, tenant)
+                .await
+                .expect("gate after invalidation"),
+            "after invalidation the canceled subscription is not a paid one"
+        );
+
+        // A subscription whose plan has no priced plans row is NOT paid.
+        let ghost = "ovcov_gate_ghost";
+        seed_tenant(env, ghost, "ghost_plan").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end)
+             VALUES ($1, 'sub_gate_ghost', 'ghost_plan', 'active', NOW(), NOW())",
+        )
+        .bind(ghost)
+        .execute(&env.pool)
+        .await
+        .expect("ghost subscription");
+        invalidate_subscription_cache(ghost);
+        assert!(
+            !tenant_has_active_paid_subscription(&env.pool, ghost)
+                .await
+                .expect("gate"),
+            "no priced plans row means no paid subscription"
+        );
+    });
 }

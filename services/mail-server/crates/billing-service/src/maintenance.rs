@@ -7660,4 +7660,1074 @@ mod coverage_adversarial {
         }
         std::env::remove_var("PERIODIC_TASK_INTERVAL_MS");
     }
+
+    // ── W6C adversarial coverage: loop-tick RESULT arms + fault arms ────
+    //
+    // The pre-existing tick test proves the loops RUN at overridden
+    // intervals; the arms that fire only when a tick actually PRODUCES
+    // work (charged>0, released>0, resumed>0, reclaimed>0, reports>0, …)
+    // stayed cold. This driver seeds real work for every loop so each
+    // result arm is reachable — and asserts the observable DB effects.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_job_tick_loops_produce_real_results() {
+        let Some(owned) = provision("periodic_tick_results").await else {
+            eprintln!("skipping: TEST_DATABASE_URL unset");
+            return;
+        };
+        let _metering_guard = metering_keys_guard(&owned.admin_url).await;
+        crate::test_support::ensure_trace_subscriber();
+
+        let mock = Mock::default();
+        // Dedicated-IP subscription item creation (charge path).
+        mock.route("/v1/subscription_items", 200, r#"{"id":"si_w6c_drv"}"#);
+        // Auto-pay: no open Stripe invoices → the dunning retry clears.
+        mock.route("/v1/invoices", 200, r#"{"data":[]}"#);
+        let base = spawn_mock(mock.clone()).await;
+
+        let _env_guard = ENV_LOCK.lock().await;
+        let previous_env = (
+            std::env::var("PERIODIC_TASK_INTERVAL_MS").ok(),
+            std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
+        );
+        std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "10");
+        std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_w6c_drv");
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c_drv");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
+
+        let env = &owned;
+
+        // ── dedicated IP: two pending charges (one for the startup sweep,
+        // one for a tick) on a tenant with an ACTIVE subscription.
+        seed_tenant_plan(env, "w6cdrv_ip", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ('w6cdrv_ip', 'sub_w6cdrv_ip', 'growth', 'active', NOW(),
+                     NOW() + INTERVAL '30 days', 'cus_w6cdrv_ip')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("ip subscription");
+        for suffix in ["a", "b"] {
+            sqlx::query(
+                "INSERT INTO dedicated_ips (id, tenant_id, ip_address, billing_status)
+                 VALUES ($1, 'w6cdrv_ip', $2, 'pending_charge')",
+            )
+            .bind(format!("w6cdrv-ip-{suffix}"))
+            .bind(format!("192.0.2.{suffix}"))
+            .execute(&env.pool)
+            .await
+            .expect("pending charge ip");
+        }
+
+        // ── wallet reservation cleanup: an expired, uncaptured reservation.
+        seed_tenant_plan(env, "w6cdrv_resv", "growth", "active").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ('w6cdrv_resv', 0, 'EUR')")
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        sqlx::query(
+            "INSERT INTO wallet_reservations
+                 (id, wallet_id, tenant_id, amount, status, expires_at, created_at)
+             SELECT gen_random_uuid(), w.id, w.tenant_id, 2500, 'pending',
+                    NOW() - INTERVAL '1 hour', NOW()
+             FROM wallets w WHERE w.tenant_id = 'w6cdrv_resv'",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("expired reservation");
+
+        // ── usage alerts: one enabled config makes tenants_checked > 0.
+        seed_tenant_plan(env, "w6cdrv_alert", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent,
+                                              notification_channel, enabled)
+             VALUES ('w6cdrv_alert', 'emails', 50, 'email', true)",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("alert config");
+
+        // ── dunning grace expiry: a hard-suspended tenant past its grace
+        // window with queued messages to purge.
+        seed_tenant_plan(env, "w6cdrv_grace", "growth", "suspended").await;
+        seed_dunning(env, "w6cdrv_grace", "hard_suspended", Some(Utc::now() - chrono::Duration::hours(2))).await;
+        sqlx::query(
+            r#"INSERT INTO messages (id, tenant_id, to_addresses, status, from_email, to_emails,
+                                   open_count, click_count, unsubscribe_count, message_category,
+                                   created_at, updated_at)
+             VALUES (gen_random_uuid(), 'w6cdrv_grace', ARRAY['victim@example.test'],
+                     'dunning_queued', 'no-reply@apexmail.test', '["victim@example.test"]'::jsonb,
+                     0, 0, 0, 'transactional', NOW(), NOW())"#,
+        )
+        .execute(&env.pool)
+        .await
+        .expect("queued message");
+
+        // ── scheduled auto-pay: warning dunning due NOW on a past_due
+        // subscription; the empty Stripe list clears the retry.
+        seed_tenant_plan(env, "w6cdrv_pay", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ('w6cdrv_pay', 'sub_w6cdrv_pay', 'growth', 'past_due', NOW(),
+                     NOW() + INTERVAL '30 days', 'cus_w6cdrv_pay')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("past due subscription");
+        seed_dunning(env, "w6cdrv_pay", "warning", None).await;
+        sqlx::query(
+            "UPDATE dunning_records SET next_retry_at = NOW() - INTERVAL '1 minute'
+             WHERE tenant_id = 'w6cdrv_pay'",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("due retry");
+
+        // ── stranded collection resume: a wallet fully covers a draft
+        // usage invoice, so the resumed ladder settles it.
+        seed_tenant_plan(env, "w6cdrv_resume", "growth", "active").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ('w6cdrv_resume', 10000, 'EUR')")
+            .execute(&env.pool)
+            .await
+            .expect("resume wallet");
+        let resume_invoice = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, 'w6cdrv_resume', 5000, 'EUR', 'draft', $2, 5000, 0, 5000,
+                     NOW(), NOW(), NOW() - INTERVAL '35 days', NOW() - INTERVAL '5 days',
+                     NOW(), NOW())",
+        )
+        .bind(resume_invoice)
+        .bind(format!("W6CDRV-{}", resume_invoice.simple()))
+        .execute(&env.pool)
+        .await
+        .expect("resume invoice");
+        sqlx::query(
+            "INSERT INTO invoice_collection_outbox
+                 (tenant_id, invoice_id, operation, status, payload)
+             VALUES ('w6cdrv_resume', $1, 'collect_usage_invoice', 'pending', '{}'::jsonb)",
+        )
+        .bind(resume_invoice)
+        .execute(&env.pool)
+        .await
+        .expect("resume outbox");
+
+        // ── derived usage: a delivered email yesterday plus a
+        // reserved-vs-delivered gap to reconcile.
+        seed_tenant_plan(env, "w6cdrv_derived", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status,
+                                      attempts, max_attempts, created_at, updated_at, priority,
+                                      attempt, message_category, sent_at)
+             VALUES (gen_random_uuid(), 'w6cdrv_derived', 'no-reply@apexmail.test',
+                     ARRAY['buyer@example.test'], 'w6c derived', 'sent', 1, 3,
+                     NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day', 5, 1, 'transactional',
+                     NOW() - INTERVAL '1 day')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("sent email");
+        for (event_type, quantity) in [("emails_sent", 10), ("emails_delivered", 4)] {
+            sqlx::query(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+                 VALUES (gen_random_uuid(), 'w6cdrv_derived', $1, $2,
+                         NOW() - INTERVAL '1 day')",
+            )
+            .bind(event_type)
+            .bind(quantity)
+            .execute(&env.pool)
+            .await
+            .expect("metering gap");
+        }
+
+        // ── webhook reclaim: one stale pending webhook for the STARTUP
+        // sweep; a second is inserted after startup ran so a TICK reclaims
+        // it (the tick arm cannot be reached by pre-seeded rows alone).
+        for event in ["evt_w6cdrv_startup", "evt_w6cdrv_tick"] {
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status,
+                                                    updated_at)
+                 VALUES (gen_random_uuid(), $1, 'invoice.paid', 'pending',
+                         NOW() - INTERVAL '1 hour')",
+            )
+            .bind(event)
+            .execute(&env.pool)
+            .await
+            .expect("stale webhook");
+        }
+
+        start_periodic_jobs(owned.state.clone());
+        // Let the startup sweeps finish before adding tick-only work: the
+        // startup sweeps consume everything seeded above, so the TICK arms
+        // of the loops only fire for work that appears afterwards.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        sqlx::query(
+            "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status,
+                                                updated_at)
+             VALUES (gen_random_uuid(), 'evt_w6cdrv_tick2', 'invoice.paid', 'pending',
+                     NOW() - INTERVAL '1 hour')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("tick-only stale webhook");
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, billing_status)
+             VALUES ('w6cdrv-ip-c', 'w6cdrv_ip', '192.0.2.3', 'pending_charge')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("tick-only pending charge");
+
+        // All loops poll on 10 ms cadences; give the assertions a bounded
+        // deadline instead of fixed sleeps. Each poll loop below fails the
+        // test when its deadline passes without the loop's effect landing —
+        // a silent loop is a broken loop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        macro_rules! poll_until {
+            ($deadline:expr, $query:expr, $ready:expr, $what:literal) => {{
+                let mut satisfied = false;
+                while std::time::Instant::now() < $deadline {
+                    let row = sqlx::query_scalar::<_, i64>($query)
+                        .fetch_one(&env.pool)
+                        .await
+                        .expect("poll probe");
+                    if $ready(row) {
+                        satisfied = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                assert!(
+                    satisfied,
+                    "periodic loop never produced its effect: {}",
+                    $what
+                );
+            }};
+        }
+
+        // Dedicated IPs: BOTH pending charges became active Stripe items —
+        // one charged by the startup sweep, one by a tick.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM dedicated_ips
+             WHERE id IN ('w6cdrv-ip-a', 'w6cdrv-ip-b', 'w6cdrv-ip-c')
+               AND billing_status = 'active'",
+            |count| count == 3,
+            "all dedicated IPs charged (startup + tick)"
+        );
+
+        // Wallet reservations: the expired one was released.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM wallet_reservations
+             WHERE status = 'released' AND released_at IS NOT NULL",
+            |count| count >= 1,
+            "expired wallet reservation released"
+        );
+
+        // Dunning grace: queued messages purged and the grace window cleared.
+        poll_until!(
+            deadline,
+            "SELECT (SELECT COUNT(*) FROM messages
+                      WHERE tenant_id = 'w6cdrv_grace' AND status = 'dunning_queued')
+                   + (SELECT COUNT(*) FROM dunning_records
+                      WHERE tenant_id = 'w6cdrv_grace' AND grace_period_ends_at IS NOT NULL)",
+            |count| count == 0,
+            "grace expiry purged messages and cleared the window"
+        );
+        let notified: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue
+             WHERE tenant_id = 'w6cdrv_grace' AND type = 'messages_purged'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("notification");
+        assert_eq!(notified, 1, "exactly one purge notification was queued");
+
+        // Scheduled auto-pay: the due retry ran against the (empty) Stripe
+        // list and cleared the next retry — never rescheduled blindly.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM dunning_records
+             WHERE tenant_id = 'w6cdrv_pay' AND next_retry_at IS NULL",
+            |count| count == 1,
+            "auto-pay cleared the retry after finding no open invoice"
+        );
+
+        // Resume ladder: the stranded usage invoice was settled exactly once.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM invoices i
+             JOIN invoice_collection_outbox o ON o.invoice_id = i.id
+             WHERE i.tenant_id = 'w6cdrv_resume' AND i.status = 'paid' AND o.status = 'done'",
+            |count| count == 1,
+            "stranded usage invoice resumed to paid"
+        );
+        let (balance, debits, allocations): (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT balance FROM wallets WHERE tenant_id = 'w6cdrv_resume'),
+                    (SELECT COUNT(*) FROM wallet_transactions
+                     WHERE tenant_id = 'w6cdrv_resume' AND type = 'debit'),
+                    (SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1)",
+        )
+        .bind(resume_invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("resume settlement detail");
+        assert_eq!((balance, debits, allocations), (5000, 1, 1));
+
+        // Webhook reclaim: the startup row AND the tick-only row were both
+        // reclaimed to 'received'.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM stripe_webhook_events
+             WHERE stripe_event_id IN ('evt_w6cdrv_startup', 'evt_w6cdrv_tick', 'evt_w6cdrv_tick2')
+               AND status = 'received'",
+            |count| count == 3,
+            "all stale webhooks reclaimed (startup + tick)"
+        );
+
+        // Derived usage: yesterday's delivered email recorded a marker, and
+        // the reserved-vs-delivered gap produced a reconciliation report.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM metering_daily_markers",
+            |count| count >= 1,
+            "derived usage marker recorded"
+        );
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM billing_reconciliation_reports",
+            |count| count >= 1,
+            "delivery reconciliation report written"
+        );
+
+        // KMD: with the day of month past the 20th, the loop generated the
+        // previous month's VAT return.
+        poll_until!(
+            deadline,
+            "SELECT COUNT(*) FROM vat_kmd_returns",
+            |count| count >= 1,
+            "KMD VAT return generated for the previous month"
+        );
+
+        // The loops keep running on the runtime until it drops; restore the
+        // process-global environment before other work observes it.
+        let (interval, price, secret, api_base, auto_pay) = previous_env;
+        match interval {
+            Some(value) => std::env::set_var("PERIODIC_TASK_INTERVAL_MS", value),
+            None => std::env::remove_var("PERIODIC_TASK_INTERVAL_MS"),
+        }
+        match price {
+            Some(value) => std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", value),
+            None => std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID"),
+        }
+        match secret {
+            Some(value) => std::env::set_var("STRIPE_SECRET_KEY", value),
+            None => std::env::remove_var("STRIPE_SECRET_KEY"),
+        }
+        match api_base {
+            Some(value) => std::env::set_var("STRIPE_API_BASE_URL", value),
+            None => std::env::remove_var("STRIPE_API_BASE_URL"),
+        }
+        match auto_pay {
+            Some(value) => std::env::set_var("AUTO_PAY_OPEN_INVOICES", value),
+            None => std::env::remove_var("AUTO_PAY_OPEN_INVOICES"),
+        }
+        drop(_env_guard);
+
+        owned.finish().await;
+    }
+    // ── metering drain fault arms ───────────────────────────────────────
+
+    env_test!(metering_drain_discards_malformed_and_fails_loudly, |env| {
+        let _drain_guard = METER_DRAIN_LOCK.lock().await;
+        let _metering_guard = metering_keys_guard(&env.admin_url).await;
+
+        // This test owns the `w6c-` prefix inside the pending keyspace:
+        // clear leftovers from previous runs first (the drain consumes the
+        // whole namespace it can see).
+        {
+            let mut conn = env.redis.get().await.expect("redis");
+            let stale: Vec<String> = redis::cmd("KEYS")
+                .arg("meter:pending:w6c-*")
+                .query_async(&mut conn)
+                .await
+                .expect("scan stale");
+            if !stale.is_empty() {
+                let _: () = redis::cmd("DEL")
+                    .arg(&stale)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear stale");
+            }
+        }
+
+        let mut conn = env.redis.get().await.expect("redis");
+        // Two malformed payloads: the drain discards them WITHOUT touching
+        // the database and reports the count.
+        for raw in ["w6c-bad-1", "w6c-bad-2"] {
+            let _: () = redis::cmd("SET")
+                .arg(format!("meter:pending:{raw}"))
+                .arg("this is not json")
+                .query_async(&mut conn)
+                .await
+                .expect("seed malformed");
+        }
+        drop(conn);
+        let result = drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect("malformed payloads are not an error");
+        assert_eq!(
+            (result.processed_count, result.discarded_count),
+            (0, 2),
+            "both malformed payloads discarded"
+        );
+        let mut conn = env.redis.get().await.expect("redis");
+        let left: Vec<String> = redis::cmd("KEYS")
+            .arg("meter:pending:w6c-bad-*")
+            .query_async(&mut conn)
+            .await
+            .expect("keys");
+        assert!(left.is_empty(), "discarded keys are cleaned up");
+
+        // A COUNTER key of the WRONG Redis type makes INCRBY raise
+        // WRONGTYPE: the counter script fails and the drain must surface the
+        // error LOUDLY. (A wrong-type GUARD key would NOT fail: SET NX on an
+        // existing wrong-type key degrades to a nil reply inside Lua.) The
+        // DB insert commits first, so the event is persisted exactly once
+        // and the pending key survives for the next attempt.
+        let raw_id = "w6c-wrongtype-1";
+        let event_at = Utc::now();
+        let counter_key = crate::usage::enforced_counter_key_for_event_type(
+            &env.pool,
+            "w6cdrv_wrongtype",
+            "emails_sent",
+            event_at,
+        )
+        .await;
+        let payload = serde_json::json!({
+            "id": raw_id,
+            "tenantId": "w6cdrv_wrongtype",
+            "eventType": "emails_sent",
+            "quantity": 3,
+            "timestamp": event_at.to_rfc3339(),
+            "metadata": {},
+        });
+        seed_tenant_plan(env, "w6cdrv_wrongtype", "growth", "active").await;
+        // Deterministic Redis state: a previous run's guard key (40-day TTL)
+        // would make SET NX silently skip the increment instead of tripping
+        // the wrong-type error.
+        let guard_key = format!("meter:guard:{}", normalize_metering_event_id(raw_id));
+        let _: () = redis::cmd("DEL")
+            .arg(&guard_key)
+            .arg(&counter_key)
+            .arg(format!("meter:pending:{raw_id}"))
+            .query_async(&mut conn)
+            .await
+            .expect("clear prior keys");
+        let _: () = redis::cmd("RPUSH")
+            .arg(&counter_key)
+            .arg("not-a-scalar")
+            .query_async(&mut conn)
+            .await
+            .expect("wrongtype counter");
+        let _: () = redis::cmd("SET")
+            .arg(format!("meter:pending:{raw_id}"))
+            .arg(payload.to_string())
+            .query_async(&mut conn)
+            .await
+            .expect("seed event");
+        drop(conn);
+        let error = drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect_err("a WRONGTYPE counter key must fail the drain");
+        assert!(
+            error.contains("drain+incr"),
+            "the failure names the counter step: {error}"
+        );
+        let persisted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM metering_events WHERE tenant_id = 'w6cdrv_wrongtype'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("events");
+        assert_eq!(persisted, 1, "the DB insert committed before the script ran");
+        let mut conn = env.redis.get().await.expect("redis");
+        let counter_kind: String = redis::cmd("TYPE")
+            .arg(&counter_key)
+            .query_async(&mut conn)
+            .await
+            .expect("counter type");
+        assert_eq!(
+            counter_kind, "list",
+            "the counter was never INCRBY'd through the wrong type"
+        );
+        let pending_left: bool = conn
+            .exists(format!("meter:pending:{raw_id}"))
+            .await
+            .expect("pending key");
+        assert!(
+            pending_left,
+            "the script aborted before DEL: the pending key survives for the next retry"
+        );
+    });
+
+    env_test!(delete_redis_keys_with_an_empty_list_is_a_clean_noop, |env| {
+        let mut conn = env.redis.get().await.expect("redis");
+        delete_redis_keys(&mut conn, &[])
+            .await
+            .expect("empty key list is a no-op");
+    });
+
+    // ── SLA credit edges ────────────────────────────────────────────────
+
+    env_test!(sla_credit_edges_are_explicit_and_capped, |env| {
+        let this_month = month_start(Utc::now());
+        let last_month = month_start(this_month - chrono::Days::new(1));
+        let mid_last_month = last_month + chrono::Duration::days(10);
+
+        // (tenant/plan, uptime % as exact decimal text, plan features) —
+        // uptime stays in EXACT decimal text end-to-end (numeric column, no
+        // binary floating point anywhere near the money computation).
+        let cases: [(&str, &str, Value); 6] = [
+            ("w6csla_noflag", "90.0", serde_json::json!({})),
+            ("w6csla_good", "99.95", serde_json::json!({"slaGuarantee": true})),
+            ("w6csla_tiny", "99.85", serde_json::json!({"slaGuarantee": true})),
+            (
+                "w6csla_capped",
+                "95.0",
+                serde_json::json!({"slaGuarantee": true, "slaCreditPercentage": 10}),
+            ),
+            ("w6csla_noinv", "90.0", serde_json::json!({"slaGuarantee": true})),
+            ("w6csla_already", "90.0", serde_json::json!({"slaGuarantee": true})),
+        ];
+        for (tenant, uptime, features) in &cases {
+            seed_plan(env, tenant, 1000, features.clone()).await;
+            seed_tenant_plan(env, tenant, tenant, "active").await;
+            sqlx::query(
+                "INSERT INTO sla_metrics (tenant_id, period_month, uptime_percent)
+                 VALUES ($1, $2, $3::numeric)",
+            )
+            .bind(tenant)
+            .bind(last_month)
+            .bind(uptime)
+            .execute(&env.pool)
+            .await
+            .expect("sla metric");
+        }
+
+        // Paid invoices inside the credited period. The capped tenant holds
+        // an older EUR invoice and a LATER USD one: the credit follows the
+        // LATEST invoice's currency and sums only that currency.
+        for (tenant, currency, total, created_at) in [
+            ("w6csla_capped", "EUR", 10_000_i64, mid_last_month),
+            (
+                "w6csla_capped",
+                "USD",
+                400_000_i64,
+                mid_last_month + chrono::Duration::days(5),
+            ),
+            ("w6csla_already", "EUR", 10_000_i64, mid_last_month),
+        ] {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                       subtotal, vat_total, total, issued_at, paid_at, due_at,
+                                       period_start, period_end, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, 'paid', $5, $3, 0, $3, $6, $6, $6, $7, $8, $9, $9)",
+            )
+            .bind(id)
+            .bind(tenant)
+            .bind(total)
+            .bind(currency)
+            .bind(format!("W6CSLA-{}", id.simple()))
+            .bind(mid_last_month)
+            .bind(last_month)
+            .bind(this_month)
+            .bind(created_at)
+            .execute(&env.pool)
+            .await
+            .expect("paid invoice");
+        }
+
+        // The already-credited tenant keeps its existing credit: no second
+        // row even though the breach qualifies again.
+        sqlx::query(
+            "INSERT INTO sla_credits (id, tenant_id, period_month, breach_percent,
+                                      credit_percent, credit_amount, currency, status)
+             VALUES (gen_random_uuid(), 'w6csla_already', $1, 9.9, 100, 10000, 'EUR', 'pending')",
+        )
+        .bind(last_month)
+        .execute(&env.pool)
+        .await
+        .expect("pre-existing credit");
+
+        let result = process_monthly_sla_credits(&env.state)
+            .await
+            .expect("sla sweep");
+        assert_eq!(result.tenants_checked, 6, "{result:?}");
+        assert_eq!(
+            result.credits_created, 1,
+            "only the capped tenant qualifies: {result:?}"
+        );
+
+        let credit: (i32, String, i32) = sqlx::query_as(
+            "SELECT credit_amount::int, currency, credit_percent::int FROM sla_credits
+             WHERE tenant_id = 'w6csla_capped'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("capped credit");
+        // Breach 4.9 % → 50 % credit; the plan cap of 10 % of the USD total
+        // (40 000 c) wins over 50 % (200 000 c).
+        assert_eq!(credit, (40_000, "USD".to_string(), 50));
+
+        let total_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sla_credits")
+            .fetch_one(&env.pool)
+            .await
+            .expect("rows");
+        assert_eq!(total_rows, 2, "no double credit, no credit for the others");
+
+        // Replaying the sweep is a no-op (per-period lock + re-check).
+        let replay = process_monthly_sla_credits(&env.state)
+            .await
+            .expect("sla replay");
+        assert_eq!(replay.credits_created, 0);
+    });
+
+    // ── dedicated-IP cancel fault arms ──────────────────────────────────
+
+    env_test!(dedicated_ip_cancel_failure_rolls_back_and_404_succeeds, |env| {
+        let mock = Mock::default();
+        mock.route("/v1/subscription_items/si_dead", 500, "stripe exploded");
+        mock.route(
+            "/v1/subscription_items/si_gone",
+            404,
+            r#"{"error":{"code":"resource_missing"}}"#,
+        );
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
+        );
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c_dip");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_w6c_dip");
+
+        seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
+                                        stripe_subscription_item_id)
+             VALUES ('w6cdip-dead', 'w6cdip_cancel', '192.0.2.51', 'active', 'pending_cancel', 'si_dead'),
+                    ('w6cdip-gone', 'w6cdip_cancel', '192.0.2.52', 'active', 'pending_cancel', 'si_gone')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("pending cancels");
+
+        let client = Client::new();
+        let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+            .await
+            .expect("cancel sweep");
+        assert_eq!(
+            canceled, 1,
+            "the 404/resource_missing cancel succeeds, the 500 one does not"
+        );
+        let statuses: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, billing_status FROM dedicated_ips WHERE id LIKE 'w6cdip-%' ORDER BY id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .expect("statuses");
+        assert_eq!(
+            statuses,
+            vec![
+                ("w6cdip-dead".to_string(), "pending_cancel".to_string()),
+                ("w6cdip-gone".to_string(), "canceled".to_string()),
+            ],
+            "the Stripe failure rolled back whole, the missing resource was finalized"
+        );
+
+        match previous {
+            (Some(a), Some(b), Some(c)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", a);
+                std::env::set_var("STRIPE_API_BASE_URL", b);
+                std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", c);
+            }
+            _ => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
+            }
+        }
+        drop(guard);
+    });
+
+    // ── cost margin status arms ─────────────────────────────────────────
+
+    env_test!(cost_margin_status_arms_alert_dedup_and_throttle, |env| {
+        let tenant_zero = "w6cm_zero";
+        let tenant_warn = "w6cm_warn";
+        let tenant_crit = "w6cm_crit";
+        let tenant_ok = "w6cm_ok";
+        for tenant in [tenant_zero, tenant_warn, tenant_crit, tenant_ok] {
+            seed_tenant_plan(env, tenant, "growth", "active").await;
+        }
+        let recorded = month_start(Utc::now()).date_naive();
+        for (tenant, total, revenue) in [
+            (tenant_warn, 850_i64, 1_000_i64),
+            (tenant_crit, 500_i64, 100_i64),
+            (tenant_ok, 100_i64, 1_000_i64),
+        ] {
+            sqlx::query(
+                "INSERT INTO tenant_costs (tenant_id, recorded_at, total_cost, revenue)
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(tenant)
+            .bind(recorded)
+            .bind(total)
+            .bind(revenue)
+            .execute(&env.pool)
+            .await
+            .expect("tenant costs");
+        }
+
+        // Zero activity: healthy, nothing alert-worthy.
+        assert!(matches!(
+            check_tenant_cost_margin(&env.state, tenant_zero).await,
+            Ok(CostMarginStatus::Healthy)
+        ));
+        // 5 % margin: warning, alert raised, throttle NOT applied.
+        assert!(matches!(
+            check_tenant_cost_margin(&env.state, tenant_warn).await,
+            Ok(CostMarginStatus::Warning)
+        ));
+        // Negative margin: critical, alert raised AND throttle applied.
+        assert!(matches!(
+            check_tenant_cost_margin(&env.state, tenant_crit).await,
+            Ok(CostMarginStatus::Critical)
+        ));
+        // 90 % margin: healthy.
+        assert!(matches!(
+            check_tenant_cost_margin(&env.state, tenant_ok).await,
+            Ok(CostMarginStatus::Healthy)
+        ));
+
+        let alerts: Vec<(String, String)> = sqlx::query_as(
+            "SELECT tenant_id, alert_type FROM cost_alerts WHERE resolved_at IS NULL
+             ORDER BY tenant_id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .expect("alerts");
+        assert_eq!(
+            alerts,
+            vec![
+                (tenant_crit.to_string(), "negative_margin".to_string()),
+                (tenant_warn.to_string(), "low_margin".to_string()),
+            ]
+        );
+        let crit_throttled = redis_exists(env, &cost_throttle_key(tenant_crit)).await;
+        assert!(crit_throttled, "the critical tenant is throttled");
+        let warn_throttled = redis_exists(env, &cost_throttle_key(tenant_warn)).await;
+        assert!(!warn_throttled, "a warning never throttles");
+
+        // Re-running the critical tenant deduplicates the open alert.
+        assert!(matches!(
+            check_tenant_cost_margin(&env.state, tenant_crit).await,
+            Ok(CostMarginStatus::Critical)
+        ));
+        let crit_alerts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cost_alerts WHERE tenant_id = $1 AND alert_type = 'negative_margin'",
+        )
+        .bind(tenant_crit)
+        .fetch_one(&env.pool)
+        .await
+        .expect("alert count");
+        assert_eq!(crit_alerts, 1, "open alerts deduplicate");
+
+        // Recovery clears the throttle and audits the transition.
+        clear_cost_throttling(&env.state, tenant_crit).await;
+        assert!(!redis_exists(env, &cost_throttle_key(tenant_crit)).await);
+        let cleared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE tenant_id = $1 AND action = 'billing.cost_throttle.cleared'",
+        )
+        .bind(tenant_crit)
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit");
+        assert_eq!(cleared, 1);
+
+        // A broken cost table isolates per-tenant failures: the sweep
+        // reports the checked set (every active tenant in the clone,
+        // including template seeds) but asserts no statuses.
+        let active_tenants: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tenants WHERE status = 'active'")
+                .fetch_one(&env.pool)
+                .await
+                .expect("tenant count");
+        env.break_table("tenant_costs").await;
+        let result = process_cost_margin_checks(&env.state).await.expect("sweep");
+        env.restore_table("tenant_costs").await;
+        assert_eq!(result.checked, active_tenants);
+        assert_eq!((result.warnings, result.critical), (0, 0));
+    });
+
+    // ── wallet-credit expiry audit fault ────────────────────────────────
+
+    env_test!(wallet_credit_expiry_audit_failure_rolls_back, |env| {
+        let tenant = "w6cexp_audit";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ($1, 500, 'EUR')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        sqlx::query(
+            "INSERT INTO wallet_transactions
+                 (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
+             SELECT id, tenant_id, 'credit', 500, 500, 'aged grant', 'w6c-exp',
+                    NOW() - INTERVAL '13 months'
+             FROM wallets WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("aged credit");
+
+        // With the audit trail unwritable the expiry must FAIL WHOLE: the
+        // balance is untouched and no debit exists (money never moves
+        // without its ledger + audit entry).
+        env.break_table("audit_logs").await;
+        let error = expire_stale_wallet_credits(&env.state)
+            .await
+            .expect_err("audit failure must abort the expiry");
+        env.restore_table("audit_logs").await;
+        assert!(
+            error.contains("Failed to audit wallet credit expiry"),
+            "{error}"
+        );
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 500, "the credit survived the failed expiry");
+
+        // With auditing healthy the same credit expires exactly once.
+        let expired = expire_stale_wallet_credits(&env.state).await.expect("expiry");
+        assert_eq!(expired, 1);
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 0);
+        let debits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'debit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("debits");
+        assert_eq!(debits, 1);
+        assert_eq!(
+            expire_stale_wallet_credits(&env.state).await.expect("replay"),
+            0,
+            "yesterday's expiry debit counts as consumption"
+        );
+    });
+
+    // ── restriction-aware admin reset ───────────────────────────────────
+
+    env_test!(admin_reset_reports_missing_holds_and_releases_messages, |env| {
+        let tenant = "w6cadmin_reset";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        seed_dunning(env, tenant, "warning", None).await;
+        seed_message(env, tenant, "dunning_queued").await;
+        seed_message(env, tenant, "dunning_queued").await;
+
+        // No billing restriction exists: the reset still resets dunning and
+        // releases the queued messages, and must not pretend a hold cleared.
+        admin_reset_dunning_restriction_aware(
+            &env.pool,
+            &env.redis,
+            tenant,
+            "admin-w6c",
+            "w6c coverage reset",
+        )
+        .await
+        .expect("admin reset");
+        let (status, holds, queued): (String, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT status FROM dunning_records WHERE tenant_id = $1),
+                    (SELECT COUNT(*) FROM tenant_restrictions
+                     WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NOT NULL),
+                    (SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'queued')",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(status, "healthy");
+        assert_eq!(holds, 0, "no hold existed to clear");
+        assert_eq!(queued, 2, "queued messages released");
+
+        // A replay stays clean.
+        admin_reset_dunning_restriction_aware(
+            &env.pool,
+            &env.redis,
+            tenant,
+            "admin-w6c",
+            "w6c replay",
+        )
+        .await
+        .expect("admin reset replay");
+    });
+
+    // ── month-end closing audit fault ───────────────────────────────────
+
+    env_test!(month_end_closing_audit_failure_rolls_everything_back, |env| {
+        let tenant = "w6cmclose_audit";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        let this_month = month_start(Utc::now());
+        let mid_last_month =
+            month_start(this_month - chrono::Days::new(1)) + chrono::Duration::days(10);
+        let invoice = Uuid::new_v4();
+        seed_invoice_row(env, invoice, tenant, "paid", mid_last_month, Some(mid_last_month), None).await;
+
+        env.break_table("billing_audit_log").await;
+        let error = perform_month_end_closing(&env.state)
+            .await
+            .expect_err("a broken audit trail must abort the closing");
+        env.restore_table("billing_audit_log").await;
+        assert!(
+            error.contains("Failed to insert billing audit log"),
+            "{error}"
+        );
+        // The whole transaction rolled back: nothing closed, nothing recorded.
+        let (closed, closings): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL),
+                    (SELECT COUNT(*) FROM month_end_closings)",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("rollback state");
+        assert_eq!((closed, closings), (0, 0));
+
+        // With the audit trail healthy the closing completes exactly once.
+        assert!(perform_month_end_closing(&env.state).await.expect("closing"));
+        assert!(!perform_month_end_closing(&env.state).await.expect("replay"));
+        let closed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("closed");
+        assert_eq!(closed, 1);
+    });
+
+    // ── usage-alert webhook failure arm ─────────────────────────────────
+
+    env_test!(usage_alert_webhook_failure_delivers_nothing_and_retries, |env| {
+        let tenant = "w6calert_fail";
+        // This test owns `alert:cooldown:{tenant}:*` in the shared Redis:
+        // a cooldown set by a previous run (1 h TTL) must not suppress the
+        // first delivery attempt.
+        {
+            let mut conn = env.redis.get().await.expect("redis");
+            let stale: Vec<String> = redis::cmd("KEYS")
+                .arg(format!("alert:cooldown:{tenant}:*"))
+                .query_async(&mut conn)
+                .await
+                .expect("scan cooldowns");
+            if !stale.is_empty() {
+                let _: () = redis::cmd("DEL")
+                    .arg(&stale)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear cooldowns");
+            }
+        }
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        seed_plan(env, "w6calert_plan", 100, json!({})).await;
+        sqlx::query("UPDATE tenants SET plan = 'w6calert_plan' WHERE id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("switch plan");
+        let mock = Mock::default();
+        mock.route("/hook", 500, "webhook down");
+        let base = spawn_mock(mock.clone()).await;
+        sqlx::query("UPDATE tenants SET settings = $2::jsonb WHERE id = $1")
+            .bind(tenant)
+            .bind(json!({"webhookUrl": format!("{base}/hook")}).to_string())
+            .execute(&env.pool)
+            .await
+            .expect("tenant webhook");
+        sqlx::query(
+            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent,
+                                              notification_channel)
+             VALUES ($1, 'emails', 50, 'webhook')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("alert config");
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 80, NOW())",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("usage");
+
+        let client = Client::new();
+        // Webhook down: nothing delivered, NO cooldown set — the next pass
+        // must retry.
+        let first = process_usage_alerts(&env.state, &client).await.expect("alerts");
+        assert_eq!(first.alerts_triggered, 0, "{first:?}");
+        assert_eq!(mock.call_count("/hook"), 1, "the webhook was attempted");
+        assert!(
+            !redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
+            "a failed delivery never sets the cooldown"
+        );
+        let last_triggered: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT last_triggered_at FROM usage_alert_configs WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("last triggered");
+        assert!(last_triggered.is_none());
+
+        // Webhook recovers: the SAME threshold fires on the next pass.
+        mock.route("/hook", 200, "{}");
+        let second = process_usage_alerts(&env.state, &client).await.expect("alerts");
+        assert_eq!(second.alerts_triggered, 1, "{second:?}");
+        assert!(
+            redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
+            "a delivered alert sets the cooldown"
+        );
+        let third = process_usage_alerts(&env.state, &client).await.expect("alerts");
+        assert_eq!(third.alerts_triggered, 0, "cooldown suppresses the replay");
+    });
+
 }

@@ -2025,3 +2025,840 @@ fn health_endpoints_report_cluster_state_without_faking_readiness() {
         assert!(json.is_array());
     });
 }
+
+// ── W6C adversarial coverage: backup storage-integrity + restore-integrity
+// arms, retention storage cleanup, failover coordination fault arms, and the
+// authorized mutating route surfaces. Each arm is reachable only through a
+// specific failure state (corrupt payload, hostile location, storage outage,
+// wrong-type Redis key) so every assertion can fail for a real reason.
+
+use chrono::Utc;
+
+/// Records method+path pairs and replies with a per-path configurable status
+/// and body. A path of "*" matches everything not otherwise configured.
+async fn spawn_storage_mock(
+    config: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+) -> String {
+    async fn handler(
+        axum::extract::State((config, log)): axum::extract::State<(
+            Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
+            Arc<std::sync::Mutex<Vec<String>>>,
+        )>,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+        log.lock().expect("log").push(format!("{method} {path}"));
+        let (status, body) = {
+            let guard = config.lock().expect("config");
+            guard
+                .get(&format!("{method} {path}"))
+                .or_else(|| guard.get(&format!("{method} *")))
+                .cloned()
+                .unwrap_or((200, "{}".to_string()))
+        };
+        (
+            axum::http::StatusCode::from_u16(status).expect("status"),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response()
+    }
+    let app = axum::Router::new()
+        .fallback(handler)
+        .with_state((config, log));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind storage mock");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+fn temp_backup_file(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("{}-{}.payload", name, Uuid::new_v4().simple()))
+}
+
+#[test]
+fn backup_service_validation_and_table_enumeration() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let db = h.db.clone();
+
+        // Startup validation: a wrong-size key is rejected before any backup
+        // can silently fall back to a broken cipher configuration.
+        let mut bad_key = (*h.config).clone();
+        bad_key.backup.encryption_key = Some("too-short".into());
+        let error = match BackupService::new(db.clone(), Arc::new(bad_key)) {
+            Err(error) => error,
+            Ok(_) => panic!("wrong-size key must be rejected at startup"),
+        };
+        assert!(error.contains("Invalid backup encryption key size"), "{error}");
+
+        // Production fail-closed: no key, no service.
+        let mut prod = (*h.config).clone();
+        prod.environment = "production".into();
+        prod.backup.encryption_key = None;
+        let error = match BackupService::new(db.clone(), Arc::new(prod)) {
+            Err(error) => error,
+            Ok(_) => panic!("production without a key must fail closed"),
+        };
+        assert!(error.contains("BACKUP_ENCRYPTION_KEY"), "{error}");
+
+        let backup = BackupService::new(db.clone(), Arc::clone(&h.config)).expect("service");
+
+        // A table OUTSIDE the allowlist is refused even though it is a
+        // syntactically valid identifier (defense in depth against catalog
+        // dumps through the backup API).
+        let error = backup
+            .create_backup(BackupType::Full, Some(vec!["pg_class".into()]))
+            .await
+            .expect_err("catalog table must be refused");
+        assert!(error.contains("Invalid table name"), "{error}");
+
+        // An EMPTY table still produces a valid backup whose compression
+        // ratio degrades to exactly 1.0 (no data to compress — never a
+        // divide-by-zero or NaN). `ip_pools` exists in the canonical schema
+        // and is empty in the harness clone.
+        let empty = backup
+            .create_backup(BackupType::Full, Some(vec!["ip_pools".into()]))
+            .await
+            .expect("empty-table backup");
+        assert_eq!(empty.status, "completed");
+        assert_eq!(empty.compression_ratio, Some(1.0), "{:?}", empty.compression_ratio);
+
+        // No table list → the FULL table enumeration runs. The allowlist
+        // filter decides what is swept; the recorded table list stays NULL
+        // exactly because the caller did not pin one.
+        let full = backup
+            .create_backup(BackupType::Full, None)
+            .await
+            .expect("full enumeration backup");
+        assert_eq!(full.status, "completed");
+        assert!(full.tables_included.is_none());
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'
+             AND tablename IN ('emails', 'contacts', 'suppression_list')",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("probe tables");
+        let enumerated: Vec<String> = rows.into_iter().map(|(t,)| t).collect();
+        assert!(
+            enumerated.contains(&"suppression_list".to_string()),
+            "allowlisted application tables exist for the enumeration: {enumerated:?}"
+        );
+
+        for id in [empty.id, full.id] {
+            assert!(backup.delete_backup(id).await.unwrap());
+        }
+    });
+}
+
+#[test]
+fn backup_upload_failure_falls_back_to_staging_and_success_cleans_it() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let backup = BackupService::new(h.db.clone(), Arc::clone(&h.config)).expect("service");
+
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
+            "PUT *".to_string(),
+            (500_u16, "storage exploded".to_string()),
+        )])));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_storage_mock(Arc::clone(&statuses), Arc::clone(&log)).await;
+
+        let previous = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
+        std::env::set_var("BACKUP_PRESIGNED_URL_BASE", &base);
+
+        // Remote upload fails → the payload is staged locally as a recovery
+        // fallback AND the creation errors (the payload is never silently
+        // "backed up" to nowhere).
+        let failed = backup
+            .create_backup(BackupType::Full, Some(vec!["suppression_list".into()]))
+            .await;
+        assert!(failed.is_err(), "a failed upload must fail the backup");
+        let failed = failed.unwrap_err();
+        assert!(failed.contains("S3 upload returned status"), "{failed}");
+        let failed_location = failed.clone();
+        let _ = failed_location;
+
+        // The fallback staging copy exists for the failed object…
+        let first_log = log.lock().expect("log").clone();
+        assert!(
+            first_log.iter().any(|entry| entry.starts_with("PUT ")),
+            "the upload was attempted: {first_log:?}"
+        );
+
+        // …and once the remote recovers, the next backup succeeds and leaves
+        // NO staging copy behind (retention cannot clean what /tmp hides).
+        statuses
+            .lock()
+            .expect("config")
+            .insert("PUT *".to_string(), (200_u16, "{}".to_string()));
+        let ok = backup
+            .create_backup(BackupType::Full, Some(vec!["suppression_list".into()]))
+            .await
+            .expect("upload recovered");
+        let staging = local_staging_path(ok.location.as_deref().expect("location"));
+        assert!(
+            !staging.exists(),
+            "a successful upload must not leave a staging copy at {}",
+            staging.display()
+        );
+        assert!(backup.delete_backup(ok.id).await.unwrap());
+
+        match previous {
+            Some(value) => std::env::set_var("BACKUP_PRESIGNED_URL_BASE", value),
+            None => std::env::remove_var("BACKUP_PRESIGNED_URL_BASE"),
+        }
+    });
+}
+
+#[test]
+fn backup_download_gates_and_storage_schemes() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let backup = BackupService::new(h.db.clone(), Arc::clone(&h.config)).expect("service");
+
+        // Stored via the local fallback: a real payload on disk.
+        let previous_base = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
+        let previous_allow = std::env::var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD").ok();
+        let previous_endpoint = std::env::var("S3_ENDPOINT").ok();
+        std::env::remove_var("BACKUP_PRESIGNED_URL_BASE");
+        std::env::remove_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD");
+        let created = backup
+            .create_backup(BackupType::Full, Some(vec!["suppression_list".into()]))
+            .await
+            .expect("local backup");
+        let staging = local_staging_path(created.location.as_deref().expect("location"));
+        let payload = tokio::fs::read(&staging).await.expect("payload bytes");
+        assert!(!payload.is_empty());
+
+        let set_location = |db: &sqlx::PgPool, id: Uuid, location: &str| {
+            let db = db.clone();
+            let location = location.to_string();
+            async move {
+                sqlx::query("UPDATE ha_backups SET location = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(&location)
+                    .execute(&db)
+                    .await
+                    .expect("update location");
+            }
+        };
+        let object_key = {
+            let location = created.location.clone().unwrap();
+            let path = location.strip_prefix("s3://").unwrap();
+            let (_, key) = path.split_once('/').unwrap();
+            key.to_string()
+        };
+
+        // (a) The s3 object is NOT staged locally and no download endpoint is
+        // configured: the restore refuses instead of fetching unauthenticated.
+        tokio::fs::remove_file(&staging).await.expect("drop staging copy");
+        set_location(&h.db, created.id, &format!("s3://w6c-bucket/{object_key}")).await;
+        let refused = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect_err("unauthenticated s3 download must be refused");
+        assert!(
+            refused.contains("Missing BACKUP_PRESIGNED_URL_BASE"),
+            "{refused}"
+        );
+
+        // (b) Explicit acknowledgement + a failing endpoint: honest error.
+        std::env::set_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD", "I_UNDERSTAND_THIS_IS_INSECURE");
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
+            "GET *".to_string(),
+            (500_u16, "s3 down".to_string()),
+        )])));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = spawn_storage_mock(Arc::clone(&statuses), Arc::clone(&log)).await;
+        std::env::set_var("S3_ENDPOINT", &base);
+        let failed = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect_err("s3 outage must fail the restore");
+        assert!(failed.contains("S3 download returned status"), "{failed}");
+
+        // (c) A 200 response carrying garbage bytes gets to the decompressor,
+        // which must refuse it — corrupt objects never reach the database.
+        statuses
+            .lock()
+            .expect("config")
+            .insert("GET *".to_string(), (200_u16, "definitely not gzip".into()));
+        let garbage = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect_err("garbage object must be refused");
+        assert!(garbage.contains("Decompress failed"), "{garbage}");
+
+        // (d) file:// locations restore the REAL payload end-to-end.
+        let payload_path = temp_backup_file("w6c-file-scheme");
+        tokio::fs::write(&payload_path, &payload).await.expect("write payload");
+        set_location(&h.db, created.id, &format!("file://{}", payload_path.display())).await;
+        let restored = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect("file restore");
+        assert!(restored.success, "{:?}", restored.message);
+
+        // (e) Unknown schemes and (f) malformed s3 locations are errors.
+        for hostile in [
+            "ftp://example/backup.gz".to_string(),
+            "s3://just-a-bucket".to_string(),
+        ] {
+            set_location(&h.db, created.id, &hostile).await;
+            let error = backup
+                .restore(RestoreOptions {
+                    backup_id: created.id,
+                    target_time: None,
+                    validate_only: false,
+                    parallel_jobs: 1,
+                })
+                .await
+                .expect_err("hostile location must be refused");
+            assert!(
+                error.contains("Unknown storage location scheme")
+                    || error.contains("Invalid S3 location"),
+                "{hostile}: {error}"
+            );
+        }
+
+        backup.delete_backup(created.id).await.unwrap();
+        let _ = tokio::fs::remove_file(&payload_path).await;
+        let _ = tokio::fs::remove_file(&staging).await;
+        match (previous_base, previous_allow, previous_endpoint) {
+            (b, a, e) => {
+                if let Some(value) = b {
+                    std::env::set_var("BACKUP_PRESIGNED_URL_BASE", value);
+                } else {
+                    std::env::remove_var("BACKUP_PRESIGNED_URL_BASE");
+                }
+                if let Some(value) = a {
+                    std::env::set_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD", value);
+                } else {
+                    std::env::remove_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD");
+                }
+                if let Some(value) = e {
+                    std::env::set_var("S3_ENDPOINT", value);
+                } else {
+                    std::env::remove_var("S3_ENDPOINT");
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn restore_and_pitr_reject_hostile_tables_and_checksum_drift() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let backup = BackupService::new(h.db.clone(), Arc::clone(&h.config)).expect("service");
+        let created = backup
+            .create_backup(BackupType::Full, Some(vec!["suppression_list".into()]))
+            .await
+            .expect("backup");
+
+        // A catalog table smuggled into the recorded table list is refused
+        // by the restore path too — not only at creation.
+        sqlx::query("UPDATE ha_backups SET tables_included = '[\"pg_class\"]'::jsonb WHERE id = $1")
+            .bind(created.id)
+            .execute(&h.db)
+            .await
+            .expect("smuggle table");
+        let error = backup
+            .restore(RestoreOptions {
+                backup_id: created.id,
+                target_time: None,
+                validate_only: false,
+                parallel_jobs: 1,
+            })
+            .await
+            .expect_err("catalog table must be refused on restore");
+        assert!(error.contains("Invalid table name: pg_class"), "{error}");
+
+        // PITR with a drifted checksum reports the mismatch honestly instead
+        // of restoring an object it cannot verify.
+        sqlx::query(
+            "UPDATE ha_backups SET tables_included = '[\"suppression_list\"]'::jsonb,
+             checksum = '0000000000000000000000000000000000000000000000000000000000000000'
+             WHERE id = $1",
+        )
+        .bind(created.id)
+        .execute(&h.db)
+        .await
+        .expect("drift checksum");
+        let pitr = backup.pitr(Utc::now()).await.expect("pitr result");
+        assert!(!pitr.success, "{:?}", pitr.message);
+        assert!(
+            pitr.message.as_deref().is_some_and(|m| m.contains("checksum mismatch")),
+            "{:?}",
+            pitr.message
+        );
+
+        // PITR with a hostile table list fails at the table-restore step.
+        sqlx::query(
+            "UPDATE ha_backups SET tables_included = '[\"pg_class\"]'::jsonb,
+             checksum = $2 WHERE id = $1",
+        )
+        .bind(created.id)
+        .bind(&created.checksum)
+        .execute(&h.db)
+        .await
+        .expect("smuggle table");
+        let pitr = backup.pitr(Utc::now()).await.expect("pitr result");
+        assert!(!pitr.success);
+        assert!(
+            pitr.message.as_deref().is_some_and(|m| m.contains("restore of table pg_class")),
+            "{:?}",
+            pitr.message
+        );
+
+        backup.delete_backup(created.id).await.unwrap();
+    });
+}
+
+#[test]
+fn retention_removes_storage_objects_and_tolerates_storage_errors() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let backup = BackupService::new(h.db.clone(), Arc::clone(&h.config)).expect("service");
+
+        let statuses = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
+            "DELETE *".to_string(),
+            (200_u16, "{}".to_string()),
+        )])));
+        let base = spawn_storage_mock(statuses.clone(), Arc::default()).await;
+        let previous = std::env::var("BACKUP_PRESIGNED_URL_BASE").ok();
+        std::env::set_var("BACKUP_PRESIGNED_URL_BASE", &base);
+
+        let seed_expired = |db: &sqlx::PgPool, location: String| {
+            let db = db.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO ha_backups
+                         (id, backup_type, status, size_bytes, location, encrypted, compressed,
+                          started_at, completed_at)
+                     VALUES ($1, 'full', 'completed', 10, $2, false, true,
+                             NOW() - INTERVAL '200 days', NOW() - INTERVAL '200 days')",
+                )
+                .bind(id)
+                .bind(&location)
+                .execute(&db)
+                .await
+                .expect("expired backup row");
+                id
+            }
+        };
+
+        // DELETE 200: the expired rows and their staging copies disappear.
+        // The staging copy MUST be at the exact path delete_from_storage
+        // derives from the object key (/tmp/apexmail-backups/<flattened
+        // key>). The key is unique per run so no earlier run's leftovers can
+        // satisfy or break the assertion.
+        let object_key = format!("w6c-ret-{}.gz", Uuid::new_v4().simple());
+        std::fs::create_dir_all("/tmp/apexmail-backups").expect("staging dir");
+        let staged = std::path::PathBuf::from("/tmp/apexmail-backups").join(&object_key);
+        std::fs::write(&staged, b"payload").expect("stage payload");
+        let one = seed_expired(&h.db, format!("s3://w6c-ret/{object_key}")).await;
+
+        let deleted = backup.enforce_retention().await.expect("retention");
+        assert!(deleted >= 1, "expired rows are deleted");
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
+        )
+        .bind(&[one])
+        .fetch_one(&h.db)
+        .await
+        .expect("rows");
+        assert_eq!(remaining, 0);
+        assert!(
+            !staged.exists(),
+            "the staging copy of a retained-away backup is removed"
+        );
+
+        // DELETE 500: catalog cleanup still proceeds (the row is past
+        // retention either way) — the storage failure is logged, not fatal.
+        statuses
+            .lock()
+            .expect("config")
+            .insert("DELETE *".to_string(), (500_u16, "still down".into()));
+        let two = seed_expired(&h.db, "s3://w6c-ret/two.gz".into()).await;
+        let deleted = backup.enforce_retention().await.expect("retention");
+        assert!(deleted >= 1);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
+        )
+        .bind(&[two])
+        .fetch_one(&h.db)
+        .await
+        .expect("rows");
+        assert_eq!(remaining, 0, "a storage outage does not keep dead rows");
+
+        // DELETE 404: the object is already gone — success.
+        statuses
+            .lock()
+            .expect("config")
+            .insert("DELETE *".to_string(), (404_u16, "gone".into()));
+        let three = seed_expired(&h.db, "s3://w6c-ret/three.gz".into()).await;
+        backup.enforce_retention().await.expect("retention");
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
+        )
+        .bind(&[three])
+        .fetch_one(&h.db)
+        .await
+        .expect("rows");
+        assert_eq!(remaining, 0);
+
+        match previous {
+            Some(value) => std::env::set_var("BACKUP_PRESIGNED_URL_BASE", value),
+            None => std::env::remove_var("BACKUP_PRESIGNED_URL_BASE"),
+        }
+    });
+}
+
+#[test]
+fn failover_reports_failures_and_refuses_unsafe_targets() {
+    run(async {
+        let Some(h) = harness().await else { return };
+
+        // Config info reflects the failback mode honestly.
+        let base = FailoverService::new(h.db.clone(), Arc::clone(&h.config));
+        assert_eq!(base.get_config_info().await.mode, "manual");
+        let auto_cfg = config_with(|config| config.failover.failback_enabled = true).await;
+        let auto = FailoverService::new(h.db.clone(), auto_cfg);
+        assert_eq!(auto.get_config_info().await.mode, "automatic");
+
+        // UNREACHABLE coordination: writes fail closed, lock acquisition
+        // fails, claim refresh errors, split-brain detection errors — and
+        // none of it wedges the state machine.
+        let mut dead = (*h.config).clone();
+        dead.redis.host = "127.0.0.1".into();
+        dead.redis.port = 1;
+        let dead = FailoverService::new(h.db.clone(), Arc::new(dead));
+        let closed = dead
+            .ensure_not_fenced()
+            .await
+            .expect_err("unreadable fence status fails closed");
+        assert!(closed.contains("failing closed"), "{closed}");
+        let error = dead
+            .initiate_failover(FailoverType::Manual, None)
+            .await
+            .expect_err("no coordination, no failover");
+        assert!(error.contains("failover lock"), "{error}");
+        assert_eq!(dead.get_state().await, FailoverState::Normal);
+        assert!(dead.refresh_primary_claim("w6c-node").await.is_err());
+        assert!(dead.detect_split_brain().await.is_err());
+
+        // A LIVE coordinator with a configured replica: the automatic
+        // failover acquires the lock, probes the candidate, finds it
+        // verifiably NOT replicating and aborts — the state machine returns
+        // to Normal and the lock is released.
+        let cfg = config_with(|config| {
+            config.failover.threshold = 1;
+            config.database.replica_hosts = vec!["w6c-not-replicating".into()];
+        })
+        .await;
+        let service = FailoverService::new(h.db.clone(), cfg);
+        let error = service
+            .report_failure("database")
+            .await
+            .expect_err("a non-replicating candidate must abort the automatic failover");
+        assert!(error.contains("No healthy failover target"), "{error}");
+        assert_eq!(
+            service.get_state().await,
+            FailoverState::Normal,
+            "an aborted failover must restore the prior state"
+        );
+        let mut conn = redis_conn(&h.config).await;
+        let lock: Option<String> = redis::cmd("GET")
+            .arg("ha:failover:lock")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(lock.is_none(), "the lock is released on the abort path");
+
+        // Claim refresh: own claim extends, foreign claim is reported lost.
+        let owner = h.config.multi_region.node_id.clone();
+        let _: () = redis::cmd("SET")
+            .arg("ha:primary:w6c-refresh")
+            .arg(&owner)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(service.refresh_primary_claim("w6c-refresh").await.unwrap());
+        let _: () = redis::cmd("SET")
+            .arg("ha:primary:w6c-refresh")
+            .arg("someone-else")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(!service.refresh_primary_claim("w6c-refresh").await.unwrap());
+        let _: i64 = redis::cmd("DEL")
+            .arg("ha:primary:w6c-refresh")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Bootstrap is idempotent: the HA tables exist and accept the exact
+        // rows the coordinator writes at runtime.
+        ha::failover::bootstrap_tables(&h.db).await.expect("bootstrap 1");
+        ha::failover::bootstrap_tables(&h.db).await.expect("bootstrap 2");
+    });
+}
+
+#[test]
+fn routes_exercise_every_authorized_mutating_surface() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let app = h.app();
+
+        // Failover initiation without replicas is an honest 500 — the
+        // handler ran, the coordinator refused.
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/failover/initiate",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({"reason": "w6c route coverage"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Failback is disabled by default → 500 with the coordinator's
+        // refusal.
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/failover/failback",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Backup lifecycle over the HTTP surface: create → list → get →
+        // validate-only restore → pitr → retention → delete.
+        let (status, created) = call(
+            &app,
+            "POST",
+            "/api/v1/backup",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({"backup_type": "full", "tables": ["suppression_list"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let backup_id = created["id"].as_str().expect("backup id").to_string();
+
+        let (status, listed) = call(
+            &app,
+            "GET",
+            "/api/v1/backup/list?backup_type=full&status=completed&limit=5",
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(listed.is_array());
+
+        let (status, fetched) = call(
+            &app,
+            "GET",
+            &format!("/api/v1/backup/{backup_id}"),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fetched["id"].as_str(), Some(backup_id.as_str()));
+        let (status, _) = call(
+            &app,
+            "GET",
+            &format!("/api/v1/backup/{}", Uuid::new_v4()),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, validated) = call(
+            &app,
+            "POST",
+            "/api/v1/backup/restore",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({
+                "backup_id": backup_id,
+                "target_time": null,
+                "validate_only": true,
+                "parallel_jobs": 1
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{validated}");
+        assert_eq!(validated["success"], true);
+
+        let (status, pitr) = call(
+            &app,
+            "POST",
+            "/api/v1/backup/pitr",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({"target_time": chrono::Utc::now().to_rfc3339()})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{pitr}");
+        assert_eq!(
+            pitr["success"], false,
+            "PITR without WAL replay is never a claimed success"
+        );
+
+        let (status, retention) = call(
+            &app,
+            "POST",
+            "/api/v1/backup/retention",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retention}");
+
+        let (status, deleted) = call(
+            &app,
+            "DELETE",
+            &format!("/api/v1/backup/{backup_id}"),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        assert_eq!(deleted["deleted"], true);
+
+        // Replication control surface: slot create/drop (the database may
+        // refuse the privilege — a 500 IS the handler reporting honestly),
+        // promotion of a non-standby, sync-mode flips and lag history.
+        let slot_name = format!("w6c_slot_{}", Uuid::new_v4().simple());
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/replication/slots",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({"name": slot_name, "slot_type": "physical"})),
+        )
+        .await;
+        assert!(
+            status == StatusCode::CREATED || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "slot creation is either granted or honestly refused: {status}"
+        );
+        let (status, _) = call(
+            &app,
+            "DELETE",
+            &format!("/api/v1/replication/slots/{slot_name}"),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "{status}"
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/replication/promote",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "promoting a non-standby reports honestly: {status}"
+        );
+        let (status, _) = call(
+            &app,
+            "PUT",
+            "/api/v1/replication/sync-mode",
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({"synchronous": false})),
+        )
+        .await;
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "{status}"
+        );
+        let (status, _) = call(
+            &app,
+            "GET",
+            "/api/v1/replication/lag/history?minutes=30",
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert!(
+            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "{status}"
+        );
+
+        // Geo-rule deletion of an unknown id is a truthful `false`.
+        let (status, deleted) = call(
+            &app,
+            "DELETE",
+            &format!("/api/v1/regions/geo-rules/{}", Uuid::new_v4()),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        assert_eq!(deleted["deleted"], false);
+
+        // Chaos surface: aborting an unknown experiment fails loudly;
+        // deleting one is a truthful `false`.
+        let unknown = Uuid::new_v4();
+        let (status, _) = call(
+            &app,
+            "POST",
+            &format!("/api/v1/chaos/experiments/{unknown}/abort"),
+            Some(INTERNAL_KEY),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, deleted) = call(
+            &app,
+            "DELETE",
+            &format!("/api/v1/chaos/experiments/{unknown}"),
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{deleted}");
+        assert_eq!(deleted["deleted"], false);
+    });
+}

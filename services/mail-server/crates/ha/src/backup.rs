@@ -428,9 +428,22 @@ impl BackupService {
     }
 
     async fn get_all_tables(&self) -> Result<Vec<String>, String> {
+        // The enumeration MUST apply the same allowlist the streamer
+        // enforces. The previous form listed EVERY table in `public`, so a
+        // full backup (tables = None) always aborted on the first
+        // non-application table (e.g. migrator bookkeeping like
+        // `_migration_down_registry`): stream_table refused it and the whole
+        // backup failed. Backups of a real deployment were impossible.
+        let allowed: Vec<String> = Self::ALLOWED_TABLES
+            .iter()
+            .map(|table| table.to_string())
+            .collect();
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+            "SELECT tablename FROM pg_tables
+             WHERE schemaname = 'public' AND tablename = ANY($1)
+             ORDER BY tablename",
         )
+        .bind(&allowed)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| format!("List tables: {e}"))?;
