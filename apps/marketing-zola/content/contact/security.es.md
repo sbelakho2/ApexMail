@@ -30,7 +30,7 @@ ApexMail proporciona documentación de seguridad a clientes y candidatos Enterpr
   <input type="hidden" name="page_language" value="es" />
   <div>
     <label for="work-email-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Email profesional <span class="text-red-500">*</span></label>
-    <input type="email" id="work-email-sec" name="work_email" required
+    <input type="email" id="work-email-sec" name="work_email" required autocomplete="email"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="usted@empresa.com" />
   </div>

@@ -1,0 +1,13 @@
+# tools/ui_copy_allowlist.txt — Gate C (flash copy canon) exemptions.
+#
+# One exemption per line:
+#
+#     path:line # justification        — exempt EVERY rule at this call site
+#     path:line:rule # justification   — exempt a single rule id
+#
+# `path` is repo-relative and matched exactly; `line` is the flash call
+# site's line. Blank lines and #-comments are ignored.
+#
+# Policy: keep this file EMPTY unless a violation is a FALSE POSITIVE.
+# Real copy drift is batch-2 fix work, not allowlist fodder — an entry
+# without a reviewable justification will be rejected.

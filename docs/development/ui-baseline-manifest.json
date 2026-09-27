@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 33,
+      "routeCount": 35,
       "routes": [
         {
           "path": "/",
@@ -96,6 +96,20 @@
           "name": "New List",
           "category": "dashboard",
           "authRequired": true
+        },
+        {
+          "path": "/lists/l_1",
+          "name": "List Detail",
+          "category": "dashboard",
+          "authRequired": true,
+          "canonicalPattern": "/lists/[id]"
+        },
+        {
+          "path": "/lists/l_1/edit",
+          "name": "Edit List",
+          "category": "dashboard",
+          "authRequired": true,
+          "canonicalPattern": "/lists/[id]/edit"
         },
         {
           "path": "/templates",

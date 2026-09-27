@@ -1,0 +1,9 @@
+# tools/ui_links_allowlist.txt — Gate I (dead-link gate) exemptions.
+#
+# One target per line:  <target> # justification
+# Matched exactly against the raw href/action value (after the built-in
+# static prefixes and route sources have had their chance).
+#
+# Policy: false positives ONLY (a link that provably resolves but through a
+# source the gate does not model). Real dead links are batch-2 fix work.
+/confirm # real web-surface route rendered by ui-foundation (axum_router.rs "/confirm" => web_confirm_page) and mounted in api-server app.rs — not yet listed in the ui-baseline-manifest (manifest drift is batch-2 work)

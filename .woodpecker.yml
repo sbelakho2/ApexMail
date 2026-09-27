@@ -54,6 +54,16 @@ steps:
     commands:
       - ./ci/woodpecker/stage.sh validate
 
+  # --- UI/UX gates over the exported visual fixtures (flash copy, form
+  #     hygiene, a11y, dead links, terminology, strings-catalog drift) ---
+  # All six gates are ADVISORY by default (see the CI_UI_* block in
+  # ci/pipeline.conf); fixtures are exported into the run dir, never the
+  # working tree.
+  - name: ui
+    image: rust:1.98-bookworm
+    commands:
+      - ./ci/woodpecker/stage.sh ui
+
   # --- build, lint and test everything (fmt, clippy -D warnings, machete,
   #     deny, cargo test --workspace against the postgres service, coverage
   #     ratchet, PHP/SDK/satellite lanes when their toolchains are present) ---
