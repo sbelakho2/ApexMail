@@ -349,6 +349,9 @@ pub fn detail_router() -> Router<AppState> {
     Router::new()
         .route("/domains/:id", get(web_domain_detail))
         .route("/campaigns/:id", get(web_campaign_detail))
+        // Batch-2 list-detail fix: /lists/{id} renders the real list (name,
+        // subscriber counts, working Edit/Delete with the real id).
+        .route("/lists/:id", get(web_list_detail))
 }
 
 /// Control-plane form routes (`/web/admin/*`). These mutate platform
@@ -360,8 +363,11 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/web/admin/tenants", post(form_admin_tenant_create))
         .route("/web/admin/operators", post(form_admin_operator_create))
-        .route("/web/admin/sales/discovery", post(form_sales_discovery))
-        .route("/web/admin/sales/outreach", post(form_sales_outreach))
+        // Batch-2 stub removal: the bare `/web/admin/sales/discovery` and
+        // `/web/admin/sales/outreach` twins only flashed a pointer at the
+        // API — they served no mutation, so the routed-but-useless forms
+        // are gone. The working `discovery/run` + `outreach/launch`
+        // handlers remain below.
         .route(
             "/web/admin/sales/discovery/run",
             post(form_sales_discovery_run),
@@ -1696,7 +1702,9 @@ fn web_data_page(
     inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
     let layout =
         ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, path, csrf_token);
-    ui_foundation::leptos_views::web_root_layout(&layout)
+    // Batch-2 titles fix: the document title comes from the route context.
+    let title = ui_foundation::axum_router::route_document_title("web", path);
+    ui_foundation::leptos_views::web_root_layout(&layout, &title)
 }
 
 /// Compose a full control-plane page from list data (stub path).
@@ -1709,14 +1717,19 @@ fn cp_data_page(
 ) -> String {
     let mut inner = stub_flash_banner(flash);
     inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
+    // Batch-2 titles fix: the stub path uses the real route title instead
+    // of a hardcoded "Control Plane" on every page.
+    let (page_title, page_description) =
+        ui_foundation::axum_router::control_plane_route_context(path);
     let layout = ui_foundation::leptos_views::control_plane_app_layout_with_title(
         &inner,
-        "Control Plane",
-        "ApexMail administration and monitoring.",
+        page_title,
+        page_description,
         path,
         csrf_token,
     );
-    ui_foundation::leptos_views::control_plane_root_layout(&layout)
+    let title = ui_foundation::axum_router::route_document_title("control-plane", path);
+    ui_foundation::leptos_views::control_plane_root_layout_with_title(&layout, &title)
 }
 
 /// Read the PRG flash from a Cookie header (mirrors the render path).
@@ -3273,6 +3286,9 @@ async fn form_api_key_create(
         return redirect_error(message, "/settings/api-keys", &state.config);
     }
     // Entitlement gate: programmatic access requires `api_access`.
+    // Batch-2 leaked-copy fix: the raw entitlement refusal (internal field
+    // names and all) went straight to the browser; the refusal is now plain
+    // copy and the detail lands in the log.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -3280,7 +3296,12 @@ async fn form_api_key_create(
     )
     .await
     {
-        return redirect_error(&error.to_string(), "/settings/api-keys", &state.config);
+        tracing::warn!(error = %error, "api key create refused by entitlement");
+        return redirect_error(
+            "API access is not part of the current plan. Upgrade the plan or contact support to create API keys.",
+            "/settings/api-keys",
+            &state.config,
+        );
     }
     let form_map: HashMap<String, String> = form.pairs.iter().cloned().collect();
     let name = field_truncated(&form_map, "name", 100);
@@ -3384,6 +3405,7 @@ async fn form_webhook_create(
     // Entitlement gates (403-equivalent flash): webhook creation requires
     // `webhooks_enabled`; the inbound event subscription additionally
     // requires `inbound_email`.
+    // Batch-2 leaked-copy fix: plain refusal copy; detail logged.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -3391,7 +3413,12 @@ async fn form_webhook_create(
     )
     .await
     {
-        return redirect_error(&error.to_string(), "/settings/webhooks", &state.config);
+        tracing::warn!(error = %error, "webhook create refused by entitlement");
+        return redirect_error(
+            "Webhooks are not part of the current plan. Upgrade the plan or contact support to add webhooks.",
+            "/settings/webhooks",
+            &state.config,
+        );
     }
     let mut fields = FormFieldMap::new("webhook-create");
     let url = form.field("url").trim().to_string();
@@ -3445,9 +3472,13 @@ async fn form_webhook_create(
         )
         .await
         {
+            // Batch-2 leaked-copy fix (P1-6): the entitlement Display leaks
+            // plan ids and snake_case feature keys into a customer banner —
+            // name the missing capability in plain words and log the detail.
+            tracing::info!(error = %error, "inbound webhook refused: plan lacks inbound_email");
             return redirect_with_field_map(
                 &fields,
-                &error.to_string(),
+                "Webhooks are not part of the current plan. Upgrade your plan to receive inbound email events.",
                 "/settings/webhooks",
                 &state.config,
             );
@@ -3682,8 +3713,15 @@ async fn form_team_invite(
     .await;
     match outcome {
         Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
+        // Batch-2 leaked-copy fix: the entitlement detail (internal plan /
+        // field names) stays in the log; the invitation flash speaks plainly.
         Err(InviteFailure::Entitlement(error)) => {
-            redirect_error(&error.to_string(), "/settings/team", &state.config)
+            tracing::warn!(error = %error, "team invite refused by entitlement");
+            redirect_error(
+                "This plan does not include more team seats. Upgrade the plan to invite more teammates.",
+                "/settings/team",
+                &state.config,
+            )
         }
         Err(InviteFailure::Limit) => redirect_error(
             "Invitation limit reached: clear outstanding invitations before sending more.",
@@ -3718,12 +3756,20 @@ async fn form_billing_checkout(
             &state.config,
         );
     }
-    // Documented limitation: provider-coupled checkout session creation
-    // lives in the JSON billing route (Stripe-compatible provider wired in
-    // state). The form validates + records the intent and points the
-    // operator at the same-origin JSON endpoint used by the dashboard.
+    // Batch-2 honesty fix (P0-C): this form previously flashed "Plan
+    // upgrade request recorded." while recording nothing. The request the
+    // form CAN make is now exactly what happens: it is noted (with tenant,
+    // plan and kind) for the billing team in the operational log, no
+    // checkout session opens and nothing is charged — the page copy states
+    // this up front too.
+    tracing::info!(
+        tenant_id = %_user.tenant_id,
+        plan = %plan,
+        request = "plan-change",
+        "billing page: plan change request noted for the billing team"
+    );
     redirect_success(
-        "Plan upgrade request recorded. The billing portal session opens from the API console (POST /v1/billing/checkout).",
+        "Your plan change request was noted for the billing team. Nothing has been charged.",
         "/settings/billing",
         &state.config,
     )
@@ -3731,15 +3777,23 @@ async fn form_billing_checkout(
 
 async fn form_billing_portal(
     State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
+    axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/billing", &state.config);
     }
+    // Batch-2 honesty fix (P0-C): the portal twin claimed a portal session
+    // opens from the API console — nothing opens here. The form notes the
+    // portal-access request for the billing team and says exactly that.
+    tracing::info!(
+        tenant_id = %user.tenant_id,
+        request = "billing-portal-access",
+        "billing page: portal access request noted for the billing team"
+    );
     redirect_success(
-        "The billing portal opens from the API console (POST /v1/billing/portal).",
+        "Your request for billing portal access was noted for the billing team. Nothing was changed.",
         "/settings/billing",
         &state.config,
     )
@@ -3894,8 +3948,15 @@ async fn form_domain_create(
     // count + 1 (the total after this creation).
     let snapshot = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
         Ok(snapshot) => snapshot,
+        // Batch-2 leaked-copy fix: a failed entitlement read is an outage,
+        // not a refusal — the browser gets the retry copy, the log the cause.
         Err(error) => {
-            return redirect_error(&error.to_string(), "/domains/new", &state.config);
+            tracing::error!(error = %error, "entitlement snapshot failed for domain create");
+            return redirect_error(
+                "Could not check the domain limit right now. Try again.",
+                "/domains/new",
+                &state.config,
+            );
         }
     };
     let domain_count: i64 =
@@ -3914,12 +3975,19 @@ async fn form_domain_create(
                 );
             }
         };
+    // Batch-2 leaked-copy fix: the plan-limit refusal reads plainly (the
+    // internal plan/capacity names stay in the log).
     if let Err(error) = crate::entitlements::gate_capacity(
         &snapshot,
         billing_entitlements::CapacityKey::SendingDomains,
         domain_count + 1,
     ) {
-        return redirect_error(&error.to_string(), "/domains/new", &state.config);
+        tracing::info!(error = %error, "domain create refused by plan capacity");
+        return redirect_error(
+            "This plan's sending-domain limit is reached. Remove a domain or upgrade the plan to add another.",
+            "/domains/new",
+            &state.config,
+        );
     }
 
     // domains.id is a UUID column (both schema lineages) — bind a UUID.
@@ -3981,6 +4049,7 @@ async fn form_template_create(
         return redirect_error(message, "/templates/new", &state.config);
     }
     // Entitlement gate: template customization requires `custom_templates`.
+    // Batch-2 leaked-copy fix: plain refusal copy; detail logged.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -3988,7 +4057,12 @@ async fn form_template_create(
     )
     .await
     {
-        return redirect_error(&error.to_string(), "/templates/new", &state.config);
+        tracing::warn!(error = %error, "template create refused by entitlement");
+        return redirect_error(
+            "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
+            "/templates/new",
+            &state.config,
+        );
     }
     let name = field_truncated(&form, "name", 120);
     let subject = field_truncated(&form, "subject", 200);
@@ -4441,6 +4515,65 @@ fn domain_verify_flash(response: &crate::routes::domains::VerifyResponse) -> Str
 }
 
 // ─── Campaign completion (item B) ─────────────────────────────────
+
+/// GET /lists/{id} — the list detail page (batch-2 list-detail fix). The
+/// name, subscriber KPIs and the Edit/Delete actions carry the REAL list
+/// id — the static demo hardcoded `l_launch`, so a real list's Delete
+/// button targeted a list that did not exist.
+async fn web_list_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    // Anonymous browser GETs redirect to login like every auth-required
+    // UI route (the routing inventory's contract).
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    // Non-UUID segments (`/lists/l_launch`) are the demo-data render path:
+    // they fall back to the static SSR page exactly as the fallback handler
+    // would have rendered them. A REAL id that does not exist must never
+    // show demo content — it gets the honest not-found flash instead.
+    if Uuid::parse_str(&id).is_err() {
+        return static_ssr_fallback("web", &format!("/lists/{id}"), &headers, &state.config);
+    }
+    let flash = flash_from_headers(&headers, &state.config);
+    match data::load_list_detail(&state.db, user.tenant_id.as_str(), &id).await {
+        Some(detail) => {
+            let form_csrf = form_csrf_for_render(&headers, &state.config);
+            let html = leptos_list_detail_page(&detail, &flash, &form_csrf.token);
+            html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
+        }
+        None => redirect_error(
+            "That list could not be found in this workspace.",
+            "/lists",
+            &state.config,
+        ),
+    }
+}
+
+/// Compose the full data-backed list detail document (root layout + shell
+/// + the with-values detail view), titled from the route context.
+fn leptos_list_detail_page(
+    detail: &ui_foundation::view_data::ListDetailData,
+    flash: &[FlashMessage],
+    csrf_token: &str,
+) -> String {
+    let path = format!("/lists/{}", detail.id);
+    let mut inner = stub_flash_banner(flash);
+    inner.push_str(&ui_foundation::leptos_views::web_list_detail_page_with_values(
+        detail,
+    ));
+    let layout =
+        ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, &path, csrf_token);
+    let title = ui_foundation::axum_router::route_document_title("web", &path);
+    ui_foundation::leptos_views::web_root_layout(&layout, &title)
+}
 
 /// GET /campaigns/{id} — the campaign detail page with per-status action
 /// data (which buttons the view should render) and the wired audience.
@@ -5039,6 +5172,7 @@ async fn form_template_update(
         return redirect_error(message, &back, &state.config);
     }
     // Entitlement gate: template customization requires `custom_templates`.
+    // Batch-2 leaked-copy fix: plain refusal copy; detail logged.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -5046,7 +5180,12 @@ async fn form_template_update(
     )
     .await
     {
-        return redirect_error(&error.to_string(), &back, &state.config);
+        tracing::warn!(error = %error, "template update refused by entitlement");
+        return redirect_error(
+            "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
+            &back,
+            &state.config,
+        );
     }
     let mut fields = FormFieldMap::new("template-update");
     fields.set("id", &id);
@@ -5492,6 +5631,7 @@ async fn form_contacts_export(
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Response {
     // Entitlement gate: exporting customer data is the `data_export` feature.
+    // Batch-2 leaked-copy fix: plain refusal copy; detail logged.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -5499,7 +5639,12 @@ async fn form_contacts_export(
     )
     .await
     {
-        return redirect_error(&error.to_string(), "/contacts", &state.config);
+        tracing::warn!(error = %error, "contacts export refused by entitlement");
+        return redirect_error(
+            "CSV export is not part of the current plan. Upgrade the plan or contact support to enable it.",
+            "/contacts",
+            &state.config,
+        );
     }
     let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT email, name, status FROM contacts WHERE tenant_id = $1 AND status != 'deleted' ORDER BY created_at DESC LIMIT 10000",
@@ -5780,70 +5925,6 @@ async fn form_admin_operator_create(
 
 // ─── Admin sales ─────────────────────────────────────────────────
 
-async fn form_sales_discovery(
-    State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/sales", &state.config);
-    }
-    let sources: Vec<String> = field(&form, "sources")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    if sources.is_empty() {
-        return redirect_error(
-            "Add at least one comma-separated source.",
-            "/sales",
-            &state.config,
-        );
-    }
-    let _categories = field(&form, "categories");
-    redirect_success(
-        "Discovery runs are launched from the API console (POST /v1/admin/sales/discovery/run).",
-        "/sales",
-        &state.config,
-    )
-}
-
-async fn form_sales_outreach(
-    State(state): State<AppState>,
-    axum::Extension(_user): axum::Extension<AuthUser>,
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/sales", &state.config);
-    }
-    let lead_ids: Vec<String> = form
-        .get("lead_ids")
-        .map(|v| {
-            v.split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    if lead_ids.is_empty() {
-        return redirect_error(
-            "Pick at least one lead in the queue first.",
-            "/sales",
-            &state.config,
-        );
-    }
-    redirect_success(
-        "Outreach is an enrollment command from the API console \
-         (POST /v1/admin/sales/outreach/start with sequenceId, contactIds and autonomyPolicyId).",
-        "/sales",
-        &state.config,
-    )
-}
-
 async fn form_sales_leads_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -5894,16 +5975,46 @@ async fn form_sales_leads_update(
         Err(error) => {
             // Honest failure: a database error is an error, never a success
             // flash; an unsupported stage names the supported vocabulary.
-            if let crate::routes::admin::sales::LeadStatusWriteError::Database(sqlx_error) = &error
-            {
-                tracing::error!(error = %sqlx_error, "web sales leads update failed");
-                return redirect_error(
-                    "The stage change failed. Refresh and retry.",
-                    "/sales",
-                    &state.config,
-                );
+            // Batch-2 leaked-copy fix: each refusal is written here in the
+            // operator's vocabulary instead of piping the error's Display
+            // through to the browser.
+            match &error {
+                crate::routes::admin::sales::LeadStatusWriteError::Database(sqlx_error) => {
+                    tracing::error!(error = %sqlx_error, "web sales leads update failed");
+                    redirect_error(
+                        "The stage change failed. Refresh and retry.",
+                        "/sales",
+                        &state.config,
+                    )
+                }
+                crate::routes::admin::sales::LeadStatusWriteError::Unsupported(status) => {
+                    redirect_error(
+                        &format!(
+                            "Unsupported lead status \"{status}\" — supported: qualified, prospect, converted, unqualified, lost."
+                        ),
+                        "/sales",
+                        &state.config,
+                    )
+                }
+                crate::routes::admin::sales::LeadStatusWriteError::LeadNotFound(id) => {
+                    redirect_error(
+                        &format!("That lead ({id}) was not found in this workspace."),
+                        "/sales",
+                        &state.config,
+                    )
+                }
+                crate::routes::admin::sales::LeadStatusWriteError::MissingCanonicalLink {
+                    lead_id,
+                    link,
+                } => {
+                    tracing::warn!(lead_id = %lead_id, link = link, "lead stage change has no canonical link");
+                    redirect_error(
+                        "That lead's account record is missing — the stage cannot be changed. Re-enrich the lead first.",
+                        "/sales",
+                        &state.config,
+                    )
+                }
             }
-            redirect_error(&error.to_string(), "/sales", &state.config)
         }
     }
 }
@@ -12080,7 +12191,9 @@ mod coverage_handler_tests {
         .unwrap();
         assert_eq!(pending, 1, "a repeated POST must not double-apply");
 
-        // Billing: plan whitelist, then a recorded intent.
+        // Billing: plan whitelist, then the honest no-op request (batch-2
+        // P0-C fix: the flash claims only what the handler does — note the
+        // request for the billing team, charge nothing).
         let (headers, form) = signed_form(&app.config, &[("plan", "free-hack")]);
         let response = form_billing_checkout(
             State(app.clone()),
@@ -12101,7 +12214,13 @@ mod coverage_handler_tests {
             Form(form),
         )
         .await;
-        assert!(flash_text(&response, &app.config).contains("Plan upgrade request recorded"));
+        // Batch-2 P0-C fix: the fabricated "request recorded" flash became
+        // the honest noted-for-the-billing-team copy.
+        assert!(
+            flash_text(&response, &app.config)
+                .contains("Your plan change request was noted for the billing team")
+        );
+        assert!(flash_text(&response, &app.config).contains("Nothing has been charged."));
         let (headers, form) = signed_form(&app.config, &[]);
         let response = form_billing_portal(
             State(app.clone()),
@@ -12110,7 +12229,138 @@ mod coverage_handler_tests {
             Form(form),
         )
         .await;
-        assert!(flash_text(&response, &app.config).contains("billing portal opens"));
+        // Batch-2 P0-C fix: no portal session "opens" here — the flash
+        // states the noted request instead.
+        assert!(
+            flash_text(&response, &app.config)
+                .contains("Your request for billing portal access was noted")
+        );
+    }
+
+    // ── Batch-2 P0-A/P0-B: the list editor and detail are data-backed ──
+
+    /// Regression for the batch-2 list fixes: `/lists/{id}/edit` renders the
+    /// REAL row (hidden id + prefilled name) so `POST /web/lists/update`
+    /// saves, and `/lists/{id}` renders the real name/counts with Edit and
+    /// Delete links carrying the real id — never the demo `l_launch`.
+    #[tokio::test]
+    async fn list_edit_and_detail_render_the_real_row() {
+        let Some(app) = coverage_support::state("cov_list_edit_detail").await else {
+            eprintln!("skipping list_edit_and_detail_render_the_real_row: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("ledit");
+        let (other_tenant, other_tag) = coverage_support::tenant_pair("leditb");
+        let seeded = coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        coverage_support::seed_tenant(&app.db, &other_tenant, &other_tag).await;
+        let user = coverage_support::user(&tenant);
+        let list_name = format!("List {tag}");
+
+        // ── P0-A: the data-backed edit page ─────────────────────────────
+        let edit_path = format!("/lists/{}/edit", seeded.list_id);
+        let data = load_page_data(&app, "web", &edit_path, None, Some(&user)).await;
+        assert!(
+            data.list_edit.is_some(),
+            "/lists/{{id}}/edit must load the row for an authenticated session"
+        );
+        let (edit_html, _) = ui_foundation::axum_router::render_route_with_form_fields_and_csrf(
+            "web",
+            &edit_path,
+            None,
+            Some(app.config.csrf_secret.as_str()),
+            &[],
+            Some(&data),
+            None,
+            None,
+        )
+        .expect("the data-backed list edit page must render");
+        assert!(
+            edit_html.contains(&format!("name=\"id\" value=\"{}\"", seeded.list_id)),
+            "the edit form must carry the real list id in a hidden input: {edit_path}"
+        );
+        assert!(
+            edit_html.contains(&format!("value=\"{list_name}\"")),
+            "the edit form must be prefilled with the real list name"
+        );
+
+        // POST /web/lists/update with that id succeeds and flashes
+        // "List saved." — the previously broken round trip.
+        let (headers, form) = signed_form(
+            &app.config,
+            &[("id", seeded.list_id.as_str()), ("name", "Renamed")],
+        );
+        let response = form_list_update(
+            State(app.clone()),
+            axum::Extension(user.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_redirect(&response, "/lists");
+        assert_eq!(flash_text(&response, &app.config), "List saved.");
+        let renamed: String =
+            sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(&seeded.list_id)
+                .bind(&tenant)
+                .fetch_one(&app.db)
+                .await
+                .expect("renamed row");
+        assert_eq!(renamed, "Renamed");
+
+        // ── P0-B: the data-backed detail page ───────────────────────────
+        let detail = crate::routes::web::data::load_list_detail(
+            &app.db,
+            &tenant,
+            &seeded.list_id,
+        )
+        .await
+        .expect("the seeded list must load");
+        // The P0-A rename above already applied, so the detail page must
+        // show the UPDATED name — one row, read fresh.
+        assert_eq!(detail.name, "Renamed");
+        // The seed wires one subscribed contact into the list.
+        assert_eq!(detail.subscribers, "1");
+        assert_eq!(detail.subscribed, "1");
+        assert_eq!(detail.unsubscribed, "0");
+        let detail_html = leptos_list_detail_page(&detail, &[], "tok");
+        assert!(
+            detail_html.contains(&format!("href=\"/lists/{}/edit\"", seeded.list_id)),
+            "the Edit link must carry the real list id"
+        );
+        assert!(
+            detail_html.contains(&format!(
+                "intent=delete-list&amp;id={}",
+                seeded.list_id
+            )),
+            "the Delete confirm link must carry the real list id"
+        );
+        assert!(
+            detail_html.contains("data-list-name>Renamed</h1>"),
+            "the page heading must be the real (current) list name"
+        );
+
+        // A REAL id that does not exist in this workspace renders no demo
+        // content anywhere: the loader returns None (the handler flashes
+        // the honest not-found) — for both this tenant and another's id.
+        assert!(
+            crate::routes::web::data::load_list_detail(&app.db, &tenant, &seeded.campaign_id)
+                .await
+                .is_none(),
+            "a campaign id is not a list — no fabricated detail"
+        );
+        assert!(
+            crate::routes::web::data::load_list_detail(&app.db, &other_tenant, &seeded.list_id)
+                .await
+                .is_none(),
+            "another workspace's list id must not resolve here"
+        );
+        assert!(
+            load_page_data(&app, "web", &format!("/lists/{}/edit", seeded.campaign_id), None, Some(&user))
+                .await
+                .list_edit
+                .is_none(),
+            "an unknown list id must not yield demo edit values"
+        );
     }
 
     // ── Campaign lifecycle, audience wiring, destructive confirms ──
@@ -14236,49 +14486,8 @@ mod coverage_auth_admin_tests {
         assert_eq!(audited, 3);
 
         // Sales queue commands never fabricate campaign sends.
-        let (headers, form) = signed_form(&app.config, &[("sources", "  , "), ("categories", "")]);
-        let response = form_sales_discovery(
-            State(app.clone()),
-            axum::Extension(operator.clone()),
-            headers,
-            Form(form),
-        )
-        .await;
-        assert!(flash_text(&response, &app.config).contains("at least one comma-separated source"));
-        let (headers, form) = signed_form(&app.config, &[("sources", &format!("source-{tag}"))]);
-        let response = form_sales_discovery(
-            State(app.clone()),
-            axum::Extension(operator.clone()),
-            headers,
-            Form(form),
-        )
-        .await;
-        assert!(flash_text(&response, &app.config).contains("API console"));
-        let (headers, form) =
-            signed_form(&app.config, &[("lead_ids", ""), ("status", "qualified")]);
-        let response = form_sales_outreach(
-            State(app.clone()),
-            axum::Extension(operator.clone()),
-            headers,
-            Form(form),
-        )
-        .await;
-        assert!(flash_text(&response, &app.config).contains("at least one lead"));
-        let (headers, form) = signed_form(
-            &app.config,
-            &[
-                ("lead_ids", &format!("lead-{tag}")),
-                ("status", "qualified"),
-            ],
-        );
-        let response = form_sales_outreach(
-            State(app.clone()),
-            axum::Extension(operator.clone()),
-            headers,
-            Form(form),
-        )
-        .await;
-        assert!(flash_text(&response, &app.config).contains("API console"));
+        // (Batch-2 stub removal: the form_sales_discovery / form_sales_outreach
+        // pointer-stub arms were deleted with their routes.)
         let (headers, form) = signed_form(
             &app.config,
             &[
@@ -14293,7 +14502,13 @@ mod coverage_auth_admin_tests {
             Form(form),
         )
         .await;
-        assert!(flash_text(&response, &app.config).contains("unsupported lead status"));
+        // Batch-2 leaked-copy fix: the refusal is written by the handler in
+        // sentence case (the flash copy canon) instead of the error Display.
+        assert!(
+            flash_text(&response, &app.config).contains("Unsupported lead status"),
+            "{}",
+            flash_text(&response, &app.config)
+        );
         let (headers, form) = signed_form(
             &app.config,
             &[
@@ -18618,24 +18833,6 @@ mod residual_zero_tests {
             "/operators/new"
         );
         bounced!(
-            form_sales_discovery(
-                State(app.clone()),
-                axum::Extension(operator.clone()),
-                headers.clone(),
-                Form(form(&[("sources", "src")])),
-            ),
-            "/sales"
-        );
-        bounced!(
-            form_sales_outreach(
-                State(app.clone()),
-                axum::Extension(operator.clone()),
-                headers.clone(),
-                Form(form(&[("lead_ids", "lead")])),
-            ),
-            "/sales"
-        );
-        bounced!(
             form_sales_leads_update(
                 State(app.clone()),
                 axum::Extension(operator.clone()),
@@ -19832,7 +20029,9 @@ mod residual_zero_tests {
             .expect("oneshot");
         assert_eq!(location(&response), "/contacts");
 
-        // (c) The admin stack gets the same treatment.
+        // (c) The admin stack gets the same treatment. Posts to the LIVE
+        //     sales run route (the dead discovery stub was removed in
+        //     batch 2 — orphaned forms must not survive as 404s here).
         let operator = AuthUser {
             tenant_id: "middleware-system".into(),
             user_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -19843,7 +20042,8 @@ mod residual_zero_tests {
         let admin = admin_router(state.clone())
             .layer(axum::Extension(operator))
             .with_state(state.clone());
-        let request = truncated_post("/web/admin/sales/discovery", "https://cp.apexmail.test/sales");
+        let request =
+            truncated_post("/web/admin/sales/discovery/run", "https://cp.apexmail.test/sales");
         let response = admin.oneshot(request).await.expect("oneshot");
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(location(&response), "/sales");
@@ -19906,16 +20106,30 @@ mod residual_zero_tests {
             session_id: None,
             scopes: vec!["*".into()],
         };
+        let ghost_tenant = ghost.tenant_id.clone();
         let (headers, form) = signed_form(&app.config, &[("name", "forged.example.test")]);
         let response =
             form_domain_create(State(app.clone()), axum::Extension(ghost), headers, Form(form))
                 .await;
         assert_eq!(location(&response), "/domains/new");
         let flash = flash_text(&response, &app.config);
+        // Batch-2 leaked-copy fix (P1-6): the entitlement failure used to
+        // surface as the raw error Display ("... tenant not found ...");
+        // the browser now gets the honest retry copy while the cause goes
+        // to the log. The contract that matters is unchanged: no success
+        // flash, and no domain row under a ghost tenant.
         assert!(
-            flash.contains("tenant not found"),
-            "the entitlement failure must be surfaced, got {flash:?}"
+            flash.contains("Could not check the domain limit right now"),
+            "the snapshot failure must flash the retry copy, got {flash:?}"
         );
+        let ghost_domains: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM domains WHERE tenant_id = $1",
+        )
+        .bind(&ghost_tenant)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(ghost_domains, 0, "no domain may be created for a ghost tenant");
 
         // (b) A one-domain plan refuses the second domain and the count
         //     stays put — the gate runs BEFORE the insert.
@@ -20005,9 +20219,12 @@ mod residual_zero_tests {
                 .await;
         assert_eq!(location(&response), "/domains/new");
         let flash = flash_text(&response, &app.config);
+        // Batch-2 leaked-copy fix (P1-6): the capacity refusal used to pipe
+        // the entitlement Display (with internal plan/capacity names) to
+        // the browser; the fixed plain refusal carries the same meaning.
         assert!(
-            flash.contains("allows at most 1"),
-            "the capacity refusal must quote the plan limit, got {flash:?}"
+            flash.contains("sending-domain limit is reached"),
+            "the capacity refusal must be the plain plan-limit copy, got {flash:?}"
         );
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
@@ -20579,9 +20796,13 @@ mod residual_zero_tests {
                 .await;
         assert_eq!(location(&response), "/settings/webhooks");
         let flash = flash_text(&response, &app.config);
+        // Batch-2 leaked-copy fix (P1-6): the refusal names the missing
+        // capability in plain words (webhooks on this plan) instead of the
+        // entitlement Display ("plan `x` does not include `inbound_email`");
+        // the refusal + nothing-written contract is unchanged.
         assert!(
-            flash.contains("does not include") && flash.contains("inbound_email"),
-            "the entitlement refusal must name the missing feature, got {flash:?}"
+            flash.contains("Webhooks are not part of the current plan"),
+            "the entitlement refusal must be the plain feature copy, got {flash:?}"
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
             .bind(&tenant)

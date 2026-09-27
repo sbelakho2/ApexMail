@@ -551,7 +551,8 @@ fn relative_time(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> String {
             if mins < 1 {
                 "just now".to_string()
             } else if mins < 60 {
-                format!("{mins} minutes ago")
+                // Batch-2 timestamp fix: "1 minutes ago" was ungrammatical.
+                format!("{mins} minute{} ago", if mins == 1 { "" } else { "s" })
             } else if mins < 60 * 24 {
                 let hours = mins / 60;
                 format!("{hours} hour{} ago", if hours == 1 { "" } else { "s" })
@@ -561,6 +562,18 @@ fn relative_time(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> String {
             }
         }
         None => "—".to_string(),
+    }
+}
+
+/// Timestamp cell under the one timestamp policy (batch-2 fix): relative
+/// prose for the cell, the exact RFC 3339 UTC value in `datetime`/`title`.
+/// A missing timestamp renders the honest em dash. This replaces the raw
+/// `DataCell::text(relative_time(..))` text cells and the raw RFC 3339
+/// "When" column.
+pub(crate) fn time_cell(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> DataCell {
+    match timestamp {
+        Some(ts) => DataCell::time(relative_time(Some(ts)), ts.to_rfc3339()),
+        None => DataCell::text("—"),
     }
 }
 
@@ -628,12 +641,62 @@ async fn web_route_data(
     } else {
         None
     };
+    // Batch-2 list-edit fix: /lists/{id}/edit is data-backed like the
+    // campaign editor, so the form can carry the real id + name.
+    let list_edit = if path.starts_with("/lists/") && path.ends_with("/edit") {
+        let id = path
+            .trim_start_matches("/lists/")
+            .trim_end_matches("/edit");
+        load_list_edit(state, &tenant, id).await
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit,
+        list_edit,
         mfa_setup: None,
         sales: None,
     }
+}
+
+/// Load `/lists/{id}/edit` form values (batch-2 list-edit fix). `None`
+/// means the row does not exist in this workspace or the lookup failed —
+/// the render then falls back to the static no-values form, which cannot
+/// claim a list it did not load.
+async fn load_list_edit(
+    state: &AppState,
+    tenant: &str,
+    id: &str,
+) -> Option<ui_foundation::view_data::ListEditData> {
+    // lists.id is a UUID column (068 lineage): cast for the String row
+    // shape (and bind the id back for the comparison), mirroring the
+    // campaign edit loader.
+    let row: Option<(String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
+        match sqlx::query_as::<
+            _,
+            (String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>),
+        >("SELECT id::text, name, description, created_at FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+        .bind(id)
+        .bind(tenant)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(row) => row,
+            Err(error) => {
+                tracing::warn!(error = %error, "list edit lookup failed");
+                return None;
+            }
+        };
+    let (id, name, description, created_at) = row?;
+    Some(ui_foundation::view_data::ListEditData {
+        id,
+        name,
+        description: description.unwrap_or_default(),
+        created_at: created_at
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_default(),
+    })
 }
 
 async fn web_dashboard(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
@@ -808,7 +871,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
                     DataCell::text(name),
                     DataCell::text(subject.unwrap_or_default()),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(updated)),
+                    time_cell(updated),
                 ],
             })
             .collect(),
@@ -962,7 +1025,7 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
                     DataCell::text(email),
                     DataCell::text(name.unwrap_or_default()),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(updated)),
+                    time_cell(updated),
                 ],
             })
             .collect(),
@@ -1040,7 +1103,7 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> 
             .into_iter()
             .map(|(id, name, updated)| DataRowData {
                 id,
-                cells: vec![DataCell::text(name), DataCell::text(relative_time(updated))],
+                cells: vec![DataCell::text(name), time_cell(updated)],
             })
             .collect(),
     });
@@ -1140,7 +1203,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
                                 .unwrap_or_else(|| "—".into()),
                         ),
                         DataCell::status(&status),
-                        DataCell::text(relative_time(updated)),
+                        time_cell(updated),
                     ],
                 },
             )
@@ -1233,7 +1296,7 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -
                 cells: vec![
                     DataCell::text(name),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -1358,7 +1421,7 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
                     DataCell::status(&event_type),
                     DataCell::text(recipient.unwrap_or_default()),
                     DataCell::mono(message_id.unwrap_or_default()),
-                    DataCell::text(ts.map(|t| t.to_rfc3339()).unwrap_or_else(|| "—".into())),
+                    time_cell(ts),
                 ],
             })
             .collect(),
@@ -1529,7 +1592,7 @@ async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
                             .map(|c| c.to_string())
                             .unwrap_or_else(|| "0".into()),
                     ),
-                    DataCell::text(relative_time(updated)),
+                    time_cell(updated),
                 ],
             })
             .collect(),
@@ -1730,7 +1793,7 @@ async fn web_inbox_placement(
                             completed.unwrap_or(0),
                             total_accounts.unwrap_or(0)
                         )),
-                        DataCell::text(relative_time(created)),
+                        time_cell(created),
                     ],
                 },
             )
@@ -1817,7 +1880,7 @@ async fn web_api_keys(state: &AppState, tenant: &str, cid: &str) -> ListPageData
                         DataCell::text(name),
                         DataCell::mono(format!("{prefix}…")),
                         DataCell::status(api_key_state(revoked, expires, now)),
-                        DataCell::text(relative_time(created)),
+                        time_cell(created),
                     ],
                 },
             )
@@ -1869,7 +1932,7 @@ async fn web_webhooks(state: &AppState, tenant: &str, cid: &str) -> ListPageData
                 cells: vec![
                     DataCell::text(url),
                     DataCell::status(if enabled { "active" } else { "paused" }),
-                    DataCell::text(relative_time(last)),
+                    time_cell(last),
                 ],
             })
             .collect(),
@@ -2080,7 +2143,7 @@ async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
                     DataCell::text(format!("{:.2}", total as f64 / 100.0)),
                     DataCell::text(currency),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
                 id,
             })
@@ -2213,6 +2276,7 @@ async fn control_plane_route_data(
     RouteData {
         list,
         campaign_edit: None,
+        list_edit: None,
         mfa_setup: None,
         sales,
     }
@@ -2454,7 +2518,7 @@ async fn cp_home(state: &AppState, cid: &str) -> ListPageData {
                     DataCell::text(name),
                     DataCell::mono(slug.unwrap_or_default()),
                     DataCell::text(plan),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -2564,7 +2628,7 @@ async fn cp_dashboard(state: &AppState, cid: &str) -> ListPageData {
                         } else {
                             "active"
                         }),
-                        DataCell::text(relative_time(created)),
+                        time_cell(created),
                     ],
                 },
             )
@@ -2675,7 +2739,7 @@ async fn cp_tenants(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
                     DataCell::mono(slug.unwrap_or_default()),
                     DataCell::text(plan),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -3057,7 +3121,7 @@ async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
                     DataCell::mono(queue),
                     DataCell::status(&status),
                     DataCell::text(count.to_string()),
-                    DataCell::text(relative_time(updated)),
+                    time_cell(updated),
                 ],
             })
             .collect(),
@@ -3376,7 +3440,7 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
                         } else {
                             "active"
                         }),
-                        DataCell::text(relative_time(created)),
+                        time_cell(created),
                     ],
                 },
             )
@@ -3487,7 +3551,7 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
                     DataCell::text(name),
                     DataCell::mono(tenant_id.unwrap_or_else(|| "—".into())),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -3642,7 +3706,7 @@ async fn cp_compliance(state: &AppState, cid: &str) -> ListPageData {
                         DataCell::mono(short_id),
                         DataCell::text(request_type),
                         DataCell::status(&status),
-                        DataCell::text(relative_time(created)),
+                        time_cell(created),
                     ],
                 }
             })
@@ -3749,7 +3813,7 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
                     DataCell::text(email),
                     DataCell::text(request_type),
                     DataCell::status(&status),
-                    DataCell::text(relative_time(created)),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -4095,6 +4159,71 @@ impl CampaignDetailData {
         });
         data
     }
+}
+
+/// Load `/lists/{id}` detail data (batch-2 list-detail fix): the real list
+/// name plus its subscriber counts. `None` when the row does not exist in
+/// this workspace (the handler flashes the honest not-found) — never a
+/// demo list. A count query failure renders "unavailable", not zero.
+pub(crate) async fn load_list_detail(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    id: &str,
+) -> Option<ui_foundation::view_data::ListDetailData> {
+    let row: Option<(String, String)> = match sqlx::query_as(
+        "SELECT id::text, name FROM lists WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(error = %error, "list detail lookup failed");
+            return None;
+        }
+    };
+    let (id, name) = row?;
+
+    // Counts come from the subscribers join. list_subscribers.status is the
+    // per-subscriber state ('subscribed' vs anything else).
+    let counts: Option<(i64, i64, i64)> = match sqlx::query_as(
+        "SELECT COUNT(*)::bigint,
+                COUNT(*) FILTER (WHERE status = 'subscribed')::bigint,
+                COUNT(*) FILTER (WHERE status <> 'subscribed')::bigint
+         FROM list_subscribers WHERE list_id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(counts) => counts,
+        Err(error) => {
+            tracing::warn!(error = %error, "list detail counts failed");
+            None
+        }
+    };
+    let (subscribers, subscribed, unsubscribed) = match counts {
+        Some(counts) => (
+            counts.0.to_string(),
+            counts.1.to_string(),
+            counts.2.to_string(),
+        ),
+        // Unknown ≠ zero: the page must say the figure is unavailable.
+        None => (
+            "unavailable".to_string(),
+            "unavailable".to_string(),
+            "unavailable".to_string(),
+        ),
+    };
+    Some(ui_foundation::view_data::ListDetailData {
+        id,
+        name,
+        subscribers,
+        subscribed,
+        unsubscribed,
+    })
 }
 
 /// Load `/campaigns/{id}` detail data (tenant-scoped), including the
@@ -6106,6 +6235,12 @@ mod coverage_loader_tests {
             relative_time(Some(now - chrono::Duration::minutes(59))),
             "59 minutes ago"
         );
+        // Batch-2 timestamp fix: the singular bucket is "1 minute ago",
+        // never "1 minutes ago".
+        assert_eq!(
+            relative_time(Some(now - chrono::Duration::minutes(1))),
+            "1 minute ago"
+        );
         assert_eq!(
             relative_time(Some(now - chrono::Duration::minutes(60))),
             "1 hour ago"
@@ -6115,6 +6250,22 @@ mod coverage_loader_tests {
             "2 days ago"
         );
         assert_eq!(relative_time(None), "—");
+    }
+
+    #[test]
+    fn time_cell_renders_the_semantic_timestamp_policy() {
+        // Batch-2 timestamp fix: created_at columns render the semantic
+        // <time datetime title> cell, and the Events "When" column shows
+        // the same human rendering instead of raw RFC 3339.
+        let ts = chrono::Utc::now() - chrono::Duration::hours(3);
+        match time_cell(Some(ts)) {
+            DataCell::Time { relative, utc } => {
+                assert_eq!(relative, "3 hours ago");
+                assert_eq!(utc, ts.to_rfc3339());
+            }
+            other => panic!("time_cell must render a Time cell, got {other:?}"),
+        }
+        assert_eq!(time_cell(None), DataCell::text("—"));
     }
 
     #[test]

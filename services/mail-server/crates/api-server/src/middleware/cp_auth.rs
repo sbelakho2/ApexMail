@@ -9,11 +9,27 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
+use crate::middleware::is_browser_facing_path;
 use crate::routes::helpers::extract_cookie;
 use crate::state::AppState;
 use ipnetwork::IpNetwork;
 
 const CP_SESSION_COOKIE_NAME: &str = "apexmail_cp_session";
+
+/// The exact denial message the MFA gate produces — both when the signed
+/// claims say MFA is off and when the live DB recheck finds it revoked.
+/// A constant (instead of two literals) so [`is_mfa_required_error`] can
+/// recognise the denial for the browser-facing HTML branch in
+/// [`require_cp_auth`] without stringly drift.
+pub(crate) const MFA_REQUIRED_MESSAGE: &str = "MFA is required for control-plane access";
+
+/// Whether this error is the CP gate's MFA denial (as opposed to an
+/// expired session, a role demotion, an IP denial, …). The browser-facing
+/// branches turn exactly this denial into the "enable MFA on the security
+/// page" guidance; every other error keeps its existing shape.
+pub(crate) fn is_mfa_required_error(error: &ApiError) -> bool {
+    matches!(error, ApiError::Forbidden(message) if message == MFA_REQUIRED_MESSAGE)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,9 +377,7 @@ pub(crate) async fn verify_cp_session(
             "cp_mfa_required",
         )
         .await;
-        return Err(ApiError::Forbidden(
-            "MFA is required for control-plane access".into(),
-        ));
+        return Err(ApiError::Forbidden(MFA_REQUIRED_MESSAGE.into()));
     }
 
     // ── Validate timeouts ───────────────────────────────────
@@ -461,9 +475,7 @@ pub(crate) async fn verify_cp_session(
             "cp_mfa_revoked",
         )
         .await;
-        return Err(ApiError::Forbidden(
-            "MFA is required for control-plane access".into(),
-        ));
+        return Err(ApiError::Forbidden(MFA_REQUIRED_MESSAGE.into()));
     }
 
     // ── Refresh session active timestamp with the LIVE values ───
@@ -509,6 +521,22 @@ pub(crate) fn refreshed_cp_cookie(
     )
 }
 
+/// The 403 HTML interstitial a browser-facing CP request receives when the
+/// operator's session is valid but MFA is not enabled: it names the fix
+/// (`/cp/security`) instead of leaving the operator with a raw JSON dump.
+/// API paths keep the JSON 403 exactly as before.
+pub(crate) fn mfa_required_browser_response() -> axum::response::Response {
+    crate::middleware::browser_error_page_response(
+        StatusCode::FORBIDDEN,
+        "Two-Factor Authentication Required",
+        "Two-factor authentication required",
+        "Two-factor authentication is required for control-plane access. \
+         Enable it on the security page.",
+        "/cp/security",
+        "Open the security page",
+    )
+}
+
 pub async fn require_cp_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
@@ -531,10 +559,10 @@ pub async fn require_cp_auth(
         &bearer,
         &path,
     )
-    .await?
+    .await
     {
-        CpAuthOutcome::MachineCredential => Ok(next.run(req).await),
-        CpAuthOutcome::Verified(verification) => {
+        Ok(CpAuthOutcome::MachineCredential) => Ok(next.run(req).await),
+        Ok(CpAuthOutcome::Verified(verification)) => {
             let (mut parts, body) = req.into_parts();
             parts.extensions.insert(verification.user.clone());
             parts
@@ -555,6 +583,14 @@ pub async fn require_cp_auth(
 
             Ok(response)
         }
+        // F1b: on the browser form routes (/web/admin/*) the MFA denial
+        // must reach the operator as an HTML interstitial that NAMES the
+        // fix (/cp/security) — never a raw JSON dump. The API surface
+        // (/v1/admin/*) keeps the JSON 403 contract unchanged.
+        Err(error) if is_mfa_required_error(&error) && is_browser_facing_path(&path) => {
+            Ok(mfa_required_browser_response())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -783,10 +819,17 @@ mod tests {
             Some((state, pool))
         }
 
-        /// Minimal router carrying ONLY the gate + a probe handler.
+        /// Minimal router carrying ONLY the gate + a probe handler. The
+        /// router carries BOTH path classes the production admin router
+        /// mixes behind the gate: the JSON API probe (/v1/admin/*) and a
+        /// browser form post (/web/admin/*).
         fn gate_router(state: AppState) -> axum::Router {
             axum::Router::new()
                 .route("/v1/admin/probe", axum::routing::get(|| async { "ok" }))
+                .route(
+                    "/web/admin/probe",
+                    axum::routing::post(|| async { "ok" }),
+                )
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     require_cp_auth,
@@ -1123,6 +1166,91 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        /// F1b: an operator whose session is valid but MFA-less driving a
+        /// BROWSER form post (/web/admin/*) gets a 403 HTML interstitial
+        /// that names the fix (/cp/security) — never a raw JSON dump the
+        /// form cannot render.
+        #[tokio::test]
+        async fn mfa_required_browser_post_gets_html_with_guidance() {
+            let Some((state, db)) = gate_state("cp_mfa_browser_html", vec![]).await else {
+                return;
+            };
+            // Login mints the CP cookie with the operator's REAL MFA state:
+            // a non-MFA operator carries mfa_enabled=false in the claims.
+            let (user_id, email) = seed_operator(&db, false).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, false);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::post("/web/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok()),
+                Some("text/html; charset=utf-8"),
+                "the browser form post must get HTML, not the JSON envelope"
+            );
+            let body = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .expect("body readable")
+                    .to_vec(),
+            )
+            .expect("utf-8 body");
+            assert!(body.contains("Two-factor authentication"), "got: {body}");
+            assert!(body.contains("href=\"/cp/security\""), "got: {body}");
+            assert!(
+                !body.contains("\"error\""),
+                "no raw JSON error body may reach the browser, got: {body}"
+            );
+        }
+
+        /// F1b: the API surface keeps the JSON 403 MFA contract EXACTLY —
+        /// API clients and their tests must not notice the browser-facing
+        /// change.
+        #[tokio::test]
+        async fn mfa_required_api_post_keeps_json() {
+            let Some((state, db)) = gate_state("cp_mfa_api_json", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, false).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, false);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::post("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .expect("body readable"),
+            )
+            .expect("the API path must keep the JSON error envelope");
+            assert_eq!(body["error"]["code"], "FORBIDDEN");
+            assert_eq!(
+                body["error"]["message"],
+                "MFA is required for control-plane access"
+            );
         }
     }
 }

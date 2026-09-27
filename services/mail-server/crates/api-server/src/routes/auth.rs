@@ -1345,7 +1345,7 @@ async fn enqueue_verification_email(
     let safe_link = html_escape(&verification_link);
     let html_body = format!(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<html lang="en"><head><meta charset="utf-8"/><title>Verify your email — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
 <h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Verify Your ApexMail Account</h2>
 <p>Finish setting up <strong>{safe_email}</strong> by confirming this email address.</p>
 <p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Verify email</a></p>
@@ -2134,7 +2134,7 @@ async fn login(
                     let safe_code = html_escape(&code_str);
                     let html_body = format!(
                         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<html lang="en"><head><meta charset="utf-8"/><title>Your ApexMail verification code</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
 <h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Your MFA Code</h2>
 <p>Your one-time verification code for <strong>{safe_email}</strong> is:</p>
 <p style="font-size:28px;font-family:ui-monospace,'JetBrains Mono',monospace;letter-spacing:0.2em;font-weight:700;color:#dc2626">{safe_code}</p>
@@ -9855,5 +9855,486 @@ mod adversarial_auth_units {
             .await
             .ok();
         pool.close().await;
+    }
+}
+
+// ─── GATE L: transactional-email contract (batch 1, W2) ─────────────
+
+/// Transactional-email contract tests. They drive the REAL email builders
+/// (the `enqueue_verification_email` seam and the login handler's email-MFA
+/// branch) and assert on the exact HTML/text that reaches `email_queue`, so
+/// the queued bytes — not a mirrored copy — are what is pinned.
+///
+/// Both paths queue inside the system-sender gate, so the tests seed the
+/// platform sender domain with real DKIM material (same convention as
+/// `mod tests::seed_system_sender` / forgot_password's
+/// `make_system_sender_ready`) and soft-skip without TEST_DATABASE_URL /
+/// TEST_REDIS_URL.
+#[cfg(test)]
+mod transactional_email_contracts {
+    use super::*;
+    use axum::body::Body;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    /// https action base for link assertions. `build_action_link` inherits
+    /// the configured base verbatim; production deploys must configure an
+    /// https `BASE_URL` (the test config's `http://localhost:3000` is a
+    /// local-development default, not the production action base).
+    const ACTION_BASE: &str = "https://apexmail.ee";
+
+    /// Test DKIM encryption key — the same fixture value every api-server
+    /// test module seeds the system sender with.
+    const TEST_DKIM_KEY: &str =
+        "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+
+    /// Dedicated logical Redis DB for this module (1-4 are taken by the
+    /// adversarial auth modules, 8 by tracking-service).
+    const REDIS_DB: u32 = 14;
+
+    struct QueuedEmail {
+        subject: String,
+        html: String,
+        text: String,
+    }
+
+    /// Set the DKIM env under the mutex, returning the previous value. The
+    /// guard is dropped BEFORE any await point (std MutexGuard must not live
+    /// across awaits) — the same scoped-lock convention
+    /// forgot_password's `make_system_sender_ready` uses.
+    fn install_dkim_key() -> Option<String> {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous =
+            std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, TEST_DKIM_KEY);
+        previous
+    }
+
+    /// Restore the DKIM env after a seeded scope (same convention as
+    /// `mod tests::restore_dkim_env`).
+    fn restore_dkim_key(previous: Option<String>) {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match previous {
+            Some(key) => {
+                std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, key)
+            }
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    /// Seed the system sender domain with valid DKIM material so
+    /// `queue_system_email*` proves readiness. Mirrors
+    /// `mod tests::seed_system_sender` (private to that module).
+    async fn seed_system_sender(db: &sqlx::PgPool) {
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted = apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+            .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'txcon', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'txcon',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("system sender seed must insert");
+    }
+
+    /// Drive the REAL verification-email builder: enqueue inside a
+    /// transaction and read the queued row back BEFORE rolling back, so the
+    /// scratch database stays clean. Soft-skips (None) without
+    /// TEST_DATABASE_URL. Returns (subject, html, text, token).
+    async fn verification_email_via_enqueue(
+        test_name: &str,
+    ) -> Option<(String, String, String, String)> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        let previous = install_dkim_key();
+        seed_system_sender(&pool).await;
+
+        let email = format!("verify-{}@example.com", Uuid::new_v4().simple());
+        let token = format!("vtok{}", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.expect("transaction");
+        enqueue_verification_email(&mut tx, ACTION_BASE, &email, &token)
+            .await
+            .expect("verification email must enqueue");
+        let (subject, html, text): (String, String, String) = sqlx::query_as(
+            "SELECT subject, html, text FROM email_queue WHERE $1 = ANY(to_addresses)",
+        )
+        .bind(&email)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("verification email must be queued");
+        tx.rollback().await.expect("rollback keeps the DB clean");
+        restore_dkim_key(previous);
+        pool.close().await;
+        Some((subject, html, text, token))
+    }
+
+    /// Drive the REAL login handler's email-MFA branch: seed an active
+    /// owner with `mfa_secret = "email"`, POST /login without a code, and
+    /// read the queued MFA email. Soft-skips without TEST_DATABASE_URL or
+    /// TEST_REDIS_URL.
+    async fn mfa_email_via_login(test_name: &str) -> Option<QueuedEmail> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        let Some(base) = std::env::var("TEST_REDIS_URL").ok().filter(|v| !v.trim().is_empty())
+        else {
+            eprintln!("skipping {test_name}: TEST_REDIS_URL unset");
+            pool.close().await;
+            return None;
+        };
+        let redis_url = format!("{}/{REDIS_DB}", base.trim_end_matches('/'));
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        match redis.get().await {
+            Ok(mut conn) => {
+                deadpool_redis::redis::cmd("PING")
+                    .query_async::<String>(&mut *conn)
+                    .await
+                    .expect("redis must answer PING");
+                // Deterministic baseline: this logical DB belongs to this test.
+                let _: Result<(), _> = deadpool_redis::redis::cmd("FLUSHDB")
+                    .query_async::<()>(&mut *conn)
+                    .await;
+            }
+            Err(error) => {
+                eprintln!("skipping {test_name}: Redis unreachable: {error}");
+                pool.close().await;
+                return None;
+            }
+        }
+
+        let state = crate::app::test_support::test_state_over_with_config_and_redis(
+            pool.clone(),
+            crate::app::test_support::test_config(),
+            &redis_url,
+        )
+        .await;
+        let previous = install_dkim_key();
+        seed_system_sender(&pool).await;
+
+        // Fresh tenant (canonical VARCHAR(26) id) + an MFA-required owner on
+        // the EMAIL code path with a verifiable bcrypt hash.
+        let tenant = format!("ttx{}", &Uuid::new_v4().simple().to_string()[..23]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'Tx Contract Co', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("txcon-{tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let email = format!("mfa-{}@example.com", Uuid::new_v4().simple());
+        let password = "Sup3r#SecurePass";
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, mfa_secret, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Mfa Contract', $4, 'owner', 'active', true, true, 'email', NOW(), NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&email)
+        .bind(bcrypt::hash(password, 4).expect("bcrypt hash"))
+        .execute(&pool)
+        .await
+        .expect("seed mfa user");
+
+        let app = axum::Router::new().merge(router()).with_state(state.clone());
+        let csrf = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/login")
+                    .header("content-type", "application/json")
+                    .header("x-csrf-token", csrf)
+                    .body(Body::from(
+                        json!({"email": email, "password": password}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .expect("login request must dispatch");
+        let status = response.status();
+        let bytes =
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap_or_default();
+        assert_eq!(
+            status,
+            axum::http::StatusCode::ACCEPTED,
+            "email-MFA login must yield a challenge, got {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT subject, html, text FROM email_queue \
+             WHERE $1 = ANY(to_addresses) AND subject = 'Your ApexMail MFA Code'",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("queued MFA email");
+        let queued = QueuedEmail {
+            subject: row.0,
+            html: row.1,
+            text: row.2,
+        };
+
+        restore_dkim_key(previous);
+        pool.close().await;
+        Some(queued)
+    }
+
+    /// Shell contract shared by every transactional email: doctype, lang,
+    /// single-line non-empty subject, no scripts, legal footer, and either
+    /// EXACTLY ONE primary CTA (Some) or zero action links (None — the MFA
+    /// code email must not carry links at all).
+    fn assert_email_shell(name: &str, subject: &str, html: &str, cta: Option<&str>) {
+        assert!(!subject.trim().is_empty(), "{name}: subject must be set");
+        assert!(
+            !subject.contains(['\n', '\r']),
+            "{name}: subject must be single-line, got {subject:?}"
+        );
+        assert!(
+            html.starts_with("<!DOCTYPE html>"),
+            "{name}: must start with <!DOCTYPE html>"
+        );
+        assert!(html.contains("lang=\"en\""), "{name}: must declare lang=\"en\"");
+        // Batch-2 email-title fix: transactional emails carry a real
+        // <title> (webmail tabs previously rendered the raw link URL).
+        assert!(
+            html.contains("<title>") && html.contains("</title>"),
+            "{name}: must carry a <title>"
+        );
+        assert!(
+            !html.contains("<script"),
+            "{name}: transactional email must not carry scripts"
+        );
+        assert!(
+            html.contains("&copy; 2026 ApexMail"),
+            "{name}: legal footer marker missing"
+        );
+        match cta {
+            Some(fragment) => assert_eq!(
+                html.matches(fragment).count(),
+                1,
+                "{name}: exactly one primary CTA link expected ({fragment})"
+            ),
+            None => assert!(
+                !html.contains("<a href"),
+                "{name}: code email must not carry action links"
+            ),
+        }
+    }
+
+    /// Plain-text alternative contract: non-empty, contains the action path
+    /// (emails that have one), no HTML tags anywhere.
+    fn assert_plain_text_alternative(
+        name: &str,
+        text: &str,
+        action_path: Option<&str>,
+        must_contain: &str,
+    ) {
+        assert!(!text.trim().is_empty(), "{name}: text body must be non-empty");
+        assert!(
+            !text.contains('<'),
+            "{name}: text alternative must not contain HTML tags: {text:?}"
+        );
+        if let Some(path) = action_path {
+            assert!(text.contains(path), "{name}: text body must carry the action path {path}");
+        }
+        assert!(
+            text.contains(must_contain),
+            "{name}: text body must contain {must_contain:?}: {text:?}"
+        );
+    }
+
+    /// The 6-digit one-time code as rendered in its dedicated paragraph.
+    fn extracted_mfa_code(html: &str) -> String {
+        let marker = "font-size:28px";
+        let pos = html
+            .find(marker)
+            .expect("the code paragraph must be rendered");
+        let after = &html[pos..];
+        let open = after.find('>').expect("code paragraph must open");
+        let rest = &after[open + 1..];
+        let close = rest.find("</p>").expect("code paragraph must close");
+        rest[..close].trim().to_string()
+    }
+
+    /// GATE L [GREEN]: the verification email carries the HTML shell
+    /// metadata, exactly one primary CTA whose href starts with the https
+    /// action base (path-based token, CWE-598), the expiry copy, and the
+    /// legal footer.
+    #[tokio::test]
+    async fn verification_email_carries_shell_metadata_and_action_link() {
+        let Some((subject, html, _text, token)) =
+            verification_email_via_enqueue("tx_verify").await
+        else {
+            return;
+        };
+        assert_eq!(subject, "Verify your ApexMail account");
+        let cta = format!("href=\"{ACTION_BASE}/v1/auth/verify-email/{token}\"");
+        assert_email_shell("verification email", &subject, &html, Some(&cta));
+        assert!(
+            !html.contains("http://"),
+            "verification email must not downgrade to http://"
+        );
+        assert!(
+            html.contains("This link expires in 24 hours."),
+            "expiry copy missing: {html}"
+        );
+        assert!(
+            !html.contains("token="),
+            "the token must ride the path, never the query string (CWE-598)"
+        );
+    }
+
+    /// GATE L [GREEN]: the MFA one-time-code email carries the shell
+    /// metadata, a SINGLE-LINE six-digit code in its own paragraph, expiry
+    /// copy — and deliberately zero action links (a code email must not
+    /// funnel the reader to a link).
+    #[tokio::test]
+    async fn mfa_code_email_carries_shell_metadata_and_single_line_code() {
+        let Some(queued) = mfa_email_via_login("tx_mfa").await else {
+            return;
+        };
+        assert_email_shell("mfa code email", &queued.subject, &queued.html, None);
+        let code = extracted_mfa_code(&queued.html);
+        assert_eq!(
+            code.len(),
+            6,
+            "one-time code must render as 6 characters, got {code:?}"
+        );
+        assert!(
+            code.bytes().all(|b| b.is_ascii_digit()),
+            "code must be digits only, got {code:?}"
+        );
+        assert!(
+            !code.contains('\n'),
+            "the code must render on a single line, got {code:?}"
+        );
+        assert_eq!(
+            queued.html.matches(&code).count(),
+            1,
+            "the code must appear exactly once in the HTML"
+        );
+        assert!(
+            queued.html.contains("This code expires in 5 minutes."),
+            "expiry copy missing: {}",
+            queued.html
+        );
+
+        // The text alternative carries the same single-line code.
+        assert_plain_text_alternative(
+            "mfa code email",
+            &queued.text,
+            None,
+            &format!("Your one-time verification code is: {code}"),
+        );
+        assert!(
+            queued.text.contains("expires in 5 minutes"),
+            "text body must carry the expiry copy: {:?}",
+            queued.text
+        );
+    }
+
+    /// GATE L [GREEN]: every transactional email queued by this module's
+    /// builders (verification + MFA) ships BOTH an html and a text body;
+    /// the text bodies are non-empty, carry the action path where one
+    /// exists, and contain no HTML tags. (The password-reset counterpart is
+    /// pinned by `reset_email_carries_shell_metadata_expiry_and_action_link`
+    /// in forgot_password.rs — the third `queue_system_email` call site.)
+    #[tokio::test]
+    async fn every_transactional_email_has_a_plain_text_alternative() {
+        let Some((_subject, _html, text, _token)) =
+            verification_email_via_enqueue("tx_plain_verify").await
+        else {
+            return;
+        };
+        assert_plain_text_alternative(
+            "verification email",
+            &text,
+            Some("/v1/auth/verify-email/"),
+            ACTION_BASE,
+        );
+
+        let Some(queued) = mfa_email_via_login("tx_plain_mfa").await else {
+            return;
+        };
+        let code = extracted_mfa_code(&queued.html);
+        assert_plain_text_alternative(
+            "mfa code email",
+            &queued.text,
+            None, // a code email has no action path; its payload IS the code
+            &code,
+        );
+    }
+
+    /// GATE L [GREEN]: action links are built from the configured action
+    /// base VERBATIM — an https base yields https-only, absolute,
+    /// path-based links; the scheme is never downgraded, the link is never
+    /// rendered relative-only, and the token never moves into the query
+    /// string (CWE-598). Production must configure an https `BASE_URL`; the
+    /// e2e proof lives in
+    /// [`verification_email_carries_shell_metadata_and_action_link`].
+    #[test]
+    fn email_action_links_use_the_https_base() {
+        let link = build_action_link(
+            "https://apexmail.ee/",
+            "/v1/auth/verify-email",
+            "user@example.com",
+            "vtok123",
+        );
+        assert_eq!(
+            link, "https://apexmail.ee/v1/auth/verify-email/vtok123",
+            "trailing slash on the base must be normalized, path + token appended"
+        );
+        assert!(
+            !link.contains("http://"),
+            "an https action base must never be downgraded to http://"
+        );
+        assert!(
+            !link.contains("token="),
+            "tokens ride the path, never the query string (CWE-598)"
+        );
+        for base in ["https://apexmail.ee", "https://apexmail.ee/"] {
+            let link = build_action_link(base, "/v1/auth/verify-email", "u@example.com", "t");
+            assert!(
+                link.starts_with("https://"),
+                "action links must be absolute and https for an https base: {link}"
+            );
+            assert!(
+                url::Url::parse(&link).is_ok(),
+                "action link must parse as an absolute URL: {link}"
+            );
+        }
     }
 }

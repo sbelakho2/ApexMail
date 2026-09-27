@@ -73,32 +73,60 @@ pub async fn rate_limit_middleware(
             resp
         }
         Err(RateLimitOutcome::Exceeded { reset_at }) => {
-            let mut resp = (
-                StatusCode::TOO_MANY_REQUESTS,
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "code": "RATE_LIMIT_EXCEEDED",
-                        "message": "too many requests"
-                    }
-                })),
-            )
-                .into_response();
+            // F1b: browser surfaces (form posts, SSR pages) get a small
+            // branded HTML page instead of a raw JSON error dump; API paths
+            // keep the machine-readable envelope.
+            let browser = crate::middleware::is_browser_facing_path(req.uri().path());
+            let mut resp = if browser {
+                crate::middleware::browser_error_page_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too Many Requests",
+                    "Too many attempts",
+                    "Wait a minute and try again.",
+                    "/login",
+                    "Back to sign in",
+                )
+            } else {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "RATE_LIMIT_EXCEEDED",
+                            "message": "too many requests"
+                        }
+                    })),
+                )
+                    .into_response()
+            };
             resp.headers_mut()
                 .insert("Retry-After", (reset_at / 1000).into());
             resp
         }
         Err(RateLimitOutcome::RedisDown) => {
             if state.config.environment == Environment::Production {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({
-                        "error": {
-                            "code": "SERVICE_UNAVAILABLE",
-                            "message": "rate limiter unavailable"
-                        }
-                    })),
-                )
-                    .into_response()
+                // F1b: browser surfaces get the branded HTML outage page;
+                // API paths keep the JSON envelope.
+                if crate::middleware::is_browser_facing_path(req.uri().path()) {
+                    crate::middleware::browser_error_page_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Service Unavailable",
+                        "Temporarily unavailable",
+                        "The console is temporarily unavailable — please try again shortly.",
+                        "/login",
+                        "Back to sign in",
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "error": {
+                                "code": "SERVICE_UNAVAILABLE",
+                                "message": "rate limiter unavailable"
+                            }
+                        })),
+                    )
+                        .into_response()
+                }
             } else {
                 // Fail open in development
                 tracing::warn!("rate limiter Redis unavailable — failing open (dev mode)");
@@ -421,32 +449,62 @@ pub async fn public_rate_limit_middleware(
             resp
         }
         Err(RateLimitOutcome::Exceeded { reset_at }) => {
-            let mut resp = (
-                StatusCode::TOO_MANY_REQUESTS,
-                axum::Json(serde_json::json!({
-                    "error": {
-                        "code": "RATE_LIMIT_EXCEEDED",
-                        "message": "too many requests — try again later"
-                    }
-                })),
-            )
-                .into_response();
+            // F1b: browser form posts (/web/auth/*, /consent, detail pages)
+            // get a small branded HTML page instead of a raw JSON error
+            // dump; API paths keep the machine-readable envelope.
+            let browser = crate::middleware::is_browser_facing_path(req.uri().path());
+            let mut resp = if browser {
+                crate::middleware::browser_error_page_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too Many Requests",
+                    "Too many attempts",
+                    "Wait a minute and try again.",
+                    "/login",
+                    "Back to sign in",
+                )
+            } else {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(serde_json::json!({
+                        "error": {
+                            "code": "RATE_LIMIT_EXCEEDED",
+                            "message": "too many requests — try again later"
+                        }
+                    })),
+                )
+                    .into_response()
+            };
             resp.headers_mut()
                 .insert("Retry-After", (reset_at / 1000).into());
             resp
         }
         Err(RateLimitOutcome::RedisDown) => {
             if state.config.environment == Environment::Production {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    axum::Json(serde_json::json!({
-                        "error": {
-                            "code": "SERVICE_UNAVAILABLE",
-                            "message": "rate limiter unavailable"
-                        }
-                    })),
-                )
-                    .into_response()
+                // F1b: a Redis outage must not bounce a browser to a raw
+                // JSON dump (or, via session resolution, silently to
+                // /login as unauthenticated) — serve the branded HTML
+                // outage page on browser paths; API paths keep JSON.
+                if crate::middleware::is_browser_facing_path(req.uri().path()) {
+                    crate::middleware::browser_error_page_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Service Unavailable",
+                        "Temporarily unavailable",
+                        "Sign-in is temporarily unavailable — please try again shortly.",
+                        "/login",
+                        "Back to sign in",
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "error": {
+                                "code": "SERVICE_UNAVAILABLE",
+                                "message": "rate limiter unavailable"
+                            }
+                        })),
+                    )
+                        .into_response()
+                }
             } else {
                 tracing::warn!("public rate limiter Redis unavailable — failing open (dev mode)");
                 next.run(req).await
@@ -891,7 +949,7 @@ mod w6a_adversarial_tests {
     use axum::body::Body;
     use axum::http::HeaderValue;
     use axum::http::Method;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use axum::Router;
     use crate::config::Config;
     use std::net::SocketAddr;
@@ -970,6 +1028,35 @@ mod w6a_adversarial_tests {
             .with_state(state)
     }
 
+    /// Public-limiter router carrying the REAL browser and API paths the
+    /// production mount mixes on one limiter stack (browser form routes and
+    /// JSON auth routes), so the per-path response-shape split is exercised
+    /// against actual path shapes.
+    fn public_app_paths(state: AppState) -> Router {
+        Router::new()
+            .route("/web/auth/login", post(handler))
+            .route("/v1/auth/login", post(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                public_rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    /// Tenant-limiter router mixing the authenticated browser form paths
+    /// (/web/*) with API paths (/v1/*), like the production `authenticated`
+    /// router does.
+    fn tenant_app_paths(state: AppState) -> Router {
+        Router::new()
+            .route("/web/campaigns/abc/start", post(handler))
+            .route("/v1/domains", post(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
     fn auth_user(tenant: &str) -> AuthUser {
         AuthUser {
             tenant_id: tenant.to_string(),
@@ -1003,6 +1090,29 @@ mod w6a_adversarial_tests {
             .unwrap()
     }
 
+    /// Browser form-post request (the shape /web/auth/login receives).
+    fn browser_post_req(path: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    /// Tenant-limiter form post with the AuthUser extension `require_auth`
+    /// would have injected.
+    fn tenant_post_req(tenant: &str, path: &str) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(auth_user(tenant));
+        req
+    }
+
     fn with_header(mut req: Request<Body>, name: &str, value: &str) -> Request<Body> {
         let name = axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap();
         req.headers_mut().insert(name, HeaderValue::from_str(value).unwrap());
@@ -1030,6 +1140,13 @@ mod w6a_adversarial_tests {
             .await
             .expect("body readable");
         serde_json::from_slice(&bytes).expect("JSON body")
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body readable");
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body")
     }
 
     async fn seed(state: &AppState, key: &str, value: &str, ttl_secs: u64) {
@@ -1585,6 +1702,224 @@ mod w6a_adversarial_tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "dev must fail open");
         assert!(resp.headers().get("X-RateLimit-Limit").is_none());
+    }
+
+    // ── F1b: browser surfaces get HTML, API surfaces keep JSON ───────────
+
+    /// F1b: a rate-limited BROWSER form post (here /web/auth/login) gets a
+    /// small branded HTML page — status 429, text/html, honest human copy
+    /// and a way onward — never the raw JSON error dump a browser cannot
+    /// render.
+    #[tokio::test]
+    async fn rate_limited_browser_post_gets_html_not_json() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app_paths(state);
+        // Unique credential per run: the bucket is per API key, so parallel
+        // suites and prior runs cannot share (and pre-exhaust) the budget.
+        let key = format!("w6a-html-{}", Uuid::new_v4());
+
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(with_header(
+                        browser_post_req("/web/auth/login"),
+                        "x-api-key",
+                        &key
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+
+        let resp = app
+            .oneshot(with_header(
+                browser_post_req("/web/auth/login"),
+                "x-api-key",
+                &key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8"),
+            "the browser must get HTML, not the JSON error envelope"
+        );
+        assert!(
+            numeric_header(&resp, "Retry-After") > 0,
+            "the 429 must still carry Retry-After"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("Too many attempts"), "got: {body}");
+        assert!(body.contains("href=\"/login\""), "got: {body}");
+        // The branded page contains no braces at all — a JSON error body
+        // cannot hide in it.
+        assert!(!body.contains('{'), "got: {body}");
+    }
+
+    /// F1b: the same limiter on an API path keeps the machine-readable
+    /// envelope EXACTLY — API clients and their tests must not notice the
+    /// browser-facing change.
+    #[tokio::test]
+    async fn rate_limited_api_post_still_gets_json() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app_paths(state);
+        let key = format!("w6a-api-json-{}", Uuid::new_v4());
+
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(with_header(
+                        browser_post_req("/v1/auth/login"),
+                        "x-api-key",
+                        &key
+                    ))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+
+        let resp = app
+            .oneshot(with_header(
+                browser_post_req("/v1/auth/login"),
+                "x-api-key",
+                &key,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert_eq!(body["error"]["message"], "too many requests — try again later");
+    }
+
+    /// F1b: with Redis down in production the browser form post gets the
+    /// branded HTML outage page (503, text/html, honest copy + /login link)
+    /// instead of a raw JSON dump.
+    #[tokio::test]
+    async fn redis_outage_browser_post_gets_html_not_json() {
+        let dead = "redis://127.0.0.1:1";
+        let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
+        let app = public_app_paths(prod);
+
+        let resp = app.oneshot(browser_post_req("/web/auth/login")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store"),
+            "a transient outage page must never be cached"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("temporarily unavailable"), "got: {body}");
+        assert!(body.contains("href=\"/login\""), "got: {body}");
+        assert!(!body.contains('{'), "got: {body}");
+    }
+
+    /// F1b: with Redis down in production an API path still gets the JSON
+    /// SERVICE_UNAVAILABLE envelope, unchanged.
+    #[tokio::test]
+    async fn redis_outage_api_post_still_gets_json() {
+        let dead = "redis://127.0.0.1:1";
+        let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
+        let app = public_app_paths(prod);
+
+        let resp = app.oneshot(browser_post_req("/v1/auth/login")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
+        assert_eq!(body["error"]["message"], "rate limiter unavailable");
+    }
+
+    /// F1b: the tenant limiter rides the SAME production router as the
+    /// authenticated /web/* form posts, so the same split applies there:
+    /// an exhausted browser post gets the branded HTML page; an exhausted
+    /// API post keeps the JSON envelope.
+    #[tokio::test]
+    async fn tenant_limiter_browser_post_gets_html_and_api_keeps_json() {
+        let state = state_with(
+            rl_config(Environment::Production, 1, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app_paths(state);
+        let browser_tenant = format!("w6a-ten-html-{}", Uuid::new_v4());
+        let api_tenant = format!("w6a-ten-json-{}", Uuid::new_v4());
+
+        // Browser path: 1 allowed, 2nd is the 429 HTML page.
+        assert_eq!(
+            app.clone()
+                .oneshot(tenant_post_req(&browser_tenant, "/web/campaigns/abc/start"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let resp = app
+            .clone()
+            .oneshot(tenant_post_req(&browser_tenant, "/web/campaigns/abc/start"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("Too many attempts"), "got: {body}");
+        assert!(!body.contains('{'), "got: {body}");
+
+        // API path: 1 allowed, 2nd is the 429 JSON envelope.
+        assert_eq!(
+            app.clone()
+                .oneshot(tenant_post_req(&api_tenant, "/v1/domains"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let resp = app
+            .oneshot(tenant_post_req(&api_tenant, "/v1/domains"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
     }
 
     #[tokio::test]

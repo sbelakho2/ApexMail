@@ -1454,6 +1454,25 @@ async fn render_ui_response_with_state(
                     error = %error,
                     "control-plane render denied by the CP session gate"
                 );
+                // F1b: an MFA denial is named as such instead of a bare
+                // login bounce (which loops — signing in again re-mints
+                // the same MFA-less session): GETs are sent onward to
+                // /cp/security to enable it. The security pages themselves
+                // would redirect to themselves, so they get the 403
+                // interstitial directly. Every other denial keeps the
+                // login redirect.
+                if cp_auth::is_mfa_required_error(&error) {
+                    if matches!(uri.path(), "/cp/security" | "/settings/security") {
+                        return Some(cp_auth::mfa_required_browser_response());
+                    }
+                    return Some(
+                        (
+                            StatusCode::SEE_OTHER,
+                            [(header::LOCATION, "/cp/security".to_string())],
+                        )
+                            .into_response(),
+                    );
+                }
                 return Some(login_redirect_response(uri));
             }
         }
@@ -1826,13 +1845,23 @@ fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
         .unwrap_or("web");
     let inner = match surface {
         "control-plane" => ui_foundation::leptos_views::control_plane_not_found_page(),
-        "marketing" | "marketing-zola" => ui_foundation::leptos_views::marketing_home_page(),
+        // F1b: the marketing 404 renders the real not-found view inside the
+        // marketing shell — the homepage hero previously masqueraded as the
+        // 404 body, telling visitors the page they asked for exists.
+        "marketing" | "marketing-zola" => ui_foundation::leptos_views::marketing_not_found_page(),
         _ => ui_foundation::leptos_views::web_not_found_page(),
     };
-    let page = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"antialiased bg-background text-surface-950\">{}</body></html>",
-        inner,
-    );
+    // F1b: the marketing not-found view is a COMPLETE MarketingShell
+    // document (own <head>, title, stylesheet); nesting it inside the
+    // minimal wrapper would put one HTML document inside another.
+    let page = if inner.starts_with("<!DOCTYPE html>") {
+        inner
+    } else {
+        format!(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Page Not Found — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"antialiased bg-background text-surface-950\">{}</body></html>",
+            inner,
+        )
+    };
     (
         StatusCode::NOT_FOUND,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
@@ -2965,6 +2994,41 @@ mod tests {
         assert!(body.contains("404"));
         assert!(body.contains("Go Home"));
         assert!(!body.contains("<script"));
+    }
+
+    /// F1b: the marketing surface's 404 renders the real not-found view
+    /// inside the marketing shell (nav + footer) — the homepage hero used
+    /// to masquerade as the 404 body, telling visitors the page they asked
+    /// for exists.
+    #[tokio::test]
+    async fn marketing_not_found_renders_the_marketing_shell_404() {
+        let app = test_app().await;
+        let response = app
+            .oneshot(
+                Request::get("/definitely-not-a-page")
+                    .header(HOST, "apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = response_body_string(response).await;
+        // The homepage hero must NOT stand in for the 404 body.
+        assert!(
+            !body.contains("The email API"),
+            "the homepage hero must not masquerade as the marketing 404"
+        );
+        // The marketing shell wraps it: navigation and the shell footer.
+        assert!(body.contains("<nav"), "the marketing shell nav must render");
+        assert!(
+            body.contains("data-marketing-shell=\"footer\""),
+            "the marketing shell footer must render"
+        );
     }
 
     /// F65: once a verification token has been exchanged on
@@ -5407,6 +5471,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// F1b: an MFA denial on a CP PAGE render is named guidance, not a
+    /// bare login bounce (which loops — signing in again re-mints the same
+    /// MFA-less session): other CP pages 303 onward to /cp/security, and
+    /// /cp/security itself (which must not redirect to itself) gets the
+    /// 403 HTML interstitial with the same copy.
+    #[tokio::test]
+    async fn cp_render_mfa_denial_redirects_to_security_page() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_render_mfa_guidance").await else {
+            return;
+        };
+        // The operator never enabled MFA: login minted both cookies with
+        // mfa_enabled=false baked into the CP claims.
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, false).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, false);
+        let cookies = format!("am_session={am_session}; {cp_cookie}");
+
+        // Another CP page: onward 303 to /cp/security.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/dashboard")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", &cookies)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/cp/security"),
+            "the render path must send the operator to where MFA is enabled"
+        );
+
+        // The security page itself: the loop-safe 403 interstitial that
+        // names the fix instead of a self-redirect.
+        let response = app
+            .oneshot(
+                Request::get("/cp/security")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", &cookies)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let body = response_body_string(response).await;
+        assert!(body.contains("Two-factor authentication"), "got: {body}");
+        assert!(body.contains("href=\"/cp/security\""), "got: {body}");
+        assert!(
+            !body.contains("\"error\""),
+            "no raw JSON error body may reach the browser, got: {body}"
+        );
     }
 
     /// Fix 7: /alerts/rules is routable but has no backing rule store — the

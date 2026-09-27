@@ -205,7 +205,7 @@ async fn forgot_password(
         let safe_link = html_escape(&reset_link);
         let html_body = format!(
             r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
+<html lang="en"><head><meta charset="utf-8"/><title>Reset your password — ApexMail</title></head><body style="font-family:ui-monospace,'JetBrains Mono',monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px">
 <h2 style="color:#dc2626;text-transform:uppercase;letter-spacing:0.05em">Reset Your Password</h2>
 <p>We received a request to reset the password for <strong>{safe_email}</strong>.</p>
 <p><a href="{safe_link}" style="display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;border-radius:0px;text-decoration:none;font-weight:700;text-transform:uppercase;letter-spacing:0.1em">Reset Password</a></p>
@@ -597,5 +597,130 @@ mod adversarial_tests {
             assert_eq!(status, StatusCode::OK, "request {i}");
         }
         assert!(saw_limit, "the IP bucket must cap at 5 per window");
+    }
+
+    /// GATE L [GREEN]: the queued password-reset email carries the shell
+    /// metadata, the expiry copy, exactly ONE primary action link on the
+    /// path-based reset route, and a plain-text alternative with no HTML
+    /// tags. Drives the REAL handler end-to-end and asserts on the exact
+    /// bytes queued into `email_queue`.
+    ///
+    /// The action base asserted here is the TEST config base
+    /// (`http://localhost:3000`): the contract pinned is that the CTA is an
+    /// absolute link derived from the configured action base — never
+    /// relative, never query-string-tokenized. The https property of the
+    /// action base itself is proven against the https seam in auth.rs's
+    /// `verification_email_carries_shell_metadata_and_action_link`; prod
+    /// must configure an https `BASE_URL`.
+    #[tokio::test]
+    async fn reset_email_carries_shell_metadata_expiry_and_action_link() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("forgot_reset_contract").await else {
+            return;
+        };
+        let env = env_with_ip(pool.clone(), [198, 51, 100, 81]).await;
+        make_system_sender_ready(&pool).await;
+
+        let user_id = uuid::Uuid::new_v4();
+        let email = format!("reset-contract-{user_id}@example.com");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1::uuid, $2, $3, 'Reset Contract', 'x', 'owner', 'active', true)",
+        )
+        .bind(user_id)
+        .bind("system_internal_tenant01")
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+
+        let (status, body) = post_forgot(
+            &env,
+            Some(&csrf_header()),
+            &serde_json::json!({ "email": email }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (subject, html, text): (String, String, String) = sqlx::query_as(
+            "SELECT subject, html, text FROM email_queue WHERE to_addresses = ARRAY[$1] LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("queued reset email");
+
+        // Shell metadata.
+        assert_eq!(subject, "Reset your ApexMail password", "{html}");
+        assert!(
+            !subject.contains(['\n', '\r']),
+            "subject must be single-line, got {subject:?}"
+        );
+        assert!(
+            html.starts_with("<!DOCTYPE html>"),
+            "reset email must start with <!DOCTYPE html>"
+        );
+        assert!(html.contains("lang=\"en\""), "must declare lang=\"en\"");
+        // Batch-2 email-title fix: the reset email carries a real <title>.
+        assert!(
+            html.contains("<title>Reset your password — ApexMail</title>"),
+            "reset email must carry its <title>: {html}"
+        );
+        assert!(
+            !html.contains("<script"),
+            "transactional email must not carry scripts"
+        );
+        assert!(
+            html.contains("&copy; 2026 ApexMail"),
+            "legal footer marker missing"
+        );
+
+        // Exactly ONE primary CTA: the second <a> is the apexmail.ee footer.
+        assert_eq!(
+            html.matches("<a href=").count(),
+            2,
+            "exactly one CTA plus the footer link expected: {html}"
+        );
+        assert_eq!(
+            html.matches("/reset-password/").count(),
+            1,
+            "exactly one reset action link expected: {html}"
+        );
+        assert!(
+            html.contains("href=\"http://localhost:3000/reset-password/"),
+            "CTA must be absolute, derived from the configured action base: {html}"
+        );
+        assert!(
+            !html.contains("token="),
+            "the token must ride the path, never the query string (CWE-598)"
+        );
+
+        // Expiry + ignore copy.
+        assert!(
+            html.contains("This link expires in 1 hour."),
+            "expiry copy missing: {html}"
+        );
+
+        // Plain-text alternative: non-empty, carries the action path, no HTML.
+        assert!(!text.trim().is_empty(), "text body must be non-empty");
+        assert!(
+            !text.contains('<'),
+            "text alternative must not contain HTML tags: {text:?}"
+        );
+        assert!(
+            text.contains("/reset-password/"),
+            "text body must carry the action path: {text:?}"
+        );
+        assert!(
+            text.contains("expires in 1 hour"),
+            "text body must carry the expiry copy: {text:?}"
+        );
     }
 }
