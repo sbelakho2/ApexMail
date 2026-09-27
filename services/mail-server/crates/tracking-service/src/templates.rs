@@ -17,6 +17,12 @@ pub fn escape_html(s: &str) -> String {
     out
 }
 
+/// The terminal error/success pages are served from the configured
+/// `base_url` origin, so a plain `href="/"` IS the base_url home — the
+/// "safe path back" every browser-facing terminal page must offer (batch 2).
+const BACK_LINK_HTML: &str =
+    r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
+
 pub fn render_error_page(message: &str) -> String {
     let msg = escape_html(message);
     format!(
@@ -35,6 +41,8 @@ pub fn render_error_page(message: &str) -> String {
     .icon {{ font-size: 48px; margin-bottom: 20px; }}
     h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
     p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
+    .back-link {{ margin-top: 24px; }}
+    .back-link a {{ color: #000000; }}
   </style>
 </head>
 <body>
@@ -42,6 +50,7 @@ pub fn render_error_page(message: &str) -> String {
     <div class="icon">⚠️</div>
     <h1>Something went wrong</h1>
     <p>{msg}</p>
+    {BACK_LINK_HTML}
   </div>
 </body>
 </html>"#
@@ -67,6 +76,8 @@ pub fn render_success_page(email: &str) -> String {
     h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
     p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
     .email {{ color: #000000; font-weight: 700; }}
+    .back-link {{ margin-top: 24px; }}
+    .back-link a {{ color: #000000; }}
   </style>
 </head>
 <body>
@@ -74,6 +85,7 @@ pub fn render_success_page(email: &str) -> String {
     <div class="icon">✅</div>
     <h1>You've been unsubscribed</h1>
     <p><span class="email">{email_safe}</span> has been removed from our mailing list.</p>
+    {BACK_LINK_HTML}
   </div>
 </body>
 </html>"#
@@ -131,12 +143,31 @@ pub struct Category<'a> {
     pub subscribed: bool,
 }
 
+/// Compatibility wrapper: the preferences page WITHOUT the post-save
+/// confirmation banner. (The 5-arg form is pinned by the batch-1
+/// render-only gates in integration-tests; the handler calls
+/// [`render_preferences_page_with_saved`] so a `?saved=1` redirect lands
+/// on a page with a visible confirmation.)
 pub fn render_preferences_page(
     token: &str,
     email: &str,
     prefs_path: &str,
     categories: &[Category<'_>],
     globally_unsubscribed: bool,
+) -> String {
+    render_preferences_page_with_saved(token, email, prefs_path, categories, globally_unsubscribed, false)
+}
+
+/// Batch-2: `just_saved` renders the visible `.alert-success` confirmation
+/// banner the `?saved=1` redirect promises (the flag used to be dead code,
+/// so a successful save landed back on a page with no confirmation).
+pub fn render_preferences_page_with_saved(
+    token: &str,
+    email: &str,
+    prefs_path: &str,
+    categories: &[Category<'_>],
+    globally_unsubscribed: bool,
+    just_saved: bool,
 ) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
@@ -200,6 +231,15 @@ pub fn render_preferences_page(
         )
     };
 
+    // Batch-2: the post-save confirmation banner (uses the previously
+    // dead .alert-success class) — shown on the ?saved=1 redirect target
+    // regardless of which consent branch the card renders below.
+    let saved_banner = if just_saved {
+        r#"<div class="alert alert-success">Your preferences have been saved.</div>"#
+    } else {
+        ""
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -241,6 +281,7 @@ pub fn render_preferences_page(
   <div class="card">
     <h1>Email Preferences</h1>
     <p class="subtitle">Manage your subscriptions for <span class="email">{email_safe}</span></p>
+    {saved_banner}
     {body}
   </div>
 </body>
@@ -280,6 +321,52 @@ mod tests {
         let hostile = render_confirmation_page("abcDEF123_-", "<script>alert(1)</script>", "/u");
         assert!(!hostile.contains("<script>alert"));
         assert!(hostile.contains("&lt;script&gt;"));
+    }
+
+    /// Batch-2: the terminal error/success pages offer a safe path back to
+    /// the base_url home (`href="/"`) — they are dead ends no longer.
+    #[test]
+    fn error_and_success_pages_offer_a_safe_path_back() {
+        for html in [
+            render_error_page("Something went wrong. Please try again."),
+            render_success_page("unsubscribe.me@example.com"),
+        ] {
+            assert!(
+                html.contains(r#"<a href="/">Return to ApexMail</a>"#),
+                "terminal page must link back to the safe path (/), got: {html}"
+            );
+        }
+    }
+
+    /// Batch-2: the `?saved=1` redirect target renders the visible
+    /// `.alert-success` confirmation banner (on BOTH consent branches);
+    /// without the flag there is no banner.
+    #[test]
+    fn preferences_page_renders_the_saved_confirmation_banner_only_when_saved() {
+        let cats: Vec<Category> = Vec::new();
+        let plain = render_preferences_page("tok", "user@example.com", "/p", &cats, false);
+        assert!(
+            !plain.contains(r#"alert-success">"#),
+            "no banner without the saved flag: {plain}"
+        );
+
+        let saved =
+            render_preferences_page_with_saved("tok", "user@example.com", "/p", &cats, false, true);
+        assert!(
+            saved
+                .contains(r#"<div class="alert alert-success">Your preferences have been saved.</div>"#),
+            "{saved}"
+        );
+
+        // The unsubscribe-all save lands on the globally-suppressed branch —
+        // the banner must show there too.
+        let saved_suppressed =
+            render_preferences_page_with_saved("tok", "user@example.com", "/p", &cats, true, true);
+        assert!(
+            saved_suppressed.contains(r#"alert-success">Your preferences have been saved."#),
+            "{saved_suppressed}"
+        );
+        assert!(saved_suppressed.contains("alert-warning"), "{saved_suppressed}");
     }
 }
 

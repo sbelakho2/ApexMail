@@ -25,7 +25,7 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Form, Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use serde::Deserialize;
@@ -36,8 +36,8 @@ use crate::processor::UnsubscribeData;
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
 use crate::templates::{
-    render_confirmation_page, render_error_page, render_preferences_page, render_success_page,
-    Category,
+    render_confirmation_page, render_error_page, render_preferences_page_with_saved,
+    render_success_page, Category,
 };
 
 // ── Token shape validation (F37) ──────────────────────────────────────────────
@@ -330,17 +330,16 @@ pub async fn handle_unsub_confirm_post(
 
 #[derive(Deserialize)]
 pub struct PrefsQuery {
-    #[expect(
-        dead_code,
-        reason = "query flag is accepted for confirmation-page UX state"
-    )]
+    /// Batch-2:`?saved=1` (set by the POST /p/:token success redirect) is no
+    /// longer dead — it renders the visible `.alert-success` confirmation
+    /// banner on the returned page.
     saved: Option<String>,
 }
 
 pub async fn handle_prefs_get(
     State(state): State<AppState>,
     Path(token): Path<String>,
-    Query(_q): Query<PrefsQuery>,
+    Query(q): Query<PrefsQuery>,
 ) -> Response {
     // F37:shape check before any processing.
     if !is_valid_token_shape(&token) {
@@ -411,12 +410,18 @@ pub async fn handle_prefs_get(
 
     let globally_unsubscribed = sup_res.is_some();
 
-    Html(render_preferences_page(
+    // Batch-2:a successful save redirects here with ?saved=1 — the page must
+    // SHOW that the save worked (visible .alert-success banner), not land
+    // back on a silently identical form.
+    let just_saved = q.saved.as_deref() == Some("1");
+
+    Html(render_preferences_page_with_saved(
         &token,
         &data.recipient,
         prefs_path,
         &cat_refs,
         globally_unsubscribed,
+        just_saved,
     ))
     .into_response()
 }
@@ -438,6 +443,14 @@ pub struct PrefsForm {
     categories: std::collections::HashMap<String, String>,
 }
 
+/// Batch-2: `POST /p/:token` is a browser form surface — every failure arm
+/// renders the branded HTML error page (never raw JSON) with the original
+/// status code preserved. (The RFC 8058 one-click POST /u/:token keeps its
+/// JSON contract — that is a mail-client surface, not a browser.)
+fn prefs_error_page(status: StatusCode, message: &str) -> Response {
+    (status, Html(render_error_page(message))).into_response()
+}
+
 pub async fn handle_prefs_post(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -446,23 +459,18 @@ pub async fn handle_prefs_post(
     // F37:shape check before any processing.
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("prefs_post", &token);
-        return axum::http::Response::builder()
-            .status(400)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(r#"{"error":"Invalid token"}"#))
-            .unwrap_or_default();
+        // Batch-2:HTML error page (was raw JSON 400) — browser form surface.
+        return prefs_error_page(StatusCode::BAD_REQUEST, "Invalid or expired preferences link.");
     }
 
     let data = match state.codec.verify_preferences_token(&token) {
         Some(d) => d,
         None => {
-            return axum::http::Response::builder()
-                .status(400)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Invalid or expired token"}"#,
-                ))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 400) — browser form surface.
+            return prefs_error_page(
+                StatusCode::BAD_REQUEST,
+                "Invalid or expired preferences link.",
+            )
         }
     };
 
@@ -482,11 +490,11 @@ pub async fn handle_prefs_post(
         .bind(&sup_id).bind(&data.tenant_id).bind(&email)
         .execute(&state.db).await {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to insert suppression record for unsubscribe");
-            return axum::http::Response::builder()
-                .status(500)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"error":"Failed to save unsubscribe preference. Please try again."}"#))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            return prefs_error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to save your unsubscribe preference. Please try again.",
+            );
         }
 
         // F38:the suppression row IS the durable consent state; the dedup
@@ -517,13 +525,11 @@ pub async fn handle_prefs_post(
         .await
         {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "Failed to delete suppression record for resubscribe");
-            return axum::http::Response::builder()
-                .status(500)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Failed to save resubscribe preference. Please try again."}"#,
-                ))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            return prefs_error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to save your resubscribe preference. Please try again.",
+            );
         }
 
         // F38:the durable consent state changed back to "subscribed" — the
@@ -567,27 +573,19 @@ pub async fn handle_prefs_post(
             Ok(rows) => rows.into_iter().map(|(name,)| name).collect(),
             Err(e) => {
                 tracing::error!(error = %e, tenant_id = %data.tenant_id, "Failed to load email categories for validation");
-                return axum::http::Response::builder()
-                    .status(500)
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"error":"Failed to save preferences. Please try again."}"#,
-                    ))
-                    .unwrap_or_default();
+                // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+                return prefs_error_page(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save preferences. Please try again.",
+                );
             }
         };
 
         if let Err(msg) = validate_category_preferences(&cats, &valid, MAX_CATEGORY_PREFERENCES) {
             warn!(tenant_id = %data.tenant_id, reason = %msg, "Rejected category preference update");
-            return axum::http::Response::builder()
-                .status(400)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(format!(
-                    r#"{{"error":{}}}"#,
-                    serde_json::to_string(&msg)
-                        .unwrap_or_else(|_| "\"invalid category preferences\"".into())
-                )))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 400; the rejection reason
+            // is HTML-escaped by the template) — browser form surface.
+            return prefs_error_page(StatusCode::BAD_REQUEST, &msg);
         }
 
         // #203:Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
@@ -595,13 +593,11 @@ pub async fn handle_prefs_post(
             Ok(tx) => tx,
             Err(e) => {
                 error!(error = %e, "Failed to begin transaction for preferences");
-                return axum::http::Response::builder()
-                    .status(500)
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"error":"Failed to save preferences. Please try again."}"#,
-                    ))
-                    .unwrap_or_default();
+                // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+                return prefs_error_page(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save preferences. Please try again.",
+                );
             }
         };
 
@@ -626,24 +622,20 @@ pub async fn handle_prefs_post(
         if let Err(e) = builder.build().execute(&mut *tx).await {
             error!(error = %e, "Failed to batch update subscription preferences");
             // tx will be rolled back on drop
-            return axum::http::Response::builder()
-                .status(500)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Failed to save preferences. Please try again."}"#,
-                ))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            return prefs_error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to save preferences. Please try again.",
+            );
         }
 
         if let Err(e) = tx.commit().await {
             tracing::error!(error = %e, tenant_id = %data.tenant_id, email = %mail_common::pii::redact_email(&email), "CRITICAL: Failed to commit subscription preference transaction \u{2014} changes rolled back");
-            return axum::http::Response::builder()
-                .status(500)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":"Failed to save preferences. Please try again."}"#,
-                ))
-                .unwrap_or_default();
+            // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
+            return prefs_error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to save preferences. Please try again.",
+            );
         }
 
         // F55:the committed preference change alters send eligibility — fan
@@ -1652,4 +1644,149 @@ mod tests {
 
     #[cfg(test)]
     mod adversarial_tests;
+}
+
+// ── Batch 1 (W2): browser-facing page contracts ──────────────────────────────
+//
+// [ASPIRATIONAL] contracts that pin the batch-2 fixes for the preferences
+// center: every BROWSER-facing response (success, failure, redirect target)
+// must be rendered HTML, never raw JSON — mail-client POST endpoints keep
+// their RFC 8058 JSON contract (they are not browser surfaces).
+#[cfg(test)]
+mod batch1_page_contracts {
+    use super::*;
+    use crate::codec::TrackingCodec;
+    use crate::routes::{build_router, test_support};
+    use std::net::SocketAddr;
+
+    async fn server(state: &AppState) -> axum_test::TestServer {
+        axum_test::TestServer::new(
+            build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .expect("test server")
+    }
+
+    fn prefs_token(tenant: &str, recipient: &str) -> String {
+        TrackingCodec::new(test_support::TEST_SECRET)
+            .generate_preferences_token(tenant, recipient)
+            .expect("preferences token")
+    }
+
+    /// BATCH-2 FIX TARGET: `POST /p/:token` failures return raw JSON
+    /// (`content-type: application/json`), which a browser renders as a bare
+    /// JSON blob. The contract: browser-facing preferences failures render
+    /// the HTML error page (`text/html`, doctype-opened), exactly like the
+    /// GET handler already does. RED until batch 2 switches the failure
+    /// arms to `render_error_page(...)`.
+    #[tokio::test]
+    async fn contract_tracking_preference_save_failure_renders_html_not_json() {
+        // Offline state: a well-shaped but unverifiable token is rejected
+        // BEFORE any database use, so the failure rendering is deterministic
+        // with no live services.
+        let state = test_support::offline_state(&[]);
+        let server = server(&state).await;
+
+        let resp = server
+            .post("/p/aaaaaaaaaa")
+            .form(&[("unsubscribe_all", "true")])
+            .await;
+        assert_eq!(
+            resp.status_code().as_u16(),
+            400,
+            "an invalid token must still be a client error: {}",
+            resp.text()
+        );
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .map(|value| value.to_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        assert!(
+            content_type.starts_with("text/html"),
+            "BATCH-2 FIX TARGET: a preferences-save FAILURE rendered content-type \
+             {content_type:?} (body: {}) — browser-facing failures must render the \
+             HTML error page (text/html), not raw JSON",
+            resp.text()
+        );
+        let body = resp.text();
+        assert!(
+            body.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("<!doctype html>"),
+            "the failure page must be an HTML document, got: {body}"
+        );
+    }
+
+    /// BATCH-2 FIX TARGET: after a successful save the handler redirects to
+    /// `{prefs_path}/{token}?saved=1`, but the GET handler ignores the
+    /// `saved` flag (dead code), so the recipient lands on a page with NO
+    /// visible confirmation that anything was saved. The contract: the
+    /// saved state renders a visible success banner (the template's
+    /// `.alert-success`). RED until batch 2 wires the flag into
+    /// `render_preferences_page`.
+    #[tokio::test]
+    async fn contract_tracking_preference_save_success_renders_a_visible_confirmation() {
+        let Some((state, _redis, db)) = test_support::live_redis_pg_or_skip(&[]).await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant("b1saved")
+            .chars()
+            .take(26)
+            .collect::<String>();
+        let server = server(&state).await;
+
+        // The suppression insert carries a tenants FK — seed the tenant.
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .expect("seed tenant");
+
+        let recipient = "saved-confirm@example.com";
+        let token = prefs_token(&tenant, recipient);
+
+        // A successful save redirects back to the preferences page with the
+        // saved flag set.
+        let resp = server
+            .post(&format!("/p/{token}"))
+            .form(&[("unsubscribe_all", "true")])
+            .await;
+        assert_eq!(
+            resp.status_code().as_u16(),
+            303,
+            "a successful save must redirect: {}",
+            resp.text()
+        );
+
+        // The redirect target must SHOW the recipient that the save worked.
+        let resp = server
+            .get(&format!("/p/{token}"))
+            .add_query_param("saved", "1")
+            .await;
+        assert_eq!(resp.status_code().as_u16(), 200);
+        let body = resp.text();
+
+        // Cleanup BEFORE asserting so a red run leaves no rows behind on the
+        // shared scratch database (this test is expected to be red until
+        // batch 2).
+        let _ = sqlx::query("DELETE FROM suppressions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM subscription_preferences WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+
+        assert!(
+            body.contains("alert-success\""),
+            "BATCH-2 FIX TARGET: ?saved=1 renders no visible confirmation banner \
+             (the saved query flag is dead code in handle_prefs_get); expected an \
+             .alert-success success banner element. Page body: {body}"
+        );
+    }
 }

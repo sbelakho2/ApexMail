@@ -1594,6 +1594,10 @@ mod unsub_http {
 
     #[tokio::test]
     async fn get_unsubscribe_suppresses_and_renders_page() {
+        // FIXED (batch 2, F39): GET /u/:token is side-effect free (renders
+        // the confirmation form only); the confirmed POST
+        // (/u/:token/confirm) performs the suppression and renders the
+        // completion page.
         let Some(db) = common::test_pool("unsub_get").await else {
             return;
         };
@@ -1611,6 +1615,38 @@ mod unsub_http {
             .oneshot(
                 Request::get(format!("/u/{token}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "confirmation page renders");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains(r#"form method="POST""#) && body.contains("/confirm"),
+            "GET renders the POST confirmation form: {body}"
+        );
+
+        // The GET suppressed NOTHING (prefetcher-safe).
+        let pre_confirm: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = 'opt.out@example.com'",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(pre_confirm.0, 0, "F39: GET must not change consent");
+
+        // The confirmed POST suppresses into both stores (lowercased) and
+        // renders the branded completion page.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/u/{token}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
                     .unwrap(),
             )
             .await
@@ -1643,12 +1679,13 @@ mod unsub_http {
             "mirror into the platform suppression table"
         );
 
-        // DOUBLE unsubscribe: still 200, still exactly one row each.
+        // DOUBLE confirm: still 200, still exactly one row each (idempotent).
         let resp2 = app
             .clone()
             .oneshot(
-                Request::get(format!("/u/{token}"))
-                    .body(Body::empty())
+                Request::post(format!("/u/{token}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
                     .unwrap(),
             )
             .await
@@ -1671,6 +1708,9 @@ mod unsub_http {
 
     #[tokio::test]
     async fn get_unsubscribe_redirects_when_configured() {
+        // FIXED (batch 2, F39): the configured redirect target is honoured by
+        // the CONFIRM POST (the consent-changing step); the prefetchable GET
+        // renders the confirmation form instead of redirecting.
         let Some(db) = common::test_pool("unsub_redirect").await else {
             return;
         };
@@ -1718,9 +1758,25 @@ mod unsub_http {
             "redirect@example.com",
         );
         let resp = app
+            .clone()
             .oneshot(
                 Request::get(format!("/u/{token}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "F39: the GET must render the confirmation form, not redirect"
+        );
+
+        let resp = app
+            .oneshot(
+                Request::post(format!("/u/{token}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
                     .unwrap(),
             )
             .await

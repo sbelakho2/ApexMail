@@ -2869,11 +2869,17 @@ impl EmailProcessor {
         let unsubscribe = unsubscribe_link(job, &self.config.tracking);
         let mut headers: Vec<(String, String)> = Vec::new();
         if let Some((_token, url)) = &unsubscribe {
-            // RFC 2369 angle-bracket https URL + RFC 8058 one-click POST —
-            // the tracking-service serves the POST variant on the same
+            // RFC 2369 angle-bracketed https URL + RFC 8058 one-click POST.
+            // FIXED (batch 2): List-Unsubscribe-Post must carry the LITERAL
+            // value `List-Unsubscribe=One-Click` (RFC 8058 §3) — the obsolete
+            // `Yes` value was not recognized by one-click-capable clients.
+            // The tracking-service serves the POST variant on the same
             // route (`handle_unsub_post`).
             headers.push(("List-Unsubscribe".to_string(), format!("<{url}>")));
-            headers.push(("List-Unsubscribe-Post".to_string(), "Yes".to_string()));
+            headers.push((
+                "List-Unsubscribe-Post".to_string(),
+                "List-Unsubscribe=One-Click".to_string(),
+            ));
             // Visible preference/unsubscribe links: the caller's template
             // placeholders receive the same server-owned URL.
             if let Some(ref h) = html {
@@ -7682,10 +7688,11 @@ mod tests {
 
         // RFC 8058 one-click is advertised (the tracking service serves
         // the POST variant on the same route).
-        assert!(prepared
-            .headers
-            .iter()
-            .any(|(k, v)| k.eq_ignore_ascii_case("List-Unsubscribe-Post") && v == "Yes"));
+        // FIXED (batch 2): the header must carry the RFC 8058 literal
+        // `List-Unsubscribe=One-Click`, not the obsolete `Yes`.
+        assert!(prepared.headers.iter().any(|(k, v)| k
+            .eq_ignore_ascii_case("List-Unsubscribe-Post")
+            && v == "List-Unsubscribe=One-Click"));
 
         // The placeholder in the visible body received the SAME URL.
         let html = prepared.html.unwrap();
@@ -7721,6 +7728,61 @@ mod tests {
         );
 
         std::env::remove_var("TRACKING_SECRET_KEY");
+    }
+
+    /// FIXED (batch 2): RFC 8058 §3 requires the List-Unsubscribe-Post
+    /// header to carry the LITERAL value `List-Unsubscribe=One-Click`;
+    /// `prepare_email` previously emitted the obsolete `Yes`, which
+    /// one-click-capable mail clients could not recognize. The
+    /// List-Unsubscribe (RFC 2369) header pair itself must stay present.
+    #[tokio::test]
+    async fn contract_customer_sends_advertise_rfc8058_one_click() {
+        let secret = "test-secret-key-32-bytes-minimum!!";
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: Some(zeroize::Zeroizing::new(secret.to_string())),
+        })
+        .await;
+
+        let mut job = tracking_gate_job();
+        job.message_id = "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into();
+        job.html = Some(
+            r#"<html><body><a href="{{unsubscribe_url}}">unsubscribe</a></body></html>"#.into(),
+        );
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .unwrap();
+
+        // RFC 2369: the List-Unsubscribe header pair must be present, as an
+        // angle-bracketed https URL.
+        let list_unsub = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("List-Unsubscribe"))
+            .map(|(_, v)| v.clone())
+            .expect("List-Unsubscribe header must be present");
+        assert!(
+            list_unsub.starts_with("<https://") && list_unsub.ends_with('>'),
+            "List-Unsubscribe must be an angle-bracketed https URL, got {list_unsub:?}"
+        );
+
+        // RFC 8058: the one-click advertisement carries the literal value.
+        let post_header = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("List-Unsubscribe-Post"))
+            .map(|(_, v)| v.clone())
+            .expect("List-Unsubscribe-Post header must be advertised");
+        assert_eq!(
+            post_header, "List-Unsubscribe=One-Click",
+            "BATCH-2 FIX TARGET: List-Unsubscribe-Post advertised {post_header:?}; \
+             RFC 8058 one-click requires the literal value \
+             \"List-Unsubscribe=One-Click\" so mail clients can auto-unsubscribe"
+        );
     }
 
     #[allow(clippy::await_holding_lock)]

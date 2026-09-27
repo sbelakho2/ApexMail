@@ -148,6 +148,11 @@ pub fn router(state: AppState) -> Router {
         // HMAC-signed token, not the shared service token — see
         // `require_service_token`'s path exemption and the handlers below.
         .route("/u/:token", get(unsubscribe_get).post(unsubscribe_post))
+        // F39 (batch 2): the manual unsubscribe is a two-step, no-JS flow —
+        // GET /u/:token renders the side-effect-free confirmation form whose
+        // submit POSTs here. Kept a separate route so the RFC 8058 one-click
+        // POST contract on /u/:token stays untouched.
+        .route("/u/:token/confirm", post(unsubscribe_confirm_post))
         .route("/calendar", get(list_calendar))
         .route("/calendar/events", post(create_calendar_event))
         .route("/calendar/events/:id", delete(cancel_calendar_event))
@@ -231,8 +236,10 @@ async fn require_service_token(
     next: Next,
 ) -> Result<Response, StatusCode> {
     // Skip auth for health checks and the PUBLIC unsubscribe endpoints
-    // (`/u/:token`) — recipient clicks arrive from mail clients with no
-    // service token; authenticity comes from the HMAC token signature.
+    // (`/u/:token` and, batch 2, its `/u/:token/confirm` confirmation
+    // submit) — recipient clicks arrive from mail clients with no service
+    // token; authenticity comes from the HMAC token signature. The
+    // `/u/` prefix match covers BOTH routes.
     let path = req.uri().path();
     if path == "/health" || path.starts_with("/u/") {
         return Ok(next.run(req).await);
@@ -1363,32 +1370,26 @@ async fn dry_run_campaign(
 
 // -- Public unsubscribe endpoints (CAN-SPAM / RFC 8058) ----------------------
 
-/// Shared suppression logic for GET and POST. Idempotent by construction
-/// (`ON CONFLICT DO NOTHING` in both suppression stores) — a second click
-/// succeeds without duplicating rows.
+/// Token resolution only (v2 → legacy v1). Shared by the side-effect-free
+/// GET (which must verify without suppressing) and the suppression path.
 ///
-/// Token resolution order:
-///
-/// 1. **v2 opaque token** — decoded, SHA-256'd, looked up in
-///    `sales_unsubscribe_tokens` (only the hash is stored). This is what
-///    every NEW send emits; the URL contains no recipient or tenant data.
+/// 1. **v2 opaque token** — decoded (strict 43-char URL-safe base64, no
+///    database use for malformed shapes), SHA-256'd, looked up in
+///    `sales_unsubscribe_tokens` (only the hash is stored).
 /// 2. **v1 legacy token** — read-only compatibility for links already
-///    delivered in email. The v1 verifier is retained for ONE expiry cycle
-///    (365 days, [`crate::dispatcher::sign_unsubscribe_token_default_ttl`]'s
-///    TTL) after the v2 rollout; remove this fallback once every v1 token is
-///    past its TTL and no legacy signer callers remain.
+///    delivered in email (see `apply_unsubscribe` for the retirement plan).
 ///
 /// Neither the raw token nor the decoded PII is logged; the only log line
 /// carries the tenant id.
-async fn apply_unsubscribe(
+async fn resolve_unsubscribe(
     state: &AppState,
     token: &str,
 ) -> Result<crate::dispatcher::UnsubscribeTokenData, SalesError> {
     // v2 first: a malformed/unknown v2 token is `Ok(None)`, a DB failure is
     // an `Err` (never silently fall through to the legacy verifier on a
     // transient outage — that could reject a valid v2 link).
-    let data = match crate::dispatcher::resolve_unsubscribe_token(&state.db, token).await? {
-        Some(data) => data,
+    match crate::dispatcher::resolve_unsubscribe_token(&state.db, token).await? {
+        Some(data) => Ok(data),
         None => {
             // Legacy v1 fallback (old emails in inboxes). Without a secret
             // the v1 verifier cannot run, but that must not turn an invalid
@@ -1405,17 +1406,27 @@ async fn apply_unsubscribe(
                 crate::dispatcher::verify_unsubscribe_token(secret, token)
             };
             match legacy {
-                Some(data) => data,
+                Some(data) => Ok(data),
                 None => {
                     // The log line intentionally omits the token.
                     tracing::warn!("unsubscribe request with invalid or expired token");
-                    return Err(SalesError::InvalidInput(
+                    Err(SalesError::InvalidInput(
                         "invalid or expired unsubscribe token".into(),
-                    ));
+                    ))
                 }
             }
         }
-    };
+    }
+}
+
+/// Verify the token AND perform the suppression (the consent-changing step).
+/// Idempotent by construction (`ON CONFLICT DO NOTHING` in both suppression
+/// stores) — a second click succeeds without duplicating rows.
+async fn apply_unsubscribe(
+    state: &AppState,
+    token: &str,
+) -> Result<crate::dispatcher::UnsubscribeTokenData, SalesError> {
+    let data = resolve_unsubscribe(state, token).await?;
 
     ProductionCampaignDispatcher::suppress(
         &state.db,
@@ -1433,43 +1444,160 @@ async fn apply_unsubscribe(
     Ok(data)
 }
 
-/// Branded confirmation page shown after a GET unsubscribe when no explicit
-/// redirect URL is configured.
-fn unsubscribed_page() -> axum::response::Html<&'static str> {
-    axum::response::Html(
+/// Minimal HTML escaping for values interpolated into the unsubscribe pages
+/// (token, email) — no template-engine dependency.
+fn html_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The safe path back every terminal unsubscribe page offers (batch 2): the
+/// site home these pages are served from.
+const BACK_LINK: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
+
+/// Shared card shell for the public unsubscribe pages (confirmation,
+/// completion, error) — identical styling on every browser-facing surface.
+fn unsubscribe_page_shell(title: &str, body: &str) -> String {
+    format!(
         r#"<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Unsubscribed — ApexMail</title>
+<head><meta charset="utf-8"><title>{title} — ApexMail</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f7f7f9;color:#222}.card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:48px;text-align:center;max-width:420px}h1{font-size:20px;margin:0 0 12px}p{color:#666;font-size:14px;line-height:1.6;margin:0}</style>
+<style>body{{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f7f7f9;color:#222}}.card{{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:48px;text-align:center;max-width:420px}}h1{{font-size:20px;margin:0 0 12px}}p{{color:#666;font-size:14px;line-height:1.6;margin:0 0 16px}}.btn{{display:inline-block;background:#dc2626;color:#fff;border:none;border-radius:8px;padding:12px 24px;font-size:14px;font-weight:700;cursor:pointer}}.back-link{{margin-top:8px}}.back-link a{{color:#666}}</style>
 </head>
-<body><div class="card"><h1>You're unsubscribed</h1>
-<p>You will not receive any further campaign emails from us. Sorry to see you go!</p>
-</div></body></html>"#,
+<body><div class="card">{body}</div></body></html>"#,
     )
 }
 
-/// GET /u/:token — manual (link click) unsubscribe: suppress + redirect to a
-/// branded page.
+/// Branded completion page shown after a confirmed unsubscribe when no
+/// explicit redirect URL is configured.
+fn unsubscribed_page() -> axum::response::Html<String> {
+    axum::response::Html(unsubscribe_page_shell(
+        "Unsubscribed",
+        &format!(
+            "<h1>You're unsubscribed</h1>\n<p>You will not receive any further campaign emails from us. Sorry to see you go!</p>\n{BACK_LINK}"
+        ),
+    ))
+}
+
+/// F39 (batch 2): the GET render — a plain no-JS HTML form whose submit
+/// POSTs to `/u/:token/confirm`. GET itself changes NOTHING, so prefetching
+/// mail clients and link scanners can no longer unsubscribe anyone by
+/// fetching a URL.
+fn unsubscribe_confirm_page(token: &str, email: &str) -> axum::response::Html<String> {
+    let token = html_escape(token);
+    let email = html_escape(email);
+    axum::response::Html(unsubscribe_page_shell(
+        "Confirm Unsubscribe",
+        &format!(
+            r#"<h1>Confirm unsubscribe</h1>
+<p>Are you sure you want to stop receiving sales campaign emails at <strong>{email}</strong>?</p>
+<form method="POST" action="/u/{token}/confirm">
+  <input type="hidden" name="confirm" value="true">
+  <button type="submit" class="btn">Yes, unsubscribe</button>
+</form>
+<p class="back-link"><a href="/">No, take me back</a></p>"#
+        ),
+    ))
+}
+
+/// Branded error page for the BROWSER-facing unsubscribe routes (batch 2):
+/// mail recipients never see raw JSON. Callers pass fixed human copy —
+/// raw error chains are logged, never rendered.
+fn unsubscribe_error_page(message: &str) -> axum::response::Html<String> {
+    let message = html_escape(message);
+    axum::response::Html(unsubscribe_page_shell(
+        "Error",
+        &format!("<h1>Something went wrong</h1>\n<p>{message}</p>\n{BACK_LINK}"),
+    ))
+}
+
+/// GET /u/:token — manual (link click) unsubscribe, step 1. F39 (batch 2):
+/// SIDE-EFFECT FREE — verifies the token and renders the confirmation form;
+/// consent changes only on the confirmed POST (`/u/:token/confirm`).
 async fn unsubscribe_get(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
 ) -> Response {
+    match resolve_unsubscribe(&state, &token).await {
+        Ok(data) => unsubscribe_confirm_page(&token, &data.email).into_response(),
+        Err(SalesError::InvalidInput(_)) => (
+            StatusCode::BAD_REQUEST,
+            unsubscribe_error_page(
+                "This unsubscribe link is invalid or has expired. Please request a new one.",
+            ),
+        )
+            .into_response(),
+        Err(e) => {
+            // Full detail stays in the log; the page carries fixed copy only.
+            tracing::error!(error = %e, "unsubscribe GET failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                unsubscribe_error_page("Something went wrong. Please try again."),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// The hidden field of the confirmation form (F39): a POST to
+/// `/u/:token/confirm` only proceeds when the form actually confirmed.
+#[derive(Deserialize)]
+struct UnsubscribeConfirmForm {
+    #[serde(default)]
+    confirm: Option<String>,
+}
+
+/// POST /u/:token/confirm — manual unsubscribe, step 2 (batch 2, F39): the
+/// ONLY browser-driven path that suppresses the recipient. Distinct from the
+/// RFC 8058 one-click POST (which requires the exact
+/// `List-Unsubscribe=One-Click` body) so both contracts stay separate.
+async fn unsubscribe_confirm_post(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+    axum::Form(form): axum::Form<UnsubscribeConfirmForm>,
+) -> Response {
+    if form.confirm.as_deref() != Some("true") && form.confirm.as_deref() != Some("1") {
+        return (
+            StatusCode::BAD_REQUEST,
+            unsubscribe_error_page("Invalid confirmation request."),
+        )
+            .into_response();
+    }
+
     match apply_unsubscribe(&state, &token).await {
         Ok(_) => match &state.config.dispatch.unsubscribe_redirect_url {
+            // The operator-configured post-unsubscribe target replaces the
+            // branded completion page (now on the CONFIRM step, never the
+            // prefetchable GET).
             Some(url) => Redirect::to(url).into_response(),
             None => unsubscribed_page().into_response(),
         },
-        Err(SalesError::InvalidInput(msg)) => (
+        Err(SalesError::InvalidInput(_)) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": msg })),
+            unsubscribe_error_page(
+                "This unsubscribe link is invalid or has expired. Please request a new one.",
+            ),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "unsubscribe confirmation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                unsubscribe_error_page("Something went wrong. Please try again."),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -2732,6 +2860,10 @@ mod tests {
     /// URL) redeems through the PUBLIC `/u/:token` handler: both suppression
     /// stores get the canonical lowercased address, `used_at` is stamped,
     /// and a replay stays idempotent.
+    ///
+    /// FIXED (batch 2, F39): the redemption happens on the CONFIRMED POST
+    /// (`/u/:token/confirm`); the prefetchable GET is side-effect free and
+    /// only renders the confirmation form.
     #[tokio::test]
     async fn v2_opaque_token_redeems_through_the_public_handler() {
         let Some(db) = crate::test_db::canonical_test_pool("unsub_v2_http").await else {
@@ -2767,9 +2899,44 @@ mod tests {
             "v2 tokens are not v1 dot-separated payloads"
         );
 
+        // FIXED (batch 2, F39): GET renders the confirmation form and must
+        // suppress NOTHING (a prefetcher fetching the URL changes no state).
         let resp = app
             .clone()
             .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "confirmation page renders");
+        let confirmation = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let confirmation = String::from_utf8_lossy(&confirmation).to_string();
+        assert!(
+            confirmation.contains(r#"form method="POST""#) && confirmation.contains("/confirm"),
+            "GET must render the POST confirmation form, got: {confirmation}"
+        );
+        let pre_get_sup: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant_id)
+        .bind("v2.click@example.com")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(
+            pre_get_sup, 0,
+            "F39: a plain GET must not change consent"
+        );
+
+        // The confirmed POST suppresses (both stores, canonical address).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(format!("{url}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK, "branded page renders");
@@ -3928,9 +4095,11 @@ mod coverage_wave_routes {
         );
     }
 
-    /// A configured `SALES_UNSUBSCRIBE_REDIRECT_URL` replaces the branded
-    /// page: a GET unsubscribe still suppresses the address AND redirects to
-    /// the operator's target.
+    /// FIXED (batch 2, F39): GET /u/:token no longer suppresses — it renders
+    /// the side-effect-free confirmation form. A configured
+    /// `SALES_UNSUBSCRIBE_REDIRECT_URL` is honoured by the CONFIRM POST (the
+    /// consent-changing step): confirm → suppress → redirect to the
+    /// operator's target.
     #[tokio::test]
     async fn unsubscribe_get_redirects_to_the_configured_target_after_suppressing() {
         let Some(db) = crate::test_db::canonical_test_pool("routes_wave_unsub_redirect_db").await
@@ -3950,10 +4119,39 @@ mod coverage_wave_routes {
             .await
             .expect("v2 token");
 
+        // GET: the confirmation form (200 HTML), never a redirect, never a
+        // suppression.
         let resp = app
+            .clone()
             .oneshot(
                 Request::get(format!("/u/{token}"))
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "F39: the prefetchable GET must render the confirmation form"
+        );
+        let pre_confirm: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant)
+        .bind("clicker@example.com")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(pre_confirm, 0, "F39: GET must not suppress");
+
+        // POST confirm: suppression FIRST, then the redirect to the
+        // configured operator target.
+        let resp = app
+            .oneshot(
+                Request::post(format!("/u/{token}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
                     .unwrap(),
             )
             .await
@@ -5151,6 +5349,248 @@ mod coverage_wave_routes {
             .await;
         let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
             .bind(campaign_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
+    }
+
+    // ── Batch 1 (W2): browser-facing unsubscribe page contracts ──────────
+
+    /// Router over the CALLER'S pool so the contract tests can seed tokens
+    /// and assert side effects on the SAME database the app uses (mirrors
+    /// [`test_app_impl`]'s state construction).
+    async fn contract_app(pool: sqlx::PgPool) -> Router {
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("failed to create lazy test redis pool");
+        let state = AppState {
+            db: pool.clone(),
+            redis,
+            config: Default::default(),
+            crm: CrmBackend::postgres(pool.clone()),
+            enrichment: EnrichmentService::mock(),
+            campaigns: CampaignManager::new(10, pool.clone()),
+            dispatcher: None,
+            calendar: CalendarService::new(pool.clone()),
+            inbox: InboxManager::new(pool.clone()),
+            service_token: "test-key".into(),
+            rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(MessageStrategist::new(
+                pool,
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
+        };
+        router(state)
+    }
+
+    /// GATE G same-crate coverage: `unsubscribed_page()` is a private fn,
+    /// so the integration-tests error-page gate cannot render it. These
+    /// assertions mirror
+    /// integration-tests/tests/ui_error_page_consistency.rs for the sales
+    /// surface (shell + leak markers + sentence copy; the doctype is
+    /// accepted case-insensitively per HTML5).
+    #[test]
+    fn sales_unsubscribed_page_matches_the_error_page_shell_contract() {
+        let html = unsubscribed_page().0;
+        assert!(
+            html.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("<!doctype html>"),
+            "must start with an HTML5 doctype, got: {html}"
+        );
+        assert!(html.contains("lang=\"en\""), "must declare lang=\"en\"");
+        let title_start = html
+            .find("<title>")
+            .expect("must carry a <title>")
+            + "<title>".len();
+        let title_end = html[title_start..].find("</title>").expect("closed title");
+        assert!(
+            !html[title_start..title_start + title_end].trim().is_empty(),
+            "<title> must not be empty"
+        );
+        for marker in [
+            "panic",
+            "unwrap(",
+            "Backtrace",
+            "sqlx",
+            "postgres://",
+            "INTERNAL",
+            "serde_json",
+        ] {
+            assert!(!html.contains(marker), "leaks internal detail {marker:?}");
+        }
+        assert!(
+            !html.contains("<script"),
+            "the page must be script-free (CSP `script-src 'none'` elsewhere)"
+        );
+        assert!(
+            html.contains("Sorry to see you go!"),
+            "the closing copy must remain a complete sentence"
+        );
+    }
+
+    /// BATCH-2 FIX TARGET: the completion page renders no link back to a
+    /// safe path (`/` or `/login`) — the recipient hits a dead end.
+    #[test]
+    fn contract_sales_unsubscribed_page_offers_a_safe_path_back() {
+        let html = unsubscribed_page().0;
+        assert!(
+            html.contains("href=\"/\"") || html.contains("href=\"/login\""),
+            "BATCH-2 FIX TARGET: the sales unsubscribed page renders no link back \
+             to a safe path (/ or /login); add a back-link to `unsubscribed_page`."
+        );
+    }
+
+    /// BATCH-2 FIX TARGET: a browser hitting `GET /u/:token` with a bad or
+    /// expired token receives raw JSON (`{"error": ...}`), not an HTML page.
+    /// The contract: browser-facing unsubscribe errors render the HTML error
+    /// page. (The RFC 8058 one-click POST keeps its JSON contract — that is
+    /// a mail-client surface, not a browser.) RED until batch 2.
+    #[tokio::test]
+    async fn contract_sales_unsubscribe_errors_render_html_not_json() {
+        // Shape-invalid token: rejected BEFORE any database use, so the lazy
+        // (never-connecting) pool keeps this deterministic and offline.
+        let app = lazy_test_app();
+        let resp = app
+            .oneshot(
+                Request::get("/u/definitely-not-a-v2-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an invalid token must stay a client error"
+        );
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .map(|value| value.to_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        assert!(
+            content_type.starts_with("text/html"),
+            "BATCH-2 FIX TARGET: a browser unsubscribe FAILURE rendered content-type \
+             {content_type:?} — it must render the HTML error page (text/html), not raw JSON"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            body.starts_with(b"<!DOCTYPE html>") || body.starts_with(b"<!doctype html>"),
+            "the failure page must be an HTML document, got: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    /// BATCH-2 FIX TARGET: `GET /u/:token` with a VALID token suppresses the
+    /// recipient immediately and renders the completion page. The contract
+    /// (mirroring the tracking-service F39 flow): GET is side-effect free
+    /// and renders a plain-HTML POST confirmation form; only the confirmed
+    /// POST performs the suppression. RED until batch 2.
+    #[tokio::test]
+    async fn contract_sales_unsubscribe_get_is_side_effect_free_and_offers_confirmation() {
+        let Some(db) = crate::test_db::canonical_test_pool("contract_sales_unsub_get").await
+        else {
+            return;
+        };
+        let app = contract_app(db.clone()).await;
+        let tenant = "ten_b1salesget";
+        let email = "sales.get@example.com";
+        // Determinism hygiene (batch 2, F39 fix): the old GET-suppressing
+        // handler (and this test's own confirmed POST) leave rows on the
+        // SHARED scratch database for this fixed tenant — clear them so the
+        // assertions below hold on every run, not just the first. No
+        // contract assertion is changed.
+        let _ = sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant)
+            .bind(email)
+            .execute(&db)
+            .await;
+        let token = crate::dispatcher::create_unsubscribe_token(&db, tenant, email)
+            .await
+            .expect("v2 unsubscribe token");
+
+        // GET must render a confirmation form and change nothing.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/u/{token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .map(|value| value.to_str().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        assert!(
+            content_type.starts_with("text/html"),
+            "GET must render HTML, got content-type {content_type:?}"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&body).to_string();
+        assert!(
+            body.contains("form method=\"POST\"") && body.contains("/confirm"),
+            "BATCH-2 FIX TARGET: GET /u/:token performed the unsubscribe immediately \
+             and rendered the completion page; it must render a side-effect-free HTML \
+             confirmation form (POST to a confirm path). Body: {body}"
+        );
+
+        let suppression_count = |db: &sqlx::PgPool| {
+            let db = db.clone();
+            async move {
+                let (count,): (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
+                        .bind(tenant)
+                        .bind(email)
+                        .fetch_one(&db)
+                        .await
+                        .expect("suppression lookup");
+                count
+            }
+        };
+
+        assert_eq!(
+            suppression_count(&db).await,
+            0,
+            "BATCH-2 FIX TARGET: GET /u/:token created a suppression row — a plain link \
+             click (or prefetcher) must never change consent; only a confirmed POST may"
+        );
+
+        // POST with the confirmation performs the unsubscribe.
+        let resp = app
+            .oneshot(
+                Request::post(format!("/u/{token}/confirm"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("confirm=true"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "BATCH-2 FIX TARGET: the confirmed POST (POST /u/:token/confirm with \
+             confirm=true) must perform the unsubscribe and render the completion page"
+        );
+        assert_eq!(
+            suppression_count(&db).await,
+            1,
+            "the confirmed POST must persist the suppression"
+        );
+
+        // Determinism hygiene (batch 2): leave no rows for the next run on
+        // the shared scratch database.
+        let _ = sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant)
+            .bind(email)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant)
             .execute(&db)
             .await;
     }

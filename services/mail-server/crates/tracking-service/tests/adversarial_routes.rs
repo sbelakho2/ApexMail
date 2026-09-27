@@ -1015,15 +1015,28 @@ async fn prefs_post_survives_database_faults() {
         .generate_preferences_token(&tenant, recipient)
         .expect("prefs token");
 
-    // (a) A token that fails the shape check → 400 JSON, never a panic.
+    // (a) A token that fails the shape check → 400, never a panic.
+    //     FIXED (batch 2): the prefs POST is a browser form surface — the
+    //     failure renders the branded HTML error page (was raw JSON
+    //     `{"error":"Invalid token"}`); the status stays a client error.
     let response = srv
         .post("/p/not$$a$$valid$$shape")
         .form(&[("category_marketing", "false")])
         .await;
     assert_eq!(response.status_code().as_u16(), 400);
-    assert!(response.text().contains("Invalid token"));
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/html"),
+        "browser-facing prefs failures must render HTML (batch 2)"
+    );
+    assert!(response.text().contains("Invalid or expired preferences link"));
 
-    // (b) Dead database: BEGIN fails → 500 JSON.
+    // (b) Dead database: BEGIN fails → 500 HTML error page (batch 2: was
+    //     raw JSON; status preserved).
     let dead_db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(50))
@@ -1083,7 +1096,8 @@ async fn prefs_post_survives_database_faults() {
         .await
         .unwrap();
 
-    // (d) Table gone: the batch UPDATE fails → 500 JSON.
+    // (d) Table gone: the batch UPDATE fails → 500 HTML error page
+    //     (batch 2: was raw JSON; status preserved).
     sqlx::query("DROP TABLE subscription_preferences CASCADE")
         .execute(&db)
         .await

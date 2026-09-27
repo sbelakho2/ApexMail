@@ -190,8 +190,9 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static 
 ///   attribution success; the recipient's unsubscribe still works through
 ///   the legacy token paths.
 /// * The URL feeds the `List-Unsubscribe` header (plus
-///   `List-Unsubscribe-Post: Yes` — the tracking-service serves RFC 8058
-///   one-click POST on the same route) and `{{unsubscribe_url}}`
+///   `List-Unsubscribe-Post: List-Unsubscribe=One-Click` — the RFC 8058 §3
+///   literal, fixed in batch 2; the tracking-service serves the one-click
+///   POST on the same route) and `{{unsubscribe_url}}`
 ///   placeholders in the caller's HTML/text bodies.
 /// * The sales-autopilot unsubscribe format is deliberately separate and is
 ///   not touched here.

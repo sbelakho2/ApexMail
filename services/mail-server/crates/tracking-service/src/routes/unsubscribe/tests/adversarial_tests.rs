@@ -500,7 +500,9 @@ async fn preferences_center_round_trips_consent_and_validates_hostile_payloads()
             .expect("pref count");
     assert_eq!(count, 2, "hostile payloads wrote nothing");
 
-    // (5) POST with an invalid token → 400 JSON.
+    // (5) POST with an invalid token → 400 HTML error page (batch 2: the
+    //     preferences POST is a browser form surface — the old contract
+    //     answered raw JSON; status stays a client error).
     let resp = srv
         .post(&format!("/p/{}", "Q".repeat(40)))
         .form(&[("unsubscribe_all", "true")])
