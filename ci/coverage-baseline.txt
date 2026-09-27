@@ -1,3 +1,4 @@
+95.61
 # ApexMail workspace line-coverage baseline (ratchet) — read by
 # ci/stages/test.sh run_coverage_gate after `cargo llvm-cov nextest
 # --workspace` (lcov artifact lands in the run dir). BELOW this number =
@@ -91,4 +92,18 @@
 # backups impossible in ha (allowlist mismatch), the oldest-unresolved
 # overage metric folding with .min(), and a silently-lossy shared-keyspace
 # test guard.
-95.59
+
+# 2026-09-27 (ui/ux campaign): raised 95.59 → 95.61 after the UI/UX CI
+# campaign measured 95.6112% over 11,034 tests (all green, 0 skipped,
+# 0 TIMEOUT, instrumented at the new nextest cap 8). The campaign shipped
+# the ui CI stage (six advisory gates: flash copy, form hygiene, a11y,
+# links, terminology, strings catalog), the ui-foundation gate suite
+# (goldens for every web/CP route, one-application chrome, form hygiene,
+# link integrity), error-page/email/service-page contract tests, and the
+# fixes they demanded: the never-succeeding list edit flow, the fabricated
+# list detail page, honest billing flashes, branded HTML instead of raw
+# JSON at every middleware boundary, one unsubscribe contract everywhere
+# (sales GET no longer mutates consent; RFC 8058 one-click header), labeled
+# form controls, single <main>/h1 landmarks, per-page titles, and honest
+# static fallbacks.
+
