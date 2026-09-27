@@ -13,9 +13,13 @@ slow-timeout = { period = "1800s", terminate-after = 2 }
 # acquire timeout (observed as ~150 sales-autopilot tests failing at
 # exactly 60.0 s in one wave). 12 keeps worst-case demand inside the
 # server limit; on CI runners with fewer cores this cap is inert (it only
-# lowers, never raises, the natural parallelism).
+# lowers, never raises, the natural parallelism). 12 fit the plain runs but
+# INSTRUMENTED (llvm-cov) tests hold their pool connections 3-5x longer, so
+# worst-case concurrent demand crested max_connections=100 and fixtures
+# died at admin-connect; 8 keeps the instrumented worst case inside the
+# limit with margin.
 [test-groups]
-all-tests = { max-threads = 12 }
+all-tests = { max-threads = 8 }
 
 [[profile.default.overrides]]
 filter = 'all()'
