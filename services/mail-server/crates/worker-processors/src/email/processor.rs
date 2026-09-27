@@ -11589,8 +11589,13 @@ mod orchestration_tests {
             let processor = Arc::clone(&processor);
             async move { processor.poll_loop().await }
         });
+        // Generous on purpose: this is SETUP for the shutdown-latency
+        // property below, not a property itself. Under a loaded machine the
+        // loop's first poll (pool warmup + queries) can exceed a small
+        // window; what the test proves is that once parked, shutdown breaks
+        // in < 5 s instead of the 60 s poll interval.
         assert!(
-            wait_until(Duration::from_secs(5), || processor.backpressure.backlog()
+            wait_until(Duration::from_secs(30), || processor.backpressure.backlog()
                 == 0)
             .await,
             "the loop must reach the empty-queue park"
