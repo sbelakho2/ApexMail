@@ -4006,6 +4006,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tracing-subscriber",
+ "tracking-service",
  "ui-foundation",
  "uuid",
  "waf-engine",
