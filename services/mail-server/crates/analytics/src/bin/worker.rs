@@ -113,7 +113,6 @@ async fn main() -> anyhow::Result<()> {
     // Compaction task (runs at configured hour, default 2 AM)
     // Uses exponential backoff on failure to avoid tight retry loops (M-48).
     let compaction_handle = tokio::spawn(async move {
-        const MAX_BACKOFF_SECS: u64 = 3600; // 1 hour cap
         let mut backoff: u64 = 30; // 30s initial
 
         loop {
@@ -145,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => {
                         error!("Compaction failed: {e}, retrying in {backoff}s");
                         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
+                        backoff = backoff_after_failure(backoff);
                         continue; // skip the long sleep, retry sooner
                     }
                 }
@@ -157,7 +156,6 @@ async fn main() -> anyhow::Result<()> {
     // Uses exponential backoff on failure to avoid tight retry loops (M-48).
     let reconciliation_config = config.reconciliation.clone();
     let reconciliation_handle = tokio::spawn(async move {
-        const MAX_BACKOFF_SECS: u64 = 3600; // 1 hour cap
         let mut backoff: u64 = 30; // 30s initial
 
         loop {
@@ -187,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => {
                         error!("Reconciliation failed: {e}, retrying in {backoff}s");
                         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
+                        backoff = backoff_after_failure(backoff);
                         continue; // skip the long sleep, retry sooner
                     }
                 }
@@ -263,4 +261,89 @@ fn next_scheduled_time(
     now + TimeDelta::try_hours(hours_until as i64).unwrap_or(TimeDelta::zero())
         - TimeDelta::try_minutes(now.minute() as i64).unwrap_or(TimeDelta::zero())
         - TimeDelta::try_seconds(now.second() as i64).unwrap_or(TimeDelta::zero())
+}
+
+/// Backoff before the next retry after a scheduled task failure (M-48):
+/// the wait doubles per consecutive failure, capped at one hour, so a
+/// persisted outage must degrade into slow retries instead of a tight loop.
+fn backoff_after_failure(current_backoff_secs: u64) -> u64 {
+    const MAX_BACKOFF_SECS: u64 = 3600; // 1 hour cap
+    (current_backoff_secs * 2).min(MAX_BACKOFF_SECS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    // ── next_scheduled_time: the scheduler's clock arithmetic ──────────
+
+    #[test]
+    fn schedules_at_the_target_hour_later_today() {
+        // 01:15:30 with a 02:00 target → today 02:00:00.
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 1, 15, 30).unwrap();
+        let next = next_scheduled_time(now, 2);
+        assert_eq!(
+            next,
+            Utc.with_ymd_and_hms(2026, 9, 21, 2, 0, 0).unwrap(),
+            "minutes and seconds must be truncated away"
+        );
+    }
+
+    #[test]
+    fn schedules_tomorrow_when_the_target_hour_already_passed() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 4, 0, 1).unwrap();
+        let next = next_scheduled_time(now, 2);
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 9, 22, 2, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn schedules_exactly_one_day_out_when_running_at_the_target_hour() {
+        // The tick that fires at 02:00:00 must not schedule 0s ahead.
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 2, 0, 0).unwrap();
+        let next = next_scheduled_time(now, 2);
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 9, 22, 2, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn handles_the_last_hour_of_the_day() {
+        // 23:xx with a 02:00 target crosses midnight: 24 - 23 + 2 = 3h.
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 23, 59, 59).unwrap();
+        let next = next_scheduled_time(now, 2);
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 9, 22, 2, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn handles_hour_zero_target() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 21, 13, 45, 10).unwrap();
+        let next = next_scheduled_time(now, 0);
+        assert_eq!(next, Utc.with_ymd_and_hms(2026, 9, 22, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn always_schedules_at_least_seconds_into_the_future() {
+        // Sub-minute times are truncated: the delay is never negative, and
+        // a within-the-target-hour run lands on the next day's slot.
+        for hour in 0..24u32 {
+            let now = Utc.with_ymd_and_hms(2026, 9, 21, hour, 59, 59).unwrap();
+            let next = next_scheduled_time(now, hour);
+            assert!(
+                next > now,
+                "hour {hour}: the next run must be in the future (next={next}, now={now})"
+            );
+        }
+    }
+
+    // ── backoff_after_failure: the M-48 no-tight-loop contract ─────────
+
+    #[test]
+    fn backoff_doubles_and_caps_at_one_hour() {
+        let mut backoff = 30;
+        let mut seen = vec![backoff];
+        for _ in 0..8 {
+            backoff = backoff_after_failure(backoff);
+            seen.push(backoff);
+        }
+        assert_eq!(seen, vec![30, 60, 120, 240, 480, 960, 1920, 3600, 3600]);
+    }
 }

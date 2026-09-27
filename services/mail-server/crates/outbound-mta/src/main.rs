@@ -20,6 +20,9 @@
 //! | `OUTBOUND_MTA_POLL_SECS` | `5` | queue sweep interval |
 //! | `OUTBOUND_MTA_BATCH_SIZE` | `100` | rows claimed per sweep |
 //! | `OUTBOUND_MTA_MAX_ATTEMPTS` | `12` | retry ceiling |
+//!
+//! SIGINT and SIGTERM both trigger the graceful drain (container runtimes
+//! stop daemons with SIGTERM).
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,7 +42,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{error, info};
 
 use outbound_mta::ledger::{PgLedger, RelayLedger};
-use outbound_mta::mx::DnsMxResolver;
+use outbound_mta::mx::{DnsMxResolver, MxResolver};
 use outbound_mta::{Relay, RelayConfig};
 
 #[derive(Debug)]
@@ -299,19 +302,132 @@ async fn main() -> Result<()> {
         .context("failed to connect to DATABASE_URL")?;
     let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool.clone()));
     let resolver = Arc::new(DnsMxResolver::new().context("failed to build the MX resolver")?);
-    let relay = Arc::new(Relay::new(ledger.clone(), resolver, config.relay.clone()));
+    run(config, pool, ledger, resolver, shutdown_signal()).await
+}
+
+/// Await SIGINT or SIGTERM. Split out of `run` so the shutdown contract is
+/// observable: container runtimes stop daemons with SIGTERM, so listening
+/// only for SIGINT (ctrl_c) would skip the drain entirely — in-flight
+/// delivery attempts killed mid-DATA, the health server never closed and
+/// held leases left to expire on their own.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(error) => {
+                error!(%error, "failed to install SIGTERM handler; falling back to SIGINT only");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => info!("SIGINT received — shutting down"),
+        _ = terminate => info!("SIGTERM received — shutting down"),
+    }
+}
+
+/// Assemble the health router. Extracted so the endpoint contract is
+/// assertable without a live process.
+fn build_router(app_state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(healthz))
+        .route("/metrics", get(metrics))
+        .with_state(app_state)
+}
+
+/// One queue sweep: reclaim expired leases, deliver due rows, then project
+/// daemon acceptances onto the worker acceptance ledger. Every failure
+/// increments the error counter — a broken sweep must be visible in
+/// /metrics, never silently swallowed.
+async fn sweep_once(
+    relay: &Relay,
+    pool: &sqlx::PgPool,
+    counters: &Counters,
+    batch_size: i64,
+) {
+    let now = Utc::now();
+    if let Err(error) = relay.reclaim_expired(now).await {
+        counters.errors.fetch_add(1, Ordering::Relaxed);
+        error!(%error, "failed to reclaim expired delivery leases");
+    }
+    match relay.process_due(now, batch_size).await {
+        Ok(report) => {
+            counters.claimed.fetch_add(report.claimed, Ordering::Relaxed);
+            counters.accepted.fetch_add(report.accepted, Ordering::Relaxed);
+            counters.retry_scheduled.fetch_add(report.retry_scheduled, Ordering::Relaxed);
+            counters.permanently_failed.fetch_add(report.permanently_failed, Ordering::Relaxed);
+            counters.errors.fetch_add(report.errors, Ordering::Relaxed);
+            if report.claimed > 0 {
+                info!(
+                    claimed = report.claimed,
+                    accepted = report.accepted,
+                    retry_scheduled = report.retry_scheduled,
+                    permanently_failed = report.permanently_failed,
+                    "outbound queue sweep complete"
+                );
+            }
+        }
+        Err(error) => {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+            error!(%error, "outbound queue sweep failed");
+        }
+    }
+
+    // Ledger→acceptance projection: a send the DAEMON accepted
+    // must not wait for the worker to happen to retry before
+    // the application learns SMTP already accepted it.
+    match outbound_mta::reconcile::reconcile_acceptances(pool).await {
+        Ok(reconciled) => {
+            if !reconciled.is_empty() {
+                counters
+                    .reconciled
+                    .fetch_add(reconciled.len() as u64, Ordering::Relaxed);
+                info!(
+                    count = reconciled.len(),
+                    "projected daemon acceptances onto the worker acceptance ledger"
+                );
+            }
+        }
+        Err(error) => {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+            error!(%error, "acceptance reconciliation sweep failed");
+        }
+    }
+}
+
+/// Serve the queue relay until `shutdown` resolves. Split out of `main` so
+/// the startup sequence (bind, spawn, sweep loop, drain) is exercisable by
+/// tests with a stub ledger and an injected shutdown — the production `main`
+/// passes [`shutdown_signal`].
+async fn run(
+    config: DaemonConfig,
+    pool: sqlx::PgPool,
+    ledger: Arc<dyn RelayLedger>,
+    resolver: Arc<dyn MxResolver>,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<()> {
+    let relay = Arc::new(Relay::new(
+        Arc::clone(&ledger),
+        resolver,
+        config.relay.clone(),
+    ));
     let counters = Arc::new(Counters::default());
 
     let app_state = AppState {
         started_at: Utc::now(),
-        ledger: Arc::clone(&ledger),
+        ledger,
         counters: Arc::clone(&counters),
     };
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(healthz))
-        .route("/metrics", get(metrics))
-        .with_state(app_state);
+    let app = build_router(app_state);
     let listener = tokio::net::TcpListener::bind(config.health_addr)
         .await
         .with_context(|| format!("failed to bind health listener on {}", config.health_addr))?;
@@ -329,62 +445,16 @@ async fn main() -> Result<()> {
 
     let mut interval = tokio::time::interval(config.poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("shutdown signal received");
                 break;
             }
             _ = interval.tick() => {
                 counters.sweeps.fetch_add(1, Ordering::Relaxed);
-                let now = Utc::now();
-                if let Err(error) = relay.reclaim_expired(now).await {
-                    counters.errors.fetch_add(1, Ordering::Relaxed);
-                    error!(%error, "failed to reclaim expired delivery leases");
-                }
-                match relay.process_due(now, config.batch_size).await {
-                    Ok(report) => {
-                        counters.claimed.fetch_add(report.claimed, Ordering::Relaxed);
-                        counters.accepted.fetch_add(report.accepted, Ordering::Relaxed);
-                        counters.retry_scheduled.fetch_add(report.retry_scheduled, Ordering::Relaxed);
-                        counters.permanently_failed.fetch_add(report.permanently_failed, Ordering::Relaxed);
-                        counters.errors.fetch_add(report.errors, Ordering::Relaxed);
-                        if report.claimed > 0 {
-                            info!(
-                                claimed = report.claimed,
-                                accepted = report.accepted,
-                                retry_scheduled = report.retry_scheduled,
-                                permanently_failed = report.permanently_failed,
-                                "outbound queue sweep complete"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        counters.errors.fetch_add(1, Ordering::Relaxed);
-                        error!(%error, "outbound queue sweep failed");
-                    }
-                }
-
-                // Ledger→acceptance projection: a send the DAEMON accepted
-                // must not wait for the worker to happen to retry before
-                // the application learns SMTP already accepted it.
-                match outbound_mta::reconcile::reconcile_acceptances(&pool).await {
-                    Ok(reconciled) => {
-                        if !reconciled.is_empty() {
-                            counters
-                                .reconciled
-                                .fetch_add(reconciled.len() as u64, Ordering::Relaxed);
-                            info!(
-                                count = reconciled.len(),
-                                "projected daemon acceptances onto the worker acceptance ledger"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        counters.errors.fetch_add(1, Ordering::Relaxed);
-                        error!(%error, "acceptance reconciliation sweep failed");
-                    }
-                }
+                sweep_once(relay.as_ref(), &pool, counters.as_ref(), config.batch_size).await;
             }
         }
     }
@@ -404,6 +474,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use outbound_mta::ledger::{ClaimOutcome, LedgerError, QueuedSubmission};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -434,6 +505,10 @@ mod tests {
     #[derive(Default)]
     struct StubLedger {
         fail: bool,
+        /// Sweep-loop observability: how many times the daemon's tick called
+        /// reclaim/claim against this ledger.
+        reclaims: std::sync::atomic::AtomicUsize,
+        claims: std::sync::atomic::AtomicUsize,
     }
 
     #[async_trait]
@@ -456,6 +531,8 @@ mod tests {
             _lease: Duration,
             _limit: i64,
         ) -> Result<Vec<QueuedSubmission>, LedgerError> {
+            self.claims
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(Vec::new())
         }
 
@@ -499,6 +576,8 @@ mod tests {
         }
 
         async fn reclaim_expired(&self, _now: DateTime<Utc>) -> Result<u64, LedgerError> {
+            self.reclaims
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(0)
         }
 
@@ -629,7 +708,10 @@ mod tests {
         assert_eq!(json["queue"]["accepted"], 5);
         assert_eq!(json["queue"]["pending"], 3);
 
-        let degraded = state(Arc::new(StubLedger { fail: true }));
+        let degraded = state(Arc::new(StubLedger {
+            fail: true,
+            ..StubLedger::default()
+        }));
         let response = healthz(State(degraded)).await.into_response();
         assert_eq!(
             response.status(),
@@ -648,5 +730,374 @@ mod tests {
                 .contains("ledger is down"),
             "json: {json}"
         );
+    }
+
+    // ── /metrics contract ──────────────────────────────────────────────────
+
+    fn counter_value(body: &str, name: &str) -> Option<i64> {
+        // Prometheus text: the sample line is `name value` after the HELP/TYPE
+        // preamble; match the exact sample, not a HELP mention.
+        body.lines()
+            .filter(|line| line.starts_with(name))
+            .next_back()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// The scrape must carry every gauge and every counter with a HELP/TYPE
+    /// preamble — a missing series silently breaks the pending-oldest-age
+    /// SLO alert (deploy/alerting-rules.yml).
+    #[tokio::test]
+    async fn metrics_exposes_queue_gauges_and_all_counters() {
+        let response = metrics(State(state(Arc::new(StubLedger::default()))))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .expect("content-type")
+            .to_str()
+            .expect("ascii");
+        assert_eq!(content_type, "text/plain; version=0.0.4");
+
+        let body = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .expect("body");
+        let body = std::str::from_utf8(&body).expect("utf8");
+        for name in [
+            "apexmail_outbound_mta_queue_pending",
+            "apexmail_outbound_mta_queue_delivering",
+            "apexmail_outbound_mta_queue_accepted",
+            "apexmail_outbound_mta_queue_failed",
+            "apexmail_outbound_mta_pending_oldest_age_seconds",
+            "apexmail_outbound_mta_sweeps_total",
+            "apexmail_outbound_mta_reconciled_total",
+            "apexmail_outbound_mta_claimed_total",
+            "apexmail_outbound_mta_accepted_total",
+            "apexmail_outbound_mta_retry_scheduled_total",
+            "apexmail_outbound_mta_permanently_failed_total",
+            "apexmail_outbound_mta_errors_total",
+        ] {
+            assert!(
+                body.contains(&format!("# HELP {name} ")),
+                "{name} must have a HELP line:\n{body}"
+            );
+            assert!(
+                body.contains(&format!("# TYPE {name} ")),
+                "{name} must have a TYPE line:\n{body}"
+            );
+            assert!(
+                counter_value(body, name).is_some(),
+                "{name} must have a sample line:\n{body}"
+            );
+        }
+        // Stub values flow through verbatim.
+        assert_eq!(
+            counter_value(body, "apexmail_outbound_mta_queue_pending"),
+            Some(3)
+        );
+        assert_eq!(
+            counter_value(body, "apexmail_outbound_mta_pending_oldest_age_seconds"),
+            Some(42)
+        );
+    }
+
+    /// A ledger outage must be visible in scrape output (`ledger_up 0`),
+    /// never masked as an empty queue — an empty queue and an unreadable
+    /// queue look identical to an alert without the sentinel.
+    #[tokio::test]
+    async fn metrics_reports_a_ledger_outage_instead_of_masking_it() {
+        let response = metrics(State(state(Arc::new(StubLedger {
+            fail: true,
+            ..StubLedger::default()
+        }))))
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65_536)
+            .await
+            .expect("body");
+        let body = std::str::from_utf8(&body).expect("utf8");
+        assert_eq!(
+            counter_value(body, "apexmail_outbound_mta_ledger_up"),
+            Some(0),
+            "the outage sentinel must read 0:\n{body}"
+        );
+        assert!(
+            body.contains("ledger is down"),
+            "the error text must be embedded as a comment:\n{body}"
+        );
+        assert!(
+            !body.contains("apexmail_outbound_mta_queue_pending"),
+            "queue gauges must be absent while the ledger is unreadable:\n{body}"
+        );
+        // Daemon counters still scrape.
+        assert_eq!(
+            counter_value(body, "apexmail_outbound_mta_sweeps_total"),
+            Some(0)
+        );
+    }
+
+    // ── run(): process orchestration ───────────────────────────────────────
+
+    struct StubResolver;
+
+    #[async_trait]
+    impl MxResolver for StubResolver {
+        async fn resolve(
+            &self,
+            _domain: &str,
+        ) -> Result<Vec<outbound_mta::mx::MxTarget>, outbound_mta::mx::MxError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn reserve_addr() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("probe bind")
+            .local_addr()
+            .expect("addr")
+    }
+
+    fn test_database_url() -> Option<String> {
+        match std::env::var("TEST_DATABASE_URL") {
+            Ok(url) if !url.trim().is_empty() => Some(url),
+            _ => None,
+        }
+    }
+
+    fn daemon_config(health_addr: SocketAddr, poll_secs: u64, database_url: String) -> DaemonConfig {
+        DaemonConfig {
+            database_url,
+            health_addr,
+            poll_interval: Duration::from_secs(poll_secs),
+            batch_size: 100,
+            relay: RelayConfig::default(),
+        }
+    }
+
+    /// Minimal HTTP/1.0 GET over a raw socket — no client dependency needed
+    /// to assert the daemon's endpoint contract.
+    async fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<(u16, String)> {
+        let mut stream = tokio::net::TcpStream::connect(addr).await?;
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes(),
+            )
+            .await?;
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await?;
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let status: u16 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "no status line")
+            })?;
+        Ok((status, text))
+    }
+
+    /// The full startup sequence on an ephemeral port: /healthz and /readyz
+    /// answer from the live ledger, the sweep loop ticks (sweeps_total climbs
+    /// and the ledger observed reclaim+claim), and the injected shutdown
+    /// drains the HTTP server before `run` returns.
+    #[tokio::test]
+    async fn run_serves_endpoints_sweeps_and_shuts_down_cleanly() {
+        let Some(database_url) = test_database_url() else {
+            eprintln!("skipping: set TEST_DATABASE_URL to drive the daemon against Postgres");
+            return;
+        };
+        let ledger = Arc::new(StubLedger::default());
+        let addr = reserve_addr();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(run(
+            daemon_config(addr, 1, database_url),
+            // The pool is only used by the acceptance projection; the scratch
+            // database provides it.
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_database_url().expect("url"))
+                .await
+                .expect("pool"),
+            ledger.clone() as Arc<dyn RelayLedger>,
+            Arc::new(StubResolver),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        // Bounded readiness wait: a hung bind must fail the test, not hang it.
+        let mut health = None;
+        for _ in 0..150 {
+            match http_get(addr, "/healthz").await {
+                Ok((status, body)) if status == 200 => {
+                    health = Some(body);
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let health = health.expect("the daemon must answer /healthz within 3s");
+        assert!(health.contains("\"status\":\"ok\""), "{health}");
+        assert!(health.contains("\"service\":\"outbound-mta\""), "{health}");
+
+        let (status, ready) = http_get(addr, "/readyz").await.expect("readyz");
+        assert_eq!(status, 200, "readyz shares the health contract: {ready}");
+
+        // The sweep loop ran at least one tick and reached the ledger.
+        let mut metrics_body = String::new();
+        for _ in 0..150 {
+            if let Ok((200, body)) = http_get(addr, "/metrics").await {
+                metrics_body = body;
+                if counter_value(&metrics_body, "apexmail_outbound_mta_sweeps_total")
+                    .unwrap_or(0)
+                    >= 1
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            counter_value(&metrics_body, "apexmail_outbound_mta_sweeps_total").unwrap_or(0) >= 1,
+            "the sweep loop must tick:\n{metrics_body}"
+        );
+        assert!(
+            ledger.reclaims.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "every sweep must reclaim expired leases"
+        );
+        assert!(
+            ledger.claims.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "every sweep must claim due rows"
+        );
+
+        shutdown_tx.send(()).expect("daemon still running");
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run must finish within 10s of shutdown")
+            .expect("join");
+        assert!(result.is_ok(), "clean drain: {result:?}");
+
+        // The health port is released again — the server drained.
+        let rebinding = tokio::net::TcpListener::bind(addr).await;
+        assert!(rebinding.is_ok(), "the drained daemon must release its port");
+    }
+
+    /// Duplicate-instance conflict: a second daemon on the same health
+    /// address must refuse to start with an error naming the address, not
+    /// run half-alive without its endpoints.
+    #[tokio::test]
+    async fn run_refuses_to_start_when_the_health_port_is_taken() {
+        let Some(database_url) = test_database_url() else {
+            eprintln!("skipping: set TEST_DATABASE_URL to drive the daemon against Postgres");
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind(reserve_addr())
+            .await
+            .expect("occupy the port");
+        let addr = listener.local_addr().expect("addr");
+
+        let result = run(
+            daemon_config(addr, 3600, database_url),
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&test_database_url().expect("url"))
+                .await
+                .expect("pool"),
+            Arc::new(StubLedger::default()) as Arc<dyn RelayLedger>,
+            Arc::new(StubResolver),
+            std::future::pending(),
+        )
+        .await;
+
+        let error = result.expect_err("an occupied health port must refuse startup");
+        assert!(
+            error.to_string().contains("failed to bind health listener")
+                && error.to_string().contains(&addr.to_string()),
+            "error: {error}"
+        );
+    }
+
+    /// A broken acceptance projection must not take the daemon down and must
+    /// not be silent: the sweep error counter climbs in /metrics while
+    /// /healthz keeps answering from the (healthy) ledger.
+    #[tokio::test]
+    async fn run_survives_a_failing_acceptance_projection_and_counts_errors() {
+        let Some(database_url) = test_database_url() else {
+            eprintln!("skipping: set TEST_DATABASE_URL to drive the daemon against Postgres");
+            return;
+        };
+        let addr = reserve_addr();
+        // Lazy pool against a dead port: connect() succeeds, every real use
+        // fails — exactly what a Postgres outage mid-flight looks like.
+        let dead_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://apexmail:bad@127.0.0.1:1/none")
+            .expect("lazy pool never connects eagerly");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(run(
+            daemon_config(addr, 1, database_url),
+            dead_pool,
+            Arc::new(StubLedger::default()) as Arc<dyn RelayLedger>,
+            Arc::new(StubResolver),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        let mut metrics_body = String::new();
+        for _ in 0..300 {
+            if let Ok((200, body)) = http_get(addr, "/metrics").await {
+                metrics_body = body;
+                if counter_value(&metrics_body, "apexmail_outbound_mta_errors_total")
+                    .unwrap_or(0)
+                    >= 1
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            counter_value(&metrics_body, "apexmail_outbound_mta_errors_total").unwrap_or(0) >= 1,
+            "projection failures must surface in the error counter:\n{metrics_body}"
+        );
+        // The daemon is still alive: liveness reflects the ledger, which is
+        // healthy, even while a projection sweep is failing.
+        let (status, health) = http_get(addr, "/healthz").await.expect("healthz");
+        assert_eq!(status, 200, "the daemon must survive projection failures: {health}");
+
+        shutdown_tx.send(()).expect("daemon still running");
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("run must finish within 10s of shutdown")
+            .expect("join");
+        assert!(result.is_ok(), "clean drain: {result:?}");
+    }
+
+    /// SIGTERM (the container stop signal) must drain the daemon exactly
+    /// like SIGINT: a plain ctrl_c-only listener would be killed by the
+    /// default SIGTERM disposition mid-sweep.
+    #[tokio::test]
+    async fn shutdown_signal_fires_on_sigterm() {
+        // Installing the handler swaps the default disposition for this
+        // process; nextest runs every test in its own process, so no other
+        // test observes it.
+        let task = tokio::spawn(shutdown_signal());
+        // Give the handler a moment to install, then SIGTERM ourselves via
+        // the standard `kill` utility (no libc dependency).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let self_pid = std::process::id().to_string();
+        std::process::Command::new("kill")
+            .args(["-TERM", &self_pid])
+            .output()
+            .expect("kill utility");
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("shutdown_signal must complete on SIGTERM")
+            .expect("join");
     }
 }
