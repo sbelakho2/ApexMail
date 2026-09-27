@@ -916,14 +916,27 @@ async fn flush_success_persists_updates_stats_and_ingests_clickhouse() {
     assert_eq!(stats, (2, 1, 0), "batch unnest stats update applied");
 
     // ClickHouse ingest ran inside flush (awaited); the rows are queryable.
-    let ch_rows: Vec<(String, u64)> = live_clickhouse()
-        .query("SELECT event_type, count() FROM events WHERE tenant_id = ? GROUP BY event_type")
-        .bind(&tenant)
-        .fetch_all()
-        .await
-        .expect("clickhouse ingest query");
-    let by_type: std::collections::HashMap<String, u64> = ch_rows.into_iter().collect();
-    assert_eq!(by_type.get("opened"), Some(&2));
+    // The ingest's visibility is asynchronous on the ClickHouse side, so a
+    // single immediate query can race it under load: poll bounded before
+    // concluding the rows never landed.
+    let mut by_type: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for _ in 0..40 {
+        let ch_rows: Vec<(String, u64)> = live_clickhouse()
+            .query("SELECT event_type, count() FROM events WHERE tenant_id = ? GROUP BY event_type")
+            .bind(&tenant)
+            .fetch_all()
+            .await
+            .expect("clickhouse ingest query");
+        by_type = ch_rows.into_iter().collect();
+        if by_type.get("opened") == Some(&2)
+            && by_type.get("clicked") == Some(&1)
+            && by_type.get("unsubscribed") == Some(&1)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert_eq!(by_type.get("opened"), Some(&2), "ingest visibility: {by_type:?}");
     assert_eq!(by_type.get("clicked"), Some(&1));
     assert_eq!(by_type.get("unsubscribed"), Some(&1));
     live_clickhouse()

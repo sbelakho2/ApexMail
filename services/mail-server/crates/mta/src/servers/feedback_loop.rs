@@ -1555,10 +1555,26 @@ Original-Message-ID: <original@example.com>\r\n";
     pub(super) async fn fbl_read_reply(
         reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     ) -> String {
+        fbl_read_reply_bounded(reader, Duration::from_secs(30)).await
+    }
+
+    /// A reply read on an explicit bound. Virtual-time tests must pass a
+    /// bound far beyond every server timer: under `start_paused` the
+    /// client's timer participates in tokio's auto-advance, and a short
+    /// bound Elapses whenever the runtime goes idle before the real-socket
+    /// reply bytes land — under load the clock can jump to this timer
+    /// before the peer task ever got scheduled to write. 3600s is safely
+    /// beyond the server's own 30s/120s timers, which always win the
+    /// auto-advance race and drive the session; a genuinely wedged session
+    /// still panics, just on a bound no real timer precedes.
+    pub(super) async fn fbl_read_reply_bounded(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+        bound: Duration,
+    ) -> String {
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line))
+        tokio::time::timeout(bound, reader.read_line(&mut line))
             .await
-            .expect("reply must arrive within 30s")
+            .unwrap_or_else(|_| panic!("reply must arrive within {bound:?}"))
             .expect("read must not fail");
         line
     }
@@ -1567,9 +1583,16 @@ Original-Message-ID: <original@example.com>\r\n";
     pub(super) async fn fbl_read_full_reply(
         reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     ) -> String {
+        fbl_read_full_reply_bounded(reader, Duration::from_secs(30)).await
+    }
+
+    pub(super) async fn fbl_read_full_reply_bounded(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+        bound: Duration,
+    ) -> String {
         let mut full = String::new();
         loop {
-            let line = fbl_read_reply(reader).await;
+            let line = fbl_read_reply_bounded(reader, bound).await;
             let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
             full.push_str(&line);
             if !more {
