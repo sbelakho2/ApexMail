@@ -151,7 +151,11 @@ async fn main() -> Result<()> {
         let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
         builder
             .with_http_listener(metrics_addr)
-            .install_recorder()
+            // install(), NOT install_recorder(): in
+            // metrics-exporter-prometheus 0.16 install_recorder builds the
+            // recorder only and never starts the HTTP exporter, so the
+            // metrics port logs "ready" while refusing every scrape.
+            .install()
             .context("Failed to install Prometheus recorder")?;
         info!(%metrics_addr, "Prometheus metrics server ready");
     }

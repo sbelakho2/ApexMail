@@ -34,6 +34,14 @@ async fn main() -> anyhow::Result<()> {
         "loaded configuration"
     );
 
+    run(config).await
+}
+
+/// Wire up and serve the API server. Split out of `main` so the startup
+/// sequence (pools, AWS client, state, heartbeat, schedulers, metrics, bind,
+/// graceful drain) is a single reviewable unit; the black-box lifecycle tests
+/// drive it through the real binary.
+async fn run(config: Config) -> anyhow::Result<()> {
     // ── Query timeout ────────────────────────────────────────
     set_query_timeout(config.query_timeout_seconds);
     tracing::info!(
@@ -197,7 +205,11 @@ async fn main() -> anyhow::Result<()> {
             format!("0.0.0.0:{}", config.metrics_port).parse()?;
         metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(metrics_addr)
-            .install_recorder()
+            // install(), NOT install_recorder(): in
+            // metrics-exporter-prometheus 0.16 install_recorder builds the
+            // recorder only and never starts the HTTP exporter, so the
+            // metrics port logs "ready" while refusing every scrape.
+            .install()
             .map_err(|e| anyhow::anyhow!("failed to install Prometheus recorder: {e}"))?;
         tracing::info!(
             port = config.metrics_port,
@@ -303,5 +315,80 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("received Ctrl+C"),
         _ = terminate => tracing::info!("received SIGTERM"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes tests that mutate process environment variables.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn clear_bootstrap_env() {
+        std::env::remove_var("SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP");
+    }
+
+    #[test]
+    fn system_sender_bootstrap_is_opt_in_and_validates_its_value() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Absent → off: provisioning must never invent DNS state by default.
+        clear_bootstrap_env();
+        assert!(!system_sender_bootstrap_requested().expect("absent"));
+
+        for off in ["false", "0", "", "FALSE", "False"] {
+            std::env::set_var("SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP", off);
+            assert!(
+                !system_sender_bootstrap_requested().expect(off),
+                "{off} must not enable bootstrap"
+            );
+        }
+        for on in ["true", "1", "TRUE", "True"] {
+            std::env::set_var("SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP", on);
+            assert!(
+                system_sender_bootstrap_requested().expect(on),
+                "{on} must enable bootstrap"
+            );
+        }
+
+        // Garbage must fail fast, not silently mean "off".
+        std::env::set_var("SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP", "yes-please");
+        let error = system_sender_bootstrap_requested().expect_err("garbage must refuse");
+        assert!(
+            error.to_string().contains("must be true, false, 1, or 0"),
+            "error: {error}"
+        );
+
+        clear_bootstrap_env();
+    }
+
+    /// SIGTERM (the container stop signal) must trigger the graceful drain
+    /// exactly like Ctrl-C: the shutdown future is what axum's graceful
+    /// shutdown awaits.
+    #[tokio::test]
+    async fn shutdown_signal_fires_on_sigterm() {
+        let task = tokio::spawn(shutdown_signal());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .output()
+            .expect("kill utility");
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("shutdown_signal must complete on SIGTERM")
+            .expect("join");
+    }
+
+    /// With OTLP disabled the fallback JSON stdout subscriber is installed
+    /// and no guard is returned.
+    #[tokio::test]
+    async fn init_tracing_falls_back_to_json_logs_without_otlp() {
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        let guard = init_tracing();
+        assert!(
+            guard.is_none(),
+            "the fallback path must not produce an OTLP guard"
+        );
     }
 }

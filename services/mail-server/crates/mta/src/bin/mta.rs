@@ -75,7 +75,11 @@ async fn run_(
             format!("0.0.0.0:{}", config.metrics.port).parse()?;
         metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(metrics_addr)
-            .install_recorder()
+            // install(), NOT install_recorder(): in
+            // metrics-exporter-prometheus 0.16 install_recorder builds the
+            // recorder only and never starts the HTTP exporter, so the
+            // metrics port logs "ready" while refusing every scrape.
+            .install()
             .map_err(|error| anyhow::anyhow!("failed to start MTA metrics listener: {error}"))?;
         metrics::gauge!("apexmail_mta_info").set(1.0);
         info!(
@@ -999,13 +1003,19 @@ mod run_tests {
         let Some(db_url) = skip_if_no_db() else {
             return;
         };
-        let config = base_config(&db_url, &ports());
+        let mut config = base_config(&db_url, &ports());
+        // A generous grace makes the discrimination unambiguous: a
+        // no-listener run must return immediately; waiting out the grace
+        // would take 30 s, while a clean no-op exits in ~1 s even under a
+        // loaded machine (the old 5 s grace vs < 5 s assert tripped on
+        // scheduler jitter alone).
+        config.graceful_shutdown_timeout = 30;
         let started = std::time::Instant::now();
         run_(config, std::future::ready(()))
             .await
             .expect("no listeners, clean exit");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(10),
             "nothing to join: run_ must not wait out the grace period"
         );
     }

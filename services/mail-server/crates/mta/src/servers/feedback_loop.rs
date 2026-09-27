@@ -1556,9 +1556,9 @@ Original-Message-ID: <original@example.com>\r\n";
         reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     ) -> String {
         let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+        tokio::time::timeout(Duration::from_secs(30), reader.read_line(&mut line))
             .await
-            .expect("reply must arrive within 5s")
+            .expect("reply must arrive within 30s")
             .expect("read must not fail");
         line
     }
