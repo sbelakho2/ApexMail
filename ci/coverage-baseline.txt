@@ -63,3 +63,19 @@
 # errors (fail-closed now), the numeric-decode zero-latency/queue-health
 # endpoints, and INET-vs-TEXT enrichment joins.
 
+# 2026-09-27: raised 93.29 → 95.00 after the determinism + wave-5 campaign
+# measured 95.0052% over 10,777 tests (all green, 0 skipped, 0 TIMEOUT —
+# the first fully clean instrumented workspace run). The campaign fixed the
+# full-run infrastructure first (nextest test-group concurrency cap 12
+# against Postgres max_connections starvation; tracking-service tests moved
+# to their own Redis logical DB 8 with a retrying WAL reader; a duplicate
+# auth Redis DB; a test that had NEVER passed — a same-thread MutexGuard
+# re-lock deadlock hidden as a 3600s TIMEOUT behind a FAIL-only triage,
+# plus a mock whose path comparison never matched axum's slash-stripped
+# Path so phase 1 was a vacuous pass). Wave 5 added 88 adversarial tests
+# across api-server web.rs (15), mta (35), sales-autopilot (24),
+# worker-processors (14) and fixed three real production bugs: flash
+# cookies clobbered by HeaderMap::insert in form_logout and
+# form_impersonate_end, and sales add_recipients mutating the recipient
+# list behind a 400.
+95.00
