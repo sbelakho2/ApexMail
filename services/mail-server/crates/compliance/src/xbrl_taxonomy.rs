@@ -1271,6 +1271,9 @@ fn parse_document(location: &TaxonomyLocation, bytes: &[u8]) -> Result<RawDocume
             quick_xml::events::Event::Text(text) => {
                 parser.on_text(&text)?;
             }
+            quick_xml::events::Event::GeneralRef(reference) => {
+                parser.on_general_ref(&reference)?;
+            }
             quick_xml::events::Event::CData(text) => {
                 parser.on_cdata(&text)?;
             }
@@ -1620,6 +1623,28 @@ impl DocumentParser<'_> {
             .is_some()
         {
             let decoded = decode_text(text).map_err(|detail| self.malformed(detail))?;
+            self.label_buffer
+                .get_or_insert_with(String::new)
+                .push_str(&decoded);
+        }
+        Ok(())
+    }
+
+    /// quick-xml reports `&name;` / `&#N;` as its own event, separate from the
+    /// surrounding label text. Dropping the event would silently delete
+    /// characters from label content (`Total &amp; assets` would become
+    /// `Total  assets`), so the reference is decoded into the label buffer.
+    fn on_general_ref(
+        &mut self,
+        reference: &quick_xml::events::BytesRef<'_>,
+    ) -> Result<(), TaxonomyError> {
+        if self
+            .frames
+            .last()
+            .and_then(|frame| frame.label_resource.as_ref())
+            .is_some()
+        {
+            let decoded = decode_general_ref(reference).map_err(|detail| self.malformed(detail))?;
             self.label_buffer
                 .get_or_insert_with(String::new)
                 .push_str(&decoded);
@@ -2014,4 +2039,28 @@ fn decode_text(text: &quick_xml::events::BytesText<'_>) -> Result<String, String
     quick_xml::escape::unescape(&decoded)
         .map(|cow| cow.into_owned())
         .map_err(|error| format!("malformed entity reference: {error}"))
+}
+
+/// Decode one XML general entity reference (`&amp;`, `&#65;`, `&#x41;`).
+///
+/// The five predefined XML entities are resolved by name; numeric character
+/// references delegate to quick-xml. Any other (undefined) reference is an
+/// error — silently dropping it would corrupt the surrounding text.
+fn decode_general_ref(reference: &quick_xml::events::BytesRef<'_>) -> Result<String, String> {
+    match reference.resolve_char_ref() {
+        Ok(Some(character)) => return Ok(character.to_string()),
+        Ok(None) => {}
+        Err(error) => return Err(format!("malformed character reference: {error}")),
+    }
+    let name = reference
+        .decode()
+        .map_err(|error| format!("malformed entity reference: {error}"))?;
+    match name.as_ref() {
+        "amp" => Ok("&".to_string()),
+        "lt" => Ok("<".to_string()),
+        "gt" => Ok(">".to_string()),
+        "apos" => Ok("'".to_string()),
+        "quot" => Ok("\"".to_string()),
+        other => Err(format!("undefined entity reference &{other};")),
+    }
 }

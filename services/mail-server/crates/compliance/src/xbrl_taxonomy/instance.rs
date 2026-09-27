@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    collect_attributes, decode_text, AttributeSet, CalculationArc, DecimalAmount, DeclaredConcept,
-    NamespaceScope, NumericKind, PeriodType, QName, XbrlTaxonomy, XBRL_INSTANCE_NAMESPACE,
-    XBRL_LINKBASE_NAMESPACE, XBRL_XLINK_NAMESPACE,
+    collect_attributes, decode_general_ref, decode_text, AttributeSet, CalculationArc,
+    DecimalAmount, DeclaredConcept, NamespaceScope, NumericKind, PeriodType, QName, XbrlTaxonomy,
+    XBRL_INSTANCE_NAMESPACE, XBRL_LINKBASE_NAMESPACE, XBRL_XLINK_NAMESPACE,
 };
 
 // ---------------------------------------------------------------------------
@@ -268,6 +268,9 @@ pub fn parse_instance(xml: &str) -> Result<InstanceDocument, InstanceError> {
             }
             quick_xml::events::Event::Text(text) => {
                 parser.on_text(&text)?;
+            }
+            quick_xml::events::Event::GeneralRef(reference) => {
+                parser.on_general_ref(&reference)?;
             }
             quick_xml::events::Event::CData(text) => {
                 if parser.text_slot.is_some() {
@@ -519,6 +522,22 @@ impl InstanceParser {
         if self.text_slot.is_some() {
             let decoded =
                 decode_text(text).map_err(|detail| InstanceError::MalformedXml { detail })?;
+            self.text_buffer.push_str(&decoded);
+        }
+        Ok(())
+    }
+
+    /// quick-xml reports `&name;` / `&#N;` as its own event, separate from the
+    /// surrounding text. Dropping the event would silently delete characters
+    /// from fact values (`AT&amp;T` would become `ATT`), so the reference is
+    /// decoded into the pending text buffer.
+    fn on_general_ref(
+        &mut self,
+        reference: &quick_xml::events::BytesRef<'_>,
+    ) -> Result<(), InstanceError> {
+        if self.text_slot.is_some() {
+            let decoded = decode_general_ref(reference)
+                .map_err(|detail| InstanceError::MalformedXml { detail })?;
             self.text_buffer.push_str(&decoded);
         }
         Ok(())

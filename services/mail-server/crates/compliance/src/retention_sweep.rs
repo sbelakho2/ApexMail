@@ -605,9 +605,21 @@ impl RetentionSweeper {
                 // When the tenants table is known, every delete is
                 // tenant-scoped: the default-days group additionally owns
                 // NULL-tenant rows; a tenant-less deployment sweeps plainly.
+                // F5: while ANY legal hold is active, NULL-tenant rows are
+                // KEPT — they cannot be attributed, so they might belong to
+                // a held tenant (the same fall-back-to-keep rule
+                // `purge_with_hold_filter` applies to gdpr_exports and the
+                // DSR outbox).
+                let default_group_predicate = |held: &[String]| {
+                    if held.is_empty() {
+                        format!("{ts} < $1 AND (tenant_id IS NULL OR tenant_id = ANY($2))")
+                    } else {
+                        format!("{ts} < $1 AND tenant_id = ANY($2)")
+                    }
+                };
                 let (predicate, bind_ids) = match tenants {
                     Some(_) if days == &default_days => (
-                        format!("{ts} < $1 AND (tenant_id IS NULL OR tenant_id = ANY($2))"),
+                        default_group_predicate(&held_ids),
                         Some(ids.as_slice()),
                     ),
                     Some(_) => (
@@ -683,9 +695,14 @@ impl RetentionSweeper {
             sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
                 .execute(&mut *tx)
                 .await?;
+            // The LIMIT placeholder's ordinal follows the bound parameters:
+            // $3 when a tenant-id array is bound as $2, $2 otherwise. A fixed
+            // `LIMIT $3` leaves the tenant-less variant with an unbound
+            // parameter, failing EVERY batch in tenant-less deployments.
+            let limit_param = if uses_tenants { "$3" } else { "$2" };
             let sql = format!(
                 "DELETE FROM {table} WHERE ctid IN (
-                   SELECT ctid FROM {table} WHERE {predicate} LIMIT $3
+                   SELECT ctid FROM {table} WHERE {predicate} LIMIT {limit_param}
                  )"
             );
             let mut q = sqlx::query(&sql).bind(cutoff);

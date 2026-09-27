@@ -4222,3 +4222,826 @@ mod db_tests {
         assert!(!queue_entry_is_stale(&future, cutoff));
     }
 }
+
+// ─── Hostile DB-backed tests: state-machine violations and schema drift ─────
+//
+// These tests attack the DSR machinery the way a hostile deployment would:
+// required stores missing or locked down, hostile invoice snapshots,
+// malformed enum values in persisted rows, broken consent cascades, an
+// unreachable analytics store, and a CP mirror table that disappeared. Every
+// test pins an honest outcome: typed failures, retries, or partial reports —
+// never a silently successful claim.
+
+#[cfg(test)]
+mod hostile_db_tests {
+    use super::*;
+    use crate::test_support;
+    use crate::types::{ConsentSource, ConsentType, RequestStatus};
+
+    async fn hostile_db(suffix: &str) -> Option<PgPool> {
+        test_support::canonical_pool(&format!("gdpr_hostile_{suffix}"), &format!("gdpr_hostile_{suffix}"))
+            .await
+    }
+
+    fn automation_with(pool: PgPool, config: GdprConfig) -> GdprAutomation {
+        GdprAutomation::new(pool, test_support::redis_pool(), config)
+    }
+
+    fn config() -> GdprConfig {
+        test_support::gdpr_config()
+    }
+
+    fn config_with_max_messages(max: i64) -> GdprConfig {
+        let mut cfg = config();
+        cfg.access_request_max_messages = max;
+        cfg
+    }
+
+    /// Real broker when configured; the failing fake pool otherwise (workspace
+    /// convention: Redis-backed flows soft-skip their broker-only assertions).
+    fn broker() -> deadpool_redis::Pool {
+        match test_support::configured_redis() {
+            Some(pool) => pool,
+            None => test_support::redis_pool(),
+        }
+    }
+
+    fn redis_configured() -> bool {
+        test_support::configured_redis().is_some()
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query("INSERT INTO tenants (id, name, slug, plan) VALUES ($1, 'n', $1, 'free')")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("seed tenant");
+    }
+
+    async fn seed_request(
+        pool: &PgPool,
+        id: &str,
+        tenant: &str,
+        email: &str,
+        request_type: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                verified_at, status, requested_at, expires_at, received_at, statutory_due_at)
+             VALUES ($1, $2, $3, $4, 'hash', true, NOW(), 'verified', NOW(),
+                     NOW() + INTERVAL '30 days', NOW(), NOW() + INTERVAL '1 month')",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(request_type)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed request");
+    }
+
+    async fn request_row(
+        pool: &PgPool,
+        id: &str,
+    ) -> (String, Option<serde_json::Value>, Option<chrono::DateTime<Utc>>) {
+        sqlx::query_as(
+            "SELECT status, result, completed_at FROM data_subject_requests WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("request row")
+    }
+
+    // ── Extension clock (Art. 12(3)) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn extension_clock_demands_justification_and_is_recorded() {
+        let Some(pool) = hostile_db("extension").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+
+        // A request with a receipt and a persisted statutory clock.
+        let received = Utc::now() - TimeDelta::days(40);
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                verified_at, status, requested_at, expires_at, received_at, statutory_due_at)
+             VALUES ('REQ-ext', $1, 'access', 'ext@example.test', 'hash', true, NOW(),
+                     'verified', $2, $2 + INTERVAL '30 days', $2, $3)",
+        )
+        .bind(&tenant)
+        .bind(received)
+        .bind(statutory_due_at(received))
+        .execute(&pool)
+        .await
+        .expect("seed");
+
+        // Every unjustified or impossible extension is refused BEFORE any
+        // write happens.
+        assert!(gdpr
+            .extend_request("REQ-ext", "   ", Utc::now())
+            .await
+            .is_err(), "whitespace reason refused");
+        assert!(gdpr
+            .extend_request("REQ-ext", "too short", Utc::now())
+            .await
+            .is_err(), "a nine-character reason is not a justification");
+        assert!(gdpr
+            .extend_request("REQ-ext", "complex accounting records", received - TimeDelta::seconds(1))
+            .await
+            .is_err(), "notification cannot precede receipt");
+        assert!(gdpr
+            .extend_request("REQ-ext", "complex accounting records", Utc::now() + TimeDelta::minutes(6))
+            .await
+            .is_err(), "notification cannot be in the future");
+        let untouched: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT extension_due_at FROM data_subject_requests WHERE id = 'REQ-ext'")
+                .fetch_one(&pool)
+                .await
+                .expect("extension_due_at");
+        assert_eq!(untouched, None, "refused extensions must not write");
+
+        // A justified, notified extension moves the clock by exactly two
+        // further calendar months and is persisted.
+        let notified = Utc::now();
+        let extended = gdpr
+            .extend_request("REQ-ext", "complex accounting records", notified)
+            .await
+            .expect("valid extension");
+        let expected_due = extended_due_at(statutory_due_at(received));
+        assert_eq!(extended.extension_due_at, Some(expected_due));
+        assert_eq!(extended.extension_reason.as_deref(), Some("complex accounting records"));
+        let stored: (Option<chrono::DateTime<Utc>>, Option<String>) = sqlx::query_as(
+            "SELECT extension_due_at, extension_reason FROM data_subject_requests WHERE id = 'REQ-ext'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("stored extension");
+        assert_eq!(stored.0, Some(expected_due));
+        assert_eq!(stored.1.as_deref(), Some("complex accounting records"));
+
+        // The overdue decision reads the STORED clock: within the extension
+        // the request is not overdue; past it, only OPEN requests are.
+        assert!(!GdprAutomation::is_statutorily_overdue(&extended, Utc::now()));
+        assert!(GdprAutomation::is_statutorily_overdue(
+            &extended,
+            expected_due + TimeDelta::seconds(1)
+        ));
+        let mut done = extended.clone();
+        done.status = RequestStatus::Completed;
+        assert!(!GdprAutomation::is_statutorily_overdue(
+            &done,
+            expected_due + TimeDelta::days(1)
+        ), "a completed request is never overdue");
+        for status in [
+            RequestStatus::Rejected,
+            RequestStatus::Expired,
+            RequestStatus::Failed,
+        ] {
+            let mut terminal = extended.clone();
+            terminal.status = status;
+            assert!(!GdprAutomation::is_statutorily_overdue(
+                &terminal,
+                expected_due + TimeDelta::days(1)
+            ));
+        }
+        let mut no_clock = extended.clone();
+        no_clock.extension_due_at = None;
+        no_clock.statutory_due_at = None;
+        assert!(!GdprAutomation::is_statutorily_overdue(&no_clock, Utc::now()));
+
+        // Unknown request: an error, not a fabrication.
+        assert!(gdpr.extend_request("REQ-none", "complex accounting records", notified).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn request_without_receipt_cannot_extend_its_clock() {
+        let Some(pool) = hostile_db("extension_noclock").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        // The dsr_statutory_clock_present CHECK allows a NULL statutory due
+        // date only when the receipt is NULL too — a legacy row.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                status, requested_at, expires_at)
+             VALUES ('REQ-legacy', 't-legacy', 'erasure', 'legacy@example.test', 'hash',
+                     true, 'verified', NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy seed");
+        let error = gdpr
+            .extend_request("REQ-legacy", "complex accounting records", Utc::now())
+            .await
+            .expect_err("no receipt — no statutory clock to extend");
+        assert!(error.contains("receipt"), "{error}");
+    }
+
+    // ── Portability / partial exports / truncation ──────────────────────────
+
+    #[tokio::test]
+    async fn portability_export_reports_truncation_and_partial_stores() {
+        let Some(pool) = hostile_db("portability").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config_with_max_messages(1));
+        let tenant = test_support::unique_tenant();
+        let email = format!("port-{}@example.test", Uuid::new_v4().simple());
+        seed_request(&pool, "REQ-port", &tenant, &email, "portability").await;
+
+        // Two events: the export is capped at one → the manifest must say so.
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, 'delivered', $3, NOW())",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("event");
+        }
+
+        let result = gdpr
+            .process_request("REQ-port")
+            .await
+            .expect("portability processes like an access export");
+
+        // Truncation is explicit, never silent.
+        let data = result.data.expect("export data");
+        let manifest = &data["manifest"];
+        assert_eq!(manifest["truncated"], serde_json::json!(true), "{manifest}");
+        assert!(
+            manifest["truncation_note"]
+                .as_str()
+                .unwrap()
+                .contains("capped"),
+            "{manifest}"
+        );
+        assert_eq!(manifest["stores"]["events"]["records"], serde_json::json!(1));
+        // contact_list_members does not exist on the canonical chain: the
+        // store is reported skipped and the export is PARTIAL, not complete.
+        assert_eq!(
+            manifest["stores"]["contact_list_members"]["included"],
+            serde_json::json!(false)
+        );
+        assert_eq!(result.partial, Some(true));
+        let (status, completed, _) = request_row(&pool, "REQ-port").await;
+        assert_eq!(status, "partial", "a partial export must not claim completed");
+        assert!(completed.is_some());
+
+        // Tenant-owned resources are listed without being queried.
+        assert_eq!(
+            manifest["stores"]["api_keys"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("tenant-owned"),
+            true
+        );
+        assert_eq!(
+            manifest["stores"]["clickhouse_events"]["included"],
+            serde_json::json!(false)
+        );
+    }
+
+    // ── Required-store failures drive the retry machine ─────────────────────
+
+    #[tokio::test]
+    async fn required_invoice_failure_retries_then_fails_honestly() {
+        let Some(pool) = hostile_db("invoice_required").await else {
+            return;
+        };
+        let gdpr = GdprAutomation::new(pool.clone(), broker(), config());
+        let tenant = test_support::unique_tenant();
+        let email = format!("inv-{}@example.test", Uuid::new_v4().simple());
+        seed_request(&pool, "REQ-inv", &tenant, &email, "access").await;
+
+        // Invoices are a REQUIRED canonical store: revoke access to simulate
+        // a schema/permission outage. The export must FAIL (not skip).
+        sqlx::query("REVOKE SELECT ON invoices FROM CURRENT_USER")
+            .execute(&pool)
+            .await
+            .expect("revoke");
+
+        let first = gdpr.process_request("REQ-inv").await;
+        if redis_configured() {
+            // The retry state was durably recorded and the entry requeued.
+            let outcome = first.expect("retrying requests report Ok so the queue can ack");
+            assert_eq!(outcome.data.as_ref().unwrap()["retry_attempt"], serde_json::json!(1));
+            let (status, _, _) = request_row(&pool, "REQ-inv").await;
+            assert_eq!(status, "retrying");
+            let error = outcome.data.as_ref().unwrap()["error"].as_str().unwrap();
+            assert!(error.contains("invoices"), "{error}");
+        } else {
+            // Without a broker the requeue fails after the retry state was
+            // recorded — an explicit error, never a fake success.
+            assert!(first.is_err());
+            let (status, _, _) = request_row(&pool, "REQ-inv").await;
+            assert_eq!(status, "retrying");
+        }
+
+        let _ = gdpr.process_request("REQ-inv").await;
+        let _ = gdpr.process_request("REQ-inv").await;
+        let (status, result, completed) = request_row(&pool, "REQ-inv").await;
+        assert_eq!(status, "failed", "the third failure is terminal");
+        assert!(completed.is_some());
+        let result = result.expect("failure reason recorded");
+        assert_eq!(result["retry_attempt"], serde_json::json!(3));
+        assert!(result["error"].as_str().unwrap().contains("invoices"));
+
+        // The erasure side treats the same store as REQUIRED too: the
+        // snapshot anonymization fails loudly instead of skipping.
+        let request = gdpr.fetch_request("REQ-inv").await.unwrap().unwrap();
+        let outcome = gdpr
+            .erase_store(&request, ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" })
+            .await;
+        assert!(
+            matches!(outcome.status, StoreErasureStatus::Failed),
+            "invoices are required: {outcome:?}"
+        );
+        assert!(outcome.error.as_deref().unwrap_or("").contains("required store"));
+    }
+
+    // ── Invoice snapshot redaction (F82) ────────────────────────────────────
+
+    async fn seed_invoice(
+        pool: &PgPool,
+        tenant: &str,
+        snapshot: Option<&str>,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, billing_address, issued_at)
+             VALUES ($1, $2, 100, 'EUR', 'paid', $3, NOW() - INTERVAL '10 days')",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(snapshot)
+        .execute(pool)
+        .await
+        .expect("invoice");
+        id
+    }
+
+    #[tokio::test]
+    async fn invoice_snapshot_redaction_is_subject_scoped_and_archives_the_record() {
+        let Some(pool) = hostile_db("invoice_redact").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+        let email = format!("snap-{}@example.test", Uuid::new_v4().simple());
+
+        // The subject is a user of this tenant.
+        seed_tenant(&pool, &tenant).await;
+        sqlx::query("INSERT INTO users (tenant_id, email, password_hash) VALUES ($1, $2, 'x')")
+            .bind(&tenant)
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("user");
+
+        let matching = seed_invoice(
+            &pool,
+            &tenant,
+            Some(&format!(r#"{{"email": "{}", "city": "Tallinn"}}"#, email)),
+        )
+        .await;
+        // Mixed-case copy in another snapshot must match case-insensitively.
+        let mixed = seed_invoice(
+            &pool,
+            &tenant,
+            Some(&format!(r#"{{"email": "{}"}}"#, email.to_uppercase())),
+        )
+        .await;
+        let _no_snapshot = seed_invoice(&pool, &tenant, None).await;
+        let malformed = seed_invoice(&pool, &tenant, Some("{not json")).await;
+        let other_email = seed_invoice(
+            &pool,
+            &tenant,
+            Some(r#"{"email": "someone-else@example.test"}"#),
+        )
+        .await;
+
+        let request = DataSubjectRequest {
+            id: "REQ-snap".into(),
+            tenant_id: tenant.clone(),
+            request_type: DataSubjectRequestType::Erasure,
+            email: email.clone(),
+            verification_token_hash: String::new(),
+            verified: true,
+            verified_at: None,
+            status: RequestStatus::Verified,
+            requested_at: Utc::now(),
+            processed_at: None,
+            completed_at: None,
+            expires_at: Utc::now(),
+            result: None,
+            received_at: Some(Utc::now()),
+            identity_verified_at: None,
+            statutory_due_at: None,
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
+        };
+        let outcome = gdpr
+            .erase_store(&request, ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" })
+            .await;
+        assert!(
+            matches!(outcome.status, StoreErasureStatus::Anonymized),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.rows_affected, 2, "only the subject's snapshots are rewritten");
+
+        let marker = redact_marker(&email);
+        for (id, expected_marker) in [(matching, true), (mixed, true), (malformed, false), (other_email, false)] {
+            let snapshot: Option<String> =
+                sqlx::query_scalar("SELECT billing_address FROM invoices WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("snapshot");
+            match (expected_marker, snapshot) {
+                (true, Some(text)) => assert!(text.contains(&marker), "{text}"),
+                (true, None) => panic!("snapshot vanished for {id}"),
+                (false, Some(text)) => assert!(!text.contains(&marker), "{text}"),
+                (false, None) => {}
+            }
+        }
+        // The financial record survives; only the subject's PII was redacted.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 5, "no invoice row is deleted — only redacted");
+
+        // The redacted record was moved to the legally-restricted archive
+        // with its statutory expiry disclosed.
+        let archived: (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*), MIN(retention_class_id) FROM legal_retention_archive \
+             WHERE source_table = 'invoices' AND tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("archive");
+        assert_eq!(archived.0, 2, "both redacted invoices are archived");
+        assert!(!archived.1.is_empty());
+
+        // The ACCESS side mirrors the erasure map: the export includes the
+        // anonymized views (subject is a tenant user) with the marker and no
+        // residual subject email.
+        seed_request(&pool, "REQ-snap-access", &tenant, &email, "access").await;
+        let result = gdpr
+            .process_request("REQ-snap-access")
+            .await
+            .expect("access export");
+        let invoices = result.data.unwrap()["invoices"].clone();
+        let rendered = serde_json::to_string(&invoices).unwrap();
+        assert!(rendered.contains(&marker), "{rendered}");
+        assert!(!rendered.contains(&email), "{rendered}");
+        let count = invoices.as_array().unwrap().len();
+        assert_eq!(count, 5, "a tenant user's invoices are all disclosed (anonymized)");
+    }
+
+    #[tokio::test]
+    async fn invoice_export_without_tenant_userships_uses_the_snapshot_identity() {
+        let Some(pool) = hostile_db("invoice_snapshot_id").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+        let email = format!("bare-{}@example.test", Uuid::new_v4().simple());
+        // NO users row for this subject: ownership resolves ONLY through the
+        // billing-address snapshot.
+        seed_tenant(&pool, &tenant).await;
+        let theirs = seed_invoice(
+            &pool,
+            &tenant,
+            Some(&format!(r#"{{"email": "{}"}}"#, email)),
+        )
+        .await;
+        seed_invoice(&pool, &tenant, Some(r#"{"email": "z@example.test"}"#)).await;
+
+        seed_request(&pool, "REQ-bare", &tenant, &email, "access").await;
+        let result = gdpr.process_request("REQ-bare").await.expect("export");
+        let invoices = result.data.unwrap()["invoices"].as_array().unwrap().clone();
+        assert_eq!(invoices.len(), 1, "only the snapshot-matching invoice: {invoices:?}");
+        let rendered = serde_json::to_string(&invoices).unwrap();
+        assert!(rendered.contains(&redact_marker(&email)));
+        let _ = theirs;
+    }
+
+    #[tokio::test]
+    async fn ai_chat_delete_failure_is_best_effort_not_silent() {
+        let Some(pool) = hostile_db("chat_locked").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let email = format!("chat-{}@example.test", Uuid::new_v4().simple());
+        seed_tenant(&pool, "t-chat").await;
+        sqlx::query("INSERT INTO users (tenant_id, email, password_hash) VALUES ('t-chat', $1, 'x')")
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("user");
+        let request = DataSubjectRequest {
+            id: "REQ-chat".into(),
+            tenant_id: "t-chat".into(),
+            request_type: DataSubjectRequestType::Erasure,
+            email,
+            verification_token_hash: String::new(),
+            verified: true,
+            verified_at: None,
+            status: RequestStatus::Verified,
+            requested_at: Utc::now(),
+            processed_at: None,
+            completed_at: None,
+            expires_at: Utc::now(),
+            result: None,
+            received_at: Some(Utc::now()),
+            identity_verified_at: None,
+            statutory_due_at: None,
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
+        };
+        sqlx::query("REVOKE DELETE ON ai_chat_messages FROM CURRENT_USER")
+            .execute(&pool)
+            .await
+            .expect("revoke delete");
+        let outcome = gdpr.erase_store(&request, ErasureStore::AiChatByUserEmail).await;
+        assert!(
+            matches!(outcome.status, StoreErasureStatus::BestEffortFailed),
+            "a failed delete is best-effort, never skipped or deleted: {outcome:?}"
+        );
+        assert!(outcome.error.is_some());
+    }
+
+    // ── Expiry jobs and hostile persisted enum values ───────────────────────
+
+    #[tokio::test]
+    async fn expiry_jobs_sweep_only_what_passed_its_deadline() {
+        let Some(pool) = hostile_db("expiry").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+
+        // A pending_verification request past its expiry is expired.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                status, requested_at, expires_at)
+             VALUES ('REQ-exp-old', $1, 'access', 'old@example.test', 'hash', false,
+                     'pending_verification', NOW() - INTERVAL '40 days', NOW() - INTERVAL '1 day')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("old request");
+        // A verified request inside its window is untouched.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                status, requested_at, expires_at)
+             VALUES ('REQ-exp-new', $1, 'access', 'new@example.test', 'hash', true,
+                     'verified', NOW(), NOW() + INTERVAL '1 day')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("new request");
+
+        let expired = gdpr.expire_overdue_requests().await.expect("expire");
+        assert_eq!(expired, 1, "exactly the overdue pending request");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-old'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("status");
+        assert_eq!(status, "expired");
+        let still: String = sqlx::query_scalar(
+            "SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-new'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("status");
+        assert_eq!(still, "verified");
+
+        // Stale double-opt-in tokens are deleted; live ones stay.
+        sqlx::query(
+            "INSERT INTO double_opt_in_tokens
+               (tenant_id, subscriber_id, consent_type, email, token_hash, expires_at, created_at)
+             VALUES ($1, 'gone', 'marketing', 'gone@example.test', 'h', NOW() - INTERVAL '1 hour', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("stale token");
+        sqlx::query(
+            "INSERT INTO double_opt_in_tokens
+               (tenant_id, subscriber_id, consent_type, email, token_hash, expires_at, created_at)
+             VALUES ($1, 'live', 'marketing', 'live@example.test', 'h', NOW() + INTERVAL '1 hour', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("live token");
+        let purged = gdpr.expire_stale_opt_in_tokens().await.expect("purge");
+        assert_eq!(purged, 1);
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM double_opt_in_tokens WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("live count");
+        assert_eq!(live, 1);
+    }
+
+    #[tokio::test]
+    async fn hostile_persisted_enum_values_are_typed_errors_not_panics() {
+        let Some(pool) = hostile_db("enums").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                status, requested_at, expires_at)
+             VALUES ('REQ-bogus', $1, 'access', 'bogus@example.test', 'hash', true,
+                     'bogus_status', NOW(), NOW() + INTERVAL '1 day')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("bogus request");
+        // The row exists, but mapping the unknown persisted status must be a
+        // typed error, never a panic or a default.
+        let mapped = gdpr.fetch_request("REQ-bogus").await;
+        assert!(
+            mapped.is_err(),
+            "an unknown persisted status must be a typed error"
+        );
+
+        // Unknown consent type / source in a persisted row.
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, source, metadata)
+             VALUES (gen_random_uuid(), $1, 'weird', 'weird@example.test', 'telepathy', true, 'dream', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("weird consent");
+        let error = gdpr
+            .get_consent_records(&tenant, "weird")
+            .await
+            .expect_err("unknown consent type must be a typed error");
+        assert!(error.contains("telepathy"), "{error}");
+
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, source, metadata)
+             VALUES (gen_random_uuid(), $1, 'weird2', 'weird2@example.test', 'marketing', true, 'carrier_pigeon', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("weird source");
+        let error = gdpr
+            .get_consent_records(&tenant, "weird2")
+            .await
+            .expect_err("unknown source must be a typed error");
+        assert!(error.contains("carrier_pigeon"), "{error}");
+    }
+
+    // ── Consent cascade failures and certificate hostility ──────────────────
+
+    #[tokio::test]
+    async fn marketing_cascade_failure_is_propagated_not_swallowed() {
+        let Some(pool) = hostile_db("cascade").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let tenant = test_support::unique_tenant();
+
+        // A deployment-level fault: the analytics write is refused.
+        sqlx::query(
+            "CREATE FUNCTION dsr_block_analytics() RETURNS trigger AS $$
+              BEGIN
+                IF NEW.consent_type = 'analytics' THEN
+                  RAISE EXCEPTION 'analytics store offline';
+                END IF;
+                RETURN NEW;
+              END;
+              $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("function");
+        sqlx::query(
+            "CREATE TRIGGER dsr_block_analytics_t BEFORE INSERT OR UPDATE ON consent_records \
+             FOR EACH ROW EXECUTE FUNCTION dsr_block_analytics()",
+        )
+        .execute(&pool)
+        .await
+        .expect("trigger");
+
+        let error = gdpr
+            .record_consent(
+                &tenant,
+                "sub-1",
+                "cascade@example.test",
+                ConsentType::Marketing,
+                false,
+                ConsentSource::Api,
+                None,
+            )
+            .await
+            .expect_err("a failed cascade is a hard error");
+        assert!(
+            error.contains("cascade") && error.contains("analytics"),
+            "the error names the cascaded type: {error}"
+        );
+    }
+
+    #[test]
+    fn consent_certificates_refuse_hostile_configuration() {
+        // An empty signing key must refuse to fabricate an unsigned proof.
+        let error = build_consent_certificate(
+            "",
+            "c-1",
+            "t-1",
+            "s-1",
+            "u@example.test",
+            "marketing",
+            true,
+            Some(Utc::now()),
+            None,
+            "api",
+            None,
+        );
+        assert!(error.is_err(), "no key, no certificate");
+        assert!(error.unwrap_err().contains("CONSENT_SIGNING_KEY"));
+
+        // A revoked consent embeds its revocation timestamp in the proof.
+        let revoked_at = Utc::now() - TimeDelta::hours(1);
+        let certificate = build_consent_certificate(
+            "unit-test-consent-key-0123456789",
+            "c-2",
+            "t-1",
+            "s-1",
+            "u@example.test",
+            "marketing",
+            false,
+            None,
+            Some(revoked_at),
+            "preference_center",
+            Some("10.0.0.1"),
+        )
+        .expect("certificate");
+        let value: serde_json::Value = serde_json::from_str(&certificate).expect("json");
+        assert_eq!(value["granted"], serde_json::json!(false));
+        assert!(value["revoked_at"].as_str().is_some());
+        assert_eq!(value["ip_address"], serde_json::json!("10.0.0.1"));
+        assert!(!value["signature"].as_str().unwrap().is_empty());
+        assert!(value["signed_fields"].as_array().unwrap().len() >= 10);
+
+        // The certificate maps every store status, including the F1
+        // mutation-submitted state.
+        let confirmation = build_deletion_confirmation(
+            "REQ",
+            "t",
+            "u@example.test",
+            &[StoreErasureResult {
+                store: "clickhouse_events",
+                status: StoreErasureStatus::MutationSubmitted,
+                rows_affected: 0,
+                error: None,
+            }],
+        );
+        assert_eq!(
+            confirmation["stores"][0]["status"],
+            serde_json::json!("mutation_submitted")
+        );
+
+        // Multi-byte characters before a match are copied whole (the redaction
+        // walk never splits a UTF-8 code point).
+        let marker = redact_marker("a@b.c");
+        let out = replace_ignore_ascii_case("😀😀a@b.c", "a@b.c", &marker);
+        assert_eq!(out, format!("😀😀{marker}"));
+    }
+}
