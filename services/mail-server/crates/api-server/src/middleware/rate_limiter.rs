@@ -877,3 +877,953 @@ mod tests {
         );
     }
 }
+
+// ─── W6a adversarial coverage campaign ─────────────────────────────────────
+// These drive the REAL middleware fns through `tower::oneshot` over a mini
+// router: burst boundaries at the exact limit, per-key isolation, window
+// rotation on the real clock, plan-cache and cost-throttle resolution, and
+// Redis-down fail-open/fail-closed. Redis-backed cases soft-skip when
+// TEST_REDIS_URL is unreachable, per the idempotency-suite convention.
+
+#[cfg(test)]
+mod w6a_adversarial_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::HeaderValue;
+    use axum::http::Method;
+    use axum::routing::get;
+    use axum::Router;
+    use crate::config::Config;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    async fn handler() -> &'static str {
+        "ok"
+    }
+
+    fn test_redis_url() -> String {
+        std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".into())
+    }
+
+    fn rl_config(
+        environment: Environment,
+        max_requests: u64,
+        window_ms: u64,
+        public_enabled: bool,
+    ) -> Config {
+        let mut cfg = crate::app::test_support::test_config();
+        cfg.environment = environment;
+        cfg.rate_limit_max_requests = max_requests;
+        cfg.rate_limit_window_ms = window_ms;
+        cfg.public_rate_limit_enabled = public_enabled;
+        cfg.trusted_proxies = Vec::new();
+        cfg
+    }
+
+    /// AppState over a lazy pool (handlers here never touch Postgres) and an
+    /// explicit Redis URL so adversarial tests can pin a dead endpoint.
+    async fn state_with(cfg: Config, redis_url: &str) -> AppState {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "postgres://apexmail:apexmail@127.0.0.1:1/apexmail".into());
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy(&database_url)
+            .expect("lazy test pool");
+        crate::app::test_support::test_state_over_with_config_and_redis(db, cfg, redis_url).await
+    }
+
+    async fn redis_ok(state: &AppState) -> bool {
+        match state.redis.get().await {
+            Ok(mut conn) => redis::cmd("PING")
+                .query_async::<String>(&mut *conn)
+                .await
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    fn tenant_app(state: AppState) -> Router {
+        Router::new()
+            .route("/rl", get(handler))
+            .fallback(get(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn public_app(state: AppState) -> Router {
+        Router::new()
+            .fallback(get(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                public_rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn auth_user(tenant: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Tenant-scoped GET for the tenant middleware (AuthUser injected, as
+    /// `require_auth` would).
+    fn tenant_req(tenant: Option<&str>) -> Request<Body> {
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri("/rl")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(t) = tenant {
+            req.extensions_mut().insert(auth_user(t));
+        }
+        req
+    }
+
+    /// Public-limiter request with arbitrary path/headers/socket.
+    fn public_req(path: &str) -> Request<Body> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    fn with_header(mut req: Request<Body>, name: &str, value: &str) -> Request<Body> {
+        let name = axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap();
+        req.headers_mut().insert(name, HeaderValue::from_str(value).unwrap());
+        req
+    }
+
+    fn with_socket(mut req: Request<Body>, ip: std::net::IpAddr) -> Request<Body> {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip, 44_000)));
+        req
+    }
+
+    fn numeric_header(resp: &Response, name: &str) -> u64 {
+        resp.headers()
+            .get(name)
+            .unwrap_or_else(|| panic!("response must carry {name}"))
+            .to_str()
+            .expect("ascii header")
+            .parse()
+            .expect("numeric header")
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("body readable");
+        serde_json::from_slice(&bytes).expect("JSON body")
+    }
+
+    async fn seed(state: &AppState, key: &str, value: &str, ttl_secs: u64) {
+        let mut conn = state.redis.get().await.expect("redis pool");
+        let _: () = conn
+            .set_ex(key, value, ttl_secs)
+            .await
+            .expect("SET EX ok");
+    }
+
+    async fn stored_value(state: &AppState, key: &str) -> Option<String> {
+        let mut conn = state.redis.get().await.expect("redis pool");
+        conn.get(key).await.expect("GET ok")
+    }
+
+    #[tokio::test]
+    async fn burst_boundary_allows_exactly_max_then_429_with_retry_after() {
+        let state = state_with(
+            rl_config(Environment::Production, 3, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state);
+        let tenant = format!("w6a-burst-{}", Uuid::new_v4());
+
+        // Requests 1..=3 are allowed; Remaining counts down to 0.
+        for remaining in (0..3).rev() {
+            let resp = app
+                .clone()
+                .oneshot(tenant_req(Some(&tenant)))
+                .await
+                .expect("oneshot");
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(numeric_header(&resp, "X-RateLimit-Limit"), 3);
+            assert_eq!(numeric_header(&resp, "X-RateLimit-Remaining"), remaining);
+            assert!(
+                numeric_header(&resp, "X-RateLimit-Reset") > 0,
+                "Reset must be an epoch timestamp of the window end"
+            );
+        }
+
+        // The burst+1 request is rejected with Retry-After and the
+        // machine-readable error envelope.
+        let resp = app.oneshot(tenant_req(Some(&tenant))).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            numeric_header(&resp, "Retry-After") > 0,
+            "429 must carry a positive Retry-After (seconds to window end)"
+        );
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert_eq!(body["error"]["message"], "too many requests");
+    }
+
+    #[tokio::test]
+    async fn per_tenant_keys_are_isolated_buckets() {
+        let state = state_with(
+            rl_config(Environment::Production, 1, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state);
+        let a = format!("w6a-iso-a-{}", Uuid::new_v4());
+        let b = format!("w6a-iso-b-{}", Uuid::new_v4());
+
+        let resp = app.clone().oneshot(tenant_req(Some(&a))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(numeric_header(&resp, "X-RateLimit-Remaining"), 0);
+
+        // A is exhausted; B must be untouched (no shared counter).
+        assert_eq!(
+            app.clone().oneshot(tenant_req(Some(&a))).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let resp = app.clone().oneshot(tenant_req(Some(&b))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // And A stays exhausted.
+        assert_eq!(
+            app.oneshot(tenant_req(Some(&a))).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn window_rotation_restores_the_budget_on_the_real_clock() {
+        let state = state_with(
+            rl_config(Environment::Production, 1, 1_100, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state);
+        let tenant = format!("w6a-rotate-{}", Uuid::new_v4());
+
+        assert_eq!(
+            app.clone().oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone().oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // Sleep past the 1.1s window: the window index must advance and the
+        // budget must be fresh (a stale key would 429 forever).
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        assert_eq!(
+            app.oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            StatusCode::OK,
+            "a new fixed window must reset the counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn anonymous_system_and_unauthenticated_requests_use_the_configured_default() {
+        let state = state_with(
+            rl_config(Environment::Production, 4_321, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state);
+
+        for tenant in [None, Some("anonymous"), Some("system")] {
+            let resp = app
+                .clone()
+                .oneshot(tenant_req(tenant))
+                .await
+                .expect("oneshot");
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(
+                numeric_header(&resp, "X-RateLimit-Limit"),
+                4_321,
+                "tenant {tenant:?} must resolve to the config default without a plan lookup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_cache_tier_drives_limit_and_unknown_tenant_negative_caches() {
+        let state = state_with(
+            rl_config(Environment::Production, 4_321, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state.clone());
+
+        // (a) A cached tier short-circuits the DB and drives the limit.
+        let tiered = format!("w6a-tier-{}", Uuid::new_v4());
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&tiered),
+            &serde_json::to_string(&RateLimitTier::High).unwrap(),
+            60,
+        )
+        .await;
+        let resp = app.clone().oneshot(tenant_req(Some(&tiered))).await.unwrap();
+        assert_eq!(
+            numeric_header(&resp, "X-RateLimit-Limit"),
+            30_000,
+            "High tier = 500rps * 60s window"
+        );
+
+        // (b) An unknown tenant falls back to the DB's Ok(None) → config
+        // default, and the negative result is cached to spare the DB.
+        let unknown = format!("w6a-unknown-{}", Uuid::new_v4());
+        let resp = app.clone().oneshot(tenant_req(Some(&unknown))).await.unwrap();
+        assert_eq!(numeric_header(&resp, "X-RateLimit-Limit"), 4_321);
+        assert_eq!(
+            stored_value(&state, &tenant_rate_limit_cache_key(&unknown)).await.as_deref(),
+            Some(TENANT_RATE_LIMIT_CACHE_NONE),
+            "Ok(None) must be negative-cached"
+        );
+
+        // (c) A corrupted cache value must not poison the limit: the entry is
+        // ignored and the DB fallback yields the default.
+        let poisoned = format!("w6a-poison-{}", Uuid::new_v4());
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&poisoned),
+            "{\"not\":\"a tier\"",
+            60,
+        )
+        .await;
+        let resp = app.clone().oneshot(tenant_req(Some(&poisoned))).await.unwrap();
+        assert_eq!(
+            numeric_header(&resp, "X-RateLimit-Limit"),
+            4_321,
+            "corrupt cache value must fall back to the database resolution"
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_throttle_caps_baseline_and_ignores_hostile_values() {
+        let state = state_with(
+            rl_config(Environment::Production, 4_321, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = tenant_app(state.clone());
+
+        let resolve = |tenant: String| {
+            let app = app.clone();
+            async move {
+                let resp = app
+                    .oneshot(tenant_req(Some(tenant.as_str())))
+                    .await
+                    .unwrap();
+                numeric_header(&resp, "X-RateLimit-Limit")
+            }
+        };
+
+        // (a) A well-formed billing override strictly reduces the limit.
+        let throttled = format!("w6a-cost-ok-{}", Uuid::new_v4());
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&throttled),
+            TENANT_RATE_LIMIT_CACHE_NONE,
+            60,
+        )
+        .await;
+        let override_ = CostThrottleOverride::critical_low_margin();
+        seed(
+            &state,
+            &cost_throttle_key(&throttled),
+            &serde_json::to_string(&override_).unwrap(),
+            60,
+        )
+        .await;
+        assert_eq!(
+            resolve(throttled.clone()).await,
+            override_.capped_limit(4_321).unwrap(),
+            "cost throttle must cap the config-derived baseline"
+        );
+
+        // (b) Malformed override JSON → baseline unchanged (never a 500, never off).
+        let malformed = format!("w6a-cost-bad-{}", Uuid::new_v4());
+        seed(&state, &tenant_rate_limit_cache_key(&malformed), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        seed(&state, &cost_throttle_key(&malformed), "{{{not json", 60).await;
+        assert_eq!(resolve(malformed).await, 4_321);
+
+        // (c) cap_percent = 100 would not reduce anything → ignored.
+        let non_reducing = format!("w6a-cost-cap100-{}", Uuid::new_v4());
+        seed(&state, &tenant_rate_limit_cache_key(&non_reducing), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        let cap100 = CostThrottleOverride {
+            cap_percent: 100,
+            ..CostThrottleOverride::critical_low_margin()
+        };
+        seed(&state, &cost_throttle_key(&non_reducing), &serde_json::to_string(&cap100).unwrap(), 60).await;
+        assert_eq!(resolve(non_reducing).await, 4_321);
+
+        // (d) An unsupported version must be ignored, not applied.
+        let future_version = format!("w6a-cost-v99-{}", Uuid::new_v4());
+        seed(&state, &tenant_rate_limit_cache_key(&future_version), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        let v99 = CostThrottleOverride {
+            version: 99,
+            ..CostThrottleOverride::critical_low_margin()
+        };
+        seed(&state, &cost_throttle_key(&future_version), &serde_json::to_string(&v99).unwrap(), 60).await;
+        assert_eq!(resolve(future_version).await, 4_321);
+    }
+
+    #[tokio::test]
+    async fn redis_down_fails_closed_in_production_and_open_in_development() {
+        let dead = "redis://127.0.0.1:1";
+
+        // Production: 503 with the SERVICE_UNAVAILABLE envelope.
+        let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
+        let app = tenant_app(prod);
+        let resp = app.clone().oneshot(tenant_req(Some("w6a-dead-prod"))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
+        assert_eq!(body["error"]["message"], "rate limiter unavailable");
+
+        // Development: fail-open — the handler runs and no rate-limit headers
+        // are attached (the limiter never saw a counter).
+        let dev = state_with(rl_config(Environment::Development, 10, 60_000, true), dead).await;
+        let app = tenant_app(dev);
+        let resp = app.oneshot(tenant_req(Some("w6a-dead-dev"))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(resp.into_body(), 16)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_limiter_dev_opt_out_never_limits() {
+        let state = state_with(
+            rl_config(Environment::Development, 10, 60_000, false),
+            &test_redis_url(),
+        )
+        .await;
+        let app = public_app(state);
+
+        // The suite-wide opt-out must bypass the limiter entirely — even far
+        // beyond 20 requests, and without touching Redis at all.
+        for i in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(public_req(&format!("/opt-out-{i}")))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "request {i} must pass");
+            assert!(resp.headers().get("X-RateLimit-Limit").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn public_limiter_allows_20_then_429s_the_21st_per_bucket() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app(state);
+        let key = format!("w6a-pub-{}", Uuid::new_v4());
+
+        for remaining in (0..20).rev() {
+            let resp = app
+                .clone()
+                .oneshot(with_header(public_req("/"), "x-api-key", &key))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(numeric_header(&resp, "X-RateLimit-Limit"), 20);
+            assert_eq!(numeric_header(&resp, "X-RateLimit-Remaining"), remaining);
+        }
+        let resp = app
+            .oneshot(with_header(public_req("/"), "x-api-key", &key))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(numeric_header(&resp, "Retry-After") > 0);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
+        assert_eq!(body["error"]["message"], "too many requests — try again later");
+    }
+
+    #[tokio::test]
+    async fn public_limiter_buckets_are_isolated_per_credential() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app(state);
+        let key_a = format!("w6a-pub-iso-{}", Uuid::new_v4());
+        let key_b = format!("w6a-pub-iso-{}", Uuid::new_v4());
+        let session = format!("w6a-sess-{}", Uuid::new_v4());
+
+        // Burn bucket A to exhaustion.
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(with_header(public_req("/"), "x-api-key", &key_a))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(with_header(public_req("/"), "x-api-key", &key_a))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        // A different API key on the same path is a different bucket.
+        assert_eq!(
+            app.clone()
+                .oneshot(with_header(public_req("/"), "x-api-key", &key_b))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        // A session credential on the same path is yet another bucket — and
+        // exhausting it must not leak into the API-key buckets.
+        let cookie = format!("other=1; am_session={session}; trailing=2");
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(with_header(public_req("/"), "cookie", &cookie))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(with_header(public_req("/"), "cookie", &cookie))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            app.oneshot(with_header(public_req("/"), "x-api-key", &key_b))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "session bucket exhaustion must not affect the api-key bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_limiter_without_socket_or_credential_buckets_by_path() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app(state);
+        let path_a = format!("/w6a-path-{}", Uuid::new_v4());
+        let path_b = format!("/w6a-path-{}", Uuid::new_v4());
+
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone().oneshot(public_req(&path_a)).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            app.clone().oneshot(public_req(&path_a)).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            app.oneshot(public_req(&path_b)).await.unwrap().status(),
+            StatusCode::OK,
+            "a different path must be a different fallback bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_limiter_buckets_by_forwarded_ip_only_through_trusted_proxies() {
+        let mut cfg = rl_config(Environment::Development, 1_000, 60_000, true);
+        cfg.trusted_proxies = vec!["10.0.0.0/8".into()];
+        let state = state_with(cfg, &test_redis_url()).await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let app = public_app(state);
+        let client_ip = format!("198.51.100.{}", 7);
+        let xff = format!(
+            "1.2.3.4, {client_ip}, 10.0.0.2" // spoofed prefix must be ignored (right-to-left walk)
+        );
+
+        // Behind a TRUSTED proxy the identity is the rightmost untrusted XFF
+        // entry, not the proxy socket.
+        let proxied = || {
+            with_socket(
+                with_header(public_req("/"), "x-forwarded-for", &xff),
+                "10.1.2.3".parse().unwrap(),
+            )
+        };
+        for _ in 0..20 {
+            assert_eq!(
+                app.clone().oneshot(proxied()).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            app.clone().oneshot(proxied()).await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "21st request from the same forwarded client IP must be limited"
+        );
+
+        // The SAME XFF behind an UNTRUSTED socket: the header is client-
+        // controlled noise there, so the bucket is the socket IP and must be
+        // unaffected by the proxied bucket's exhaustion.
+        let direct = || {
+            with_socket(
+                with_header(public_req("/"), "x-forwarded-for", &xff),
+                "203.0.113.9".parse().unwrap(),
+            )
+        };
+        assert_eq!(
+            app.clone().oneshot(direct()).await.unwrap().status(),
+            StatusCode::OK,
+            "spoofed XFF behind an untrusted socket must not inherit the proxied bucket"
+        );
+        assert_eq!(
+            app.oneshot(direct()).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn public_limiter_redis_down_fails_closed_in_production_only() {
+        let dead = "redis://127.0.0.1:1";
+
+        let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
+        let app = public_app(prod);
+        let resp = app
+            .clone()
+            .oneshot(public_req("/w6a-pub-dead"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
+
+        let dev = state_with(rl_config(Environment::Development, 10, 60_000, true), dead).await;
+        let app = public_app(dev);
+        let resp = app
+            .clone()
+            .oneshot(public_req("/w6a-pub-dead"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "dev must fail open");
+        assert!(resp.headers().get("X-RateLimit-Limit").is_none());
+    }
+
+    #[tokio::test]
+    async fn sliding_window_blocks_over_limit_and_allows_fresh_keys_deterministically() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+
+        // No counters at all → estimate 0 → allowed.
+        let fresh = format!("w6a-slide-fresh-{}", Uuid::new_v4());
+        assert!(sliding_window_count(&state, &fresh, 60_000, 10).await.unwrap());
+
+        // Deterministic over-limit: with window = u64::MAX/2 the window index
+        // is 0 now and forever, so current == previous == the seeded key and
+        // the estimate is 11..=22 regardless of the position in the window.
+        let huge = format!("w6a-slide-max-{}", Uuid::new_v4());
+        seed(&state, &format!("apexmail:ratelimit:{huge}:0"), "11", 60).await;
+        assert!(!sliding_window_count(&state, &huge, u64::MAX / 2, 10).await.unwrap());
+
+        // Dead Redis must be an Err, never a silent allow.
+        let dead = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        assert!(sliding_window_count(&dead, "w6a-slide-dead", 60_000, 10)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn incr_expire_lua_sets_the_ttl_on_the_first_incr_only() {
+        let state = state_with(
+            rl_config(Environment::Development, 1_000, 60_000, true),
+            &test_redis_url(),
+        )
+        .await;
+        if !redis_ok(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let mut conn = state.redis.get().await.expect("redis pool");
+        let key = format!("w6a-lua-{}", Uuid::new_v4());
+        let script = redis::Script::new(INCR_EXPIRE_LUA);
+
+        let count: u64 = script.key(&key).arg(60).invoke_async(&mut *conn).await.unwrap();
+        assert_eq!(count, 1);
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            (1..=60).contains(&ttl),
+            "the first INCR must leave the key with a TTL (crash safety), got {ttl}"
+        );
+
+        let count: u64 = script.key(&key).arg(60).invoke_async(&mut *conn).await.unwrap();
+        assert_eq!(count, 2, "the script must return the incrementing count");
+        let ttl2: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            ttl2 <= ttl + 1,
+            "later INCRs must not refresh the TTL (fixed-window semantics)"
+        );
+        let _: () = conn.del(&key).await.unwrap();
+    }
+
+    #[test]
+    fn check_rate_limit_source_pins_incr_and_expire_together() {
+        // The atomic INCR+EXPIRE-on-first script exists exactly twice: the
+        // INCR_EXPIRE_LUA constant and check_rate_limit's inline copy. A
+        // regression to a bare INCR would leave counters without TTL on a
+        // crash between the two calls (a permanent rate limit). The needle is
+        // assembled from parts so this test's own source does not contain it.
+        let needle = ["redis.call('EXPIRE', KEYS[1]", ", ARGV[1])"].concat();
+        let source = include_str!("rate_limiter.rs");
+        assert_eq!(
+            source.match_indices(&needle).count(),
+            2,
+            "INCR_EXPIRE_LUA and check_rate_limit must both pair INCR with EXPIRE-on-first"
+        );
+        let incr = ["local count = redis.call('IN", "CR', KEYS[1])"].concat();
+        assert!(source.contains(&incr));
+    }
+
+    // ── Pure helpers ───────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_user_key_prefers_api_key_then_session_cookie() {
+        use sha2::Digest;
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(extract_user_key_from_headers(&headers), None);
+
+        headers.insert("x-api-key", HeaderValue::from_static("key-123"));
+        assert_eq!(
+            extract_user_key_from_headers(&headers),
+            Some(format!("ak:{}", hex::encode(sha2::Sha256::digest(b"key-123"))))
+        );
+
+        // An EMPTY api key must be ignored, not hashed, so the cookie is used.
+        headers.insert("x-api-key", HeaderValue::from_static(""));
+        headers.insert(
+            "cookie",
+            HeaderValue::from_static("other=1; am_session=tok-9; trailing=2"),
+        );
+        assert_eq!(
+            extract_user_key_from_headers(&headers),
+            Some(format!(
+                "session:{}",
+                hex::encode(sha2::Sha256::digest(b"tok-9"))
+            ))
+        );
+
+        // Cookies without the am_session entry yield nothing.
+        headers.remove("x-api-key");
+        headers.insert("cookie", HeaderValue::from_static("a=b; c=d"));
+        assert_eq!(extract_user_key_from_headers(&headers), None);
+        // An empty am_session value yields nothing either.
+        headers.insert("cookie", HeaderValue::from_static("am_session=; x=1"));
+        assert_eq!(extract_user_key_from_headers(&headers), None);
+    }
+
+    #[test]
+    fn trusted_proxy_networks_accept_cidr_and_plain_ips_and_skip_junk() {
+        let networks = parse_trusted_proxy_networks(&[
+            " 10.0.0.0/8 ".into(),
+            "192.168.1.7".into(),
+            "".into(),
+            "   ".into(),
+            "definitely-not-a-network".into(),
+        ]);
+        assert_eq!(
+            networks.len(),
+            2,
+            "CIDR + plain IP are kept, blank and junk entries are dropped"
+        );
+        assert!(is_in_trusted("10.255.1.1".parse().unwrap(), &networks));
+        assert!(is_in_trusted("192.168.1.7".parse().unwrap(), &networks));
+        assert!(!is_in_trusted("192.168.1.8".parse().unwrap(), &networks));
+    }
+
+    #[test]
+    fn normalise_ip_folds_v6_mapped_v4_into_v4() {
+        assert_eq!(
+            normalise_ip("::ffff:203.0.113.5".parse().unwrap()),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            normalise_ip("2001:db8::1".parse().unwrap()),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_walks_xff_then_real_ip_then_socket() {
+        let trusted = vec!["10.0.0.0/8".to_string()];
+        let socket: IpAddr = "10.1.2.3".parse().unwrap();
+
+        // (a) Trusted socket, no XFF → x-real-ip is the client.
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("198.51.100.21"));
+        assert_eq!(
+            extract_public_client_ip(&h, socket, &trusted),
+            "198.51.100.21"
+        );
+
+        // (b) XFF made entirely of trusted proxies → walk is exhausted →
+        // x-real-ip.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.0.0.1, 10.0.0.2"),
+        );
+        h.insert("x-real-ip", HeaderValue::from_static("198.51.100.22"));
+        assert_eq!(
+            extract_public_client_ip(&h, socket, &trusted),
+            "198.51.100.22"
+        );
+
+        // (c) Unparseable x-real-ip → back to the (normalised) socket.
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", HeaderValue::from_static("not-an-ip"));
+        assert_eq!(extract_public_client_ip(&h, socket, &trusted), "10.1.2.3");
+
+        // (d) Junk XFF parts are skipped; the first parseable untrusted entry
+        // from the right wins.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("banana, 198.51.100.23"),
+        );
+        assert_eq!(
+            extract_public_client_ip(&h, socket, &trusted),
+            "198.51.100.23"
+        );
+
+        // (e) Untrusted socket: headers are never consulted, not even
+        // x-real-ip.
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.24"),
+        );
+        h.insert("x-real-ip", HeaderValue::from_static("198.51.100.25"));
+        assert_eq!(
+            extract_public_client_ip(&h, "203.0.113.5".parse().unwrap(), &trusted),
+            "203.0.113.5"
+        );
+    }
+
+    #[test]
+    fn ttl_jitter_stays_in_band_and_handles_tiny_bases() {
+        for _ in 0..200 {
+            let ttl = ttl_with_jitter(60, TENANT_RATE_LIMIT_CACHE_TTL_JITTER);
+            assert!(
+                (54..=66).contains(&ttl),
+                "jittered TTL {ttl} outside the ±10% band [54,66]"
+            );
+        }
+        // A base whose jitter band is < 1s must not be jittered (and never
+        // become 0 — Redis rejects a 0 TTL).
+        assert_eq!(ttl_with_jitter(1, 0.10), 1);
+        assert_eq!(ttl_with_jitter(4, 0.10), 4);
+        assert_eq!(ttl_with_jitter(0, 0.10), 0);
+        // A 100% jitter band stays within [1, 2*base].
+        for _ in 0..100 {
+            let ttl = ttl_with_jitter(5, 1.0);
+            assert!((1..=10).contains(&ttl), "jittered TTL {ttl} outside [1,10]");
+        }
+    }
+}

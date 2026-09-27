@@ -439,6 +439,13 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
 
+    /// Serialises every test in this module that mutates the process-global
+    /// `AUDIT_SIGNING_KEY` / `ENVIRONMENT` env vars (mirrors
+    /// `test_db::DKIM_ENV_MUTEX`): the fail-closed test REMOVES the signing
+    /// key while the chain tests need it set — without the lock, in-process
+    /// `cargo test` threads would race each other's signatures.
+    static AUDIT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// SQL template pin (M-10): the append path must never lock `audit_logs`
     /// rows; the single `audit_chain_head` row is the only serialization
     /// point.
@@ -682,6 +689,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// FOR UPDATE serialization on audit_logs.
     #[tokio::test]
     async fn concurrent_appends_produce_a_verifiable_chain() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
         std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
         let Some(pool) = audit_chain_test_pool("concurrency").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
@@ -725,6 +733,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// the pre-existing newest row instead of starting a NULL-rooted chain.
     #[tokio::test]
     async fn head_backfill_links_new_appends_onto_legacy_history() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
         std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
         let Some(pool) = audit_chain_test_pool("backfill").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
@@ -792,6 +801,628 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
             Some(legacy_hash.as_str()),
             "the first post-migration append must link to the legacy head"
         );
+        pool.close().await;
+    }
+
+    // ── W6a: adversarial coverage campaign ────────────────────────────────
+
+    /// Restores `AUDIT_SIGNING_KEY` to its pre-test value on drop so an env
+    /// test can never leak state into a later test in the same process.
+    struct EnvGuard(Option<String>);
+    impl EnvGuard {
+        fn take_signing_key() -> Self {
+            Self(std::env::var("AUDIT_SIGNING_KEY").ok())
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("AUDIT_SIGNING_KEY", value),
+                None => std::env::remove_var("AUDIT_SIGNING_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn audit_signature_fails_closed_in_production_and_binds_the_chain_link() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+
+        // Production without a key must FAIL, never sign with a guessable
+        // fallback (every signature would be forgeable).
+        let err = audit_log_signature("hash-a", "hash-b", true)
+            .err()
+            .expect("production append without AUDIT_SIGNING_KEY must fail closed");
+        assert!(
+            err.to_string().contains("AUDIT_SIGNING_KEY"),
+            "unexpected error: {err}"
+        );
+        // An EMPTY key is exactly as useless as a missing one.
+        std::env::set_var("AUDIT_SIGNING_KEY", "");
+        assert!(
+            audit_log_signature("hash-a", "hash-b", true).is_err(),
+            "empty AUDIT_SIGNING_KEY must fail closed in production"
+        );
+
+        // Development falls back to the documented public key: the signature
+        // is exactly HMAC-SHA256(fallback, "{previous_hash}|{hash}") hex.
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+        let fallback =
+            audit_log_signature("hash-a", "hash-b", false).expect("dev fallback must sign");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"apexmail-audit-fallback-key").unwrap();
+        mac.update(b"hash-b|hash-a");
+        assert_eq!(fallback, hex::encode(mac.finalize().into_bytes()));
+
+        // A configured key overrides the fallback — also in production.
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-configured-key");
+        let configured = audit_log_signature("hash-a", "hash-b", true)
+            .expect("configured key must sign in production");
+        let mut mac2 = <Hmac<Sha256> as Mac>::new_from_slice(b"w6a-configured-key").unwrap();
+        mac2.update(b"hash-b|hash-a");
+        assert_eq!(configured, hex::encode(mac2.finalize().into_bytes()));
+
+        // The signature binds the chain: a different previous_hash (i.e. the
+        // entry re-parented elsewhere in the chain) invalidates it.
+        assert_ne!(
+            configured,
+            audit_log_signature("hash-a", "different-parent", true).unwrap()
+        );
+        // ...and so does a different entry hash.
+        assert_ne!(
+            configured,
+            audit_log_signature("tampered-hash", "hash-b", true).unwrap()
+        );
+    }
+
+    #[test]
+    fn state_is_production_probe_reads_the_env_var() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let prior = std::env::var("ENVIRONMENT").ok();
+
+        std::env::remove_var("ENVIRONMENT");
+        assert!(!state_is_production(), "absent ENVIRONMENT defaults to dev");
+        std::env::set_var("ENVIRONMENT", "production");
+        assert!(state_is_production());
+        std::env::set_var("ENVIRONMENT", "PRODUCTION");
+        assert!(state_is_production(), "the probe is case-insensitive");
+        std::env::set_var("ENVIRONMENT", "staging");
+        assert!(!state_is_production());
+
+        match prior {
+            Some(value) => std::env::set_var("ENVIRONMENT", value),
+            None => std::env::remove_var("ENVIRONMENT"),
+        }
+    }
+
+    #[test]
+    fn audit_hash_covers_every_field_and_is_stable_across_the_db_round_trip() {
+        let ts = Utc::now();
+        let details = serde_json::json!({"event": "login", "n": 1});
+        let base = || {
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "login",
+                "auth",
+                Some("res-1"),
+                &details,
+                ts,
+            )
+        };
+        let base_hash = base();
+        assert_eq!(base_hash, base(), "hashing must be deterministic");
+        assert_eq!(base_hash.len(), 64);
+
+        // Every hashed field participates: a tamper of ANY of them must be
+        // detectable by re-hashing the stored row.
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-2"),
+                Some("user-1"),
+                "login",
+                "auth",
+                Some("res-1"),
+                &details,
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-2"),
+                "login",
+                "auth",
+                Some("res-1"),
+                &details,
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "logout",
+                "auth",
+                Some("res-1"),
+                &details,
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "login",
+                "billing",
+                Some("res-1"),
+                &details,
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "login",
+                "auth",
+                Some("res-2"),
+                &details,
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "login",
+                "auth",
+                Some("res-1"),
+                &serde_json::json!({"event": "login", "n": 2}),
+                ts
+            )
+        );
+        assert_ne!(
+            base_hash,
+            compute_hash(
+                Some("tenant-1"),
+                Some("user-1"),
+                "login",
+                "auth",
+                Some("res-1"),
+                &details,
+                ts + chrono::Duration::microseconds(1)
+            )
+        );
+
+        // PINNED (chain-format stability): absent and empty-string optional
+        // fields hash identically (`unwrap_or_default`). Historical rows were
+        // hashed this way, so a re-hashing verifier must keep the convention;
+        // the side effect is that a NULL↔'' swap of a stored field does not
+        // change the hash. Fixing that requires a versioned chain format
+        // migration, not a silent formula change.
+        assert_eq!(
+            compute_hash(
+                None,
+                None,
+                "login",
+                "auth",
+                None,
+                &details,
+                ts
+            ),
+            compute_hash(
+                Some(""),
+                Some(""),
+                "login",
+                "auth",
+                Some(""),
+                &details,
+                ts
+            )
+        );
+    }
+
+    /// Production append without a signing key: the error must surface AND
+    /// the transaction must leave zero partial state — no row, and the chain
+    /// head must not have advanced (it is advanced inside the same tx,
+    /// BEFORE the signature step).
+    #[tokio::test]
+    async fn production_append_without_key_fails_closed_without_partial_state() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+
+        let Some(pool) = audit_chain_test_pool("w6a-failclosed").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        let result = insert_audit_log_with_env(
+            &pool,
+            true,
+            Some("tenant-1"),
+            Some("user-1"),
+            "login",
+            "auth",
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "production append without key must fail");
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "the failed append must not leave a row behind");
+        let head: Option<String> =
+            sqlx::query_scalar("SELECT head_hash FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert_eq!(head, None, "the chain head must not advance on a failed append");
+
+        // With the key present the very same append succeeds and roots the
+        // chain — proving the failure was purely the fail-closed guard.
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+        insert_audit_log_with_env(
+            &pool,
+            true,
+            Some("tenant-1"),
+            Some("user-1"),
+            "login",
+            "auth",
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect("production append with a configured key must succeed");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn best_effort_writer_swallows_failures_and_writes_on_success() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+
+        let Some(pool) = audit_chain_test_pool("w6a-besteffort").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        // Production without a key: the write fails internally but the
+        // fire-and-forget wrapper must NOT panic and NOT write a row.
+        std::env::remove_var("AUDIT_SIGNING_KEY");
+        insert_audit_log_best_effort_with_env(
+            &pool,
+            true,
+            Some("tenant-1"),
+            None,
+            "rotate",
+            "auth",
+            None,
+            serde_json::json!({"attempt": 1}),
+            None,
+            None,
+        )
+        .await;
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "a failed best-effort append must write nothing");
+
+        // With the key set the same call succeeds and chains.
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+        insert_audit_log_best_effort_with_env(
+            &pool,
+            false,
+            Some("tenant-1"),
+            None,
+            "rotate",
+            "auth",
+            None,
+            serde_json::json!({"attempt": 2}),
+            None,
+            None,
+        )
+        .await;
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "a healthy best-effort append must persist");
+        let verified = verify_chain_from_head(&pool).await;
+        assert_eq!(verified, 1);
+        pool.close().await;
+    }
+
+    /// Adversarial DB tampering: rewriting stored fields must be detectable
+    /// by re-hashing; rewriting a signature must be detectable by re-signing.
+    #[tokio::test]
+    async fn tampered_rows_fail_hash_and_signature_verification() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+
+        let Some(pool) = audit_chain_test_pool("w6a-tamper").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        insert_audit_log_with_env(
+            &pool,
+            false,
+            Some("tenant-1"),
+            Some("user-1"),
+            "login",
+            "auth",
+            None,
+            serde_json::json!({"ok": true}),
+            Some("203.0.113.5"),
+            Some("agent"),
+        )
+        .await
+        .expect("append");
+
+        // 1) Field tamper: rewrite the stored action.
+        sqlx::query("UPDATE audit_logs SET action = 'forged' WHERE tenant_id = 'tenant-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row: AuditRow = sqlx::query_as(
+            "SELECT id, tenant_id, user_id, action, resource, resource_id, details,
+                    timestamp, hash, previous_hash, signature
+             FROM audit_logs WHERE tenant_id = 'tenant-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let recomputed = compute_hash(
+            row.tenant_id.as_deref(),
+            row.user_id.as_deref(),
+            &row.action,
+            &row.resource,
+            row.resource_id.as_deref(),
+            &row.details,
+            row.timestamp,
+        );
+        assert_ne!(
+            recomputed, row.hash,
+            "re-hashing the tampered row must expose the forgery"
+        );
+
+        // 2) Signature tamper on a fresh, untampered entry.
+        insert_audit_log_with_env(
+            &pool,
+            false,
+            Some("tenant-2"),
+            None,
+            "rotate",
+            "auth",
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect("second append");
+        sqlx::query("UPDATE audit_logs SET signature = 'deadbeef' WHERE tenant_id = 'tenant-2'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row2: AuditRow = sqlx::query_as(
+            "SELECT id, tenant_id, user_id, action, resource, resource_id, details,
+                    timestamp, hash, previous_hash, signature
+             FROM audit_logs WHERE tenant_id = 'tenant-2'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let expected_sig = audit_log_signature(
+            &row2.hash,
+            row2.previous_hash.as_deref().unwrap_or_default(),
+            false,
+        )
+        .unwrap();
+        assert_ne!(
+            expected_sig, row2.signature,
+            "re-signing the entry must expose the forged signature"
+        );
+
+        // The untouched first entry (modulo the action rewrite) still proves
+        // the verifier works in the positive direction on honest rows via
+        // `verify_chain_from_head` in the other tests.
+        pool.close().await;
+    }
+
+    /// A caller rolling back its transaction must also undo the chain-head
+    /// advance — the head must never point at a hash that was never appended.
+    #[tokio::test]
+    async fn caller_rollback_undoes_the_chain_head_advance() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+
+        let Some(pool) = audit_chain_test_pool("w6a-rollback").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        {
+            let mut tx = pool.begin().await.expect("tx");
+            insert_audit_log_in_tx_with_env(
+                &mut tx,
+                false,
+                Some("tenant-1"),
+                None,
+                "login",
+                "auth",
+                None,
+                serde_json::json!({"rolled": "back"}),
+                None,
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("in-tx append");
+            tx.rollback().await.expect("rollback");
+        }
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+        let head: Option<String> =
+            sqlx::query_scalar("SELECT head_hash FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert_eq!(head, None, "rollback must undo the head advance");
+
+        // The next append starts a NULL-rooted chain (the rolled-back head is
+        // truly gone), and the legacy env-probing wrapper chains onto it.
+        insert_audit_log_in_tx_prep_and_commit(&pool).await;
+        let prev: Option<String> =
+            sqlx::query_scalar("SELECT previous_hash FROM audit_logs LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(prev, None, "after the rollback the chain restarts at the root");
+        let verified = verify_chain_from_head(&pool).await;
+        assert_eq!(verified, 1);
+        pool.close().await;
+    }
+
+    /// Exercises the deprecated `insert_audit_log_in_tx` wrapper (env-probed
+    /// production flag) end to end: append inside a caller transaction and
+    /// commit.
+    async fn insert_audit_log_in_tx_prep_and_commit(pool: &PgPool) {
+        let mut tx = pool.begin().await.expect("tx");
+        insert_audit_log_in_tx(
+            &mut tx,
+            Some("tenant-legacy"),
+            Some("user-legacy"),
+            "rotate",
+            "auth",
+            None,
+            serde_json::json!({}),
+            None,
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("legacy in-tx append");
+        tx.commit().await.expect("commit");
+    }
+
+    /// Two sequential legacy-wrapper appends must chain head → next.
+    #[tokio::test]
+    async fn legacy_in_tx_wrapper_chains_sequential_appends() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+        let prior_env = std::env::var("ENVIRONMENT").ok();
+        std::env::remove_var("ENVIRONMENT");
+
+        let Some(pool) = audit_chain_test_pool("w6a-legacytx").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            match prior_env {
+                Some(v) => std::env::set_var("ENVIRONMENT", v),
+                None => std::env::remove_var("ENVIRONMENT"),
+            }
+            return;
+        };
+
+        insert_audit_log_in_tx_prep_and_commit(&pool).await;
+        insert_audit_log_in_tx_prep_and_commit(&pool).await;
+
+        let verified = verify_chain_from_head(&pool).await;
+        assert_eq!(verified, 2, "both legacy-wrapper appends must chain");
+        pool.close().await;
+
+        match prior_env {
+            Some(v) => std::env::set_var("ENVIRONMENT", v),
+            None => std::env::remove_var("ENVIRONMENT"),
+        }
+    }
+
+    /// The FTS upkeep UPDATE (migration-081 expression) must actually fill
+    /// `fts_vector` when the column exists — appended rows must be searchable.
+    #[tokio::test]
+    async fn fts_vector_is_maintained_when_the_column_exists() {
+        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+        let _restore = EnvGuard::take_signing_key();
+        std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
+
+        let Some(pool) = audit_chain_test_pool("w6a-fts").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        // The canonical fixture has no fts_vector; production (post-migration
+        // 081) does. Add it to mirror the deployed schema.
+        sqlx::query("ALTER TABLE audit_logs ADD COLUMN fts_vector tsvector")
+            .execute(&pool)
+            .await
+            .expect("add fts_vector column");
+
+        insert_audit_log_with_env(
+            &pool,
+            false,
+            Some("tenant-1"),
+            Some("user-1"),
+            "rotate_api_key",
+            "auth",
+            Some("res-9"),
+            serde_json::json!({"scope": "mail.send"}),
+            Some("203.0.113.5"),
+            None,
+        )
+        .await
+        .expect("append");
+
+        let fts: Option<String> =
+            sqlx::query_scalar("SELECT fts_vector::text FROM audit_logs LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            fts.as_ref().is_some_and(|v| !v.is_empty()),
+            "the append must maintain fts_vector, got {fts:?}"
+        );
+        let hits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE fts_vector @@ to_tsquery('english', 'rotate')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hits, 1, "the appended action must be full-text searchable");
+        let hits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE fts_vector @@ to_tsquery('english', 'send')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(hits, 1, "details text must be indexed too");
+        let verified = verify_chain_from_head(&pool).await;
+        assert_eq!(verified, 1);
         pool.close().await;
     }
 }

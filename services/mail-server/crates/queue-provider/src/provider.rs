@@ -98,6 +98,19 @@ impl PostgresQueueProvider {
         Self::strip_hmac(&mut payload);
 
         let signature = if self.signing_key.is_some() {
+            // O‑5.1:the signature is embedded INSIDE the payload object under
+            // `__hmac__`. A non-object payload (array/string/number/null) has
+            // nowhere to carry it: the code below used to compute the
+            // signature and then silently drop it for non-objects, so the job
+            // was stored unsigned while enqueue() reported success — and the
+            // next dequeue routed the "missing signature" job to dead_letter.
+            // Silent enqueue-then-lose. Reject at the boundary instead so the
+            // caller learns immediately that the payload cannot be signed.
+            if !matches!(payload, serde_json::Value::Object(_)) {
+                return Err(QueueError::InvalidPayload(
+                    "payload must be a JSON object when payload signing is enabled".into(),
+                ));
+            }
             let sig = self.compute_signature(&payload)?;
             if let serde_json::Value::Object(ref mut map) = payload {
                 map.insert(
@@ -226,6 +239,24 @@ impl PostgresQueueProvider {
         .await?;
 
         // O‑5.1:Verify HMAC signatures and filter out tampered payloads
+        let mut rows = rows;
+        // O‑5.2:The inner ORDER BY above selects WHICH jobs to claim, but SQL
+        // makes no guarantee that `UPDATE ... WHERE id IN (SELECT ... ORDER
+        // BY ...) RETURNING` streams rows back in that order (observed in the
+        // field as an arbitrary permutation, e.g. [5, 1, 10]). Re-apply the
+        // documented dequeue ordering here so callers can rely on it:
+        // effective priority (priority + LEAST(age_hours, 100)) DESC, FIFO by
+        // created_at ASC — the exact expression the claim query sorts by.
+        rows.sort_by(|a, b| {
+            let key = |r: &JobRow| {
+                let age_hours = (now - r.created_at).num_seconds() as f64 / 3600.0;
+                ((r.priority as f64 + age_hours.min(100.0)) as i32, r.created_at)
+            };
+            let (eff_a, created_a) = key(a);
+            let (eff_b, created_b) = key(b);
+            eff_b.cmp(&eff_a).then(created_a.cmp(&created_b))
+        });
+
         let mut jobs: Vec<Job> = Vec::with_capacity(rows.len());
         for row in rows {
             let mut payload = row.payload.clone();
@@ -1100,6 +1131,11 @@ mod tests {
             String::from_utf8(bytes).unwrap(),
             r#"{"big":18446744073709551615,"f":2.5,"i":42}"#
         );
+        // Both boolean literals survive verbatim.
+        assert_eq!(
+            canonical_json_bytes(&serde_json::json!({"t": true, "f": false})).unwrap(),
+            b"{\"f\":false,\"t\":true}"
+        );
     }
 
     // ── K: lease fencing ───────────────────────────────────────────────────
@@ -1175,11 +1211,15 @@ mod tests {
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
         let pool = PgPool::connect(&url).await.ok()?;
         // Ensure the table shape exists (fresh scratch databases): the base
-        // DDL plus migration 103's column/index.
+        // DDL plus migration 103's column/index. Both are BEST-EFFORT: on a
+        // pre-provisioned database owned by the migrator role, every DDL
+        // statement fails with "must be owner" even though the schema is
+        // already complete — that must not silently skip the test, so the
+        // schema is verified below instead.
         sqlx::raw_sql(crate::schema::QUEUE_SCHEMA)
             .execute(&pool)
             .await
-            .ok()?;
+            .ok();
         sqlx::raw_sql(
             "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS lease_token UUID; \
              CREATE INDEX IF NOT EXISTS idx_queue_jobs_lease \
@@ -1188,7 +1228,38 @@ mod tests {
         )
         .execute(&pool)
         .await
-        .ok()?;
+        .ok();
+        let usable: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) = 17 FROM information_schema.columns
+             WHERE table_name = 'queue_jobs'
+               AND column_name = ANY($1)",
+        )
+        .bind(vec![
+            "id",
+            "tenant_id",
+            "queue",
+            "payload",
+            "status",
+            "attempts",
+            "max_attempts",
+            "priority",
+            "scheduled_at",
+            "started_at",
+            "completed_at",
+            "failed_at",
+            "error_message",
+            "visibility_timeout",
+            "lease_token",
+            "created_at",
+            "updated_at",
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+        if !usable {
+            eprintln!("optional_pool: queue_jobs table missing required columns; skipping");
+            return None;
+        }
         Some(pool)
     }
 
@@ -1338,5 +1409,814 @@ mod tests {
             recent_effective,
             effective
         );
+    }
+
+    // ── W6a: adversarial coverage campaign ────────────────────────────────
+
+    /// Dedicated DB pool for the W6a tests. Same convention as
+    /// [`optional_pool`] (skip without TEST_DATABASE_URL) but tolerant of a
+    /// PRE-PROVISIONED database owned by another role: the DDL is only needed
+    /// to bootstrap a fresh scratch database, and every statement fails with
+    /// "must be owner" when a migrator role already created the table — which
+    /// must NOT silently skip the tests. After applying the DDL best-effort
+    /// (one retry for the CREATE INDEX IF NOT EXISTS lock race), the schema
+    /// is verified and the tests proceed whenever the table is actually
+    /// usable.
+    async fn db_pool() -> Option<PgPool> {
+        let url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let pool = match PgPool::connect(&url).await {
+            Ok(pool) => pool,
+            Err(error) => {
+                eprintln!("db_pool: TEST_DATABASE_URL connect failed: {error}");
+                return None;
+            }
+        };
+        if sqlx::raw_sql(crate::schema::QUEUE_SCHEMA)
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            sqlx::raw_sql(crate::schema::QUEUE_SCHEMA)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+        // Scratch databases may predate migration 103's column/index.
+        sqlx::raw_sql(
+            "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS lease_token UUID; \
+             CREATE INDEX IF NOT EXISTS idx_queue_jobs_lease \
+             ON queue_jobs (lease_token) \
+             WHERE status = 'processing' AND lease_token IS NOT NULL;",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        // Usability is the actual gate — not DDL success. Every column the
+        // provider's queries touch must exist; extra/legacy columns are fine.
+        let usable: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) = 17 FROM information_schema.columns
+             WHERE table_name = 'queue_jobs'
+               AND column_name = ANY($1)",
+        )
+        .bind(vec![
+            "id",
+            "tenant_id",
+            "queue",
+            "payload",
+            "status",
+            "attempts",
+            "max_attempts",
+            "priority",
+            "scheduled_at",
+            "started_at",
+            "completed_at",
+            "failed_at",
+            "error_message",
+            "visibility_timeout",
+            "lease_token",
+            "created_at",
+            "updated_at",
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+        let _ = sqlx::query("SELECT 1 FROM queue_jobs LIMIT 0")
+            .execute(&pool)
+            .await;
+        if !usable {
+            eprintln!("db_pool: queue_jobs table missing required columns; skipping");
+            return None;
+        }
+        Some(pool)
+    }
+
+    fn opts(queue: &str, payload: serde_json::Value, max_attempts: i32) -> EnqueueOptions {
+        EnqueueOptions {
+            tenant_id: Uuid::new_v4(),
+            queue: queue.to_string(),
+            payload,
+            max_attempts,
+            priority: 0,
+            scheduled_at: None,
+            visibility_timeout: 600,
+        }
+    }
+
+    async fn cleanup_queue(pool: &PgPool, queue: &str) {
+        sqlx::query("DELETE FROM queue_jobs WHERE queue = $1")
+            .bind(queue)
+            .execute(pool)
+            .await
+            .expect("cleanup must succeed");
+    }
+
+    async fn row_status(pool: &PgPool, id: Uuid) -> (String, Option<String>, Option<Uuid>) {
+        let (status, error, token): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, error_message, lease_token FROM queue_jobs WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("row must exist");
+        (status, error, token)
+    }
+
+    #[tokio::test]
+    async fn enqueue_validation_rejects_blank_queue_and_non_positive_limits() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::new(pool);
+
+        let mut bad = opts("email", serde_json::json!({"a": 1}), 3);
+        bad.queue = "   ".into();
+        let err = provider.enqueue(bad.clone()).await.err().unwrap();
+        assert!(err.to_string().contains("queue name is required"), "{err}");
+
+        bad.queue = "email".into();
+        bad.max_attempts = 0;
+        let err = provider.enqueue(bad.clone()).await.err().unwrap();
+        assert!(err.to_string().contains("max_attempts must be positive"), "{err}");
+        bad.max_attempts = -5;
+        let err = provider.enqueue(bad.clone()).await.err().unwrap();
+        assert!(err.to_string().contains("max_attempts must be positive"), "{err}");
+
+        bad.max_attempts = 3;
+        bad.visibility_timeout = 0;
+        let err = provider.enqueue(bad.clone()).await.err().unwrap();
+        assert!(
+            err.to_string().contains("visibility_timeout must be positive"),
+            "{err}"
+        );
+        bad.visibility_timeout = -1;
+        let err = provider.enqueue(bad).await.err().unwrap();
+        assert!(
+            err.to_string().contains("visibility_timeout must be positive"),
+            "{err}"
+        );
+    }
+
+    /// BUG FIX (W6a campaign): with signing enabled, a non-object payload
+    /// (array/string/number/null) cannot carry the embedded `__hmac__`
+    /// signature. The old code computed a signature and then silently dropped
+    /// it for non-objects — enqueue() returned Ok, the job was stored
+    /// unsigned, and the next dequeue() routed it to dead_letter as "Missing
+    /// HMAC signature": a silently lost job. The fix fails fast at enqueue.
+    #[tokio::test]
+    async fn enqueue_fails_fast_for_unsignable_non_object_payloads() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let provider = PostgresQueueProvider::with_signing_key(pool, b"k".to_vec());
+
+        for payload in [
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!("bare string"),
+            serde_json::json!(42),
+            serde_json::Value::Null,
+        ] {
+            let err = provider
+                .enqueue(opts("email", payload.clone(), 3))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("non-object payload {payload} must be rejected"));
+            assert!(
+                matches!(err, QueueError::InvalidPayload(ref m) if m.contains("JSON object")),
+                "unexpected error for {payload}: {err}"
+            );
+        }
+        // replay_dead_letter shares the same storage prep and must reject too.
+        let err = provider
+            .replay_dead_letter(Uuid::new_v4(), serde_json::json!([1]))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(err, QueueError::InvalidPayload(_)));
+    }
+
+    #[tokio::test]
+    async fn unsigned_provider_still_accepts_non_object_payloads_end_to_end() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-unsigned-array-{}", Uuid::new_v4());
+
+        // The signing-only restriction must not leak into unsigned queues.
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!([1, "two", null]), 3))
+            .await
+            .unwrap();
+        let got = provider.dequeue(&queue, 10).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, job.id);
+        assert_eq!(got[0].payload, serde_json::json!([1, "two", null]));
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn signed_enqueue_stores_signature_and_dequeue_verifies_and_strips_it() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider =
+            PostgresQueueProvider::with_signing_key(pool.clone(), b"w6a-signing-key".to_vec());
+        let queue = format!("w6a-signed-{}", Uuid::new_v4());
+
+        let job = provider
+            .enqueue(
+                opts(&queue, serde_json::json!({"to": "user@example.com", "n": 3}), 3)
+            )
+            .await
+            .unwrap();
+
+        // The STORED payload (post-JSONB) carries the signature...
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT payload FROM queue_jobs WHERE id = $1")
+                .bind(job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.get(HMAC_FIELD).and_then(|v| v.as_str()).is_some());
+
+        // ...and dequeue returns the payload STRIPPED, in Processing state.
+        let mut got = provider.dequeue(&queue, 10).await.unwrap();
+        assert_eq!(got.len(), 1);
+        let claimed = got.remove(0);
+        assert_eq!(claimed.id, job.id);
+        assert_eq!(claimed.status, JobStatus::Processing);
+        assert!(claimed.payload.get(HMAC_FIELD).is_none());
+        assert_eq!(claimed.payload.get("to").unwrap(), "user@example.com");
+        assert!(claimed.lease_token.is_some());
+
+        provider
+            .complete(claimed.id, claimed.lease_token.unwrap())
+            .await
+            .unwrap();
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn dequeue_dead_letters_payloads_tampered_after_signing() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider =
+            PostgresQueueProvider::with_signing_key(pool.clone(), b"w6a-signing-key".to_vec());
+        let queue = format!("w6a-tamper-{}", Uuid::new_v4());
+
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!({"to": "victim@example.com"}), 3))
+            .await
+            .unwrap();
+
+        // Hostile DB write: flip the recipient, keep the signature field.
+        sqlx::query(
+            r#"UPDATE queue_jobs
+               SET payload = jsonb_set(payload, '{to}', '"attacker@example.com"')
+               WHERE id = $1"#,
+        )
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The tampered job is NEVER returned to a worker...
+        let got = provider.dequeue(&queue, 10).await.unwrap();
+        assert!(got.is_empty(), "tampered payload must not be delivered");
+
+        // ...it lands in dead_letter with a manual-replay hint.
+        let (status, error, _) = row_status(&pool, job.id).await;
+        assert_eq!(status, "dead_letter");
+        assert!(
+            error.as_deref().unwrap_or_default().contains("HMAC verification failed"),
+            "unexpected error_message: {error:?}"
+        );
+
+        let stats = provider.stats(&queue).await.unwrap();
+        assert_eq!(stats.dead_letter, 1);
+        assert_eq!(stats.processing, 0);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn dequeue_dead_letters_rows_stored_without_signature() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        // Migration scenario: rows written before signing was enabled, then a
+        // signing provider starts reading them. Unsigned rows must not be
+        // silently processed.
+        let unsigned = PostgresQueueProvider::new(pool.clone());
+        let signing =
+            PostgresQueueProvider::with_signing_key(pool.clone(), b"w6a-signing-key".to_vec());
+        let queue = format!("w6a-unsigned-row-{}", Uuid::new_v4());
+
+        let job = unsigned
+            .enqueue(opts(&queue, serde_json::json!({"to": "user@example.com"}), 3))
+            .await
+            .unwrap();
+
+        let got = signing.dequeue(&queue, 10).await.unwrap();
+        assert!(got.is_empty(), "unsigned row must not be delivered under signing");
+        let (status, error, _) = row_status(&pool, job.id).await;
+        assert_eq!(status, "dead_letter");
+        assert!(
+            error.as_deref().unwrap_or_default().contains("Missing HMAC signature"),
+            "unexpected error_message: {error:?}"
+        );
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn replay_dead_letter_resigns_trusted_payload_and_requeues() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider =
+            PostgresQueueProvider::with_signing_key(pool.clone(), b"w6a-signing-key".to_vec());
+        let queue = format!("w6a-replay-{}", Uuid::new_v4());
+
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!({"to": "victim@example.com"}), 3))
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"UPDATE queue_jobs
+               SET payload = jsonb_set(payload, '{to}', '"attacker@example.com"')
+               WHERE id = $1"#,
+        )
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(provider.dequeue(&queue, 10).await.unwrap().is_empty());
+
+        // Manual replay after inspection: trusted payload is re-signed.
+        let replayed = provider
+            .replay_dead_letter(job.id, serde_json::json!({"to": "fixed@example.com"}))
+            .await
+            .unwrap();
+        assert_eq!(replayed.status, JobStatus::Pending);
+        assert_eq!(replayed.attempts, 0);
+        assert_eq!(replayed.error_message, None);
+        assert_eq!(replayed.lease_token, None);
+
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT payload FROM queue_jobs WHERE id = $1")
+                .bind(job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.get(HMAC_FIELD).is_some(), "replayed payload must be re-signed");
+
+        let got = provider.dequeue(&queue, 10).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].payload.get("to").unwrap(), "fixed@example.com");
+        assert!(got[0].payload.get(HMAC_FIELD).is_none());
+
+        // Replay only works on dead_letter rows.
+        assert!(matches!(
+            provider
+                .replay_dead_letter(Uuid::new_v4(), serde_json::json!({"x": 1}))
+                .await
+                .err()
+                .unwrap(),
+            QueueError::NotFound { .. }
+        ));
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn fail_retries_with_backoff_then_dead_letters_at_max_attempts() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-fail-{}", Uuid::new_v4());
+
+        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 2)).await.unwrap();
+
+        // Unknown job: NotFound.
+        assert!(matches!(
+            provider.fail(Uuid::new_v4(), Uuid::new_v4(), "ghost").await.err().unwrap(),
+            QueueError::NotFound { .. }
+        ));
+
+        // Attempt 1 fails → back to pending, scheduled in the future with a
+        // cleared lease.
+        let attempt1 = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        let token1 = attempt1.lease_token.unwrap();
+        provider.fail(job.id, token1, "transient").await.unwrap();
+        let (status, error, token) = row_status(&pool, job.id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(error.as_deref(), Some("transient"));
+        assert_eq!(token, None, "retry must clear the lease token");
+        let scheduled_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT scheduled_at FROM queue_jobs WHERE id = $1")
+                .bind(job.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            scheduled_at > Utc::now(),
+            "retry must be scheduled via the backoff, got {scheduled_at}"
+        );
+
+        // While pending, the OLD token can no longer complete the job.
+        assert!(matches!(
+            provider.complete(job.id, token1).await.err().unwrap(),
+            QueueError::NotFound { .. }
+        ));
+
+        // Attempt 2 fails → attempts (2) >= max_attempts (2) → dead letter.
+        sqlx::query("UPDATE queue_jobs SET scheduled_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(job.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attempt2 = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        assert_eq!(attempt2.attempts, 2);
+        provider.fail(job.id, attempt2.lease_token.unwrap(), "fatal").await.unwrap();
+        let (status, error, token) = row_status(&pool, job.id).await;
+        assert_eq!(status, "dead_letter");
+        assert_eq!(error.as_deref(), Some("fatal"));
+        assert_eq!(token, None);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn dead_letter_is_fenced_on_the_live_lease_token() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-dl-fence-{}", Uuid::new_v4());
+
+        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 3)).await.unwrap();
+        let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        let token = claimed.lease_token.unwrap();
+
+        // Stale token: no-op, job stays processing.
+        provider.dead_letter(job.id, Uuid::new_v4(), "stale").await.unwrap();
+        assert_eq!(row_status(&pool, job.id).await.0, "processing");
+
+        // Live token: moves to dead letter.
+        provider.dead_letter(job.id, token, "poison").await.unwrap();
+        let (status, error, token_after) = row_status(&pool, job.id).await;
+        assert_eq!(status, "dead_letter");
+        assert_eq!(error.as_deref(), Some("poison"));
+        assert_eq!(token_after, None);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    /// SKIP LOCKED exactly-once: N concurrent workers dequeue the same queue
+    /// and no job is ever handed to two of them.
+    #[tokio::test]
+    async fn concurrent_dequeue_claims_each_job_exactly_once() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-race-{}", Uuid::new_v4());
+
+        const JOBS: usize = 12;
+        const WORKERS: usize = 8;
+        for i in 0..JOBS {
+            provider
+                .enqueue(opts(&queue, serde_json::json!({"i": i}), 3))
+                .await
+                .unwrap();
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..WORKERS {
+            let provider = PostgresQueueProvider::new(pool.clone());
+            let queue = queue.clone();
+            handles.push(tokio::spawn(async move {
+                provider.dequeue(&queue, 4).await.unwrap()
+            }));
+        }
+        let mut claimed = Vec::new();
+        for handle in handles {
+            claimed.extend(handle.await.expect("worker join"));
+        }
+
+        assert_eq!(claimed.len(), JOBS, "every job must be claimed exactly once");
+        let mut ids: Vec<Uuid> = claimed.iter().map(|j| j.id).collect();
+        ids.sort();
+        let distinct = ids.len();
+        assert_eq!(distinct, JOBS, "SKIP LOCKED must never double-claim: {ids:?}");
+        for job in &claimed {
+            assert_eq!(job.status, JobStatus::Processing);
+            assert_eq!(job.attempts, 1, "a claimed job must have exactly one attempt");
+            assert!(job.lease_token.is_some());
+        }
+        let stats = provider.stats(&queue).await.unwrap();
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.processing, JOBS as i64);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn dequeue_respects_scheduling_future_priority_and_fifo() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-order-{}", Uuid::new_v4());
+
+        // Future-scheduled jobs are invisible.
+        let mut future = opts(&queue, serde_json::json!({"n": "future"}), 3);
+        future.scheduled_at = Some(Utc::now() + chrono::Duration::hours(1));
+        let _future_job = provider.enqueue(future).await.unwrap();
+        assert!(
+            provider.dequeue(&queue, 10).await.unwrap().is_empty(),
+            "future-scheduled job must not dequeue"
+        );
+
+        // Batch size 0 claims nothing.
+        let due = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": "due"}), 3))
+            .await
+            .unwrap();
+        assert!(provider.dequeue(&queue, 0).await.unwrap().is_empty());
+
+        // Priority ordering, highest first; the earlier default-priority `due`
+        // job trails the batch (proving ordering, not luck of the draw).
+        for p in [1, 10, 5] {
+            let mut o = opts(&queue, serde_json::json!({"p": p}), 3);
+            o.priority = p;
+            provider.enqueue(o).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let batch = provider.dequeue(&queue, 10).await.unwrap();
+        let priorities: Vec<i32> = batch.iter().map(|j| j.priority).collect();
+        assert_eq!(priorities, vec![10, 5, 1, 0], "dequeue must order by priority desc, FIFO last");
+
+        // FIFO within equal priority (created_at asc), and the future job
+        // stays put while it is not yet due.
+        let queue2 = format!("{}-fifo", queue);
+        for i in 0..3 {
+            provider
+                .enqueue(opts(&queue2, serde_json::json!({"i": i}), 3))
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let fifo = provider.dequeue(&queue2, 10).await.unwrap();
+        let seq: Vec<i64> = fifo
+            .iter()
+            .map(|j| j.payload.get("i").and_then(|v| v.as_i64()).unwrap())
+            .collect();
+        assert_eq!(seq, vec![0, 1, 2], "equal-priority jobs must dequeue FIFO");
+
+        let stats = provider.stats(&queue).await.unwrap();
+        assert_eq!(stats.pending, 1, "only the future-scheduled job stays pending");
+
+        cleanup_queue(&pool, &queue).await;
+        cleanup_queue(&pool, &queue2).await;
+        let _ = due;
+    }
+
+    /// The fail() TOCTOU window made deterministic: the SELECT still sees
+    /// this worker's lease, but the lease is rotated (by recovery + re-claim)
+    /// before the fenced UPDATE lands. The row lock serialises the two
+    /// writers, so the interleaving is guaranteed, not lucky.
+    #[tokio::test]
+    async fn fail_lease_rotated_between_select_and_update_is_a_noop() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-toctou-{}", Uuid::new_v4());
+
+        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 5)).await.unwrap();
+        let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        let token1 = claimed.lease_token.unwrap();
+
+        // Connection B: hold the row lock WITHOUT changing the lease yet.
+        let mut tx = pool.begin().await.expect("tx");
+        sqlx::query("UPDATE queue_jobs SET updated_at = updated_at WHERE id = $1")
+            .bind(job.id)
+            .execute(&mut *tx)
+            .await
+            .expect("lock row");
+
+        // fail() SELECTs (still sees token1) and then BLOCKS on the locked
+        // row inside its fenced UPDATE.
+        let worker = PostgresQueueProvider::new(pool.clone());
+        let worker = tokio::spawn(async move {
+            worker.fail(job.id, token1, "raced failure").await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // While fail() is parked on the row lock, the lease rotates (the
+        // recovery/re-claim that stole the job).
+        let new_token = Uuid::new_v4();
+        sqlx::query("UPDATE queue_jobs SET lease_token = $2 WHERE id = $1")
+            .bind(job.id)
+            .bind(new_token)
+            .execute(&mut *tx)
+            .await
+            .expect("rotate lease");
+        tx.commit().await.expect("commit rotation");
+
+        // fail() resumes: its fencing predicate no longer matches → no-op.
+        worker
+            .await
+            .expect("fail task join")
+            .expect("fail must return Ok on lost race");
+
+        let (status, error, stored_token) = row_status(&pool, job.id).await;
+        assert_eq!(status, "processing", "the raced fail must not touch the job");
+        assert_eq!(stored_token, Some(new_token), "the new owner's lease survives");
+        assert_eq!(error, None, "the raced error message must not be written");
+        let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM queue_jobs WHERE id = $1")
+            .bind(job.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 1, "no extra attempt may be consumed");
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn recover_stale_dead_letters_zombies_and_recovers_expired_leases() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-recover-{}", Uuid::new_v4());
+
+        // (a) Expired processing job AT the attempt limit → dead letter.
+        let exhausted = provider.enqueue(opts(&queue, serde_json::json!({"n": "a"}), 1)).await.unwrap();
+        provider.dequeue(&queue, 1).await.unwrap();
+        sqlx::query(
+            "UPDATE queue_jobs SET started_at = NOW() - INTERVAL '700 seconds' WHERE id = $1",
+        )
+        .bind(exhausted.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // (b) Pending zombie (crash between fail() and the retry write).
+        let zombie = provider.enqueue(opts(&queue, serde_json::json!({"n": "b"}), 1)).await.unwrap();
+        sqlx::query("UPDATE queue_jobs SET attempts = 1, status = 'pending' WHERE id = $1")
+            .bind(zombie.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // (c) Expired processing job BELOW the limit → recovered to pending.
+        let expired = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": "c"}), 3))
+            .await
+            .unwrap();
+        let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        let stale_token = claimed.lease_token.unwrap();
+        sqlx::query(
+            "UPDATE queue_jobs SET started_at = NOW() - INTERVAL '700 seconds' WHERE id = $1",
+        )
+        .bind(expired.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recovered = provider.recover_stale().await.unwrap();
+        assert!(recovered >= 3, "expected at least the 3 fixtures, got {recovered}");
+
+        let (status, error, _) = row_status(&pool, exhausted.id).await;
+        assert_eq!(status, "dead_letter", "exhausted zombie must dead-letter");
+        assert!(error.unwrap_or_default().contains("visibility timeout expired"));
+
+        let (status, error, _) = row_status(&pool, zombie.id).await;
+        assert_eq!(status, "dead_letter", "pending zombie must be swept");
+        assert!(error.unwrap_or_default().contains("max attempts exceeded while pending"));
+
+        let (status, _, token) = row_status(&pool, expired.id).await;
+        assert_eq!(status, "pending", "expired lease below the limit must recover");
+        assert_eq!(token, None, "recovery must clear the token");
+
+        // The stale worker cannot fail the recovered job; the re-claim gets a
+        // fresh attempt.
+        provider.fail(expired.id, stale_token, "stale after recovery").await.unwrap();
+        assert_eq!(row_status(&pool, expired.id).await.0, "pending");
+        let again = provider.dequeue(&queue, 1).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, expired.id);
+        assert_eq!(again[0].attempts, 2);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn stats_counts_every_status_bucket() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-stats-{}", Uuid::new_v4());
+
+        let empty = provider.stats(&queue).await.unwrap();
+        assert_eq!(
+            (empty.pending, empty.processing, empty.completed, empty.failed, empty.dead_letter),
+            (0, 0, 0, 0, 0)
+        );
+
+        for i in 0..3 {
+            provider.enqueue(opts(&queue, serde_json::json!({"i": i}), 3)).await.unwrap();
+        }
+        let batch = provider.dequeue(&queue, 2).await.unwrap();
+        provider.complete(batch[0].id, batch[0].lease_token.unwrap()).await.unwrap();
+        provider.fail(batch[1].id, batch[1].lease_token.unwrap(), "boom").await.unwrap();
+
+        let stats = provider.stats(&queue).await.unwrap();
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.processing, 0);
+        assert_eq!(stats.pending, 2, "failed job returned to pending");
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.dead_letter, 0);
+        assert_eq!(stats.queue, queue);
+
+        cleanup_queue(&pool, &queue).await;
+    }
+
+    #[tokio::test]
+    async fn purge_deletes_only_finished_rows_older_than_cutoff_per_queue() {
+        let Some(pool) = db_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let provider = PostgresQueueProvider::new(pool.clone());
+        let queue = format!("w6a-purge-{}", Uuid::new_v4());
+        let other = format!("w6a-purge-other-{}", Uuid::new_v4());
+
+        // Finished + old → purged. Each job is claimed right after its own
+        // enqueue (FIFO would otherwise hand the claim to a later job).
+        let old_done = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 3)).await.unwrap();
+        let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        assert_eq!(claimed.id, old_done.id);
+        provider.complete(old_done.id, claimed.lease_token.unwrap()).await.unwrap();
+
+        // Dead-lettered + old → purged.
+        let old_dead = provider.enqueue(opts(&queue, serde_json::json!({"n": 4}), 3)).await.unwrap();
+        let dead_claim = provider.dequeue(&queue, 1).await.unwrap().remove(0);
+        assert_eq!(dead_claim.id, old_dead.id);
+        provider.dead_letter(old_dead.id, dead_claim.lease_token.unwrap(), "junk").await.unwrap();
+
+        // Finished + old in ANOTHER queue → NOT purged by `queue`'s sweep.
+        let other_done = provider.enqueue(opts(&other, serde_json::json!({"n": 2}), 3)).await.unwrap();
+        let other_claim = provider.dequeue(&other, 1).await.unwrap().remove(0);
+        provider.complete(other_done.id, other_claim.lease_token.unwrap()).await.unwrap();
+
+        // Pending + old → never purged.
+        let old_pending = provider.enqueue(opts(&queue, serde_json::json!({"n": 3}), 3)).await.unwrap();
+
+        // NOTE: the production schema carries trg_queue_jobs_updated_at, a
+        // BEFORE UPDATE trigger that stamps updated_at = NOW() on every
+        // UPDATE, so rows cannot be backdated. The age filter is instead
+        // proven from both sides of the cutoff: with older_than_hours = -1
+        // the cutoff lands in the future (everything finished is older than
+        // it), and with 1 hour the freshly finished rows must all survive.
+        let purged = provider.purge(&queue, -1).await.unwrap();
+        assert_eq!(purged, 2, "old completed + old dead_letter, nothing else");
+
+        assert_eq!(
+            row_status(&pool, old_pending.id).await.0,
+            "pending",
+            "pending rows must survive purge regardless of age"
+        );
+        assert_eq!(
+            row_status(&pool, other_done.id).await.0,
+            "completed",
+            "purge must be queue-scoped"
+        );
+
+        // Fresh finished rows sit beyond a 1-hour cutoff: nothing more to
+        // purge, in either queue.
+        assert_eq!(provider.purge(&queue, 1).await.unwrap(), 0);
+        assert_eq!(provider.purge(&other, 1).await.unwrap(), 0);
+
+        cleanup_queue(&pool, &queue).await;
+        cleanup_queue(&pool, &other).await;
     }
 }
