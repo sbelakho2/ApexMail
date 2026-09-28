@@ -2498,7 +2498,12 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     // issue; cash-accounting supplies recognise on payment (or the
     // third-month fallback, handled by the sweep). Idempotent, best-effort:
     // a failure here is logged, never allowed to fake or skip the ledger.
-    let bound_invoices: Vec<(Uuid,)> = sqlx::query_as(
+    // Fix #10 sweep: a DB failure here previously collapsed to an empty vec
+    // via `unwrap_or_default`, silently skipping recognition materialization
+    // for a settled invoice — the exact silent-ledger-skip the comment above
+    // forbids. Keep the best-effort behavior (never fail the webhook over the
+    // ledger), but make the skip loud and alert-grade.
+    let bound_invoices: Vec<(Uuid,)> = match sqlx::query_as(
         r#"
         SELECT id FROM invoices
         WHERE stripe_invoice_id = $1
@@ -2509,7 +2514,19 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     .bind(&tenant_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            error!(
+                stripe_invoice_id = %invoice.id,
+                tenant_id = %tenant_id,
+                error = %error,
+                "could not load invoices bound to this Stripe settlement — \
+                 VAT recognition materialization SKIPPED for it (Fix #10 sweep)"
+            );
+            Vec::new()
+        }
+    };
     for (invoice_row_id,) in &bound_invoices {
         if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
             &state.db,

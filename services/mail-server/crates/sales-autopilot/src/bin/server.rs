@@ -10,7 +10,9 @@ use sales_autopilot::{
     config::SalesConfig,
     crm::CrmBackend,
     dispatcher::ProductionCampaignDispatcher,
-    enrichment::{EnrichmentService, HttpEnrichmentProvider},
+    enrichment::{
+        providers::http::UnavailableEnrichmentProvider, EnrichmentService, HttpEnrichmentProvider,
+    },
     inbox::InboxManager,
     intelligence,
     knowledge::SalesKnowledgeBase,
@@ -183,10 +185,23 @@ async fn run_(
         db.clone(),
         SalesKnowledgeBase::canonical(),
     ));
-    let enrichment = EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
+    // PERF #24: a failed HTTP-client construction makes the enrichment
+    // integration UNAVAILABLE (every lookup fails with a typed error naming
+    // the reason), never a fall back to an unbounded default client.
+    let enrichment = match HttpEnrichmentProvider::try_new(
         &cfg.enrichment_api_url,
         &cfg.enrichment_api_key,
-    )));
+    ) {
+        Ok(provider) => EnrichmentService::new(Arc::new(provider)),
+        Err(reason) => {
+            tracing::error!(
+                %reason,
+                "enrichment gateway HTTP client could not be constructed — enrichment \
+                 integration is UNAVAILABLE (PERF #24)"
+            );
+            EnrichmentService::new(Arc::new(UnavailableEnrichmentProvider::new(reason)))
+        }
+    };
 
     let state = AppState {
         config: cfg.clone(),

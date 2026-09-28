@@ -27,6 +27,45 @@ pub struct RetrievedChunk {
     pub score: f64,
 }
 
+/// Degradation state of a retrieval operation (Fix #17).
+///
+/// The point of the tri-state is honesty: a BROKEN docs index must be
+/// distinguishable from a genuinely EMPTY result. The previous behavior —
+/// `search` warning into `Vec::new()` and `current_version` swallowing its
+/// query failure into `""` — let a broken database pose as "no evidence",
+/// so the assistant answered canonical-facts-only while looking grounded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetrievalState {
+    /// The index answered and returned at least one passage.
+    Available,
+    /// The index answered: there is genuinely no matching evidence. This is
+    /// evidence of ABSENCE.
+    #[default]
+    Empty,
+    /// The retrieval subsystem FAILED (broken database, failed query). This
+    /// is NOT evidence of absence — callers must treat passage-backed
+    /// answers as unverifiable and surface the degradation (Fix #17/#18).
+    Unavailable,
+}
+
+/// The result of a hybrid docs search, with its degradation state.
+#[derive(Debug, Clone)]
+pub struct RetrievalOutcome {
+    pub passages: Vec<RetrievedChunk>,
+    pub state: RetrievalState,
+}
+
+/// The current indexed corpus version, with its degradation state
+/// (Fix #17): `None` + [`RetrievalState::Empty`] means nothing is indexed,
+/// while `None` + [`RetrievalState::Unavailable`] means the lookup itself
+/// failed — never masquerade one as the other.
+#[derive(Debug, Clone)]
+pub struct CurrentVersionOutcome {
+    pub version: Option<String>,
+    pub state: RetrievalState,
+}
+
 /// Version of the indexed corpus — content hash of the docs tree. Changes
 /// only when the docs change, which (a) keys cache invalidation and (b) is
 /// stamped on every chat row for auditability.
@@ -183,10 +222,18 @@ pub async fn reindex(pool: &PgPool, dir: &Path) -> Result<usize, String> {
 
 /// Hybrid lexical search: ts_rank full-text fused with trigram similarity
 /// (RRF). Every query is parameterized; the scope is fixed to public docs.
-pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> Vec<RetrievedChunk> {
+///
+/// Fix #17: a failed query returns [`RetrievalState::Unavailable`] — never a
+/// plain empty vec, which is reserved for a successful "nothing matched".
+pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> RetrievalOutcome {
     let q = query.trim();
     if q.is_empty() {
-        return Vec::new();
+        // Not a subsystem failure and not evidence either: a blank query
+        // simply has nothing to look up.
+        return RetrievalOutcome {
+            passages: Vec::new(),
+            state: RetrievalState::Empty,
+        };
     }
     type SearchRow = (String, String, String, f32, f32);
     let rows: Result<Vec<SearchRow>, _> = sqlx::query_as(
@@ -221,30 +268,65 @@ pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> Vec<Retri
     .await;
 
     match rows {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|(path, title, content, fts, trg)| RetrievedChunk {
-                path,
-                title,
-                snippet: truncate_chars(&content, 700),
-                score: fts as f64 * 2.0 + trg as f64,
-            })
-            .collect(),
+        Ok(rows) => {
+            let passages: Vec<RetrievedChunk> = rows
+                .into_iter()
+                .map(|(path, title, content, fts, trg)| RetrievedChunk {
+                    path,
+                    title,
+                    snippet: truncate_chars(&content, 700),
+                    score: fts as f64 * 2.0 + trg as f64,
+                })
+                .collect();
+            let state = if passages.is_empty() {
+                RetrievalState::Empty
+            } else {
+                RetrievalState::Available
+            };
+            RetrievalOutcome { passages, state }
+        }
         Err(e) => {
-            tracing::warn!(error = %e, "docs search failed; answering from canonical facts only");
-            Vec::new()
+            tracing::warn!(
+                error = %e,
+                state = "unavailable",
+                "docs search failed — retrieval is UNAVAILABLE, which is not evidence of absence (Fix #17)"
+            );
+            RetrievalOutcome {
+                passages: Vec::new(),
+                state: RetrievalState::Unavailable,
+            }
         }
     }
 }
 
-/// Current indexed version (empty string when nothing indexed yet).
-pub async fn current_version(pool: &PgPool) -> String {
-    sqlx::query_scalar("SELECT docs_version FROM ai_docs_chunks LIMIT 1")
+/// Current indexed version (Fix #17): `None` + [`RetrievalState::Empty`]
+/// when nothing is indexed yet; `None` + [`RetrievalState::Unavailable`]
+/// when the lookup failed. Never a silent `""`.
+pub async fn current_version(pool: &PgPool) -> CurrentVersionOutcome {
+    match sqlx::query_scalar::<_, String>("SELECT docs_version FROM ai_docs_chunks LIMIT 1")
         .fetch_optional(pool)
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    {
+        Ok(Some(version)) => CurrentVersionOutcome {
+            version: Some(version),
+            state: RetrievalState::Available,
+        },
+        Ok(None) => CurrentVersionOutcome {
+            version: None,
+            state: RetrievalState::Empty,
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                state = "unavailable",
+                "docs version lookup failed — retrieval is UNAVAILABLE (Fix #17)"
+            );
+            CurrentVersionOutcome {
+                version: None,
+                state: RetrievalState::Unavailable,
+            }
+        }
+    }
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -382,17 +464,37 @@ mod tests {
         }
     }
 
-    /// A broken docs database degrades to "no passages" (the canonical
-    /// facts still answer) — search never panics on query failure.
+    /// A broken docs database is UNAVAILABLE (Fix #17) — a distinct state
+    /// from a successful-but-empty search, never masquerading as "no
+    /// evidence". The search never panics on query failure.
     #[tokio::test]
-    async fn search_degrades_to_empty_on_database_failure() {
+    async fn search_reports_unavailable_on_database_failure() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(1))
             .connect_lazy("postgresql://apexmail:not-a-real-password@127.0.0.1:1/no-such-db")
             .unwrap();
-        let hits = search(&pool, "warmup guidance", "someversion").await;
-        assert!(hits.is_empty(), "failures must degrade to no passages");
+        // Fix #17: updated from the old `Vec::new()` swallow — the outcome
+        // must name the degradation instead of posing as "no evidence".
+        let outcome = search(&pool, "warmup guidance", "someversion").await;
+        assert_eq!(
+            outcome.state,
+            RetrievalState::Unavailable,
+            "a broken index is Unavailable, not Empty"
+        );
+        assert!(outcome.passages.is_empty());
+
+        // The same broken database makes the version lookup Unavailable:
+        // "cannot consult the index" is distinguishable from "nothing
+        // indexed" (Fix #17).
+        let version = current_version(&pool).await;
+        assert_eq!(version.state, RetrievalState::Unavailable);
+        assert_eq!(version.version, None);
+
+        // Empty ≠ Unavailable: a blank query on the same broken pool still
+        // reports Empty (the query never reaches the database).
+        let blank = search(&pool, "   ", "someversion").await;
+        assert_eq!(blank.state, RetrievalState::Empty);
     }
 
     #[test]
@@ -460,10 +562,16 @@ mod tests {
         );
 
         let version = docs_version(&dir);
-        assert_eq!(current_version(&pool).await, version);
+        // Fix #17: the version lookup now reports its state.
+        let indexed = current_version(&pool).await;
+        assert_eq!(indexed.state, RetrievalState::Available);
+        assert_eq!(indexed.version.as_deref(), Some(version.as_str()));
 
         // ── search returns scoped, bounded, scored passages ──────────────
-        let hits = search(&pool, "warmup guidance", &version).await;
+        // Fix #17: search returns a RetrievalOutcome.
+        let outcome = search(&pool, "warmup guidance", &version).await;
+        assert_eq!(outcome.state, RetrievalState::Available);
+        let hits = outcome.passages;
         assert!(!hits.is_empty(), "FTS must match indexed text");
         for hit in &hits {
             assert!(hit.path.starts_with("pricing") || hit.path.starts_with("sub/"));
@@ -472,8 +580,12 @@ mod tests {
         }
 
         // Empty and whitespace-only queries never reach the database.
-        assert!(search(&pool, "", &version).await.is_empty());
-        assert!(search(&pool, "   ", &version).await.is_empty());
+        // Fix #17: this is Empty (nothing to look up), not Unavailable.
+        assert_eq!(search(&pool, "", &version).await.state, RetrievalState::Empty);
+        assert_eq!(
+            search(&pool, "   ", &version).await.state,
+            RetrievalState::Empty
+        );
 
         // A hostile SQL payload is data, not code: plainto_tsquery
         // neutralizes it and the table survives.
@@ -485,10 +597,11 @@ mod tests {
             .unwrap();
         assert!(still_there >= 3, "table must survive a hostile query");
 
-        // Unknown version: nothing to search.
-        assert!(search(&pool, "warmup guidance", "0000000000000000")
-            .await
-            .is_empty());
+        // Unknown version: a successful query with no hits — Empty, and
+        // crucially NOT Unavailable (Fix #17).
+        let unknown = search(&pool, "warmup guidance", "0000000000000000").await;
+        assert_eq!(unknown.state, RetrievalState::Empty);
+        assert!(unknown.passages.is_empty());
 
         // ── tenant scoping: another scope's rows are unreachable ─────────
         sqlx::query(
@@ -500,7 +613,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let scoped = search(&pool, "warmup guidance", &version).await;
+        let scoped = search(&pool, "warmup guidance", &version).await.passages;
         assert!(
             !scoped.iter().any(|c| c.path == "secret.md"),
             "search is fixed to the public scope, got {:?}",
@@ -535,7 +648,10 @@ mod tests {
         let new_version = docs_version(&dir);
         assert_ne!(version, new_version);
         let new_count = reindex(&pool, &dir).await.unwrap();
-        assert_eq!(current_version(&pool).await, new_version);
+        // Fix #17: state-carrying version lookup.
+        let rotated = current_version(&pool).await;
+        assert_eq!(rotated.state, RetrievalState::Available);
+        assert_eq!(rotated.version.as_deref(), Some(new_version.as_str()));
         let old_rows: i64 =
             sqlx::query_scalar("SELECT count(*) FROM ai_docs_chunks WHERE docs_version = $1")
                 .bind(&version)

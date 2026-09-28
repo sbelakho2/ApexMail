@@ -54,27 +54,27 @@ pub struct HttpDiscoverySource {
 impl HttpDiscoverySource {
     /// `id` must be a static name (it is persisted in
     /// `sales_discovery_candidates.source`).
-    pub fn new(
+    ///
+    /// PERF #24: client-construction failure makes the source UNAVAILABLE —
+    /// a typed `Err` the caller must surface (skip the source with an
+    /// alert-grade log), never a fall back to the process-default client,
+    /// which silently discards the timeout, user agent and no-redirect
+    /// policy this builder pins.
+    pub fn try_new(
         id: &'static str,
         base_url: &str,
         api_key: &str,
         allowed_jurisdictions: Vec<&'static str>,
-    ) -> Self {
-        // A client-build failure must not panic the service; the default
-        // client is the degraded fallback.
-        let client = match reqwest::Client::builder()
+    ) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .user_agent("ApexMail/1.0 (discovery)")
             .redirect(reqwest::redirect::Policy::none())
             .build()
-        {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::warn!(%error, "failed to build discovery HTTP client — using default client");
-                reqwest::Client::new()
-            }
-        };
-        Self {
+            .map_err(|error| {
+                format!("failed to build discovery HTTP client for `{id}`: {error}")
+            })?;
+        Ok(Self {
             id,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -82,7 +82,7 @@ impl HttpDiscoverySource {
             default_cost_eur: DEFAULT_DISCOVERY_COST_EUR,
             client,
             last_status: AtomicI32::new(NO_STATUS),
-        }
+        })
     }
 
     /// Override the per-page cost used when the provider reports none.
@@ -263,7 +263,10 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_base_url_fails_without_panicking() {
-        let source = HttpDiscoverySource::new("provider_api", "http://127.0.0.1:1", "k", vec![]);
+        // PERF #24: construction now returns a typed Result; the bounded
+        // client build succeeds in tests, so unwrap is honest here.
+        let source = HttpDiscoverySource::try_new("provider_api", "http://127.0.0.1:1", "k", vec![])
+            .expect("bounded client construction succeeds");
         let result = source.discover(&DiscoveryQuery::default(), None).await;
         assert!(result.is_err());
         assert!(source.last_http_status().is_none());

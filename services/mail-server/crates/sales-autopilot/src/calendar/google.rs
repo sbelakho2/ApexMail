@@ -77,10 +77,21 @@ impl GoogleCalendarProvider {
             .unwrap_or_else(|| DEFAULT_GOOGLE_CALENDAR_BASE_URL.to_string());
         let calendar_id = read_env(&["SALES_GOOGLE_CALENDAR_ID", "GOOGLE_CALENDAR_ID"])
             .unwrap_or_else(|| "primary".into());
+        // PERF #24: a client-construction failure must make the Google
+        // integration UNAVAILABLE, never substitute the process-default
+        // (unbounded) client — the old fallback silently discarded the
+        // timeout. `None` is the documented unavailable shape here: the
+        // caller degrades to the internal provider.
         let client = reqwest::Client::builder()
             .timeout(StdDuration::from_secs(HTTP_TIMEOUT_SECS))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .map_err(|error| {
+                tracing::error!(
+                    %error,
+                    "failed to build Google Calendar HTTP client — Google Calendar integration is UNAVAILABLE (PERF #24)"
+                )
+            })
+            .ok()?;
         Some(Self {
             client,
             base_url,

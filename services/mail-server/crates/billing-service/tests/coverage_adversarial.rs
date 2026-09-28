@@ -307,9 +307,16 @@ async fn seed_tenant_created_at(
 }
 
 async fn seed_plan(pool: &PgPool, name: &str, email_limit: i64, api_call_limit: i64) {
+    // Fix #10: a plans row whose `features` is present but invalid now fails
+    // plan/quota lookups CLOSED (typed error), and the column default ('{}')
+    // is invalid for PlanFeatures. The fixture therefore persists the
+    // documented default feature set so the seeded plan resolves exactly
+    // like an API-seeded one. All assertions unchanged.
+    let features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+        .expect("PlanFeatures serializes");
     sqlx::query(
-        "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit)
-         VALUES ($1, $2, $2, 0, $3, $4)
+        "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit, features)
+         VALUES ($1, $2, $2, 0, $3, $4, $5)
          ON CONFLICT (name) DO UPDATE SET email_limit = EXCLUDED.email_limit,
              api_call_limit = EXCLUDED.api_call_limit",
     )
@@ -317,6 +324,7 @@ async fn seed_plan(pool: &PgPool, name: &str, email_limit: i64, api_call_limit: 
     .bind(name)
     .bind(email_limit)
     .bind(api_call_limit)
+    .bind(&features)
     .execute(pool)
     .await
     .expect("seed plan");
@@ -1083,11 +1091,15 @@ db_test!(paid_subscription_widens_email_ceiling, |h| {
     seed_plan(&h.pool, "covceil", 100, 100).await;
     // The paid-subscription gate joins stripe_subscriptions.plan to plans and
     // requires price_monthly > 0, so the subscription's plan needs a price.
+    // Fix #10: the features column must carry a valid PlanFeatures document —
+    // the '{}' column default now (correctly) fails plan lookups closed.
     sqlx::query(
-        "INSERT INTO plans (id, name, display_name, price_cents, price_monthly, email_limit, api_call_limit)
-         VALUES ('plan_growth', 'growth', 'Growth', 4900, 4900, 100000, 100000)
+        "INSERT INTO plans (id, name, display_name, price_cents, price_monthly, email_limit, api_call_limit, features)
+         VALUES ('plan_growth', 'growth', 'Growth', 4900, 4900, 100000, 100000, $1)
          ON CONFLICT (name) DO UPDATE SET price_monthly = 4900",
     )
+    .bind(serde_json::to_value(billing_service::types::PlanFeatures::default())
+        .expect("PlanFeatures serializes"))
     .execute(&h.pool)
     .await
     .expect("seed growth plan");
@@ -3030,16 +3042,21 @@ async fn expect_webhook_ok(
 }
 
 async fn seed_stripe_plan(h: &Harness, name: &str, price_id: &str) {
+    // Fix #10: the features column must carry a valid PlanFeatures document —
+    // the '{}' column default now (correctly) fails plan lookups closed.
+    let features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+        .expect("PlanFeatures serializes");
     sqlx::query(
         "INSERT INTO plans (id, name, display_name, price_cents, price_monthly,
-                            email_limit, api_call_limit, stripe_price_id_monthly, is_active)
-         VALUES ($1, $2, $2, 4900, 4900, 100000, 100000, $3, true)
+                            email_limit, api_call_limit, stripe_price_id_monthly, is_active, features)
+         VALUES ($1, $2, $2, 4900, 4900, 100000, 100000, $3, true, $4)
          ON CONFLICT (name) DO UPDATE SET stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
              is_active = true, price_monthly = 4900",
     )
     .bind(format!("plan_{name}"))
     .bind(name)
     .bind(price_id)
+    .bind(&features)
     .execute(&h.pool)
     .await
     .expect("seed stripe plan");

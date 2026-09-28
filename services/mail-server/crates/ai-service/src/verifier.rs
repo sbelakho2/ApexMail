@@ -61,6 +61,10 @@ pub enum Violation {
     /// citation marker alone proves nothing: the marker must map to a chunk
     /// whose content actually overlaps the claim.
     UnsupportedClaim { claim: String },
+    /// Fix #17/#18: a `[n]` citation marker in an answer produced while docs
+    /// retrieval was UNAVAILABLE — there is no chunk the marker could map to,
+    /// so the citation is unsupported by construction.
+    UnavailableCitation { claim: String },
 }
 
 impl std::fmt::Display for Violation {
@@ -85,6 +89,11 @@ impl std::fmt::Display for Violation {
                 f,
                 "unsupported factual claim (not in canonical facts, account context, tool \
                  output, or the cited passage): {claim:?}"
+            ),
+            Self::UnavailableCitation { claim } => write!(
+                f,
+                "citation marker while documentation retrieval is unavailable — the cited \
+                 passage could not be consulted, so the citation is unsupported: {claim:?}"
             ),
         }
     }
@@ -136,6 +145,13 @@ pub struct Grounding<'a> {
     pub tool_output: &'a str,
     /// Retrieved passages in prompt order: chunk `i` is cited as `[i+1]`.
     pub chunks: &'a [RetrievedChunk],
+    /// Fix #17/#18 — retrieval Unavailable mode. The docs index could not be
+    /// consulted, so cited-chunk provenance is IMPOSSIBLE by construction:
+    /// any `[n]` citation marker in the answer is unsupported (nothing was
+    /// retrieved to cite), and provenance ladder (d) never applies. Canonical
+    /// facts / account context / tool output remain valid sources — they are
+    /// in-process data, not served by the broken index.
+    pub retrieval_unavailable: bool,
 }
 
 #[derive(Clone, Default)]
@@ -221,6 +237,12 @@ impl ResponseVerifier {
     /// claim: (a) canonical facts, (b) account context, (c) tool output,
     /// (d) a cited retrieved chunk with meaningful lexical overlap, else the
     /// claim is UNSUPPORTED.
+    ///
+    /// Fix #17/#18 — Unavailable mode ([`Grounding::retrieval_unavailable`]):
+    /// the docs index could not be consulted, so ANY `[n]` citation marker is
+    /// unsupported BY CONSTRUCTION (there is no chunk n to map to) and ladder
+    /// (d) is skipped entirely. Deterministic: the flag alone decides, never
+    /// the answer content.
     fn check_claim_support(&self, response: &str, grounding: &Grounding<'_>) -> Vec<Violation> {
         let canonical = tokenize_source(grounding.canonical_facts);
         let account = tokenize_source(grounding.account_context);
@@ -236,17 +258,29 @@ impl ResponseVerifier {
                 || supported_by_source(&claim, &account)
                 || supported_by_source(&claim, &tool)
             {
+                // Fix #17/#18: even a canonically-supported sentence may not
+                // WEAR a citation marker while retrieval is unavailable —
+                // citing evidence that could not be retrieved is exactly the
+                // "unsupported factual assertion shaped as a citation" the
+                // degraded mode exists to refuse.
+                if grounding.retrieval_unavailable && !claim.citations.is_empty() {
+                    violations.push(Violation::UnavailableCitation {
+                        claim: sentence.chars().take(200).collect(),
+                    });
+                }
                 continue;
             }
             // (d) the citation marker must map to a real chunk whose content
             // overlaps the claim — the mere presence of "[1]" proves nothing.
-            let chunk_supported = claim.citations.iter().any(|&marker| {
-                marker >= 1
-                    && grounding
-                        .chunks
-                        .get(marker - 1)
-                        .is_some_and(|chunk| supported_by_chunk(&claim, chunk))
-            });
+            // Under Unavailable retrieval it can never map: skip by flag.
+            let chunk_supported = !grounding.retrieval_unavailable
+                && claim.citations.iter().any(|&marker| {
+                    marker >= 1
+                        && grounding
+                            .chunks
+                            .get(marker - 1)
+                            .is_some_and(|chunk| supported_by_chunk(&claim, chunk))
+                });
             if chunk_supported {
                 continue;
             }
@@ -682,6 +716,13 @@ impl ResponseVerifier {
                         "Remove or correctly re-cite the claim {claim:?} — every factual \
                          statement must come from the Canonical Facts block, a cited passage, \
                          or a tool result."
+                    ));
+                }
+                Violation::UnavailableCitation { claim } => {
+                    hints.push(format!(
+                        "Remove the citation marker from {claim:?} — the documentation search \
+                         is currently unavailable, so no passage can be cited. Answer only \
+                         from the Canonical Facts block and say so if that is not enough."
                     ));
                 }
                 Violation::PromptInjection { .. } => {
@@ -1408,6 +1449,23 @@ mod grounding_tests {
             account_context: account,
             tool_output: tool,
             chunks,
+            // Fix #17/#18 tests opt into the Unavailable mode explicitly via
+            // `grounded_unavailable`.
+            retrieval_unavailable: false,
+        }
+    }
+
+    /// Fix #17/#18: a grounding set under UNAVAILABLE docs retrieval — no
+    /// passage could be consulted, so cited-chunk provenance is impossible.
+    fn grounded_unavailable<'a>(
+        canonical: &'a str,
+        chunks: &'a [RetrievedChunk],
+        account: &'a str,
+        tool: &'a str,
+    ) -> Grounding<'a> {
+        Grounding {
+            retrieval_unavailable: true,
+            ..grounded(canonical, chunks, account, tool)
         }
     }
 
@@ -1616,6 +1674,109 @@ mod grounding_tests {
             v.passed,
             "policy checks alone must not reject ungrounded claims: {:?}",
             v.violations
+        );
+    }
+
+    // ── Fix #17/#18: Unavailable retrieval mode ─────────────────────────
+
+    /// Under Unavailable retrieval ANY citation marker is unsupported by
+    /// construction — even when the claim itself would be backed by the
+    /// canonical facts. The same sentence without the marker passes.
+    #[test]
+    fn unavailable_retrieval_rejects_any_citation_marker() {
+        let canonical = canonical();
+        let grounding = grounded_unavailable(&canonical, &[], "", "");
+        let v = ResponseVerifier::new().verify_grounded(
+            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included [1].",
+            &[],
+            &grounding,
+        );
+        assert!(
+            !v.passed,
+            "a citation marker must be rejected while retrieval is unavailable: {:?}",
+            v.violations
+        );
+        assert!(v
+            .violations
+            .iter()
+            .any(|viol| matches!(viol, Violation::UnavailableCitation { .. })));
+
+        // The identical factual content WITHOUT the marker stays allowed:
+        // canonical facts are in-process data, not served by the broken index.
+        let v = ResponseVerifier::new().verify_grounded(
+            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included.",
+            &[],
+            &grounding,
+        );
+        assert!(
+            v.passed,
+            "canonical-facts answers remain allowed without markers: {:?}",
+            v.violations
+        );
+    }
+
+    /// Stale chunks handed to an Unavailable grounding cannot launder a
+    /// citation: provenance (d) is skipped by flag, not by chunk content.
+    /// The passage-backed claim therefore falls through to the base
+    /// UnsupportedClaim rule (the marker-wearing-but-source-backed case that
+    /// produces UnavailableCitation is covered in the previous test).
+    #[test]
+    fn unavailable_retrieval_makes_chunk_provenance_impossible() {
+        let canonical = canonical();
+        let chunks = vec![chunk(
+            "Bounce handling",
+            "Soft bounces clear automatically within 72 hours; hard bounces do not retry.",
+        )];
+        let grounding = grounded_unavailable(&canonical, &chunks, "", "");
+        let v = ResponseVerifier::new().verify_grounded(
+            "Soft bounces clear automatically within 72 hours [1].",
+            &[],
+            &grounding,
+        );
+        assert!(
+            !v.passed,
+            "an Unavailable flag must beat even a genuinely overlapping chunk: {:?}",
+            v.violations
+        );
+        assert!(v
+            .violations
+            .iter()
+            .any(|viol| matches!(viol, Violation::UnsupportedClaim { .. })));
+
+        // Without the flag, the very same answer passes through the chunk —
+        // proving the flag (not the chunk content) decided.
+        let grounding = grounded(&canonical, &chunks, "", "");
+        let v = ResponseVerifier::new().verify_grounded(
+            "Soft bounces clear automatically within 72 hours [1].",
+            &[],
+            &grounding,
+        );
+        assert!(v.passed, "the flag decided, not the chunk: {:?}", v.violations);
+    }
+
+    /// Under Unavailable retrieval, a passage-shaped claim with NO source at
+    /// all is still an UnsupportedClaim (the base rule), and the verdict
+    /// carries the unavailable-citation diagnosis for the retry hint.
+    #[test]
+    fn unavailable_retrieval_rejects_unsourced_factual_claims() {
+        let canonical = canonical();
+        let grounding = grounded_unavailable(&canonical, &[], "", "");
+        let v = ResponseVerifier::new().verify_grounded(
+            "Soft bounces usually clear within 72 hours.",
+            &[],
+            &grounding,
+        );
+        assert!(!v.passed, "{:?}", v.violations);
+        assert!(v
+            .violations
+            .iter()
+            .any(|viol| matches!(viol, Violation::UnsupportedClaim { .. })));
+        assert!(
+            v.correction_hint.as_deref().is_some_and(|hint| {
+                hint.contains("Canonical Facts") || hint.contains("documentation search")
+            }),
+            "the retry hint must steer away from citations: {:?}",
+            v.correction_hint
         );
     }
 }

@@ -1692,6 +1692,10 @@ async fn list_inbox(
             "support" => MessageCategory::Support,
             "spam" => MessageCategory::Spam,
             "unsubscribe" => MessageCategory::Unsubscribe,
+            // Fix #19: the review bucket must be listable — this is the one
+            // consumer that READS low-confidence classifications (humans
+            // resolving them); it never drives an action.
+            "needs_review" => MessageCategory::NeedsReview,
             _ => MessageCategory::Other,
         });
         let msgs = if let Some(c) = cat {
@@ -1922,8 +1926,8 @@ async fn reply_inbox_message(
         };
 
         // The message being replied to (tenant-scoped).
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT sender, subject FROM sales_inbox_messages \
+        let row: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT sender, subject, category FROM sales_inbox_messages \
              WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
@@ -1931,7 +1935,22 @@ async fn reply_inbox_message(
         .fetch_optional(&state.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
-        let (sender, original_subject) = row.ok_or(SalesError::MessageNotFound(id))?;
+        let (sender, original_subject, category) = row.ok_or(SalesError::MessageNotFound(id))?;
+
+        // Fix #19 — irreversible-action guard: the reply enqueue is an
+        // outbound send. A message whose classifier confidence fell below
+        // the automation threshold (or a legacy non-concrete row) MUST NOT
+        // drive it: it goes to human review instead. `is_concrete` is the
+        // structural gate — NeedsReview and Other can never pass it, so a
+        // low-confidence classification can never fire this action no
+        // matter how the consumer matches.
+        let category = crate::types::MessageCategory::from_str(&category);
+        if !category.is_concrete() {
+            return Err(SalesError::PolicyDenied(format!(
+                "inbox message is categorized `{category}` (below automation confidence): \
+                 resolve its classification by human review before a reply can be sent (Fix #19)"
+            )));
+        }
 
         // The correspondent's address is the reply recipient — validate it
         // syntactically before spending a quota reservation.
@@ -4632,9 +4651,14 @@ mod coverage_wave_routes {
         .expect("seed verified sender domain");
         let inbox_id = Uuid::new_v4();
         let sender = format!("prospect-{}@example.com", &inbox_id.simple().to_string()[..8]);
+        // Fix #19: the fixture previously seeded the legacy category
+        // 'positive' (which parses to the non-concrete `Other`) — the new
+        // irreversible-action guard refuses replies to non-concrete rows,
+        // so the fixture uses a concrete, classifier-emitted category
+        // (`lead`). All assertions below are unchanged.
         sqlx::query(
             "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
-             VALUES ($1, $2, $3, 'Re: demo', 'positive')",
+             VALUES ($1, $2, $3, 'Re: demo', 'lead')",
         )
         .bind(inbox_id)
         .bind(tenant)
@@ -4773,10 +4797,15 @@ mod coverage_wave_routes {
 
         let suppressed_inbox = Uuid::new_v4();
         let invalid_inbox = Uuid::new_v4();
+        // Fix #19: the fixtures previously seeded the legacy category
+        // 'other' (non-concrete); the new irreversible-action guard refuses
+        // replies to non-concrete rows BEFORE the suppression/sender checks
+        // these cases exercise, so the fixtures use a concrete
+        // classifier-emitted category (`support`). Assertions unchanged.
         for (id, sender) in [(suppressed_inbox, "bounced@example.com"), (invalid_inbox, "no-at-sign")] {
             sqlx::query(
                 "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
-                 VALUES ($1, $2, $3, 'hi', 'other')",
+                 VALUES ($1, $2, $3, 'hi', 'support')",
             )
             .bind(id)
             .bind(tenant)
@@ -4785,6 +4814,18 @@ mod coverage_wave_routes {
             .await
             .expect("seed inbox message");
         }
+        // Fix #19 fixture: a low-confidence classification (NeedsReview) is
+        // the row the guard exists for.
+        let needs_review_inbox = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+             VALUES ($1, $2, 'review-me@example.com', 'hello?', 'needs_review')",
+        )
+        .bind(needs_review_inbox)
+        .bind(tenant)
+        .execute(&db)
+        .await
+        .expect("seed needs-review inbox message");
         // Platform-level hard bounce for the suppressed correspondent. The
         // reply is 1:1 correspondence, so only THIS list blocks it.
         let suppression_id = apexmail_lib::id::generate_id("sup", 22);
@@ -4889,9 +4930,44 @@ mod coverage_wave_routes {
             "{body}"
         );
 
+        // (e) Fix #19: a NeedsReview (below automation confidence) message
+        // is refused BEFORE any enqueue work — no irreversible outbound send
+        // may fire from a low-confidence classification. The refusal names
+        // the review requirement and leaves the row unanswered.
+        let resp = reply(
+            needs_review_inbox,
+            serde_json::json!({ "body": "hello?" }),
+            tenant.to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = json_body(resp).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("needs_review"),
+            "the refusal must name the non-concrete category: {body}"
+        );
+        let replied: bool =
+            sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(needs_review_inbox)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(!replied, "a guard-refused reply leaves the message unanswered");
+        let messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE metadata->>'inbox_message_id' = $1",
+        )
+        .bind(needs_review_inbox.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(messages, 0, "no reply is enqueued for a review-bucket row");
+
         // batch: scoped cleanup — only this fixture's rows; the shared system
         // tenants row (and the other tests' rows) must survive.
-        for id in [suppressed_inbox, invalid_inbox] {
+        for id in [suppressed_inbox, invalid_inbox, needs_review_inbox] {
             let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
                 .bind(id)
                 .execute(&db)

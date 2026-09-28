@@ -519,6 +519,11 @@ impl AiPipeline {
                 account_context: &customer_json,
                 tool_output: &tool_output_text,
                 chunks: &[],
+                // The pipeline consults no docs index at all, so its
+                // canonical-facts grounding is not "degraded retrieval" —
+                // the in-process knowledge block is always available
+                // (Fix #17: only a FAILED lookup is Unavailable).
+                retrieval_unavailable: false,
             };
             let verdict = self
                 .verifier

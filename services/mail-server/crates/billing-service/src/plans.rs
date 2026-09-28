@@ -10,6 +10,50 @@ use billing_entitlements::EntitlementSnapshot;
 
 use crate::types::{Plan, PlanFeatures, QuotaLimit, RateLimitTier, SupportLevel};
 
+/// Typed failure for plan/entitlement resolution (Fix #10).
+///
+/// A malformed persisted `plans.features` JSONB must never masquerade as a
+/// valid default plan: entitlement checks FAIL CLOSED with this error naming
+/// the offending plan, instead of silently repairing money state with
+/// `PlanFeatures::default()` / the builtin seed.
+#[derive(Debug, thiserror::Error)]
+pub enum BillingError {
+    /// `plans.features` was present but could not be deserialized as
+    /// [`PlanFeatures`] (partial object, wrong type, non-object JSON).
+    #[error(
+        "corrupt persisted plan features for plan `{plan}`: entitlement resolution fails closed \
+         (repair the plans.features JSONB row before this plan can resolve)"
+    )]
+    CorruptPlanFeatures {
+        plan: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A tenant's joined plan row carried corrupt features during quota or
+    /// entitlement resolution.
+    #[error(
+        "corrupt persisted plan features for plan `{plan}` (tenant `{tenant_id}`): quota/\
+         entitlement resolution fails closed (repair the plans.features JSONB row)"
+    )]
+    CorruptTenantPlanFeatures {
+        plan: String,
+        tenant_id: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl BillingError {
+    /// Bridge into [`sqlx::Error`] so the public lookup helpers can keep
+    /// their `Result<_, sqlx::Error>` signature (api-server call sites use
+    /// `?` against sqlx) while still surfacing the typed, plan-naming error:
+    /// the value is preserved losslessly in the `Decode` payload and its
+    /// `Display`/`source` chain names the plan.
+    pub(crate) fn into_sqlx_decode(self) -> sqlx::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+}
+
 /// Static seed data for default plans.
 #[derive(Debug, Clone)]
 pub struct PlanSeed {
@@ -384,7 +428,9 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
         .fetch_one(pool)
         .await?;
 
-    Ok(row.into_plan())
+    // The seed we just wrote round-trips through `PlanFeatures`, so a
+    // corrupt read here means storage mangled it — surface it (Fix #10).
+    row.try_into_plan().map_err(BillingError::into_sqlx_decode)
 }
 
 pub async fn upsert_plan_input(
@@ -441,7 +487,7 @@ pub async fn upsert_plan_input(
     .fetch_one(pool)
     .await?;
 
-    Ok(row.into_plan())
+    row.try_into_plan().map_err(BillingError::into_sqlx_decode)
 }
 
 /// Fetch all active plans ordered by `sort_order`.
@@ -461,7 +507,13 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| r.into_plan()).collect())
+    let mut plans = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Fix #10: one corrupt row fails the whole listing rather than
+        // silently rendering that plan with repaired/default features.
+        plans.push(row.try_into_plan().map_err(BillingError::into_sqlx_decode)?);
+    }
+    Ok(plans)
 }
 
 /// Get a single plan by name.
@@ -481,7 +533,10 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.into_plan()))
+    Ok(row
+        .map(|r| r.try_into_plan())
+        .transpose()
+        .map_err(BillingError::into_sqlx_decode)?)
 }
 
 /// Resolve a tenant's effective plan.
@@ -553,10 +608,28 @@ pub async fn get_quota_for_tenant(
     } else {
         fallback_plan.name.to_string()
     };
-    let features = row
-        .features
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_else(|| fallback_plan.features.clone());
+    // Fix #10 — "features NULL" (legacy row) uses the builtin seed features;
+    // "features present but invalid" is corruption and fails the lookup with
+    // a typed error naming plan and tenant. The previous
+    // `.and_then(from_value.ok()).unwrap_or_else(fallback)` silently repaired
+    // a corrupt paying plan into builtin money state.
+    let features = match row.features {
+        None => fallback_plan.features.clone(),
+        Some(value) => serde_json::from_value(value).map_err(|source| {
+            tracing::error!(
+                plan = %row.plan_name,
+                tenant_id = %row.tenant_id,
+                error = %source,
+                "corrupt plans.features JSONB — quota resolution fails closed (Fix #10)"
+            );
+            BillingError::CorruptTenantPlanFeatures {
+                plan: row.plan_name.clone(),
+                tenant_id: row.tenant_id.clone(),
+                source,
+            }
+            .into_sqlx_decode()
+        })?,
+    };
 
     let tier = match effective_plan_name.as_str() {
         "free" => RateLimitTier::Free,
@@ -590,7 +663,9 @@ pub async fn get_quota_for_tenant(
 /// 1. effective plan: active, unexpired `plan_overrides` row wins over
 ///    `tenants.plan`; a missing `plans` row falls back to the builtin seed
 ///    for that plan name;
-/// 2. `plans.features` (JSONB) deserialized as `PlanFeatures`;
+/// 2. `plans.features` (JSONB) deserialized as `PlanFeatures` — NULL is the
+///    legacy fallback (builtin seed features); present-but-invalid JSON
+///    fails the whole resolution closed with [`BillingError`] (Fix #10);
 /// 3. tenant `feature_flag_overrides` rows whose `flag_key` names a
 ///    `FeatureKey`, latest row per key, JSON booleans only — anything else
 ///    fails closed to the plan value (same rule as `FeatureFlagService`).
@@ -622,10 +697,28 @@ pub async fn get_entitlement_snapshot(
     let Some(row) = row else { return Ok(None) };
 
     let fallback = builtin_plan_seed(Some(&row.plan_name));
-    let features: PlanFeatures = row
-        .features
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_else(|| fallback.features.clone());
+    // Fix #10 — same rule as [`get_quota_for_tenant`]: NULL features is the
+    // documented legacy fallback; present-but-invalid features is corruption
+    // and must fail the entitlement lookup closed, never silently fall back
+    // to the builtin seed (that would re-grade a paying tenant without any
+    // alert).
+    let features: PlanFeatures = match row.features {
+        None => fallback.features.clone(),
+        Some(value) => serde_json::from_value(value).map_err(|source| {
+            tracing::error!(
+                plan = %row.plan_name,
+                tenant_id = %row.tenant_id,
+                error = %source,
+                "corrupt plans.features JSONB — entitlement resolution fails closed (Fix #10)"
+            );
+            BillingError::CorruptTenantPlanFeatures {
+                plan: row.plan_name.clone(),
+                tenant_id: row.tenant_id.clone(),
+                source,
+            }
+            .into_sqlx_decode()
+        })?,
+    };
 
     let mut snapshot = entitlement_snapshot_for_features(&row.tenant_id, &row.plan_name, &features);
 
@@ -737,10 +830,41 @@ struct PlanRow {
 use chrono::DateTime;
 
 impl PlanRow {
-    fn into_plan(self) -> Plan {
-        let features: PlanFeatures =
-            serde_json::from_value(self.features.unwrap_or_default()).unwrap_or_default();
-        Plan {
+    /// Convert a raw row into a [`Plan`], failing loud on corruption (Fix #10).
+    ///
+    /// - `features` NULL → legacy row predating the JSONB column → the
+    ///   documented default ([`PlanFeatures::default()`], a deny-most
+    ///   feature set). This is data-shape history, not corruption.
+    /// - `features` present but not a valid `PlanFeatures` object →
+    ///   [`BillingError::CorruptPlanFeatures`] naming the plan. Entitlement
+    ///   checks must fail closed; silently substituting defaults here let a
+    ///   single bad write silently "repair" a paying plan into free-tier
+    ///   money state.
+    fn try_into_plan(self) -> Result<Plan, BillingError> {
+        let features = match self.features {
+            None => {
+                tracing::debug!(
+                    plan = %self.name,
+                    "plans row has NULL features (legacy row) — using documented PlanFeatures default"
+                );
+                PlanFeatures::default()
+            }
+            Some(value) => serde_json::from_value(value).map_err(|source| {
+                // Alert-grade: a persisted plan no longer round-trips its own
+                // feature set. Entitlement checks for every tenant on this
+                // plan fail closed until an operator repairs the row.
+                tracing::error!(
+                    plan = %self.name,
+                    error = %source,
+                    "corrupt plans.features JSONB — plan resolution fails closed (Fix #10)"
+                );
+                BillingError::CorruptPlanFeatures {
+                    plan: self.name.clone(),
+                    source,
+                }
+            })?,
+        };
+        Ok(Plan {
             id: self.id,
             name: self.name,
             display_name: self.display_name,
@@ -756,7 +880,7 @@ impl PlanRow {
             sort_order: self.sort_order,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -1117,6 +1241,119 @@ mod tests {
         assert!(snapshot
             .require_capacity(CapacityKey::TeamMembers, 26)
             .is_err());
+    }
+
+    // ------------------------------------------------------------------
+    // Fix #10 — corrupt persisted plan features fail closed with a typed,
+    // plan-naming error + alert-grade log; NULL stays the documented legacy
+    // default; valid JSON keeps resolving.
+    // ------------------------------------------------------------------
+
+    /// Captures `tracing` ERROR-level output into a shared buffer so the
+    /// alert-grade log emitted on corruption can be asserted deterministically.
+    fn error_capture() -> (
+        impl tracing::Subscriber,
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
+        use std::sync::{Arc, Mutex};
+        struct CaptureWriter {
+            inner: Arc<Mutex<Vec<u8>>>,
+        }
+        impl std::io::Write for CaptureWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.inner.lock().expect("log buffer lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer_sink = Arc::clone(&buffer);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(move || CaptureWriter {
+                inner: Arc::clone(&writer_sink),
+            })
+            .finish();
+        (subscriber, buffer)
+    }
+
+    fn plan_row(name: &str, features: Option<serde_json::Value>) -> PlanRow {
+        let now = Utc::now();
+        PlanRow {
+            id: format!("pln_{name}"),
+            name: name.to_string(),
+            display_name: name.to_string(),
+            description: "test row".to_string(),
+            price_monthly: 1_000,
+            price_yearly: 10_000,
+            email_limit: 1_000,
+            api_call_limit: 1_000,
+            features,
+            stripe_price_id_monthly: None,
+            stripe_price_id_yearly: None,
+            is_active: true,
+            sort_order: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn try_into_plan_rejects_corrupt_features_with_typed_error_and_alert_log() {
+        let row = plan_row("growth", Some(serde_json::json!({"webhooks_enabled": true})));
+        let (dispatch, buffer) = error_capture();
+        let result = tracing::subscriber::with_default(dispatch, || row.try_into_plan());
+
+        let error = result.expect_err("corrupt features must fail the plan lookup");
+        match &error {
+            BillingError::CorruptPlanFeatures { plan, source } => {
+                assert_eq!(plan, "growth", "the typed error names the offending plan");
+                assert!(
+                    !source.to_string().is_empty(),
+                    "the serde source error is preserved"
+                );
+            }
+            other => panic!("expected CorruptPlanFeatures, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("growth"),
+            "error display must name the plan: {error}"
+        );
+        let logs = String::from_utf8(buffer.lock().expect("log buffer lock").clone())
+            .expect("logs are utf8");
+        assert!(
+            logs.contains("corrupt plans.features JSONB"),
+            "alert-grade log must be emitted, got: {logs}"
+        );
+        assert!(
+            logs.contains("growth"),
+            "alert log must name the plan, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn try_into_plan_null_features_is_documented_legacy_default() {
+        let row = plan_row("legacy-null", None);
+        let plan = row.try_into_plan().expect("NULL features is not corruption");
+        // PlanFeatures has no PartialEq — compare canonical serializations.
+        assert_eq!(
+            serde_json::to_value(&plan.features).expect("serializes"),
+            serde_json::to_value(PlanFeatures::default()).expect("serializes")
+        );
+        assert_eq!(plan.name, "legacy-null");
+    }
+
+    #[test]
+    fn try_into_plan_valid_features_round_trip() {
+        let row = plan_row(
+            "pro",
+            Some(serde_json::to_value(default_plans()[2].features.clone()).unwrap()),
+        );
+        let plan = row.try_into_plan().expect("valid features resolve");
+        assert!(plan.features.dedicated_ip);
+        assert_eq!(plan.features.max_sending_domains, 25);
     }
 }
 
@@ -1487,4 +1724,93 @@ mod coverage_adversarial {
         assert_eq!(plan_overage_rate_millicents("pro"), Some(60));
         assert_eq!(plan_overage_rate_millicents("starter"), Some(80));
     }
+
+    // ------------------------------------------------------------------
+    // Fix #10 (DB backed) — corrupt persisted features fail plan, quota and
+    // entitlement lookups closed; NULL features stay the documented legacy
+    // default.
+    // ------------------------------------------------------------------
+
+    async fn corrupt_plan_features(pool: &PgPool, plan: &str, json: serde_json::Value) {
+        sqlx::query("UPDATE plans SET features = $1 WHERE name = $2")
+            .bind(json)
+            .bind(plan)
+            .execute(pool)
+            .await
+            .expect("corrupt plan features");
+    }
+
+    fn assert_plan_named_in_error(plan: &str, error: &sqlx::Error) {
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(plan),
+            "fail-closed error must name the plan `{plan}`: {rendered}"
+        );
+    }
+
+    env_test!(corrupt_plan_features_fail_plan_lookups_closed, |env| {
+        upsert_plan_input(&env.pool, &upsert("plcov_corrupt", 10, 20))
+            .await
+            .expect("seed plan");
+        // A partial object fails `PlanFeatures` deserialization (no
+        // #[serde(default)] on the struct).
+        corrupt_plan_features(&env.pool, "plcov_corrupt", serde_json::json!({"webhooks_enabled": true}))
+            .await;
+
+        let by_name = get_plan_by_name(&env.pool, "plcov_corrupt")
+            .await
+            .expect_err("corrupt plan must fail the by-name lookup");
+        assert_plan_named_in_error("plcov_corrupt", &by_name);
+
+        let all = get_active_plans(&env.pool)
+            .await
+            .expect_err("corrupt plan must fail the active listing");
+        assert_plan_named_in_error("plcov_corrupt", &all);
+    });
+
+    env_test!(
+        corrupt_tenant_plan_features_fail_quota_and_entitlement_lookups,
+        |env| {
+            upsert_plan_input(&env.pool, &upsert("plcov_corrupt_t", 10, 20))
+                .await
+                .expect("seed plan");
+            corrupt_plan_features(
+                &env.pool,
+                "plcov_corrupt_t",
+                serde_json::json!({"max_sending_domains": 99}),
+            )
+            .await;
+            seed_tenant(env, "plcov_corrupt_tenant", "plcov_corrupt_t").await;
+
+            let quota = get_quota_for_tenant(&env.pool, "plcov_corrupt_tenant")
+                .await
+                .expect_err("corrupt plan features must fail the quota lookup");
+            assert_plan_named_in_error("plcov_corrupt_t", &quota);
+
+            let snapshot = get_entitlement_snapshot(&env.pool, "plcov_corrupt_tenant")
+                .await
+                .expect_err("corrupt plan features must fail the entitlement lookup");
+            assert_plan_named_in_error("plcov_corrupt_t", &snapshot);
+        }
+    );
+
+    env_test!(
+        null_plan_features_are_schema_forbidden_legacy_shape_only,
+        |env| {
+            // The current schema forbids NULL features outright — the "NULL
+            // features" branch is defense-in-depth for legacy rows predating
+            // the NOT NULL constraint (covered by the in-memory unit test
+            // `try_into_plan_null_features_is_documented_legacy_default`).
+            // Pin the schema invariant so the branch's documented reachability
+            // stays honest.
+            let nullable: String = sqlx::query_scalar(
+                "SELECT is_nullable FROM information_schema.columns
+                 WHERE table_name = 'plans' AND column_name = 'features'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("plans.features column metadata");
+            assert_eq!(nullable, "NO", "plans.features must stay NOT NULL");
+        }
+    );
 }

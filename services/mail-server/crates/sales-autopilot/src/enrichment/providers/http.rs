@@ -111,29 +111,28 @@ impl HttpEnrichmentProvider {
     ///
     /// `base_url` — the API base URL (e.g. `https://company.clearbit.com`).
     /// `api_key` — the API key for Bearer authentication.
-    pub fn new(base_url: &str, api_key: &str) -> Self {
-        // A client-build failure (e.g. TLS backend unavailable) must not
-        // panic the service; the default client is the degraded fallback.
-        let client = match reqwest::Client::builder()
+    ///
+    /// PERF #24: client-construction failure makes the integration
+    /// UNAVAILABLE — a typed `Err` the caller must surface, never a fall
+    /// back to the process-default client, which silently discards the
+    /// timeout, user agent and no-redirect policy this builder pins (the
+    /// no-redirect policy also guards the Bearer key from leaking to
+    /// redirect targets).
+    pub fn try_new(base_url: &str, api_key: &str) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent("ApexMail/1.0 (enrichment)")
             // Never follow redirects: a redirect could leak the Bearer API
             // key to whatever host the response points at.
             .redirect(reqwest::redirect::Policy::none())
             .build()
-        {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::warn!(%error, "failed to build enrichment HTTP client — using default client");
-                reqwest::Client::new()
-            }
-        };
-        Self {
+            .map_err(|error| format!("failed to build enrichment HTTP client: {error}"))?;
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             cost_eur: DEFAULT_HTTP_COST_EUR,
             client,
-        }
+        })
     }
 
     /// Override the marginal cost per filled lookup.
@@ -255,6 +254,48 @@ impl EnrichmentProvider for HttpEnrichmentProvider {
                 )))
             }
         }
+    }
+}
+
+/// PERF #24: the enrichment integration's honest unavailable state.
+///
+/// When the gateway's HTTP client cannot even be constructed, the server
+/// wires THIS provider instead of an unbounded fallback client: every lookup
+/// fails with a typed [`EnrichmentError::Unavailable`] naming the reason, so
+/// the waterfall surfaces the degradation instead of silently losing the
+/// timeout/redirect bounds.
+#[derive(Debug, Clone)]
+pub struct UnavailableEnrichmentProvider {
+    reason: String,
+}
+
+impl UnavailableEnrichmentProvider {
+    pub fn new(reason: String) -> Self {
+        Self { reason }
+    }
+}
+
+#[async_trait::async_trait]
+impl EnrichmentProvider for UnavailableEnrichmentProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId("http_gateway_unavailable")
+    }
+
+    fn fields(&self) -> &[&'static str] {
+        // An unavailable provider can never supply a field.
+        &[]
+    }
+
+    fn cost_eur(&self) -> f64 {
+        // It never performs a lookup, so it never bills.
+        0.0
+    }
+
+    async fn fetch(
+        &self,
+        _request: &EnrichmentRequest<'_>,
+    ) -> Result<ProviderPayload, EnrichmentError> {
+        Err(EnrichmentError::Unavailable(self.reason.clone()))
     }
 }
 
@@ -404,7 +445,10 @@ mod tests {
 
     #[tokio::test]
     async fn http_provider_rejects_invalid_domains() {
-        let provider = HttpEnrichmentProvider::new("https://enrich.example.com", "test-key");
+        // PERF #24: construction is now a typed Result; the bounded client
+        // build succeeds in tests, so expect is honest here.
+        let provider = HttpEnrichmentProvider::try_new("https://enrich.example.com", "test-key")
+            .expect("bounded client construction succeeds");
         for bad in [
             "",
             "evil.com/../../admin",
@@ -463,9 +507,32 @@ mod tests {
 
     #[test]
     fn cost_override_ignores_non_finite_values() {
-        let provider = HttpEnrichmentProvider::new("https://x.example", "k");
+        // PERF #24: try_new (typed Result) replaces the unbounded fallback.
+        let provider =
+            HttpEnrichmentProvider::try_new("https://x.example", "k").expect("client builds");
         assert_eq!(provider.cost_eur(), DEFAULT_HTTP_COST_EUR);
         let provider = provider.with_cost_eur(f64::NAN);
         assert_eq!(provider.cost_eur(), 0.0);
+    }
+
+    /// PERF #24: the unavailable provider refuses every lookup with a typed
+    /// error carrying the construction failure — the integration's honest
+    /// degraded state, never a silently unbounded client.
+    #[tokio::test]
+    async fn unavailable_provider_refuses_every_lookup_with_typed_error() {
+        let provider =
+            UnavailableEnrichmentProvider::new("failed to build enrichment HTTP client: tls".into());
+        assert_eq!(provider.id().as_str(), "http_gateway_unavailable");
+        assert!(provider.fields().is_empty());
+        assert_eq!(provider.cost_eur(), 0.0);
+        let result = provider
+            .fetch(&EnrichmentRequest::new("t", "example.com"))
+            .await;
+        match result {
+            Err(EnrichmentError::Unavailable(reason)) => {
+                assert!(reason.contains("tls"), "reason preserved: {reason}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 }

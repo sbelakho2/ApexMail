@@ -1959,3 +1959,58 @@ async fn deploy_contract_schema_guard_refuses_a_drifted_database() {
     .await;
     admin.close().await;
 }
+
+/// PERF #24 gate — bounded HTTP clients, always.
+///
+/// Sales-autopilot builds every outbound HTTP integration (calendar,
+/// discovery, enrichment, sales intelligence) on
+/// `reqwest::Client::builder()` so the client carries the integration's
+/// timeout (and, where security-relevant, the no-redirect policy and user
+/// agent). A construction failure must make the integration UNAVAILABLE —
+/// a typed error / `None` / skipped source — never a silent fall back to
+/// `Client::new()`, the process-default client with NO timeout, which turns
+/// every call site into an unbounded wait.
+///
+/// This is a source-scan gate in the style of
+/// `worker_has_no_warmup_settlement_path`: everything after a file's FIRST
+/// `#[cfg(test)]` marker is test code (the crate's convention — test modules
+/// live at the end of each file); the production prefix of every `src/` file
+/// must not construct the default client at all.
+#[test]
+fn perf_24_no_bare_unbounded_client_construction_in_non_test_src() {
+    fn collect_offenders(dir: &std::path::Path, offenders: &mut Vec<String>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .expect("src dir is readable")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                collect_offenders(&path, offenders);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                let source = std::fs::read_to_string(&path).expect("source file reads");
+                // Production code = everything before the first test module.
+                let production = source
+                    .split("#[cfg(test)]")
+                    .next()
+                    .expect("split always yields a prefix");
+                if production.contains("Client::new()") {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+    }
+
+    let mut offenders = Vec::new();
+    collect_offenders(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        &mut offenders,
+    );
+    assert!(
+        offenders.is_empty(),
+        "bare unbounded client construction found outside test code: {offenders:?} — \
+         client-build failure must make the integration UNAVAILABLE (typed error / None / \
+         skipped source), never fall back to the process-default client (PERF #24)"
+    );
+}

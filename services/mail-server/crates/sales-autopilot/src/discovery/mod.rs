@@ -74,12 +74,23 @@ pub fn default_sources(
         .unwrap_or_else(|| config.enrichment_api_key.clone());
 
     if !api_url.trim().is_empty() {
-        sources.push(std::sync::Arc::new(HttpDiscoverySource::new(
+        // PERF #24: a failed client construction makes the provider-API
+        // source UNAVAILABLE — it is skipped with an alert-grade log (the
+        // first-party source still answers), never registered on an
+        // unbounded default client.
+        match HttpDiscoverySource::try_new(
             "provider_api",
             &api_url,
             &api_key,
             configured_allowed_jurisdictions(),
-        )));
+        ) {
+            Ok(source) => sources.push(std::sync::Arc::new(source)),
+            Err(error) => tracing::error!(
+                error = %error,
+                "provider-API discovery source is UNAVAILABLE: its HTTP client could not be \
+                 constructed — discovery degrades to the first-party source only (PERF #24)"
+            ),
+        }
     }
 
     sources.push(std::sync::Arc::new(FirstPartySource::new(

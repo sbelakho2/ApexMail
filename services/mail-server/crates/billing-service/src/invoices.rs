@@ -915,7 +915,13 @@ pub async fn list_invoices(
     .await
     .map_err(InvoiceError::Db)?;
 
-    Ok(rows.into_iter().map(|r| r.into_invoice()).collect())
+    let mut invoices = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Fix #10 sweep: one corrupt row fails the listing rather than
+        // silently rendering that invoice with empty line items.
+        invoices.push(row.into_invoice()?);
+    }
+    Ok(invoices)
 }
 
 /// Fetch a single invoice by ID.
@@ -941,7 +947,7 @@ pub async fn get_invoice_by_id(
     .await
     .map_err(InvoiceError::Db)?;
 
-    Ok(row.map(|r| r.into_invoice()))
+    Ok(row.map(|r| r.into_invoice()).transpose()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -986,16 +992,34 @@ fn encode_invoice_line_items(
     .map_err(InvoiceError::from)
 }
 
-fn decode_invoice_line_items(value: serde_json::Value) -> Vec<InvoiceLineItem> {
+/// Decode persisted invoice line items (Fix #10 sweep).
+///
+/// `NULL` line_items is the documented legacy shape (invoice stored before
+/// the column was populated) and yields an empty list. Present-but-invalid
+/// JSON is corruption of the invoice's monetary breakdown — rendering an
+/// invoice with its totals but silently EMPTY items would drift the
+/// customer-facing money state, so it fails with
+/// [`InvoiceError::CorruptLineItems`] naming the invoice.
+fn decode_invoice_line_items(
+    invoice_id: Uuid,
+    value: serde_json::Value,
+) -> Result<Vec<InvoiceLineItem>, InvoiceError> {
     if let Ok(versioned) = serde_json::from_value::<StoredInvoiceLineItems>(value.clone()) {
-        return versioned.items;
+        return Ok(versioned.items);
     }
 
-    serde_json::from_value(value).unwrap_or_default()
+    serde_json::from_value(value).map_err(|source| {
+        tracing::error!(
+            invoice_id = %invoice_id,
+            error = %source,
+            "corrupt invoices.line_items JSONB — invoice decode fails closed (Fix #10 sweep)"
+        );
+        InvoiceError::CorruptLineItems { invoice_id, source }
+    })
 }
 
 impl InvoiceRow {
-    fn into_invoice(self) -> Invoice {
+    fn into_invoice(self) -> Result<Invoice, InvoiceError> {
         let status = match self.status.as_str() {
             "paid" => InvoiceStatus::Paid,
             "pending" => InvoiceStatus::Pending,
@@ -1004,12 +1028,13 @@ impl InvoiceRow {
             _ => InvoiceStatus::Draft,
         };
 
-        let line_items = self
-            .line_items
-            .map(decode_invoice_line_items)
-            .unwrap_or_default();
+        let line_items = match self.line_items {
+            // NULL = legacy row: documented empty default, not corruption.
+            None => Vec::new(),
+            Some(value) => decode_invoice_line_items(self.id, value)?,
+        };
 
-        Invoice {
+        Ok(Invoice {
             id: self.id,
             tenant_id: self.tenant_id,
             stripe_invoice_id: self.stripe_invoice_id,
@@ -1027,7 +1052,7 @@ impl InvoiceRow {
             period_end: self.period_end,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }
 
@@ -1047,6 +1072,18 @@ pub enum InvoiceError {
     Recognition(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    /// Fix #10 sweep: the persisted `line_items` JSONB does not decode, so
+    /// the invoice's monetary breakdown is corrupt — the lookup fails closed
+    /// instead of rendering the invoice with silently empty items.
+    #[error(
+        "corrupt persisted line items for invoice {invoice_id}: monetary breakdown fails closed \
+         (repair the invoices.line_items JSONB)"
+    )]
+    CorruptLineItems {
+        invoice_id: Uuid,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 fn require_config_value(name: &str, value: Option<String>) -> Result<String, InvoiceError> {
@@ -1262,6 +1299,67 @@ mod tests {
 
     use billing_common::vat_rates;
 
+    // ------------------------------------------------------------------
+    // Fix #10 sweep — corrupt persisted line_items fail the invoice decode
+    // closed instead of rendering silently empty items.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn corrupt_line_items_fail_with_typed_error_naming_the_invoice() {
+        let invoice_id = Uuid::new_v4();
+        let error = decode_invoice_line_items(invoice_id, serde_json::json!({"items": "not-an-array"}))
+            .expect_err("corrupt line items must fail the decode");
+        match &error {
+            InvoiceError::CorruptLineItems {
+                invoice_id: failed_id,
+                ..
+            } => assert_eq!(*failed_id, invoice_id),
+            other => panic!("expected CorruptLineItems, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains(&invoice_id.to_string()),
+            "error display must name the invoice: {error}"
+        );
+    }
+
+    #[test]
+    fn sql_null_line_items_remain_documented_legacy_default() {
+        // SQL NULL (`Option::None`) is the documented legacy shape: the row
+        // decodes with an empty item list, not an error. Exercised via
+        // `into_invoice` below.
+        let invoice_id = Uuid::new_v4();
+        let row = InvoiceRow {
+            id: invoice_id,
+            tenant_id: "tenant_01HZY2Q4YQ0L8QW8Q7Q28WKSFJ".into(),
+            stripe_invoice_id: None,
+            invoice_number: "2026-000002".into(),
+            status: "pending".into(),
+            currency: "eur".into(),
+            subtotal: 1000,
+            vat_total: 240,
+            total: 1240,
+            line_items: None,
+            issued_at: Utc::now(),
+            due_at: Utc::now(),
+            paid_at: None,
+            period_start: Utc::now(),
+            period_end: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let invoice = row.into_invoice().expect("SQL NULL items are legacy");
+        assert!(
+            invoice.line_items.is_empty(),
+            "SQL NULL line items decode to the documented empty default"
+        );
+
+        // A literal JSON `null` inside the column is "present but invalid"
+        // and fails closed like any other corrupt payload.
+        let error = decode_invoice_line_items(invoice_id, serde_json::Value::Null)
+            .expect_err("literal JSON null is not a valid line-items payload");
+        assert!(matches!(error, InvoiceError::CorruptLineItems { .. }));
+    }
+
     #[test]
     fn missing_required_config_returns_typed_error() {
         let err = require_config_value("S3_ACCESS_KEY_ID", None).unwrap_err();
@@ -1412,7 +1510,9 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let inv = row.into_invoice();
+        // Fix #10 sweep: into_invoice now validates the persisted monetary
+        // breakdown, so valid fixtures assert through the Result.
+        let inv = row.into_invoice().expect("valid row decodes (Fix #10)");
         assert_eq!(inv.status, InvoiceStatus::Paid);
     }
 
@@ -1427,7 +1527,13 @@ mod tests {
             vat_amount: 240,
         }];
 
-        let decoded = decode_invoice_line_items(serde_json::to_value(&line_items).unwrap());
+        // Fix #10 sweep: decode now returns Result — the legacy unversioned
+        // array shape still decodes when valid.
+        let decoded = decode_invoice_line_items(
+            Uuid::new_v4(),
+            serde_json::to_value(&line_items).unwrap(),
+        )
+        .expect("legacy line items decode (Fix #10)");
 
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].description, "Monthly plan");
@@ -1446,7 +1552,10 @@ mod tests {
         }])
         .expect("versioned invoice line items should serialize");
 
-        let decoded = decode_invoice_line_items(encoded);
+        // Fix #10 sweep: decode now returns Result — the versioned wrapper
+        // shape still decodes when valid.
+        let decoded = decode_invoice_line_items(Uuid::new_v4(), encoded)
+            .expect("versioned line items decode (Fix #10)");
 
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].description, "Extra seats");

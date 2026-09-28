@@ -2,15 +2,76 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::types::{InboxMessage, MessageCategory, SalesError};
+use crate::types::{is_automation_confidence, InboxMessage, MessageCategory, SalesError};
 
 /// Inbox monitoring / sentinel service backed by PostgreSQL.
-/// Categorises inbound messages into Lead / Customer / Support / Spam / Other
-/// using simple keyword heuristics (production would use an ML classifier).
+/// Categorises inbound messages into Lead / Customer / Support / Spam /
+/// Unsubscribe / NeedsReview using weighted keyword heuristics scored for
+/// confidence (Fix #19): only a classification whose confidence reaches
+/// [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] is treated as decided;
+/// anything weaker lands in [`MessageCategory::NeedsReview`] for human review
+/// and can never drive downstream automation.
 #[derive(Debug, Clone)]
 pub struct InboxManager {
     db: PgPool,
 }
+
+/// A scored classification decision (Fix #19).
+///
+/// `category` is [`MessageCategory::NeedsReview`] whenever `confidence` is
+/// below [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] — the confidence
+/// is preserved so callers/logs can show HOW ambiguous the message was.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassificationDecision {
+    pub category: MessageCategory,
+    /// 0.0–1.0 keyword-hit strength for the winning category.
+    pub confidence: f32,
+}
+
+/// A heuristic keyword and the strength of its signal (Fix #19).
+///
+/// Weights encode specificity: an explicit, unambiguous phrase ("invoice",
+/// "unsubscribe", "viagra") is strong; a generic word ("help", "issue",
+/// "interested") is weak and only decides a category when it accumulates
+/// past the threshold together with other hits.
+type Keyword = (&'static str, f32);
+
+/// Opt-out language is legally significant (CAN-SPAM, Fix I-5) and always
+/// explicit: any single hit is decisive.
+const UNSUBSCRIBE_KEYWORDS: &[Keyword] = &[
+    ("unsubscribe", 1.0),
+    ("remove me", 1.0),
+    ("take me off", 1.0),
+    ("stop emailing", 1.0),
+    ("opt out", 1.0),
+    ("opt-out", 1.0),
+];
+
+/// Explicit spam vocabulary.
+const SPAM_KEYWORDS: &[Keyword] = &[("viagra", 1.0), ("lottery", 1.0)];
+/// Transactional/system sender addresses — a strong but not explicit signal.
+const SPAM_SENDER_KEYWORDS: &[Keyword] = &[("noreply", 0.75)];
+
+const SUPPORT_KEYWORDS: &[Keyword] = &[
+    ("ticket", 0.8),
+    ("support", 0.7),
+    ("issue", 0.35),
+    ("help", 0.35),
+];
+
+const CUSTOMER_KEYWORDS: &[Keyword] = &[
+    ("invoice", 0.8),
+    ("payment", 0.7),
+    ("subscription", 0.7),
+    ("renewal", 0.7),
+];
+
+const LEAD_KEYWORDS: &[Keyword] = &[
+    ("demo", 0.8),
+    ("pricing", 0.8),
+    ("trial", 0.7),
+    ("interested", 0.35),
+];
 
 impl InboxManager {
     pub fn new(db: PgPool) -> Self {
@@ -19,14 +80,23 @@ impl InboxManager {
 
     /// Classify a message without persisting it.
     pub fn classify_message(tenant_id: String, from: String, subject: String) -> InboxMessage {
-        let category = Self::classify(&subject, &from);
+        let decision = Self::classify_scored(&subject, &from);
+        if !decision.category.is_concrete() {
+            // Alert-grade for the review bucket: the message is deliberately
+            // NOT decided, so no downstream automation may act on it (Fix #19).
+            tracing::info!(
+                category = %decision.category,
+                confidence = decision.confidence,
+                "inbox message below automation confidence — routed to human review (Fix #19)"
+            );
+        }
         InboxMessage {
             id: Uuid::new_v4(),
             tenant_id,
             from,
             subject,
             received_at: Utc::now(),
-            category,
+            category: decision.category,
             replied: false,
         }
     }
@@ -57,48 +127,69 @@ impl InboxManager {
         msg
     }
 
-    /// Heuristic classification.
-    fn classify(subject: &str, from: &str) -> MessageCategory {
+    /// Heuristic classification with confidence scoring (Fix #19).
+    ///
+    /// Deterministic scoring model:
+    /// - each category sums the weights of its keywords that appear in the
+    ///   (lowercased) subject, capped at 1.0; Spam also matches sender
+    ///   keywords;
+    /// - the winner is the highest-scoring category, ties broken by the fixed
+    ///   check order below (Unsubscribe → Spam → Support → Customer → Lead);
+    /// - a winner below
+    ///   [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] — including the
+    ///   no-hit case — is demoted to [`MessageCategory::NeedsReview`] with
+    ///   its score preserved: ambiguity must be a distinct category, so the
+    ///   structural guard (no irreversible action from a non-concrete
+    ///   category) holds at every consumer.
+    pub fn classify_scored(subject: &str, from: &str) -> ClassificationDecision {
         let s = subject.to_lowercase();
         let f = from.to_lowercase();
 
-        // Fix I-5: opt-out requests are classified as Unsubscribe and must be
-        // handled with priority (CAN-SPAM) — they previously matched the spam
-        // keyword heuristic below and were buried as Spam.
-        if s.contains("unsubscribe")
-            || s.contains("remove me")
-            || s.contains("take me off")
-            || s.contains("stop emailing")
-            || s.contains("opt out")
-            || s.contains("opt-out")
-        {
-            return MessageCategory::Unsubscribe;
+        // Scored in a FIXED order — the tie-break is "first in this order"
+        // (strictly-greater comparison keeps the earlier category on ties).
+        let scored: [(MessageCategory, f32); 5] = [
+            (
+                MessageCategory::Unsubscribe,
+                Self::score(&s, UNSUBSCRIBE_KEYWORDS),
+            ),
+            (
+                MessageCategory::Spam,
+                Self::score(&s, SPAM_KEYWORDS).max(Self::score(&f, SPAM_SENDER_KEYWORDS)),
+            ),
+            (MessageCategory::Support, Self::score(&s, SUPPORT_KEYWORDS)),
+            (MessageCategory::Customer, Self::score(&s, CUSTOMER_KEYWORDS)),
+            (MessageCategory::Lead, Self::score(&s, LEAD_KEYWORDS)),
+        ];
+
+        let mut best = (MessageCategory::Unsubscribe, 0.0_f32);
+        for (category, score) in scored {
+            if score > best.1 {
+                best = (category, score);
+            }
         }
-        if s.contains("viagra") || s.contains("lottery") || f.contains("noreply") {
-            return MessageCategory::Spam;
+        let (category, confidence) = best;
+
+        if is_automation_confidence(confidence) {
+            ClassificationDecision {
+                category,
+                confidence,
+            }
+        } else {
+            ClassificationDecision {
+                category: MessageCategory::NeedsReview,
+                confidence,
+            }
         }
-        if s.contains("support")
-            || s.contains("help")
-            || s.contains("ticket")
-            || s.contains("issue")
-        {
-            return MessageCategory::Support;
-        }
-        if s.contains("invoice")
-            || s.contains("payment")
-            || s.contains("subscription")
-            || s.contains("renewal")
-        {
-            return MessageCategory::Customer;
-        }
-        if s.contains("demo")
-            || s.contains("pricing")
-            || s.contains("interested")
-            || s.contains("trial")
-        {
-            return MessageCategory::Lead;
-        }
-        MessageCategory::Other
+    }
+
+    /// Sum the weights of matched keywords, capped at 1.0.
+    fn score(haystack: &str, keywords: &[Keyword]) -> f32 {
+        let total: f32 = keywords
+            .iter()
+            .filter(|(phrase, _)| haystack.contains(phrase))
+            .map(|(_, weight)| weight)
+            .sum();
+        total.min(1.0)
     }
 
     /// List messages belonging to a given category, scoped to tenant.
@@ -275,6 +366,145 @@ mod tests {
             MessageCategory::from_str("unsubscribe"),
             MessageCategory::Unsubscribe
         );
+        // Fix #19: the review bucket round-trips the same way.
+        assert_eq!(MessageCategory::NeedsReview.to_string(), "needs_review");
+        assert_eq!(
+            MessageCategory::from_str("needs_review"),
+            MessageCategory::NeedsReview
+        );
+        assert!(!MessageCategory::NeedsReview.is_concrete());
+    }
+
+    // ------------------------------------------------------------------
+    // Fix #19 — confidence-scored classification: ambiguous input lands in
+    // NeedsReview (no downstream automation may act on it), strong input is
+    // decided, and the threshold boundary is inclusive.
+    // ------------------------------------------------------------------
+
+    /// An ambiguous message (no decisive keyword signal) must land in the
+    /// NeedsReview bucket — structurally NOT a concrete category — so no
+    /// consumer can drive suppression, auto-reply sends or enrollment from
+    /// it. The score is preserved for the review UI/log.
+    #[test]
+    fn ambiguous_messages_land_in_needs_review_without_a_decided_category() {
+        for (subject, from) in [
+            ("Hello", "someone@example.com"),
+            ("World", "someone@example.com"),
+            ("quick question", "someone@example.com"),
+            ("", ""),
+            ("hey there, checking in", "someone@example.com"),
+        ] {
+            let decision = InboxManager::classify_scored(subject, from);
+            assert_eq!(
+                decision.category,
+                MessageCategory::NeedsReview,
+                "{subject:?} from {from:?} is ambiguous and must NOT be decided"
+            );
+            assert!(
+                decision.confidence < crate::types::AUTOMATION_CONFIDENCE_THRESHOLD,
+                "review-bucket confidence must be below the threshold: {decision:?}"
+            );
+            assert!(
+                !decision.category.is_concrete(),
+                "NeedsReview is never concrete"
+            );
+            // The persisted message carries the review category, so the
+            // structural guard survives persistence.
+            let msg = InboxManager::classify_message("t".into(), from.into(), subject.into());
+            assert_eq!(msg.category, MessageCategory::NeedsReview);
+        }
+    }
+
+    /// Strong, specific keyword signals keep their decided categories with
+    /// automation-grade confidence — downstream consumers may act on these.
+    #[test]
+    fn strong_classifications_are_concrete_with_automation_confidence() {
+        let cases: [(&str, &str, MessageCategory); 6] = [
+            (
+                "Interested in a demo",
+                "alice@x.com",
+                MessageCategory::Lead,
+            ),
+            ("Pricing inquiry", "a@b.com", MessageCategory::Lead),
+            ("Support ticket #1234", "bob@y.com", MessageCategory::Support),
+            (
+                "Invoice for subscription",
+                "billing@co.com",
+                MessageCategory::Customer,
+            ),
+            (
+                "You won the lottery!",
+                "noreply@spam.biz",
+                MessageCategory::Spam,
+            ),
+            (
+                "Please unsubscribe me",
+                "user@corp.example",
+                MessageCategory::Unsubscribe,
+            ),
+        ];
+        for (subject, from, expected) in cases {
+            let decision = InboxManager::classify_scored(subject, from);
+            assert_eq!(
+                decision.category, expected,
+                "{subject:?} from {from:?} must classify as {expected:?}"
+            );
+            assert!(
+                crate::types::is_automation_confidence(decision.confidence),
+                "{subject:?} must carry automation-grade confidence, got {decision:?}"
+            );
+            assert!(decision.category.is_concrete());
+        }
+    }
+
+    /// The threshold boundary is inclusive (>=): a score EXACTLY at
+    /// [`crate::types::AUTOMATION_CONFIDENCE_THRESHOLD`] decides the category
+    /// (one specific keyword, or two weak hits summing to the threshold);
+    /// one point below it stays in review.
+    #[test]
+    fn threshold_boundary_is_inclusive_and_deterministic() {
+        // "trial" alone weighs exactly 0.70 → decided Lead.
+        let at_threshold = InboxManager::classify_scored("trial access", "a@b.com");
+        assert_eq!(at_threshold.category, MessageCategory::Lead);
+        assert_eq!(at_threshold.confidence, 0.70);
+
+        // Two weak hits sum to exactly 0.70 → decided Support.
+        let weak_pair = InboxManager::classify_scored("need help with this issue", "a@b.com");
+        assert_eq!(weak_pair.category, MessageCategory::Support);
+        assert_eq!(weak_pair.confidence, 0.70);
+
+        // One weak hit alone (0.35) is below the threshold → NeedsReview.
+        let below = InboxManager::classify_scored("can you help", "a@b.com");
+        assert_eq!(below.category, MessageCategory::NeedsReview);
+        assert_eq!(below.confidence, 0.35);
+
+        // Determinism: identical input → identical decision, every time.
+        for _ in 0..3 {
+            assert_eq!(
+                InboxManager::classify_scored("trial access", "a@b.com"),
+                at_threshold
+            );
+        }
+    }
+
+    /// Explicit opt-out language is legally significant (Fix I-5) and always
+    /// decisive: it must never be demoted to NeedsReview, and it wins over
+    /// any weaker concurrent signal (priority order).
+    #[test]
+    fn unsubscribe_phrases_carry_full_confidence_and_priority() {
+        for subject in [
+            "Please unsubscribe me from your list",
+            "Remove me from this newsletter",
+            "Stop emailing me",
+            "I want to opt out of marketing emails",
+        ] {
+            let decision = InboxManager::classify_scored(subject, "user@corp.example");
+            assert_eq!(decision.category, MessageCategory::Unsubscribe);
+            assert_eq!(decision.confidence, 1.0);
+        }
+        // Opt-out beats a coincidental weak support signal.
+        let mixed = InboxManager::classify_scored("please unsubscribe, I need no help", "a@b.com");
+        assert_eq!(mixed.category, MessageCategory::Unsubscribe);
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.

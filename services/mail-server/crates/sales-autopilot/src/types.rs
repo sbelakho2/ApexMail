@@ -556,6 +556,14 @@ pub enum MessageCategory {
     /// priority — they are legally significant (CAN-SPAM) and previously
     /// fell through the spam keyword heuristic.
     Unsubscribe,
+    /// Fix #19: the heuristic classifier's confidence fell below
+    /// [`AUTOMATION_CONFIDENCE_THRESHOLD`] — the message may be any category
+    /// and MUST NOT drive any irreversible downstream action (suppression,
+    /// auto-reply send, enrollment trigger). It goes to human review instead.
+    /// Ambiguity is a distinct category (not a soft flag), so the structural
+    /// guard holds: a consumer matching concrete categories can never fire on
+    /// a low-confidence classification.
+    NeedsReview,
     Other,
 }
 
@@ -567,6 +575,7 @@ impl std::fmt::Display for MessageCategory {
             Self::Support => write!(f, "support"),
             Self::Spam => write!(f, "spam"),
             Self::Unsubscribe => write!(f, "unsubscribe"),
+            Self::NeedsReview => write!(f, "needs_review"),
             Self::Other => write!(f, "other"),
         }
     }
@@ -582,9 +591,29 @@ impl MessageCategory {
             "support" => Self::Support,
             "spam" => Self::Spam,
             "unsubscribe" => Self::Unsubscribe,
+            "needs_review" => Self::NeedsReview,
             _ => Self::Other,
         }
     }
+
+    /// Is this a CONCRETE (decided) category? Only concrete categories with
+    /// sufficient confidence may drive automation (Fix #19).
+    pub fn is_concrete(self) -> bool {
+        !matches!(self, Self::NeedsReview | Self::Other)
+    }
+}
+
+/// Fix #19: minimum classifier confidence for a categorization to be treated
+/// as decided. Below it the message lands in
+/// [`MessageCategory::NeedsReview`], and NO irreversible downstream action
+/// (suppression, auto-reply send, enrollment trigger) may fire from it.
+pub const AUTOMATION_CONFIDENCE_THRESHOLD: f32 = 0.70;
+
+/// Fix #19: is `confidence` strong enough to automate on? The single
+/// comparison every consumer must route through (>= semantics: a score
+/// exactly AT the threshold is decided).
+pub fn is_automation_confidence(confidence: f32) -> bool {
+    confidence >= AUTOMATION_CONFIDENCE_THRESHOLD
 }
 
 // ---------------------------------------------------------------------------

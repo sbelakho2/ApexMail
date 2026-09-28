@@ -309,31 +309,42 @@ fn read_env(names: &[&str]) -> Option<String> {
 
 impl HttpSalesIntelligence {
     /// Construct with an explicit base URL and key.
-    pub fn new(base_url: &str, api_key: &str) -> Self {
-        let client = match reqwest::Client::builder()
+    ///
+    /// PERF #24: client-construction failure makes the AI integration
+    /// UNAVAILABLE — a typed `Err` (callers degrade to the offline
+    /// intelligence), never a fall back to the process-default client,
+    /// which silently discards the timeout this builder pins.
+    pub fn try_new(base_url: &str, api_key: &str) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .user_agent("ApexMail/1.0 (sales-intelligence)")
             .build()
-        {
-            Ok(client) => client,
-            // A client-build failure (e.g. TLS backend unavailable) must not
-            // panic the service; the default client is the degraded fallback.
-            Err(_) => reqwest::Client::new(),
-        };
-        Self {
+            .map_err(|error| format!("failed to build sales-intelligence HTTP client: {error}"))?;
+        Ok(Self {
             base_url: base_url.trim().trim_end_matches('/').to_string(),
             api_key: api_key.trim().to_string(),
             model_version: "apexmail-ai".to_string(),
             client,
-        }
+        })
     }
 
-    /// Build from the environment; `None` when unconfigured, which selects the
-    /// offline fallback.
+    /// Build from the environment; `None` when unconfigured or when the HTTP
+    /// client cannot be constructed (PERF #24: the integration is
+    /// UNAVAILABLE, which selects the offline fallback), never running on an
+    /// unbounded default client.
     pub fn from_env() -> Option<Self> {
         let base_url = read_env(&[AI_BASE_URL_ENV, AI_BASE_URL_ENV_ALT])?;
         let api_key = read_env(&[AI_API_KEY_ENV, AI_API_KEY_ENV_ALT]).unwrap_or_default();
-        Some(Self::new(&base_url, &api_key))
+        match Self::try_new(&base_url, &api_key) {
+            Ok(intelligence) => Some(intelligence),
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "AI intelligence HTTP client unavailable — degrading to offline intelligence (PERF #24)"
+                );
+                None
+            }
+        }
     }
 
     pub fn base_url(&self) -> &str {
@@ -1060,7 +1071,10 @@ mod tests {
     fn env_configured_http_provider_is_built() {
         // `from_env` is only testable serially; assert the constructor + config
         // surface instead of mutating process env.
-        let http = HttpSalesIntelligence::new("https://ai.example.com/", "key");
+        // PERF #24: try_new (typed Result) replaces the unbounded fallback;
+        // the bounded client build succeeds in tests, so expect is honest.
+        let http = HttpSalesIntelligence::try_new("https://ai.example.com/", "key")
+            .expect("bounded client construction succeeds");
         assert_eq!(http.base_url(), "https://ai.example.com");
         assert_eq!(http.model_version(), "apexmail-ai");
         assert_eq!(
