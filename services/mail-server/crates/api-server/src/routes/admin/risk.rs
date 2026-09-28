@@ -303,8 +303,8 @@ async fn load_risk_rows(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> Result<Vec<RiskAssessmentRow>, ApiError> {
-    let has_reputation_stats = table_exists(db, "reputation_stats").await;
-    let has_reputation_alerts = table_exists(db, "reputation_alerts").await;
+    let has_reputation_stats = table_exists(db, "reputation_stats").await?;
+    let has_reputation_alerts = table_exists(db, "reputation_alerts").await?;
     let sql = build_risk_rows_sql(has_reputation_stats, has_reputation_alerts, limit.is_some());
 
     let mut query = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64, i64)>(&sql);
@@ -436,7 +436,7 @@ async fn run_risk_assessment(
     let assessed_at = chrono::Utc::now();
     let mut alerts_created = 0usize;
 
-    if table_exists(db, "reputation_alerts").await {
+    if table_exists(db, "reputation_alerts").await? {
         let mut tx = db.begin().await?;
 
         for row in &rows {
@@ -730,7 +730,7 @@ async fn update_risk(
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::ResolveFlag { tenant_id, flag_id } => {
-            if table_exists(&state.db, "reputation_alerts").await {
+            if table_exists(&state.db, "reputation_alerts").await? {
                 // Propagate (P2): swallowing the UPDATE reported
                 // success:true for a flag that was never resolved —
                 // operators trusted a no-op.
@@ -1208,7 +1208,14 @@ mod adversarial_tests {
         );
 
         // ResolveFlag against a real alert row flips acknowledgement.
-        if table_exists(&pool, "reputation_alerts").await {
+        // Fix (P1 swallowed outages): probes now return Result — in this test
+        // the Err case means the shared fixture database is unreachable, and
+        // skipping the assertion block (as before with Ok(false)) is the
+        // honest degradation.
+        if table_exists(&pool, "reputation_alerts")
+            .await
+            .unwrap_or(false)
+        {
             let flag_id = apexmail_lib::id::generate_id("", 26);
             sqlx::query(
                 "INSERT INTO reputation_alerts (id, tenant_id, alert_type, value, threshold, acknowledged, created_at)
@@ -1312,7 +1319,9 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("adv_risk_resolve_flag").await else {
             return;
         };
-        if !table_exists(&pool, "reputation_alerts").await {
+        // Fix (P1 swallowed outages): probes return Result; Err (unreachable
+        // database) skips the test exactly as the genuine-absence branch did.
+        if !matches!(table_exists(&pool, "reputation_alerts").await, Ok(true)) {
             eprintln!("skipping: reputation_alerts missing from the canonical chain");
             pool.close().await;
             return;

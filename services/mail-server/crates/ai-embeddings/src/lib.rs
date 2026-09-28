@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+pub mod auth;
 pub mod chunker;
 pub mod config;
 pub mod embeddings;

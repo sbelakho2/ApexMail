@@ -3,6 +3,7 @@
 use super::helpers::{
     clamp_limit, default_limit, extract_cookie, hash_token, html_escape, token_blacklist_key,
 };
+use ato_protection::runtime::{band_for as ato_band_for, AtoBand};
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -913,7 +914,9 @@ fn build_action_link(base_url: &str, path: &str, _email: &str, token: &str) -> S
     format!("{}{}/{}", base_url.trim_end_matches('/'), path, token,)
 }
 
-fn normalized_login_identifier(email: &str) -> String {
+/// Lowercased/trimmed login identifier (email or username) — shared by the
+/// JSON and SSR login flows so both feed the same Redis failure/lock keys.
+pub(crate) fn normalized_login_identifier(email: &str) -> String {
     email.trim().to_ascii_lowercase()
 }
 
@@ -962,7 +965,11 @@ async fn login_lock_ttl(
     Ok((ttl > 0).then_some(ttl))
 }
 
-async fn record_login_failure(
+/// Record a failed login for `identifier` (failure counter + distinct source
+/// IPs + escalation-backed account lock). Shared by the JSON login flow and
+/// the SSR ATO high-risk refusals (which must rate-limit the attempt exactly
+/// like a wrong password would).
+pub(crate) async fn record_login_failure(
     redis_pool: &deadpool_redis::Pool,
     identifier: &str,
     source_ip: Option<&str>,
@@ -1051,6 +1058,215 @@ async fn clear_login_failures(
     )
     .await?;
     Ok(())
+}
+
+// ─── ATO protection (account-takeover risk on password logins) ───────────
+//
+// The marketing/compliance surface advertises account-takeover protection;
+// this is the wiring that makes the claim true on the real login flows.
+// Every successful-password authentication is evaluated by the
+// `ato-protection` engine (process-shared runtime) with the inputs the
+// platform actually has: client IP, User-Agent, timestamp, and the engine's
+// own per-user login history (prior IPs and device fingerprints).
+//
+// Risk ladder (deterministic, explainable — every non-low verdict names its
+// factors in the audit row):
+// - low    → allow (score logged, no audit row),
+// - medium → allow, but require the MFA challenge when the user has MFA
+//            enrolled, otherwise allow + flag — audit row always,
+// - high   → refuse with the SAME wrong-password response the handler
+//            already returns (byte-identical status/body/flash, so an
+//            attacker learns nothing); `record_login_failure` rate-limits
+//            the attempt (M-6 distinct-IP corroboration intact — the ATO
+//            path alone never disables an account). Audit row always.
+//
+// Failure semantics: any detector error fails OPEN (allow + loud log) —
+// authentication must never break because the security layer crashed.
+
+/// What the login flow must do after the ATO evaluation of a
+/// successful-password authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtoLoginDecision {
+    /// Proceed exactly as before the ATO wiring existed.
+    Allow,
+    /// Medium risk with MFA enrolled: force the MFA challenge even for
+    /// roles that do not require MFA.
+    StepUpMfa,
+    /// High risk: refuse with the handler's standard wrong-password
+    /// response (anti-enumeration; the real reason lives in the audit row).
+    Refuse,
+}
+
+/// SHA-256 digest over the raw evaluation inputs (user id, client IP,
+/// User-Agent, timestamp). Audit rows carry this digest instead of the raw
+/// request headers, so the owner can correlate rows without storing
+/// User-Agent strings verbatim.
+fn ato_inputs_digest(
+    user_id: &str,
+    client_ip: &str,
+    user_agent: &str,
+    timestamp: DateTime<Utc>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(user_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(client_ip.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(user_agent.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(timestamp.to_rfc3339().as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// Everything the audit row for a medium/high ATO verdict records.
+struct AtoAudit<'a> {
+    tenant_id: &'a str,
+    user_id: &'a str,
+    band: AtoBand,
+    risk_score: f64,
+    engine_action: String,
+    factors: &'a [ato_protection::engine::RiskFactor],
+    new_device: bool,
+    impossible_travel: bool,
+    inputs_digest: String,
+    step_up: &'static str,
+    client_ip: Option<&'a str>,
+    user_agent: Option<&'a str>,
+}
+
+/// Best-effort audit row for a medium/high ATO verdict. An audit failure is
+/// logged loudly but never fails the login (the audit sink fails open); the
+/// verdict itself is still enforced by the caller.
+async fn write_ato_audit_row(state: &AppState, audit: &AtoAudit<'_>) {
+    let metadata = serde_json::json!({
+        "band": audit.band.as_str(),
+        "risk_score": audit.risk_score,
+        "engine_action": audit.engine_action,
+        "new_device": audit.new_device,
+        "impossible_travel": audit.impossible_travel,
+        "verdict_factors": audit
+            .factors
+            .iter()
+            .map(|factor| {
+                serde_json::json!({
+                    "id": factor.id,
+                    "risk": factor.risk,
+                    "description": factor.description,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "inputs_digest": audit.inputs_digest,
+        "step_up": audit.step_up,
+    });
+    if let Err(error) = insert_auth_audit_log(
+        state,
+        audit.tenant_id,
+        audit.user_id,
+        "auth.ato_login_risk",
+        metadata,
+        audit.client_ip,
+        audit.user_agent,
+    )
+    .await
+    {
+        tracing::error!(
+            error = %error,
+            user_id = %audit.user_id,
+            band = audit.band.as_str(),
+            "failed to write the ATO audit row — the verdict is still enforced"
+        );
+    }
+}
+
+/// Evaluate a successful-password authentication with the ATO engine.
+///
+/// Infallible by contract: the gate off → `Allow`; any detector error →
+/// `Allow` with a loud log. Only medium (with MFA enrolled → step-up) and
+/// high (→ refuse) deviate from the pre-ATO behavior.
+pub(crate) async fn ato_evaluate_password_login(
+    state: &AppState,
+    user_id: &str,
+    tenant_id: &str,
+    mfa_enrolled: bool,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> AtoLoginDecision {
+    let runtime = ato_protection::runtime::shared();
+    if !runtime.enabled() {
+        return AtoLoginDecision::Allow;
+    }
+    let ip = client_ip.unwrap_or("unknown");
+    let ua = user_agent.unwrap_or("");
+    let timestamp = Utc::now();
+    let event = ato_protection::session::LoginEvent {
+        user_id: user_id.to_string(),
+        ip_address: ip.to_string(),
+        user_agent: ua.to_string(),
+        // No GeoIP feed is wired into the platform yet: the engine falls
+        // back to the IP-pivot (GEO_UNKNOWN) risk when the IP changes
+        // without coordinates.
+        latitude: None,
+        longitude: None,
+        timestamp,
+        success: true,
+        // JA4 extraction is not plumbed through axum yet; the device
+        // fingerprint is derived by the store from UA + IP prefix.
+        tls_fingerprint: None,
+        device_fingerprint: None,
+    };
+    let verdict = match runtime.evaluate_login(&event) {
+        Ok(verdict) => verdict,
+        Err(error) => {
+            tracing::error!(
+                user_id = %user_id,
+                error = %error,
+                "ATO detector unavailable — failing OPEN (login allowed without ATO evaluation)"
+            );
+            return AtoLoginDecision::Allow;
+        }
+    };
+
+    let band = ato_band_for(verdict.action);
+    if band == AtoBand::Low {
+        tracing::info!(
+            user_id = %user_id,
+            score = verdict.risk_score,
+            action = %verdict.action,
+            "ATO login risk: low — allowed"
+        );
+        return AtoLoginDecision::Allow;
+    }
+    let decision = if band == AtoBand::Medium && mfa_enrolled {
+        AtoLoginDecision::StepUpMfa
+    } else if band == AtoBand::High {
+        AtoLoginDecision::Refuse
+    } else {
+        AtoLoginDecision::Allow
+    };
+    let step_up = match decision {
+        AtoLoginDecision::StepUpMfa => "required",
+        AtoLoginDecision::Allow => "flagged",
+        AtoLoginDecision::Refuse => "refused",
+    };
+    write_ato_audit_row(
+        state,
+        &AtoAudit {
+            tenant_id,
+            user_id,
+            band,
+            risk_score: verdict.risk_score,
+            engine_action: verdict.action.to_string(),
+            factors: &verdict.factors,
+            new_device: verdict.new_device,
+            impossible_travel: verdict.impossible_travel,
+            inputs_digest: ato_inputs_digest(user_id, ip, ua, timestamp),
+            step_up,
+            client_ip,
+            user_agent,
+        },
+    )
+    .await;
+    decision
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2035,6 +2251,39 @@ async fn login(
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
+    // ── ATO protection: evaluate the successful-password authentication ──
+    // (risk ladder documented on `ato_evaluate_password_login`). A high-risk
+    // refusal is byte-identical to the wrong-password error above: the
+    // attacker learns nothing except that the credentials did not yield a
+    // session. The real reason lives in the auth.ato_login_risk audit row.
+    let ato_decision = ato_evaluate_password_login(
+        &state,
+        &user.id,
+        &user.tenant_id,
+        user.mfa_enabled
+            && user
+                .mfa_secret
+                .as_deref()
+                .is_some_and(|secret| !secret.is_empty()),
+        Some(client_ip.as_str()),
+        headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok()),
+    )
+    .await;
+    let ato_step_up = match ato_decision {
+        AtoLoginDecision::Refuse => {
+            // Rate-limit the attempt exactly like a wrong password (the M-6
+            // distinct-IP corroboration still applies, so the ATO path alone
+            // never disables the account), then return the anti-enumeration
+            // error.
+            record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
+            return Err(ApiError::Unauthorized("invalid credentials".into()));
+        }
+        AtoLoginDecision::StepUpMfa => true,
+        AtoLoginDecision::Allow => false,
+    };
+
     // Status and SSO policy are revealed only AFTER the password verified:
     // these branches previously ran pre-verification, letting an anonymous
     // caller confirm an email is registered (and whether its org enforces
@@ -2079,7 +2328,11 @@ async fn login(
         ));
     }
 
-    if role_requires_mfa(&user.role) {
+    // ATO step-up (medium risk with MFA enrolled) enters the same challenge
+    // machinery as MFA-required roles; the branch below only issues a
+    // challenge because `ato_step_up` implies an enrolled, configured
+    // secret — never an enrollment forcing.
+    if ato_step_up || role_requires_mfa(&user.role) {
         if user.mfa_enabled {
             let secret = user
                 .mfa_secret
@@ -6395,6 +6648,15 @@ async fn revoke_session(
 // unique tenants/users per test, and a dedicated Redis logical DB per test
 // (FLUSHDB-scoped) so rate-limit and lockout counters never leak between
 // tests or modules.
+//
+// Redis logical DB registry (each number owned by exactly one test):
+//   1 adv_login_enum          2 adv_login_lock         3 adv_login_policy
+//   4 adv_login_mfa           5 adv2_mfa_verify        6 adv2_mfa_setup
+//   7 adv2_mfa_manage         8 adv2_verify_path       9 adv2_register
+//  10 adv2_register_dup      11 adv3_api_keys         12 adv2_session_bookkeeping
+//  13 adv3_refresh           14 adv3_password         15 adv3_reset
+//  16 ato_disabled_identical 17 ato_medium_flag_stepup 18 ato_high_refusal
+//  19 ato_fail_open
 
 #[cfg(test)]
 mod adversarial_auth_tests {
@@ -6555,6 +6817,49 @@ mod adversarial_auth_tests {
             builder = builder.header(*name, *value);
         }
         let response = tower::ServiceExt::oneshot(app.clone(), builder.body(body).unwrap())
+            .await
+            .expect("auth request must dispatch");
+        let status = response.status();
+        let response_headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, response_headers, json)
+    }
+
+    /// `call` with an explicit peer socket. axum's `ConnectInfo` extractor
+    /// reads the request extensions, so the oneshot harness can pin the
+    /// client IP the way a real connection would — required to exercise the
+    /// ATO IP-pivot risk factors on the JSON login.
+    async fn call_peer(
+        app: &axum::Router,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        csrf: Option<&str>,
+        headers: &[(&str, &str)],
+        peer: Option<SocketAddr>,
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        if let Some(token) = csrf {
+            builder = builder.header("x-csrf-token", token);
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut request = builder.body(body).expect("request builds");
+        if let Some(peer) = peer {
+            request.extensions_mut().insert(ConnectInfo(peer));
+        }
+        let response = tower::ServiceExt::oneshot(app.clone(), request)
             .await
             .expect("auth request must dispatch");
         let status = response.status();
@@ -6848,6 +7153,426 @@ mod adversarial_auth_tests {
             .await
             .expect("clear rate");
 
+        fx.cleanup().await;
+    }
+
+    // ── ATO protection on the JSON login (redis DBs 16-19) ────────────────
+    //
+    // The runtime is process-global; nextest runs each test in its own
+    // process, so `install_for_tests` gives every test a deterministic,
+    // history-free engine. Fresh users land in the low band (NEW_DEVICE 3.0
+    // + LOW_HISTORY 1.0 = 4.0 < mfa_threshold 5.0), and an IP pivot with a
+    // different device adds GEO_UNKNOWN 2.0 → 6.0 (medium).
+
+    /// Deterministic dev-mode engine config for the ATO tests (defaults:
+    /// mfa_threshold 5.0, block_threshold 9.0).
+    fn ato_development_config() -> ato_protection::config::AtoConfig {
+        ato_protection::config::AtoConfig::development()
+    }
+
+    /// Engine config with explicit thresholds (validation requires
+    /// mfa_threshold < block_threshold).
+    fn ato_config_with_thresholds(
+        mfa_threshold: f64,
+        block_threshold: f64,
+    ) -> ato_protection::config::AtoConfig {
+        ato_protection::config::AtoConfig {
+            mfa_threshold,
+            block_threshold,
+            ..ato_protection::config::AtoConfig::development()
+        }
+    }
+
+    /// Seed a fresh verified member (no MFA), log in through the router
+    /// with the given peer/UA, and return (status, headers, body, user id).
+    async fn seed_and_login(
+        fx: &AuthFx,
+        tenant: &str,
+        label: &str,
+        peer: SocketAddr,
+        ua: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, serde_json::Value, Uuid) {
+        let email = format!("ato-{label}-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user(
+            &fx.pool,
+            tenant,
+            &email,
+            Some(&bcrypt_hash(TEST_PASSWORD)),
+            "member",
+            "active",
+            true,
+            false,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+        let (status, headers, body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            ua,
+            Some(peer),
+        )
+        .await;
+        (status, headers, body, user_id)
+    }
+
+    /// Audit rows written by the ATO path for a user: (action, details).
+    async fn ato_audit_rows(pool: &PgPool, user_id: Uuid) -> Vec<(String, serde_json::Value)> {
+        sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT action, details FROM audit_logs \
+             WHERE user_id = $1 AND action LIKE 'auth.ato%' ORDER BY timestamp",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(pool)
+        .await
+        .expect("query ato audit rows")
+    }
+
+    /// Replace per-user volatile fields so two login responses can be
+    /// compared byte-shape for byte-shape.
+    fn normalize_login_body(body: &mut serde_json::Value) {
+        body["user"]["id"] = json!("<id>");
+        body["user"]["email"] = json!("<email>");
+        body["user"]["tenant_id"] = json!("<tenant>");
+        body["expires_at"] = json!("<expires>");
+    }
+
+    #[tokio::test]
+    async fn ato_disabled_login_is_byte_identical_and_writes_no_audit() {
+        let Some(fx) = auth_fx("ato_disabled_identical", 16).await else {
+            return;
+        };
+        ato_protection::runtime::install_for_tests(false, ato_development_config());
+        let tenant = new_tenant_id();
+        seed_tenant(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let peer = SocketAddr::from(([203, 0, 113, 10], 443));
+        let ua = [("user-agent", "ATO-UA-Disabled")];
+
+        let disabled = seed_and_login(&fx, &tenant, "disabled", peer, &ua).await;
+        assert_eq!(disabled.0, StatusCode::OK, "body: {}", disabled.2);
+        assert!(session_cookie(&disabled.1).is_some());
+        assert!(
+            ato_audit_rows(&fx.pool, disabled.3).await.is_empty(),
+            "a disabled gate must not write ATO audit rows"
+        );
+
+        // Enabled but low-risk (fresh user) must produce the exact same
+        // response shape as the disabled run — the wiring changes nothing
+        // observable when the verdict is low.
+        ato_protection::runtime::install_for_tests(true, ato_development_config());
+        let enabled = seed_and_login(&fx, &tenant, "enabled-low", peer, &ua).await;
+        assert_eq!(enabled.0, StatusCode::OK, "body: {}", enabled.2);
+        assert!(session_cookie(&enabled.1).is_some());
+        assert!(
+            ato_audit_rows(&fx.pool, enabled.3).await.is_empty(),
+            "a low verdict logs the score but writes no audit row"
+        );
+
+        let (mut disabled_body, mut enabled_body) = (disabled.2, enabled.2);
+        normalize_login_body(&mut disabled_body);
+        normalize_login_body(&mut enabled_body);
+        assert_eq!(
+            serde_json::to_string(&disabled_body).unwrap(),
+            serde_json::to_string(&enabled_body).unwrap(),
+            "disabled and low-risk-enabled logins must be byte-identical"
+        );
+
+        ato_protection::runtime::uninstall_for_tests();
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn ato_medium_risk_flags_unenrolled_and_steps_up_enrolled() {
+        let Some(fx) = auth_fx("ato_medium_flag_stepup", 17).await else {
+            return;
+        };
+        ato_protection::runtime::install_for_tests(true, ato_development_config());
+        let tenant = new_tenant_id();
+        seed_tenant(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let home = SocketAddr::from(([203, 0, 113, 10], 443));
+        let roamer = SocketAddr::from(([198, 51, 100, 20], 443));
+        let ua_home = [("user-agent", "ATO-UA-One")];
+        let ua_roamer = [("user-agent", "ATO-UA-Two")];
+
+        // Unenrolled member: first login (fresh user) is low → session.
+        let unenrolled_email = format!("ato-flag-{}@example.com", Uuid::new_v4().simple());
+        let unenrolled = seed_user(
+            &fx.pool,
+            &tenant,
+            &unenrolled_email,
+            Some(&bcrypt_hash(TEST_PASSWORD)),
+            "member",
+            "active",
+            true,
+            false,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+        let (status, headers, body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": unenrolled_email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &ua_home,
+            Some(home),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert!(session_cookie(&headers).is_some());
+        assert!(ato_audit_rows(&fx.pool, unenrolled).await.is_empty());
+
+        // Second login from a different IP + device → medium (6.0). No MFA
+        // enrolled: allowed + flagged (audit row, still a session).
+        let (status, headers, _body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": unenrolled_email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &ua_roamer,
+            Some(roamer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "medium + unenrolled must allow");
+        assert!(session_cookie(&headers).is_some(), "flagging never blocks");
+        let rows = ato_audit_rows(&fx.pool, unenrolled).await;
+        assert_eq!(rows.len(), 1, "exactly the medium verdict is audited");
+        assert_eq!(rows[0].0, "auth.ato_login_risk");
+        assert_eq!(rows[0].1["band"], "medium");
+        assert_eq!(rows[0].1["step_up"], "flagged");
+        assert!(
+            rows[0].1["inputs_digest"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("sha256:"),
+            "the audit row carries the inputs digest"
+        );
+        assert!(
+            rows[0].1["verdict_factors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["id"] == "GEO_UNKNOWN"),
+            "the IP-pivot factor must be explainable: {:?}",
+            rows[0].1["verdict_factors"]
+        );
+
+        // Enrolled member (MFA not role-required): first login is low →
+        // direct session (unchanged behavior), second login is medium →
+        // step-up: the MFA challenge fires and completing it yields the
+        // session.
+        let totp_secret = generate_mfa_secret().expect("secret");
+        let enrolled_email = format!("ato-step-{}@example.com", Uuid::new_v4().simple());
+        let enrolled = seed_user(
+            &fx.pool,
+            &tenant,
+            &enrolled_email,
+            Some(&bcrypt_hash(TEST_PASSWORD)),
+            "member",
+            "active",
+            true,
+            true,
+            Some(&totp_secret),
+            None,
+            json!({}),
+        )
+        .await;
+        let (status, headers, _body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": enrolled_email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &ua_home,
+            Some(home),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "low risk keeps the direct session");
+        assert!(session_cookie(&headers).is_some());
+        let (status, headers, body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": enrolled_email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &ua_roamer,
+            Some(roamer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "medium must step up: {body}");
+        assert_eq!(body["status"], "mfa_required");
+        assert!(session_cookie(&headers).is_none());
+        let token = body["challengeToken"].as_str().expect("challenge token");
+        let (status, headers, body) = call(
+            &fx.app,
+            Method::POST,
+            "/mfa/verify",
+            Some(json!({"challenge_token": token, "mfaCode": totp_code(&totp_secret, 0)})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "step-up completes: {body}");
+        assert_eq!(body["user"]["id"], enrolled.to_string());
+        assert!(session_cookie(&headers).is_some());
+        let rows = ato_audit_rows(&fx.pool, enrolled).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1["band"], "medium");
+        assert_eq!(rows[0].1["step_up"], "required");
+
+        ato_protection::runtime::uninstall_for_tests();
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn ato_high_risk_refusal_is_byte_identical_to_wrong_password() {
+        let Some(fx) = auth_fx("ato_high_refusal", 18).await else {
+            return;
+        };
+        // Lower thresholds so a FIRST login (4.0) crosses the block
+        // threshold (3.5): the refusal must carry the exact wrong-password
+        // response, never a distinctive "suspicious" answer.
+        ato_protection::runtime::install_for_tests(true, ato_config_with_thresholds(2.0, 3.5));
+        let tenant = new_tenant_id();
+        seed_tenant(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let email = format!("ato-high-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user(
+            &fx.pool,
+            &tenant,
+            &email,
+            Some(&bcrypt_hash(TEST_PASSWORD)),
+            "member",
+            "active",
+            true,
+            false,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+
+        let (wrong_status, wrong_headers, wrong_body) = call(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": email, "password": "WrongPassphrase1"})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(wrong_status, StatusCode::UNAUTHORIZED);
+        assert!(session_cookie(&wrong_headers).is_none());
+
+        let (status, headers, body) = call_peer(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &[("user-agent", "ATO-UA-High")],
+            Some(SocketAddr::from(([203, 0, 113, 10], 443))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "high risk must refuse");
+        assert!(session_cookie(&headers).is_none());
+        assert_eq!(
+            serde_json::to_string(&wrong_body).unwrap(),
+            serde_json::to_string(&body).unwrap(),
+            "the ATO refusal must be byte-identical to the wrong-password body (no oracle)"
+        );
+
+        // The refusal rate-limits the attempt: the identifier's failure
+        // counter moved (two failures now — the wrong password and the
+        // refusal).
+        let failure_keys: Vec<String> = deadpool_redis::redis::cmd("KEYS")
+            .arg("apexmail:auth:failures:*")
+            .query_async(&mut fx.redis.get().await.unwrap())
+            .await
+            .expect("keys");
+        assert_eq!(failure_keys.len(), 1, "one identifier: {failure_keys:?}");
+        let failures: i64 = deadpool_redis::redis::cmd("GET")
+            .arg(&failure_keys[0])
+            .query_async(&mut fx.redis.get().await.unwrap())
+            .await
+            .expect("failure count");
+        assert_eq!(failures, 2, "the refusal itself counts as a failure");
+
+        // The owner sees the real reason.
+        let rows = ato_audit_rows(&fx.pool, user_id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1["band"], "high");
+        assert_eq!(rows[0].1["step_up"], "refused");
+
+        // Never a permanent lockout: with the detector off, the SAME
+        // credentials log in immediately.
+        ato_protection::runtime::install_for_tests(false, ato_development_config());
+        let (status, headers, body) = call(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "ATO must never disable: {body}");
+        assert!(session_cookie(&headers).is_some());
+
+        ato_protection::runtime::uninstall_for_tests();
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn ato_detector_error_fails_open() {
+        let Some(fx) = auth_fx("ato_fail_open", 19).await else {
+            return;
+        };
+        // Invalid thresholds (mfa >= block) fail validation → the runtime is
+        // DEGRADED and every evaluation reports an error. Authentication
+        // must keep working: fail OPEN with a loud log, no audit rows.
+        ato_protection::runtime::install_for_tests(true, ato_config_with_thresholds(9.0, 5.0));
+        let tenant = new_tenant_id();
+        seed_tenant(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let email = format!("ato-open-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user(
+            &fx.pool,
+            &tenant,
+            &email,
+            Some(&bcrypt_hash(TEST_PASSWORD)),
+            "member",
+            "active",
+            true,
+            false,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+
+        let (status, headers, body) = call(
+            &fx.app,
+            Method::POST,
+            "/login",
+            Some(json!({"email": email, "password": TEST_PASSWORD})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "detector errors fail OPEN: {body}");
+        assert!(session_cookie(&headers).is_some());
+        assert!(
+            ato_audit_rows(&fx.pool, user_id).await.is_empty(),
+            "a failed evaluation must not produce an audit row"
+        );
+
+        ato_protection::runtime::uninstall_for_tests();
         fx.cleanup().await;
     }
 
@@ -9885,8 +10610,7 @@ mod transactional_email_contracts {
 
     /// Test DKIM encryption key — the same fixture value every api-server
     /// test module seeds the system sender with.
-    const TEST_DKIM_KEY: &str =
-        "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+    const TEST_DKIM_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
 
     /// Dedicated logical Redis DB for this module (1-4 are taken by the
     /// adversarial auth modules, 8 by tracking-service).
@@ -9906,9 +10630,11 @@ mod transactional_email_contracts {
         let _guard = crate::test_db::DKIM_ENV_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous =
-            std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
-        std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, TEST_DKIM_KEY);
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            TEST_DKIM_KEY,
+        );
         previous
     }
 
@@ -9936,8 +10662,9 @@ mod transactional_email_contracts {
             crate::routes::system_sender::SYSTEM_TENANT_ID,
             crate::routes::system_sender::SYSTEM_DOMAIN_ID,
         );
-        let encrypted = apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
-            .expect("test DKIM private key encryption must not fail");
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
         let public_key =
             apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
                 .expect("test DKIM public key derivation must not fail");
@@ -10001,7 +10728,9 @@ mod transactional_email_contracts {
     /// TEST_REDIS_URL.
     async fn mfa_email_via_login(test_name: &str) -> Option<QueuedEmail> {
         let pool = crate::test_db::canonical_pool(test_name).await?;
-        let Some(base) = std::env::var("TEST_REDIS_URL").ok().filter(|v| !v.trim().is_empty())
+        let Some(base) = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
         else {
             eprintln!("skipping {test_name}: TEST_REDIS_URL unset");
             pool.close().await;
@@ -10065,7 +10794,9 @@ mod transactional_email_contracts {
         .await
         .expect("seed mfa user");
 
-        let app = axum::Router::new().merge(router()).with_state(state.clone());
+        let app = axum::Router::new()
+            .merge(router())
+            .with_state(state.clone());
         let csrf = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
         let response = app
             .oneshot(
@@ -10082,10 +10813,9 @@ mod transactional_email_contracts {
             .await
             .expect("login request must dispatch");
         let status = response.status();
-        let bytes =
-            axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap_or_default();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
         assert_eq!(
             status,
             axum::http::StatusCode::ACCEPTED,
@@ -10126,7 +10856,10 @@ mod transactional_email_contracts {
             html.starts_with("<!DOCTYPE html>"),
             "{name}: must start with <!DOCTYPE html>"
         );
-        assert!(html.contains("lang=\"en\""), "{name}: must declare lang=\"en\"");
+        assert!(
+            html.contains("lang=\"en\""),
+            "{name}: must declare lang=\"en\""
+        );
         // Batch-2 email-title fix: transactional emails carry a real
         // <title> (webmail tabs previously rendered the raw link URL).
         assert!(
@@ -10162,13 +10895,19 @@ mod transactional_email_contracts {
         action_path: Option<&str>,
         must_contain: &str,
     ) {
-        assert!(!text.trim().is_empty(), "{name}: text body must be non-empty");
+        assert!(
+            !text.trim().is_empty(),
+            "{name}: text body must be non-empty"
+        );
         assert!(
             !text.contains('<'),
             "{name}: text alternative must not contain HTML tags: {text:?}"
         );
         if let Some(path) = action_path {
-            assert!(text.contains(path), "{name}: text body must carry the action path {path}");
+            assert!(
+                text.contains(path),
+                "{name}: text body must carry the action path {path}"
+            );
         }
         assert!(
             text.contains(must_contain),
@@ -10195,8 +10934,7 @@ mod transactional_email_contracts {
     /// legal footer.
     #[tokio::test]
     async fn verification_email_carries_shell_metadata_and_action_link() {
-        let Some((subject, html, _text, token)) =
-            verification_email_via_enqueue("tx_verify").await
+        let Some((subject, html, _text, token)) = verification_email_via_enqueue("tx_verify").await
         else {
             return;
         };

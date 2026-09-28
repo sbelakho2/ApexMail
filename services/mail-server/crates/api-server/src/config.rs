@@ -124,6 +124,27 @@ pub struct Config {
     /// peer and would make every call fail from inside a container.
     pub sales_autopilot_base_url: String,
     pub internal_service_token: Option<String>,
+    // ── P1 #6: per-workload outbound credentials ────────────────
+    // One universal INTERNAL_SERVICE_TOKEN authorizing every internal
+    // service means one compromised secret unlocks unrelated workloads.
+    // Each field mirrors the target service's DEDICATED token env; when set,
+    // the outbound client sends it INSTEAD of the universal token (the
+    // services refuse the universal token once their dedicated one exists).
+    /// Dedicated credential for pdf-renderer (`PDF_RENDERER_AUTH_TOKEN`) —
+    /// consumed by the analytics PDF export.
+    pub pdf_renderer_auth_token: Option<String>,
+    /// Dedicated credential for template-renderer
+    /// (`TEMPLATE_RENDERER_AUTH_TOKEN`) — reserved for the template-renderer
+    /// outbound wiring (no api-server call site yet).
+    pub template_renderer_auth_token: Option<String>,
+    /// Dedicated credential for devex-service (`DEVEX_AUTH_TOKEN`) —
+    /// reserved for the devex-service outbound wiring (no api-server call
+    /// site yet).
+    pub devex_auth_token: Option<String>,
+    /// Dedicated credential for ai-embeddings (`AI_EMBEDDINGS_AUTH_TOKEN`) —
+    /// reserved for the embeddings outbound wiring (no api-server call site
+    /// yet).
+    pub ai_embeddings_auth_token: Option<String>,
     /// ai-service base URL for the grounded assistant (empty = assistant
     /// disabled; /v1/ai/chat then returns 503 with the support escalation).
     pub ai_service_base_url: String,
@@ -1020,6 +1041,16 @@ impl Config {
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            pdf_renderer_auth_token: env::var("PDF_RENDERER_AUTH_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            template_renderer_auth_token: env::var("TEMPLATE_RENDERER_AUTH_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            devex_auth_token: env::var("DEVEX_AUTH_TOKEN").ok().filter(|s| !s.is_empty()),
+            ai_embeddings_auth_token: env::var("AI_EMBEDDINGS_AUTH_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
             cp_auth: CpAuthConfig::from_env()?,
 
             tracking_secret_key: tracking_secret_key_env
@@ -1102,6 +1133,34 @@ impl Config {
                 }
             }
             config.validate_production()?;
+
+            // P1 #6 caller-side posture: name every per-workload credential
+            // that is MISSING while the target service is actually wired into
+            // this process's outbound calls. The services themselves REFUSE
+            // TO BOOT in production without their dedicated token, so an
+            // unset caller token here means the outbound call would present
+            // the universal token — refused with a loud log on the service
+            // side. Warn (do not fail the api-server boot): the affected
+            // routes degrade honestly with a 500 either way.
+            for (service, env_name, wired) in [
+                ("pdf-renderer (analytics PDF export)", "PDF_RENDERER_AUTH_TOKEN", true),
+                // No api-server outbound call sites yet — the config fields
+                // exist so deployments can pre-provision; nothing to warn
+                // about while no call presents a credential.
+                ("template-renderer", "TEMPLATE_RENDERER_AUTH_TOKEN", false),
+                ("devex-service", "DEVEX_AUTH_TOKEN", false),
+                ("ai-embeddings", "AI_EMBEDDINGS_AUTH_TOKEN", false),
+            ] {
+                let dedicated_set = env::var(env_name).ok().is_some_and(|v| !v.trim().is_empty());
+                if wired && !dedicated_set {
+                    tracing::warn!(
+                        "{env_name} is not set — the outbound call to {service} still \
+                         authenticates with the universal INTERNAL_SERVICE_TOKEN. \
+                         REQUIRED-SOON: the service refuses the universal token once its \
+                         dedicated per-workload credential is provisioned"
+                    );
+                }
+            }
         }
 
         Ok(config)
@@ -1484,6 +1543,10 @@ pub(crate) mod tests {
             sales_autopilot_base_url: "http://localhost:3010".into(),
             ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
+            pdf_renderer_auth_token: None,
+            template_renderer_auth_token: None,
+            devex_auth_token: None,
+            ai_embeddings_auth_token: None,
             cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012abcd".into(),
             billing_company_iban: "EE381010220123456789".into(),
@@ -1633,6 +1696,10 @@ pub(crate) mod tests {
             sales_autopilot_base_url: "http://localhost:3010".into(),
             ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
+            pdf_renderer_auth_token: None,
+            template_renderer_auth_token: None,
+            devex_auth_token: None,
+            ai_embeddings_auth_token: None,
             cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             billing_company_iban: "EE381010220123456789".into(),
@@ -2226,6 +2293,11 @@ mod adversarial_tests {
         assert!(config.public_rate_limit_enabled);
         assert!(config.control_plane_api_key.is_none());
         assert!(config.internal_service_token.is_none());
+        // P1 #6: the per-workload outbound credentials are unset by default.
+        assert!(config.pdf_renderer_auth_token.is_none());
+        assert!(config.template_renderer_auth_token.is_none());
+        assert!(config.devex_auth_token.is_none());
+        assert!(config.ai_embeddings_auth_token.is_none());
 
         // Explicit overrides are honoured, including truthy/duration forms.
         sandbox.set("PORT", "8080");
@@ -2249,6 +2321,11 @@ mod adversarial_tests {
         sandbox.set("KIWI_MIN_DURATION_MS", "500");
         sandbox.set("CONTROL_PLANE_API_KEY", "cp-key");
         sandbox.set("INTERNAL_SERVICE_TOKEN", "token");
+        // P1 #6: per-workload outbound credentials.
+        sandbox.set("PDF_RENDERER_AUTH_TOKEN", "pdf-dedicated");
+        sandbox.set("TEMPLATE_RENDERER_AUTH_TOKEN", "template-dedicated");
+        sandbox.set("DEVEX_AUTH_TOKEN", "devex-dedicated");
+        sandbox.set("AI_EMBEDDINGS_AUTH_TOKEN", "embeddings-dedicated");
         sandbox.set("SES_CONFIGURATION_SET", "cfg-set");
         sandbox.set("INTERNAL_TLS_ENABLED", "true");
         sandbox.set("DATABASE_REPLICA_URL", "postgres://replica/db");
@@ -2277,6 +2354,20 @@ mod adversarial_tests {
         assert_eq!(config.kiwi_min_duration_ms, Some(500));
         assert_eq!(config.control_plane_api_key.as_deref(), Some("cp-key"));
         assert_eq!(config.internal_service_token.as_deref(), Some("token"));
+        // P1 #6: the dedicated per-workload credentials load from their envs.
+        assert_eq!(
+            config.pdf_renderer_auth_token.as_deref(),
+            Some("pdf-dedicated")
+        );
+        assert_eq!(
+            config.template_renderer_auth_token.as_deref(),
+            Some("template-dedicated")
+        );
+        assert_eq!(config.devex_auth_token.as_deref(), Some("devex-dedicated"));
+        assert_eq!(
+            config.ai_embeddings_auth_token.as_deref(),
+            Some("embeddings-dedicated")
+        );
         assert_eq!(config.ses_configuration_set.as_deref(), Some("cfg-set"));
         assert!(config.internal_tls_enabled);
         assert_eq!(

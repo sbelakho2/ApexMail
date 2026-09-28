@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::auth::ServiceAuth;
 use crate::config::EmbeddingsConfig;
 use crate::embeddings::EmbeddingService;
 use crate::vector_store::VectorStore;
@@ -22,7 +23,10 @@ pub struct AppState {
     pub embedding_service: EmbeddingService,
     pub vector_store: VectorStore,
     pub config: EmbeddingsConfig,
-    pub service_token: String,
+    /// P1 #6: the resolved per-workload credential. The universal
+    /// `INTERNAL_SERVICE_TOKEN` authorizes nothing here once the dedicated
+    /// `AI_EMBEDDINGS_AUTH_TOKEN` is configured.
+    pub service_auth: ServiceAuth,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -49,9 +53,6 @@ async fn require_service_token(
     if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
     }
-    if state.service_token.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     let provided = req
         .headers()
         .get("x-api-key")
@@ -62,10 +63,17 @@ async fn require_service_token(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
         });
-    if provided
-        .as_deref()
-        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
-    {
+    let provided = provided.as_deref().unwrap_or("");
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // the unmigrated caller loudly (it is refused either way).
+    if state.service_auth.is_refused_universal_attempt(provided) {
+        tracing::warn!(
+            "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
+             AI_EMBEDDINGS_AUTH_TOKEN is configured — migrate this caller to the \
+             dedicated per-workload token"
+        );
+    }
+    if state.service_auth.authorize(provided) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -265,7 +273,10 @@ mod tests {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config,
-            service_token: "test-key".into(),
+            // P1 #6: tests build the resolved per-workload `ServiceAuth` — a
+            // single credential, the universal token refuses.
+            service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
+                .expect("test auth resolves"),
         });
         let _router = router(state);
     }
@@ -325,7 +336,10 @@ mod tests {
             embedding_service: EmbeddingService::new(config.inference.clone()).unwrap(),
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config,
-            service_token: "test-key".into(),
+            // P1 #6: the resolved per-workload `ServiceAuth` replaces the bare
+            // token string.
+            service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
+                .expect("test auth resolves"),
         })
     }
 
@@ -425,7 +439,8 @@ mod tests {
                 .expect("service"),
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config: template.config.clone(),
-            service_token: String::new(),
+            service_auth: crate::auth::ServiceAuth::resolve(None, None, false)
+                .expect("deny-all auth resolves"),
         });
         let locked = router(empty_token_state);
         let response = locked
@@ -439,6 +454,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── P1 #6: per-workload token semantics over HTTP ────────────────────
+
+    /// When `AI_EMBEDDINGS_AUTH_TOKEN` is configured it is the ONLY accepted
+    /// credential; the universal `INTERNAL_SERVICE_TOKEN` gets 401.
+    #[tokio::test]
+    async fn dedicated_token_authorizes_and_universal_token_is_refused() {
+        use tower::ServiceExt;
+        let template = test_state();
+        let auth = crate::auth::ServiceAuth::resolve(
+            Some("dedicated-secret"),
+            Some("universal-legacy"),
+            false,
+        )
+        .expect("dedicated auth resolves");
+        let state = Arc::new(AppState {
+            embedding_service: EmbeddingService::new(template.config.inference.clone())
+                .expect("service"),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
+            config: template.config.clone(),
+            service_auth: auth,
+        });
+        let app = router(state);
+        let probe = |app: axum::Router, key: &'static str| {
+            let app = app.clone();
+            async move {
+                let mut builder = Request::builder().method("GET").uri("/stats");
+                if !key.is_empty() {
+                    builder = builder.header("x-api-key", key);
+                }
+                app.oneshot(builder.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(
+            probe(app.clone(), "dedicated-secret").await,
+            StatusCode::OK,
+            "dedicated token passes"
+        );
+        assert_eq!(
+            probe(app.clone(), "universal-legacy").await,
+            StatusCode::UNAUTHORIZED,
+            "the universal token must be refused once the dedicated one is set"
+        );
+        assert_eq!(probe(app, "").await, StatusCode::UNAUTHORIZED);
+    }
+
+    /// Legacy fallback (dedicated env unset): the universal token still
+    /// authenticates outside production — migration-safe behavior.
+    #[tokio::test]
+    async fn unset_dedicated_token_keeps_universal_token_working() {
+        use tower::ServiceExt;
+        let template = test_state();
+        let auth =
+            crate::auth::ServiceAuth::resolve(None, Some("universal-legacy"), false)
+                .expect("legacy auth resolves");
+        let state = Arc::new(AppState {
+            embedding_service: EmbeddingService::new(template.config.inference.clone())
+                .expect("service"),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
+            config: template.config.clone(),
+            service_auth: auth,
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(auth_request("GET", "/stats", Some("universal-legacy")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
     }
 
     #[tokio::test]

@@ -240,12 +240,12 @@ async fn marketing_spend_cents_since(
     db: &sqlx::PgPool,
     cutoff: DateTime<Utc>,
 ) -> Result<Option<i64>, ApiError> {
-    if table_exists(db, "marketing_spend").await {
-        let time_col = if column_exists(db, "marketing_spend", "spent_at").await {
+    if table_exists(db, "marketing_spend").await? {
+        let time_col = if column_exists(db, "marketing_spend", "spent_at").await? {
             Some(validated_column("spent_at")?)
-        } else if column_exists(db, "marketing_spend", "date").await {
+        } else if column_exists(db, "marketing_spend", "date").await? {
             Some(validated_column("date")?)
-        } else if column_exists(db, "marketing_spend", "created_at").await {
+        } else if column_exists(db, "marketing_spend", "created_at").await? {
             Some(validated_column("created_at")?)
         } else {
             None
@@ -253,7 +253,7 @@ async fn marketing_spend_cents_since(
 
         let mut amount_col = None;
         for column in ["amount_cents", "cost_cents", "spend_cents"] {
-            if column_exists(db, "marketing_spend", column).await {
+            if column_exists(db, "marketing_spend", column).await? {
                 amount_col = Some(validated_column(column)?);
                 break;
             }
@@ -283,8 +283,8 @@ async fn marketing_spend_cents_since(
         }
     }
 
-    if table_exists(db, "audit_logs").await {
-        let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await {
+    if table_exists(db, "audit_logs").await? {
+        let audit_time_col = if column_exists(db, "audit_logs", "timestamp").await? {
             validated_column("timestamp")?
         } else {
             validated_column("created_at")?
@@ -320,10 +320,10 @@ async fn get_revenue(
     let mut notes: Vec<String> = Vec::new();
 
     let subscriptions =
-        if table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await {
+        if table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await? {
             let has_billing_interval =
-                column_exists(db, "stripe_subscriptions", "billing_interval").await;
-            let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await {
+                column_exists(db, "stripe_subscriptions", "billing_interval").await?;
+            let cancel_expr = if column_exists(db, "stripe_subscriptions", "canceled_at").await? {
                 validated_column("s.canceled_at")?
             } else {
                 // Hardcoded CASE expression - not from user input, safe from injection
@@ -338,7 +338,7 @@ async fn get_revenue(
             Vec::new()
         };
 
-    let tenant_plan_counts: HashMap<String, i64> = if table_exists(db, "tenants").await {
+    let tenant_plan_counts: HashMap<String, i64> = if table_exists(db, "tenants").await? {
         sqlx::query_as::<_, (String, i64)>(
             "SELECT COALESCE(NULLIF(plan, ''), 'free') as plan,
                     COUNT(*)::bigint as customers
@@ -435,7 +435,7 @@ async fn get_revenue(
         0.0
     };
 
-    let new_customers = if table_exists(db, "tenants").await {
+    let new_customers = if table_exists(db, "tenants").await? {
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM tenants WHERE created_at >= $1")
             .bind(cutoff_30)
             .fetch_one(db)

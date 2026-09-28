@@ -8,6 +8,7 @@ use tokio::signal;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use devex_service::auth::ServiceAuth;
 use devex_service::config::DevExConfig;
 use devex_service::routes::{build_router, AppState};
 
@@ -49,6 +50,21 @@ async fn main() -> Result<()> {
     );
 
     // ── App state + router ────────────────────────────────────────────
+    // P1 #6: per-workload credentials. When DEVEX_AUTH_TOKEN is set it is
+    // the ONLY accepted secret; when it is unset production boots REFUSE
+    // (the per-workload pattern is complete for this service) and
+    // non-production boots fall back to the universal token with a
+    // required-soon warning. `from_env` is the strict boot check; the
+    // identical (lenient) resolution inside `from_config` becomes the
+    // state's credential.
+    let service_auth = ServiceAuth::from_env()
+        .map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
+    if service_auth.dedicated_configured() {
+        info!(
+            "per-workload auth active: {} is the only accepted credential",
+            devex_service::auth::DEDICATED_TOKEN_ENV
+        );
+    }
     let state = AppState::from_config(cfg).context("Failed to build DevEx app state")?;
     let router = build_router(state);
 

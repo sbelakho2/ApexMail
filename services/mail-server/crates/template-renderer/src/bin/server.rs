@@ -5,6 +5,7 @@ use observability_service::otlp_exporter::{
 use std::sync::Arc;
 use tracing_subscriber::{fmt, EnvFilter};
 
+use template_renderer::auth::ServiceAuth;
 use template_renderer::cache::TemplateCache;
 use template_renderer::config::*;
 use template_renderer::routes::{self, AppState};
@@ -99,20 +100,26 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("Invalid renderer config: {err}");
     }
 
+    // P1 #6: per-workload credentials. When TEMPLATE_RENDERER_AUTH_TOKEN is
+    // set it is the ONLY accepted secret; when it is unset production boots
+    // REFUSE (the per-workload pattern is complete for this service) and
+    // non-production boots fall back to the universal token with a
+    // required-soon warning.
+    let service_auth = ServiceAuth::from_env()
+        .map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
+    if service_auth.dedicated_configured() {
+        tracing::info!(
+            "per-workload auth active: {} is the only accepted credential",
+            template_renderer::auth::DEDICATED_TOKEN_ENV
+        );
+    }
+
     let state = Arc::new(AppState {
         db,
         sandbox: Sandbox::new(config.sandbox.clone()),
         cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
         config,
-        service_token: {
-            let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
-            if token.is_empty() {
-                tracing::warn!(
-                    "INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled"
-                );
-            }
-            token
-        },
+        service_auth,
     });
 
     let app = routes::router(state);

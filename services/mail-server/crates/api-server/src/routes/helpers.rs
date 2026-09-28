@@ -237,19 +237,91 @@ pub fn token_blacklist_key(token: &str) -> String {
     format!("{TOKEN_BLACKLIST_PREFIX}{}", hash_token(token))
 }
 
+// ─── Schema capability probes ──────────────────────────────────
+//
+// P1 fix (swallowed outages): both probes used to end in
+// `.await.unwrap_or(false)`, making "table absent" indistinguishable from
+// "database unreachable / pool exhausted / permission denied" — an outage
+// masqueraded as a healthy empty state. They now return the probe error and
+// every caller decides explicitly:
+//
+// * `Ok(false)` — genuine absence → the legacy / empty / fallback SQL path;
+// * `Err(_)`    — degraded → the caller's honest error contract (a 5xx for
+//   admin APIs, a "Data unavailable" render for the web layer), NEVER a
+//   fabricated healthy zero.
+//
+// Hot-path hoisting: in a canonical-migration production environment the
+// schema is fixed for the life of the process (the real migrator runs before
+// `up`), so a probe result is a *capability*. The first successful probe for
+// a given database is memoized in [`CAPABILITY_CACHE`] and every later call
+// — including per-request probes on hot admin paths — reads the cached
+// capability instead of re-querying the catalog. Probe ERRORS are never
+// cached: a degraded database must stay detectable on every call. (The cache
+// is populated lazily on first use rather than at state build: `state.rs` is
+// outside this fix's ownership boundary, and the observable behavior — one
+// catalog query per database per capability per process — is identical.)
+
+/// Memoized schema capabilities keyed by (database identity, probe kind).
+static CAPABILITY_CACHE: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<(String, String), bool>>,
+> = std::sync::OnceLock::new();
+
+fn capability_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<(String, String), bool>>
+{
+    CAPABILITY_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Stable per-database identity for capability caching. Distinct databases
+/// (test isolation databases, a dead lazy pool pointed elsewhere) get distinct
+/// cache entries; clones of the same pool share one.
+pub(crate) fn pool_identity(db: &sqlx::PgPool) -> String {
+    let opts = db.connect_options();
+    match opts.get_socket() {
+        Some(socket) => format!(
+            "unix:{}|{}|{}",
+            socket.display(),
+            opts.get_username(),
+            opts.get_database().unwrap_or_default()
+        ),
+        None => format!(
+            "{}:{}/{}|{}",
+            opts.get_host(),
+            opts.get_port(),
+            opts.get_username(),
+            opts.get_database().unwrap_or_default()
+        ),
+    }
+}
+
 /// Check whether a table exists in the `public` schema.
-pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> bool {
+///
+/// `Ok(false)` is a definitive answer (memoized per process per database);
+/// `Err` means the catalog itself could not be consulted — propagate it, do
+/// not treat the table as absent.
+pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    let key = (pool_identity(db), format!("table:{name}"));
+    if let Some(cached) = capability_cache().lock().get(&key) {
+        return Ok(*cached);
+    }
     let table_ref = format!("public.{name}");
-    sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+    let exists = sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
         .bind(&table_ref)
         .fetch_one(db)
-        .await
-        .unwrap_or(false)
+        .await?;
+    capability_cache().lock().insert(key, exists);
+    Ok(exists)
 }
 
 /// Check whether a column exists on a table in the `public` schema.
-pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> bool {
-    sqlx::query_scalar::<_, bool>(
+///
+/// Same contract as [`table_exists`]: `Err` is a degraded database, never a
+/// "column missing" verdict.
+pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+    let key = (pool_identity(db), format!("column:{table}.{column}"));
+    if let Some(cached) = capability_cache().lock().get(&key) {
+        return Ok(*cached);
+    }
+    let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (
             SELECT 1
             FROM information_schema.columns
@@ -261,8 +333,15 @@ pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> bool
     .bind(table)
     .bind(column)
     .fetch_one(db)
-    .await
-    .unwrap_or(false)
+    .await?;
+    capability_cache().lock().insert(key, exists);
+    Ok(exists)
+}
+
+/// Number of memoized capabilities (test visibility only).
+#[cfg(test)]
+pub(crate) fn capability_cache_len() -> usize {
+    capability_cache().lock().len()
 }
 
 #[cfg(test)]
@@ -320,5 +399,78 @@ mod tests {
     fn cursor_round_trip_is_lossless() {
         let original = "2026-08-08T18:00:00.000Z";
         assert_eq!(decode_cursor(&encode_cursor(original)).unwrap(), original);
+    }
+
+    // tokio::test: sqlx 0.8's Pool::connect_options spawns its maintenance
+    // machinery, which requires a runtime context even for a lazy pool.
+    #[tokio::test]
+    async fn pool_identity_distinguishes_databases_and_shares_clones() {
+        let dead_a = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/probe_db_a")
+            .expect("lazy pool");
+        let dead_a_clone = dead_a.clone();
+        let dead_b = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/probe_db_b")
+            .expect("lazy pool");
+
+        assert_eq!(
+            pool_identity(&dead_a),
+            pool_identity(&dead_a_clone),
+            "clones of one pool share an identity"
+        );
+        assert_ne!(
+            pool_identity(&dead_a),
+            pool_identity(&dead_b),
+            "distinct databases must never share a capability cache entry"
+        );
+    }
+
+    /// Fix (P1 swallowed outages): `Ok` capability verdicts are memoized per
+    /// process per database; probe errors are NEVER cached, so a degraded
+    /// database stays detectable on every call.
+    #[tokio::test]
+    async fn capability_probes_cache_ok_and_never_cache_errors() {
+        let Some(pool) = crate::test_db::optional_pg_pool("helpers_capability_cache").await else {
+            return;
+        };
+        let unique_table = format!(
+            "capability_probe_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+
+        // Genuine absence is a definitive Ok(false)…
+        let before = capability_cache_len();
+        assert!(!table_exists(&pool, &unique_table).await.expect("probe"));
+        // …and it is memoized (one catalog query for this database + probe).
+        assert!(
+            capability_cache_len() >= before + 1,
+            "the Ok verdict must be memoized"
+        );
+        assert!(!table_exists(&pool, &unique_table).await.expect("cached"));
+        assert!(table_exists(&pool, "tenants").await.expect("probe"));
+
+        // A dead (lazy) pool probes to Err, and the error is not cached:
+        // both calls re-attempt the catalog query.
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        let key = (pool_identity(&dead), format!("table:{unique_table}"));
+        assert!(
+            table_exists(&dead, &unique_table).await.is_err(),
+            "an unreachable database is Err, never a fabricated absent"
+        );
+        assert!(
+            table_exists(&dead, &unique_table).await.is_err(),
+            "a failed probe must not be cached as absence"
+        );
+        assert!(
+            !capability_cache().lock().contains_key(&key),
+            "errors must never enter the capability cache"
+        );
+        assert!(column_exists(&dead, "tenants", "id").await.is_err());
     }
 }

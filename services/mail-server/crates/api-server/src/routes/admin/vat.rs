@@ -124,7 +124,11 @@ fn map_kmd_row(
 }
 
 /// Check if the `vat_kmd_returns` table exists.
-async fn kmd_table_exists(db: &sqlx::PgPool) -> bool {
+///
+/// Fix (P1 swallowed outages): the probe's storage failure propagates — a
+/// degraded database is a 5xx from the caller, never a fabricated "no KMD
+/// read model" empty state.
+async fn kmd_table_exists(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
     crate::routes::helpers::table_exists(db, "vat_kmd_returns").await
 }
 
@@ -159,7 +163,7 @@ async fn list_kmd_returns(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     require_system_kmd_access(&state, &auth).await?;
 
-    if !kmd_table_exists(&state.db).await {
+    if !kmd_table_exists(&state.db).await? {
         return Ok(Json(serde_json::json!({
             "returns": [],
             "total": 0
@@ -229,7 +233,7 @@ async fn get_latest_kmd(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     require_system_kmd_access(&state, &auth).await?;
 
-    if !kmd_table_exists(&state.db).await {
+    if !kmd_table_exists(&state.db).await? {
         return Ok(Json(serde_json::json!(null)));
     }
 
@@ -286,7 +290,7 @@ async fn get_current_vat_summary(
 
     // Try to use the billing-service module via direct DB query
     // to avoid tight coupling. We query invoices directly for the current month.
-    let has_invoices = crate::routes::helpers::table_exists(&state.db, "invoices").await;
+    let has_invoices = crate::routes::helpers::table_exists(&state.db, "invoices").await?;
 
     if !has_invoices {
         return Ok(Json(VatSummaryResponse {
@@ -533,7 +537,7 @@ async fn get_kmd_by_period(
         ]));
     }
 
-    if !kmd_table_exists(&state.db).await {
+    if !kmd_table_exists(&state.db).await? {
         return Ok(Json(serde_json::json!(null)));
     }
 

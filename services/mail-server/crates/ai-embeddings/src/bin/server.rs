@@ -109,6 +109,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let embedding_service = EmbeddingService::new(config.inference.clone())?;
+    // P1 #6: per-workload credential — AI_EMBEDDINGS_AUTH_TOKEN when set (the
+    // universal INTERNAL_SERVICE_TOKEN is then refused, loudly logged), the
+    // universal token only as the non-production legacy fallback. Production
+    // boots REFUSE without the dedicated token.
+    let service_auth = ai_embeddings::auth::ServiceAuth::from_env()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let state = Arc::new(AppState {
         embedding_service,
         vector_store: VectorStore::new(
@@ -118,15 +124,7 @@ async fn main() -> anyhow::Result<()> {
             hmac_key_bytes,
         ),
         config,
-        service_token: {
-            let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
-            if token.is_empty() {
-                tracing::warn!(
-                    "INTERNAL_SERVICE_TOKEN is not set — internal auth is effectively disabled"
-                );
-            }
-            token
-        },
+        service_auth,
     });
 
     let app = routes::router(state);

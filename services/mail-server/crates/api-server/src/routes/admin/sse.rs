@@ -6,7 +6,13 @@
 //! Mounted under the dashboard router (see `dashboard.rs`):
 //! - `GET /v1/admin/dashboard/sse/dashboard` — live dashboard metrics every 5 seconds
 //! - `GET /v1/admin/dashboard/sse/alerts` — real-time alert stream every 10 seconds
+//!
+//! The dashboard snapshot is computed ONCE per [`SNAPSHOT_TTL`] on a shared
+//! cache and served to every connected operator (P1/P2 fix: the global
+//! counts, schema probes and MRR aggregation used to run per client per
+//! tick, scaling query load with the operator count).
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +44,136 @@ const MAX_STREAM_DURATION: Duration = Duration::from_secs(30 * 60);
 /// Live alerts poll interval.
 const ALERTS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long one computed platform snapshot is served to ALL SSE clients
+/// before a recompute is allowed. Equal to the per-client poll cadence, so
+/// every operator still sees a snapshot at most one interval old (the same
+/// freshness contract as the old per-client recomputation) — but the global
+/// aggregates run ONCE per interval for the whole platform instead of once
+/// per connected operator.
+const SNAPSHOT_TTL: Duration = Duration::from_secs(5);
+
+// ── Shared platform snapshot cache ─────────────────────────────────────
+
+/// One cached computation: when it was computed (tokio clock, so paused-time
+/// tests stay deterministic) and its outcome. Errors are cached too: during
+/// a database outage the shared cache caps the platform at ONE failing
+/// aggregation per TTL instead of one per client per tick.
+struct SnapshotSlot<T, E> {
+    computed_at: tokio::time::Instant,
+    value: Result<Arc<T>, Arc<E>>,
+}
+
+/// TTL cache with serialized recompute (P1/P2 perf fix): the admin SSE
+/// dashboard used to recompute global counts, schema probes and the MRR
+/// aggregation every ~5s PER CONNECTED operator — query load scaled with
+/// the operator count. Now all clients read one shared snapshot: a fresh
+/// slot is served without the refresh lock (fast path), an expired slot
+/// triggers exactly one recompute at a time (the `refresh` mutex), and
+/// clients that queued behind the winner find the slot fresh and reuse it.
+struct SnapshotCache<T, E> {
+    /// One slot per database identity — test-isolated databases (and any
+    /// future second pool) never share snapshots.
+    slots: Mutex<HashMap<String, SnapshotSlot<T, E>>>,
+    /// At most one recompute in flight at a time, across all clients.
+    refresh: Mutex<()>,
+}
+
+impl<T, E> Default for SnapshotCache<T, E> {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+            refresh: Mutex::new(()),
+        }
+    }
+}
+
+type DashboardSnapshotCache = SnapshotCache<DashboardSsePayload, sqlx::Error>;
+
+static SNAPSHOT_CACHE: std::sync::OnceLock<DashboardSnapshotCache> = std::sync::OnceLock::new();
+
+fn snapshot_cache() -> &'static DashboardSnapshotCache {
+    SNAPSHOT_CACHE.get_or_init(SnapshotCache::default)
+}
+
+/// Computations actually performed (test visibility: proves the aggregation
+/// count does not scale with the number of concurrent clients).
+#[cfg(test)]
+static SNAPSHOT_COMPUTATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+async fn fresh_slot<T, E>(
+    slots: &Mutex<HashMap<String, SnapshotSlot<T, E>>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<Result<Arc<T>, Arc<E>>> {
+    let guard = slots.lock().await;
+    let slot = guard.get(key)?;
+    if slot.computed_at.elapsed() >= ttl {
+        return None;
+    }
+    Some(slot.value.clone())
+}
+
+/// The cache core: serve fresh, else recompute serialized. Injectable
+/// (`cache`, `ttl`, `compute`) so tests can pin stampede + TTL semantics
+/// without a database.
+async fn get_or_refresh<T, E, F, Fut>(
+    cache: &SnapshotCache<T, E>,
+    key: String,
+    ttl: Duration,
+    compute: F,
+) -> Result<Arc<T>, Arc<E>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    // Fast path: a fresh-enough snapshot never touches the refresh lock.
+    if let Some(hit) = fresh_slot(&cache.slots, &key, ttl).await {
+        return hit;
+    }
+    // Recompute one at a time; everyone else reuses the winner's snapshot.
+    let _guard = cache.refresh.lock().await;
+    if let Some(hit) = fresh_slot(&cache.slots, &key, ttl).await {
+        return hit;
+    }
+    #[cfg(test)]
+    SNAPSHOT_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let value = compute().await;
+    let computed_at = tokio::time::Instant::now();
+    let (stored, ret) = match value {
+        Ok(v) => {
+            let arc = Arc::new(v);
+            (Ok(Arc::clone(&arc)), Ok(arc))
+        }
+        Err(e) => {
+            let arc = Arc::new(e);
+            (Err(Arc::clone(&arc)), Err(arc))
+        }
+    };
+    cache.slots.lock().await.insert(
+        key,
+        SnapshotSlot {
+            computed_at,
+            value: stored,
+        },
+    );
+    ret
+}
+
+/// The shared snapshot every dashboard SSE client polls. One computation per
+/// [`SNAPSHOT_TTL`] per database serves any number of connected operators.
+async fn cached_dashboard_snapshot(
+    db: &sqlx::PgPool,
+) -> Result<Arc<DashboardSsePayload>, Arc<sqlx::Error>> {
+    get_or_refresh(
+        snapshot_cache(),
+        crate::routes::helpers::pool_identity(db),
+        SNAPSHOT_TTL,
+        || query_dashboard_snapshot(db),
+    )
+    .await
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dashboard", get(sse_dashboard))
@@ -65,7 +201,7 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
     .fetch_one(db)
     .await?;
 
-    let queue = if table_exists(db, "queue_jobs").await {
+    let queue = if table_exists(db, "queue_jobs").await? {
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::bigint FROM queue_jobs WHERE status = 'pending'",
         )
@@ -79,10 +215,10 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
     // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
     // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
     // The legacy `subscriptions` table has no writer and always read as zero.
-    let mrr = if table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await {
+    let mrr = if table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await? {
         let has_billing_interval =
             crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval")
-                .await;
+                .await?;
 
         let billing_interval_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
@@ -109,7 +245,7 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
         0.0
     };
 
-    let health_status = if table_exists(db, "system_alerts").await {
+    let health_status = if table_exists(db, "system_alerts").await? {
         let critical_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false AND severity = 'critical'",
         )
@@ -161,10 +297,10 @@ async fn sse_dashboard(
                 tracing::info!("admin dashboard SSE stream reached its time cap; closing");
                 return None;
             }
-            let event = match query_dashboard_snapshot(&poll_state.0).await {
+            let event = match cached_dashboard_snapshot(&poll_state.0).await {
                 Ok(snapshot) => {
                     poll_state.2 = 0;
-                    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+                    let json = serde_json::to_string(snapshot.as_ref()).unwrap_or_default();
                     Ok(Event::default().data(json).event("dashboard"))
                 }
                 Err(error) => {
@@ -221,7 +357,7 @@ async fn query_new_alerts(
     db: &sqlx::PgPool,
     since: DateTime<Utc>,
 ) -> Result<Vec<AlertSsePayload>, sqlx::Error> {
-    if !table_exists(db, "system_alerts").await {
+    if !table_exists(db, "system_alerts").await? {
         return Ok(Vec::new());
     }
 
@@ -398,6 +534,132 @@ mod tests {
         assert!(!NEW_ALERTS_SQL.contains("WHERE timestamp"));
     }
 
+    /// Fix (P1/P2 per-client global SQL): N concurrent clients hitting an
+    /// expired snapshot must produce exactly ONE computation — the first
+    /// recomputes while holding the refresh lock, the rest queue and then
+    /// reuse the winner's fresh snapshot. All clients receive the SAME Arc.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_clients_reuse_one_serialized_computation() {
+        let cache = Arc::new(SnapshotCache::<u64, ()>::default());
+        let computations = Arc::new(AtomicUsize::new(0));
+        // The compute blocks on this gate so the other clients demonstrably
+        // arrive WHILE a recompute is in flight.
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let cache = Arc::clone(&cache);
+            let computations = Arc::clone(&computations);
+            let gate = Arc::clone(&gate);
+            handles.push(tokio::spawn(async move {
+                get_or_refresh(
+                    &cache,
+                    "platform".to_string(),
+                    SNAPSHOT_TTL,
+                    || {
+                        let computations = Arc::clone(&computations);
+                        let gate = Arc::clone(&gate);
+                        async move {
+                            computations.fetch_add(1, Ordering::SeqCst);
+                            // Serialized recompute: hold the winner here
+                            // until every other client is queued behind the
+                            // refresh lock.
+                            gate.acquire().await.expect("gate opened");
+                            Ok(42u64)
+                        }
+                    },
+                )
+                .await
+            }));
+        }
+
+        // Paused time: this sleep only elapses once every spawned task is
+        // parked (the winner at the gate, the rest on the refresh lock).
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(
+            computations.load(Ordering::SeqCst),
+            1,
+            "exactly one recompute may be in flight"
+        );
+        gate.add_permits(1);
+
+        let results = futures::future::join_all(handles).await;
+        let mut snapshots = Vec::new();
+        for r in results {
+            snapshots.push(r.expect("join").expect("snapshot"));
+        }
+        assert_eq!(snapshots.len(), 5);
+        assert_eq!(snapshots[0].as_ref(), &42u64);
+        for s in &snapshots[1..] {
+            assert!(
+                Arc::ptr_eq(s, &snapshots[0]),
+                "every client must be served the SAME cached snapshot"
+            );
+        }
+        assert_eq!(
+            computations.load(Ordering::SeqCst),
+            1,
+            "queued clients must reuse, not recompute"
+        );
+    }
+
+    /// Within the TTL every call reuses the slot; only expiry recomputes.
+    #[tokio::test(start_paused = true)]
+    async fn snapshots_recompute_once_the_ttl_expires() {
+        let cache: SnapshotCache<u64, ()> = SnapshotCache::default();
+        let computations = Arc::new(AtomicUsize::new(0));
+
+        let compute = || {
+            let computations = Arc::clone(&computations);
+            async move {
+                computations.fetch_add(1, Ordering::SeqCst);
+                Ok(7u64)
+            }
+        };
+        let a = get_or_refresh(&cache, "platform".into(), SNAPSHOT_TTL, compute.clone())
+            .await
+            .expect("first compute");
+        let b = get_or_refresh(&cache, "platform".into(), SNAPSHOT_TTL, compute.clone())
+            .await
+            .expect("fresh reuse");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(computations.load(Ordering::SeqCst), 1);
+
+        // Paused time jumps past the TTL → the next call recomputes.
+        tokio::time::sleep(SNAPSHOT_TTL + Duration::from_millis(1)).await;
+        let _ = get_or_refresh(&cache, "platform".into(), SNAPSHOT_TTL, compute.clone())
+            .await
+            .expect("recompute after expiry");
+        assert_eq!(computations.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failing aggregation is cached too: during an outage the platform
+    /// pays ONE failing computation per TTL, and every client sees the same
+    /// error (which the streams degrade to comment events).
+    #[tokio::test(start_paused = true)]
+    async fn failed_computations_are_shared_and_never_fabricate_success() {
+        let cache: SnapshotCache<u64, String> = SnapshotCache::default();
+        let computations = Arc::new(AtomicUsize::new(0));
+        let compute = || {
+            let computations = Arc::clone(&computations);
+            async move {
+                computations.fetch_add(1, Ordering::SeqCst);
+                Err("db unavailable".to_string())
+            }
+        };
+        for _ in 0..3 {
+            let err = get_or_refresh(&cache, "platform".into(), SNAPSHOT_TTL, compute.clone())
+                .await
+                .expect_err("shared error");
+            assert_eq!(err.as_str(), "db unavailable");
+        }
+        assert_eq!(
+            computations.load(Ordering::SeqCst),
+            1,
+            "one failing computation serves all clients within the TTL"
+        );
+    }
+
     fn backlog_alert() -> AlertSsePayload {
         AlertSsePayload {
             id: "alert-backlog-1".into(),
@@ -468,9 +730,13 @@ mod tests {
 
 #[cfg(test)]
 mod adversarial_tests {
-    use super::{query_dashboard_snapshot, query_new_alerts};
+    use super::{
+        cached_dashboard_snapshot, query_dashboard_snapshot, query_new_alerts,
+        SNAPSHOT_COMPUTATIONS,
+    };
     use axum::http::StatusCode;
     use futures::StreamExt;
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     use crate::app::test_support::adv::AdvEnv;
@@ -701,5 +967,34 @@ mod adversarial_tests {
         assert_eq!(alerts[0].component.as_deref(), Some("backup"));
         assert!(!alerts[0].acknowledged);
         assert!(alerts[0].timestamp.contains('T'));
+    }
+
+    /// Fix (P1/P2 per-client global SQL): the aggregation query count must
+    /// NOT scale with the client count. Two concurrent dashboard SSE polls
+    /// (the real shared cache over the real snapshot query) produce exactly
+    /// ONE computation, served to both clients as the same snapshot.
+    #[tokio::test]
+    async fn two_concurrent_sse_clients_cause_one_platform_snapshot_computation() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_shared_cache").await else {
+            return;
+        };
+        let before = SNAPSHOT_COMPUTATIONS.load(std::sync::atomic::Ordering::SeqCst);
+
+        let (a, b) = tokio::join!(cached_dashboard_snapshot(&pool), cached_dashboard_snapshot(&pool));
+        let a = a.expect("snapshot a");
+        let b = b.expect("snapshot b");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "both concurrent clients must be served the same shared snapshot"
+        );
+        // The payload shape is unchanged from the per-client computation.
+        assert!(a.mrr >= 0.0);
+        assert!(a.tenants >= 0);
+
+        assert_eq!(
+            SNAPSHOT_COMPUTATIONS.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "the aggregation must be computed once for the platform, not once per client"
+        );
     }
 }

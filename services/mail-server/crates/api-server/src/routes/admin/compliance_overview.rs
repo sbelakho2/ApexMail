@@ -149,9 +149,9 @@ async fn get_compliance_overview(
     // literal comparison rendered this overview empty for every human operator.
     let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
 
-    let has_gdpr = table_exists(db, "gdpr_requests").await;
-    let has_alerts = table_exists(db, "system_alerts").await;
-    let has_domains = table_exists(db, "domains").await;
+    let has_gdpr = table_exists(db, "gdpr_requests").await?;
+    let has_alerts = table_exists(db, "system_alerts").await?;
+    let has_domains = table_exists(db, "domains").await?;
 
     // Risk summary
     let mut risk_summary = RiskSummary {
@@ -243,7 +243,7 @@ async fn get_compliance_overview(
     }
 
     // Audit stats
-    let has_audit_logs = table_exists(db, "audit_logs").await;
+    let has_audit_logs = table_exists(db, "audit_logs").await?;
     let audit_stats = if has_audit_logs {
         let audit_row: (i64, i64) = if tenant_scoped {
             sqlx::query_as(
@@ -451,8 +451,8 @@ async fn compute_vat_summary(
     db: &sqlx::PgPool,
     tenant_id: Option<&str>,
 ) -> Result<VatSummaryWidget, sqlx::Error> {
-    let has_kmd = table_exists(db, "vat_kmd_returns").await;
-    let has_invoices = table_exists(db, "invoices").await;
+    let has_kmd = table_exists(db, "vat_kmd_returns").await?;
+    let has_invoices = table_exists(db, "invoices").await?;
 
     let now = chrono::Utc::now();
     let year = now.year();

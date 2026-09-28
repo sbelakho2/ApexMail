@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod plaintext;

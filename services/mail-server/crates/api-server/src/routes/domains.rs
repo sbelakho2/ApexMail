@@ -2355,10 +2355,17 @@ mod adversarial_handler_tests {
             crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
                 .await;
         let plan = unique("plan-adv");
+        // Batch fix (billing fail-closed decode): a partial features document
+        // is present-but-invalid and now (correctly) fails the plan decode —
+        // seed a VALID full PlanFeatures with the zero-domain override.
+        let mut features =
+            serde_json::to_value(billing_service::types::PlanFeatures::default())
+                .expect("default features serialize");
+        features["max_sending_domains"] = json!(0);
         sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
             .bind(unique("pid"))
             .bind(&plan)
-            .bind(json!({ "max_sending_domains": 0 }).to_string())
+            .bind(features.to_string())
             .execute(&pool)
             .await
             .expect("seed restrictive plan");

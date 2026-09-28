@@ -20,16 +20,13 @@ use std::sync::Arc;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info};
 
+use crate::auth::ServiceAuth;
 use crate::compiler::{self, RenderError, RenderRequest, RenderResponse};
 use crate::world::WorldError;
 
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
-
-struct ServiceAuth {
-    service_token: String,
-}
 
 async fn require_service_token(
     State(state): State<Arc<ServiceAuth>>,
@@ -38,9 +35,6 @@ async fn require_service_token(
 ) -> Result<Response, StatusCode> {
     if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
-    }
-    if state.service_token.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
     }
     let provided = req
         .headers()
@@ -51,15 +45,22 @@ async fn require_service_token(
                 .get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
-        });
-    if provided
-        .as_deref()
-        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
-    {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+        })
+        .unwrap_or_default();
+    if state.authorize(&provided) {
+        return Ok(next.run(req).await);
     }
+    // P1 #6: a configured dedicated token means the universal
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // unmigrated callers loudly (they get 401 either way).
+    if state.is_refused_universal_attempt(&provided) {
+        tracing::warn!(
+            "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
+             PDF_RENDERER_AUTH_TOKEN is configured — the caller must migrate to the \
+             dedicated per-workload token"
+        );
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 // ---------------------------------------------------------------------------
@@ -67,8 +68,12 @@ async fn require_service_token(
 // ---------------------------------------------------------------------------
 
 /// Build the PDF renderer Axum router.
-pub fn pdf_router(service_token: String) -> Router {
-    let auth = Arc::new(ServiceAuth { service_token });
+///
+/// P1 #6: the router takes the resolved per-workload [`ServiceAuth`] —
+/// `PDF_RENDERER_AUTH_TOKEN` when configured (universal token refused), the
+/// universal token as legacy fallback (non-production) otherwise.
+pub fn pdf_router(service_auth: ServiceAuth) -> Router {
+    let auth = Arc::new(service_auth);
     Router::new()
         .route("/health", get(health))
         .route("/v1/pdf/render", post(render_pdf_stream))
@@ -198,13 +203,25 @@ impl IntoResponse for PdfApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::ServiceAuth;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
 
+    // P1 #6: tests build the resolved per-workload `ServiceAuth` — a single
+    // accepted dedicated token, or the deny-all resolution when nothing is
+    // configured (previously a bare token string).
+    fn dedicated_auth(token: &str) -> ServiceAuth {
+        ServiceAuth::resolve(Some(token), None, false).expect("dedicated test auth resolves")
+    }
+
+    fn no_auth() -> ServiceAuth {
+        ServiceAuth::resolve(None, None, false).expect("deny-all test auth resolves")
+    }
+
     #[tokio::test]
     async fn health_route_skips_service_auth() {
-        let app = pdf_router(String::new());
+        let app = pdf_router(no_auth());
 
         let response = app
             .oneshot(
@@ -221,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn render_route_requires_service_token() {
-        let app = pdf_router("super-secret".into());
+        let app = pdf_router(dedicated_auth("super-secret"));
 
         let response = app
             .oneshot(
@@ -238,12 +255,72 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // ── P1 #6: per-workload token semantics over HTTP ────────────────────
+
+    /// When `PDF_RENDERER_AUTH_TOKEN` is configured it is the ONLY accepted
+    /// credential; the universal `INTERNAL_SERVICE_TOKEN` gets 401.
+    #[tokio::test]
+    async fn dedicated_token_authorizes_and_universal_token_is_refused() {
+        let auth = ServiceAuth::resolve(Some("dedicated-secret"), Some("universal-legacy"), false)
+            .expect("dedicated auth resolves");
+        let app = pdf_router(auth);
+        let probe = |app: Router, key: &'static str| async move {
+            let mut builder = Request::builder()
+                .method("POST")
+                .uri("/v1/pdf/render/json")
+                .header(header::CONTENT_TYPE, "application/json");
+            if !key.is_empty() {
+                builder = builder.header("x-api-key", key);
+            }
+            app.oneshot(
+                builder
+                    .body(Body::from(r#"{"template":"invoice","data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        let response = probe(app.clone(), "dedicated-secret").await;
+        assert_eq!(response.status(), StatusCode::OK, "dedicated token passes");
+        let response = probe(app.clone(), "universal-legacy").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the universal token must be refused once the dedicated one is set"
+        );
+        let response = probe(app, "").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Legacy fallback (dedicated env unset): the universal token still
+    /// authenticates outside production — migration-safe behavior.
+    #[tokio::test]
+    async fn unset_dedicated_token_keeps_universal_token_working() {
+        let auth = ServiceAuth::resolve(None, Some("universal-legacy"), false)
+            .expect("legacy auth resolves");
+        let app = pdf_router(auth);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pdf/render/json")
+                    .header("x-api-key", "universal-legacy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"template":"invoice","data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
+    }
+
     #[tokio::test]
     async fn render_route_rejects_path_shaped_template_names_with_400() {
         // Regression: `../../`-style names were joined onto
         // PDF_TEMPLATES_DIR and read whatever they resolved to. They must
         // now be rejected as caller errors before any filesystem access.
-        let app = pdf_router("super-secret".into());
+        let app = pdf_router(dedicated_auth("super-secret"));
         let response = app
             .oneshot(
                 Request::builder()
@@ -261,7 +338,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         // A valid-charset but unknown template stays a 404.
-        let app = pdf_router("super-secret".into());
+        let app = pdf_router(dedicated_auth("super-secret"));
         let response = app
             .oneshot(
                 Request::builder()
@@ -293,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn render_endpoints_stream_and_encode_real_pdfs() {
-        let app = pdf_router("super-secret".into());
+        let app = pdf_router(dedicated_auth("super-secret"));
         let body = serde_json::json!({
             "template": "invoice",
             "data": { "invoice_number": "INV-1", "total": 12400 }
@@ -355,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_template_is_404_and_empty_token_locks_render() {
-        let app = pdf_router("super-secret".into());
+        let app = pdf_router(dedicated_auth("super-secret"));
         let response = app
             .clone()
             .oneshot(
@@ -372,7 +449,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         // An unconfigured token rejects every protected route.
-        let locked = pdf_router(String::new());
+        let locked = pdf_router(no_auth());
         let response = locked
             .oneshot(
                 Request::builder()
@@ -438,9 +515,9 @@ mod tests {
 
         // "Tenant A" and "Tenant B" render the SAME inputs → identical
         // output (no per-caller state, no tenant-scoped variation).
-        let first = render(pdf_router("super-secret".into()), "INV-SAME").await;
+        let first = render(pdf_router(dedicated_auth("super-secret")), "INV-SAME").await;
         assert_eq!(first.status(), StatusCode::OK);
-        let second = render(pdf_router("super-secret".into()), "INV-SAME").await;
+        let second = render(pdf_router(dedicated_auth("super-secret")), "INV-SAME").await;
         assert_eq!(second.status(), StatusCode::OK);
         let bytes_a = axum::body::to_bytes(first.into_body(), usize::MAX)
             .await
@@ -452,7 +529,7 @@ mod tests {
 
         // Different inputs (another tenant's data) → different output; and
         // neither render influences the other (no shared mutable state).
-        let other = render(pdf_router("super-secret".into()), "INV-OTHER").await;
+        let other = render(pdf_router(dedicated_auth("super-secret")), "INV-OTHER").await;
         assert_eq!(other.status(), StatusCode::OK);
         let bytes_other = axum::body::to_bytes(other.into_body(), usize::MAX)
             .await

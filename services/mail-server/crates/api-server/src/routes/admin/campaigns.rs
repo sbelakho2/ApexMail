@@ -73,10 +73,10 @@ async fn list_campaigns(
 
     // `sales_campaigns` is canonical (migration 197); the recipient table is
     // created by the sales service's bootstrap, so probe it before joining.
-    if !table_exists(&state.db, "sales_campaigns").await {
+    if !table_exists(&state.db, "sales_campaigns").await? {
         return Ok(Json(vec![]));
     }
-    let has_recipients = table_exists(&state.db, "sales_campaign_recipients").await;
+    let has_recipients = table_exists(&state.db, "sales_campaign_recipients").await?;
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);

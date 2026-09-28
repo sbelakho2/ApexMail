@@ -292,7 +292,10 @@ async fn list_leads(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    if !table_exists(&state.db, "sales_leads").await {
+    // Fix (P1 swallowed outages): an unreachable database now propagates as
+    // a 5xx instead of fabricating a healthy empty leads list; Ok(false)
+    // (genuine pre-migration absence) keeps the empty fallback.
+    if !table_exists(&state.db, "sales_leads").await? {
         return Ok(Json(empty_leads_response()));
     }
 
@@ -1140,7 +1143,9 @@ async fn enrich_leads(
         return Err(ApiError::Validation(vec!["1-50 lead IDs allowed".into()]));
     }
 
-    if !table_exists(&state.db, "sales_leads").await {
+    // Fix (P1 swallowed outages): storage failures propagate (5xx), only a
+    // genuinely absent table keeps the "unavailable" skip response.
+    if !table_exists(&state.db, "sales_leads").await? {
         log_sales_audit(
             &state.db,
             &auth,
@@ -1305,8 +1310,8 @@ async fn list_campaigns(
 /// Canonical read-model fallback: one row per enrollment, labelled by its
 /// sequence. Used only when the sales service is unconfigured.
 async fn canonical_enrollment_campaigns(state: &AppState) -> Result<Vec<Campaign>, ApiError> {
-    if !table_exists(&state.db, "sales_enrollments").await
-        || !table_exists(&state.db, "sales_sequences").await
+    if !table_exists(&state.db, "sales_enrollments").await?
+        || !table_exists(&state.db, "sales_sequences").await?
     {
         return Ok(Vec::new());
     }
@@ -1487,8 +1492,10 @@ async fn run_discovery(
     }
 
     let job_id = apexmail_lib::id::generate_id("disc", 22);
-    if !table_exists(&state.db, "sales_leads").await
-        || !table_exists(&state.db, "enriched_companies").await
+    // Fix (P1 swallowed outages): storage failures propagate (5xx), only a
+    // genuinely absent table keeps the "unavailable" import-only response.
+    if !table_exists(&state.db, "sales_leads").await?
+        || !table_exists(&state.db, "enriched_companies").await?
     {
         log_sales_audit(
             &state.db,
@@ -2863,8 +2870,11 @@ mod adversarial_handler_tests {
 
     // ── Honest refusals with no database ─────────────────────────
 
-    /// A dead lazy pool: `table_exists` is false, every handler must degrade
-    /// honestly (never a fabricated success with rows).
+    /// A dead lazy pool: probing it now yields `Err` (P1 fix — schema probes
+    /// no longer collapse storage outages into "table absent"), so every
+    /// handler must refuse honestly with a 5xx. A fabricated 200 with empty
+    /// rows was exactly the "outage masquerading as a healthy empty state"
+    /// the probe contract fix removes.
     async fn dead_pool_state() -> AppState {
         let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
@@ -2879,29 +2889,35 @@ mod adversarial_handler_tests {
         let state = dead_pool_state().await;
         let app = sales_app(&state);
 
-        // No sales_leads table → an empty, explicitly zeroed response.
+        // Storage outage → an honest 5xx, never a fabricated 200 with an
+        // empty-but-healthy body (previously `table_exists` errors collapsed
+        // into Ok(false) and these endpoints lied with empty successes).
         let response = app
             .clone()
             .oneshot(cp_request(Method::GET, "/v1/admin/sales/leads", None))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["leads"].as_array().unwrap().len(), 0);
-        assert_eq!(body["total"], 0);
+        assert!(
+            response.status().is_server_error(),
+            "leads must refuse on a storage outage, got {}",
+            response.status()
+        );
 
-        // No enrollment read model → the canonical fallback is empty, not an
-        // error and not invented campaigns.
+        // No enrollment read model reachable → honest refusal, not an
+        // invented empty campaign list.
         let response = app
             .clone()
             .oneshot(cp_request(Method::GET, "/v1/admin/sales/campaigns", None))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert!(body.as_array().unwrap().is_empty());
+        assert!(
+            response.status().is_server_error(),
+            "campaigns must refuse on a storage outage, got {}",
+            response.status()
+        );
 
-        // Enrichment without a leads table reports the skip reason per id.
+        // Enrichment cannot consult the leads table → honest refusal instead
+        // of reporting per-id skips that imply the table was consulted.
         let response = app
             .clone()
             .oneshot(cp_request(
@@ -2911,17 +2927,14 @@ mod adversarial_handler_tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["enriched"], 0);
-        assert_eq!(body["skipped"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            body["skipped"][0]["reason"],
-            "sales leads table unavailable"
+        assert!(
+            response.status().is_server_error(),
+            "enrich must refuse on a storage outage, got {}",
+            response.status()
         );
 
-        // Discovery without its tables says so explicitly instead of
-        // reporting a fabricated import count.
+        // Discovery without its tables reachable says so with a 5xx instead
+        // of a fabricated import-only 200.
         let response = app
             .clone()
             .oneshot(cp_request(
@@ -2931,11 +2944,11 @@ mod adversarial_handler_tests {
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = json_body(response).await;
-        assert_eq!(body["status"], "unavailable");
-        assert_eq!(body["imported"], 0);
-        assert_eq!(body["mode"], "import_only");
+        assert!(
+            response.status().is_server_error(),
+            "discovery must refuse on a storage outage, got {}",
+            response.status()
+        );
 
         // Settings are never silently faked: a storage failure propagates.
         let response = app

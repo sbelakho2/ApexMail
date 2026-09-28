@@ -120,19 +120,20 @@ fn build_subscription_mrr_sql(has_billing_interval: bool) -> String {
     )
 }
 
-async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> f64 {
-    if !(table_exists(db, "stripe_subscriptions").await && table_exists(db, "plans").await) {
-        return 0.0;
+/// Fix (P1 swallowed outages): the probes and the MRR aggregate propagate
+/// storage failures — `get_dashboard_stats` surfaces them as a 5xx instead
+/// of a fabricated zero on a degraded database.
+async fn fetch_dashboard_mrr(db: &sqlx::PgPool) -> Result<f64, sqlx::Error> {
+    if !(table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await?) {
+        return Ok(0.0);
     }
 
-    let has_billing_interval = column_exists(db, "stripe_subscriptions", "billing_interval").await;
+    let has_billing_interval =
+        column_exists(db, "stripe_subscriptions", "billing_interval").await?;
     let sql = build_subscription_mrr_sql(has_billing_interval);
 
-    sqlx::query_scalar::<_, i64>(&sql)
-        .fetch_one(db)
-        .await
-        .map(|cents| cents as f64 / 100.0)
-        .unwrap_or(0.0)
+    let cents = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db).await?;
+    Ok(cents as f64 / 100.0)
 }
 
 async fn get_dashboard_stats(
@@ -155,13 +156,13 @@ async fn get_dashboard_stats(
 
     let db = &state.db;
 
-    let has_sales_leads = table_exists(db, "sales_leads").await;
+    let has_sales_leads = table_exists(db, "sales_leads").await?;
     // Canonical sales campaign model. `drip_campaigns` was the control plane's
     // own execution path and was dropped in migration 200; counting it here
     // would silently report zero forever.
-    let has_sales_campaigns = table_exists(db, "sales_campaigns").await;
-    let has_gdpr_requests = table_exists(db, "gdpr_requests").await;
-    let has_system_alerts = table_exists(db, "system_alerts").await;
+    let has_sales_campaigns = table_exists(db, "sales_campaigns").await?;
+    let has_gdpr_requests = table_exists(db, "gdpr_requests").await?;
+    let has_system_alerts = table_exists(db, "system_alerts").await?;
 
     // Aggregate counts
     let active_leads = if has_sales_leads {
@@ -238,7 +239,7 @@ async fn get_dashboard_stats(
     )
     .await;
 
-    let mrr = fetch_dashboard_mrr(db).await;
+    let mrr = fetch_dashboard_mrr(db).await?;
 
     // Risk / health
     let (mut risk_alerts, mut critical_tenants) = (0i64, 0i64);

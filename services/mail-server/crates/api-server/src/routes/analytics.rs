@@ -1018,17 +1018,33 @@ async fn export_pdf(
     // Reuse the shared process-wide client (state.http_client) instead of
     // building a fresh reqwest stack per export; the per-request timeout
     // below bounds the render round-trip.
+    // P1 #6 per-workload credential: once PDF_RENDERER_AUTH_TOKEN is
+    // configured, pdf-renderer accepts EXACTLY it (the universal
+    // INTERNAL_SERVICE_TOKEN is refused, loudly logged) — so the dedicated
+    // token must ride the request when present, universal token only as the
+    // legacy fallback. A configured-but-empty value sends no header (an
+    // empty credential would 401 anyway).
+    let credential = state
+        .config
+        .pdf_renderer_auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            state
+                .config
+                .internal_service_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+        });
     let mut req = state
         .http_client
         .post(format!("{pdf_renderer_url}/v1/pdf/render"))
         .timeout(std::time::Duration::from_secs(30))
         .json(&render_request);
-    // pdf-renderer requires the shared internal service token; only attach the
-    // header when one is configured (empty token would 401 anyway).
-    if let Some(token) = state.config.internal_service_token.as_deref() {
-        if !token.is_empty() {
-            req = req.header("x-api-key", token);
-        }
+    if let Some(token) = credential {
+        req = req.header("x-api-key", token);
     }
     let resp = req
         .send()
@@ -2633,6 +2649,108 @@ mod adversarial_tests {
         };
         let (status, _, _) = get_raw(&basic, &uri).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+
+        std::env::remove_var("PDF_RENDERER_URL");
+    }
+
+    // ── P1 #6: the export presents the per-workload credential ──────────
+
+    /// The outbound export must present `PDF_RENDERER_AUTH_TOKEN` when the
+    /// config carries one (pdf-renderer REFUSES the universal token once its
+    /// dedicated credential is provisioned), and only fall back to the
+    /// universal `INTERNAL_SERVICE_TOKEN` while the dedicated one is unset.
+    #[tokio::test]
+    async fn export_pdf_sends_the_dedicated_per_workload_token() {
+        let Some(h) = harness("export_pdf_dedicated_token").await else {
+            return;
+        };
+        let _guard = lock_pdf_env().await;
+
+        // Mock renderer: captures the x-api-key credential it was called with.
+        let seen: Arc<std::sync::Mutex<Vec<Option<String>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock_seen = seen.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/pdf/render",
+                post(
+                    |headers: axum::http::HeaderMap, Json(_body): Json<serde_json::Value>| async move {
+                        mock_seen
+                            .lock()
+                            .unwrap()
+                            .push(headers.get("x-api-key").and_then(|v| v.to_str().ok().map(String::from)));
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "application/pdf")],
+                            b"%PDF-1.4 mock".to_vec(),
+                        )
+                            .into_response()
+                    },
+                ),
+            )
+            .with_state(());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+        std::env::set_var("PDF_RENDERER_URL", format!("http://{addr}"));
+
+        let now = Utc::now();
+        let uri = format!(
+            "/v1/analytics/export/pdf?from={}&to={}",
+            rfc(now - TimeDelta::days(1)),
+            rfc(now)
+        );
+
+        // Legacy posture (dedicated token unset): the universal token rides.
+        {
+            let base = crate::app::test_support::test_state_over(h.pool.clone()).await;
+            let mut config = base.config.clone();
+            config.internal_service_token = Some("universal-legacy".into());
+            config.pdf_renderer_auth_token = None;
+            let state =
+                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config)
+                    .await;
+            let legacy = Harness {
+                app: build_app(state),
+                pool: h.pool.clone(),
+                tenant_id: h.tenant_id.clone(),
+                key: h.key.clone(),
+            };
+            let (status, _, _) = get_raw(&legacy, &uri).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                seen.lock().unwrap().last().and_then(|c| c.as_deref()),
+                Some("universal-legacy"),
+                "without the dedicated token the universal one must ride"
+            );
+        }
+
+        // Migrated posture: the DEDICATED token rides, even with the
+        // universal token also configured.
+        {
+            let base = crate::app::test_support::test_state_over(h.pool.clone()).await;
+            let mut config = base.config.clone();
+            config.internal_service_token = Some("universal-legacy".into());
+            config.pdf_renderer_auth_token = Some("dedicated-pdf-secret".into());
+            let state =
+                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config)
+                    .await;
+            let migrated = Harness {
+                app: build_app(state),
+                pool: h.pool.clone(),
+                tenant_id: h.tenant_id.clone(),
+                key: h.key.clone(),
+            };
+            let (status, _, _) = get_raw(&migrated, &uri).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                seen.lock().unwrap().last().and_then(|c| c.as_deref()),
+                Some("dedicated-pdf-secret"),
+                "the dedicated per-workload token must replace the universal one"
+            );
+        }
 
         std::env::remove_var("PDF_RENDERER_URL");
     }

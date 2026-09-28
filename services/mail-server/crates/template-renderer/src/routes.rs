@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::cache::TemplateCache;
+use crate::auth::ServiceAuth;
+use crate::cache::{source_render_cache_key, TemplateCache};
 use crate::config::RendererConfig;
 use crate::plaintext::html_to_plaintext;
 use crate::sandbox::Sandbox;
@@ -28,7 +29,16 @@ pub struct AppState {
     pub sandbox: Sandbox,
     pub cache: TemplateCache,
     pub config: RendererConfig,
-    pub service_token: String,
+    /// P1 #6: per-workload credentials — the dedicated
+    /// `TEMPLATE_RENDERER_AUTH_TOKEN` is the only accepted secret when
+    /// configured; the universal token is legacy fallback (non-production).
+    pub service_auth: ServiceAuth,
+}
+
+/// Routes that stay public for orchestrator probes (no service token).
+/// `/health` is liveness; `/ready` reports dependency honesty (P1 #12).
+fn is_public_probe_path(path: &str) -> bool {
+    path == "/health" || path == "/ready"
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -37,6 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/validate", post(validate_handler))
         .route("/starter", get(starter_handler))
         .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_service_token,
@@ -56,11 +67,8 @@ async fn require_service_token(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if req.uri().path() == "/health" {
+    if is_public_probe_path(req.uri().path()) {
         return Ok(next.run(req).await);
-    }
-    if state.service_token.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
     }
     let provided = req
         .headers()
@@ -71,15 +79,22 @@ async fn require_service_token(
                 .get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
-        });
-    if provided
-        .as_deref()
-        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
-    {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+        })
+        .unwrap_or_default();
+    if state.service_auth.authorize(&provided) {
+        return Ok(next.run(req).await);
     }
+    // P1 #6: a configured dedicated token means the universal
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // unmigrated callers loudly (they get 401 either way).
+    if state.service_auth.is_refused_universal_attempt(&provided) {
+        tracing::warn!(
+            "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
+             TEMPLATE_RENDERER_AUTH_TOKEN is configured — the caller must migrate to the \
+             dedicated per-workload token"
+        );
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 // ─── Request / Response types ──────────────────────────────────
@@ -123,6 +138,22 @@ async fn render_handler(
         subject: req.subject,
         missing_field_fallback: req.missing_field_fallback.clone(),
     };
+
+    // P1 #11: the render cache is consulted on the HTTP path. The key is a
+    // SHA-256 over the template SOURCE (never an id alone — the request
+    // carries inline source), the canonicalized props, every output-affecting
+    // option and the renderer semantics version, so any content or option
+    // change rotates the key.
+    let cache_key = source_render_cache_key(&req.source, &opts);
+    if let Some(mut cached) = state.cache.get(&cache_key) {
+        cached.metadata.cached = true;
+        return (
+            StatusCode::OK,
+            Json(serde_json::to_value(&cached).unwrap_or_else(|e| {
+                serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
+            })),
+        );
+    }
 
     // The sandbox execute is CPU-bound (regex scans, html5ever parse,
     // minify). Running it inline on the async worker starves the runtime:
@@ -184,6 +215,11 @@ async fn render_handler(
                 warnings: result.warnings,
             };
 
+            // Cache the successful render (bounded by `CacheConfig`): the
+            // next identical (source, props, options) request is served from
+            // the cache with `cached: true`.
+            state.cache.insert(cache_key, render_result.clone());
+
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(&render_result).unwrap_or_else(|e| {
@@ -233,6 +269,9 @@ async fn starter_handler() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+/// Liveness probe: the process is up. It deliberately says NOTHING about
+/// dependencies (P1 #12) — restart loops driven by a blind "healthy" answer
+/// are exactly what the readiness probe below exists to prevent.
 async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::OK,
@@ -240,9 +279,53 @@ async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+/// Upper bound on the readiness probe's DB check so orchestrator polls
+/// cannot pile up behind a hung pool acquisition.
+const READY_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Readiness probe (P1 #12): honestly reports whether the service can serve
+/// traffic. `/health` used to answer "healthy" regardless of the DB pool;
+/// `/ready` runs a bounded `SELECT 1` against it and reports
+/// `{"status":"ready"}` (200) or `{"status":"degraded", ...}` (503) with the
+/// failing dependency named.
+async fn ready_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let check = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db);
+    match tokio::time::timeout(READY_CHECK_TIMEOUT, check).await {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "dependencies": { "database": "up" },
+            })),
+        ),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "readiness check: database not reachable");
+            degraded("down", &error.to_string())
+        }
+        Err(_) => {
+            tracing::warn!(
+                "readiness check: database did not answer within {READY_CHECK_TIMEOUT:?}"
+            );
+            degraded("timeout", &format!("no answer within {READY_CHECK_TIMEOUT:?}"))
+        }
+    }
+}
+
+fn degraded(detail: &str, message: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "degraded",
+            "dependencies": { "database": detail },
+            "detail": message,
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::ServiceAuth;
     use crate::config::*;
 
     fn test_config() -> RendererConfig {
@@ -270,6 +353,12 @@ mod tests {
         }
     }
 
+    /// P1 #6: state construction uses the per-workload `ServiceAuth`
+    /// resolver (a single accepted token, no universal credential).
+    fn auth_with_token(token: &str) -> ServiceAuth {
+        ServiceAuth::resolve(Some(token), None, false).expect("test auth resolves")
+    }
+
     #[tokio::test]
     async fn test_router_creation() {
         // Just verifies router builds without panic
@@ -280,7 +369,7 @@ mod tests {
             sandbox: Sandbox::new(config.sandbox.clone()),
             cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
             config,
-            service_token: "test-key".into(),
+            service_auth: auth_with_token("test-key"),
         });
         let _router = router(state);
     }
@@ -356,7 +445,7 @@ mod tests {
             sandbox: Sandbox::new(config.sandbox.clone()),
             cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
             config,
-            service_token: "test-key".into(),
+            service_auth: auth_with_token("test-key"),
         });
         let app = router(state);
 
@@ -408,7 +497,8 @@ mod tests {
             sandbox: Sandbox::new(config.sandbox.clone()),
             cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
             config,
-            service_token: token.into(),
+            // P1 #6: per-workload ServiceAuth replaces the bare token field.
+            service_auth: auth_with_token(token),
         })
     }
 
@@ -604,9 +694,321 @@ mod tests {
             !json_b["html"].as_str().unwrap().contains(">A"),
             "caller B's render must not contain caller A's content"
         );
+        // P1 #11: the two callers render DISTINCT sources, so both remain
+        // cache misses (the comment below previously said the HTTP path was
+        // uncached entirely — the wired cache is content-addressed, so only
+        // byte-identical (source, props, options) requests share an entry).
         assert_eq!(
             json_b["metadata"]["cached"], false,
-            "the HTTP render path is uncached: no shared per-tenant state"
+            "distinct sources are distinct cache keys: no shared entry"
         );
+    }
+
+    // ── P1 #6: per-workload token semantics over HTTP ────────────────────
+
+    /// When `TEMPLATE_RENDERER_AUTH_TOKEN` is configured it is the ONLY
+    /// accepted credential: the universal `INTERNAL_SERVICE_TOKEN` gets 401
+    /// (and is detected for loud logging) instead of authorizing requests.
+    #[tokio::test]
+    async fn dedicated_token_authorizes_and_universal_token_is_refused() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let config = test_config();
+        let state = Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            // Dedicated token configured; universal retained only for
+            // refusal detection.
+            service_auth: ServiceAuth::resolve(
+                Some("dedicated-secret"),
+                Some("universal-legacy"),
+                false,
+            )
+            .expect("dedicated auth resolves"),
+        });
+        let app = router(state);
+        let probe = |app: axum::Router, key: &'static str| async move {
+            let mut builder = Request::builder().uri("/starter");
+            if !key.is_empty() {
+                builder = builder.header("x-api-key", key);
+            }
+            app.oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        let response = probe(app.clone(), "dedicated-secret").await;
+        assert_eq!(response.status(), StatusCode::OK, "dedicated token passes");
+        let response = probe(app.clone(), "universal-legacy").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the universal token must be refused once the dedicated one is set"
+        );
+        let response = probe(app.clone(), "").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = probe(app, "wrong").await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Legacy fallback (dedicated env unset): the universal token still
+    /// authenticates outside production — migration-safe behavior.
+    #[tokio::test]
+    async fn unset_dedicated_token_keeps_universal_token_working() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let config = test_config();
+        let state = Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: ServiceAuth::resolve(None, Some("universal-legacy"), false)
+                .expect("legacy auth resolves"),
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/starter")
+                    .header("x-api-key", "universal-legacy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
+    }
+
+    // ── P1 #11: the HTTP /render path actually uses the cache ────────────
+
+    async fn post_render(
+        app: axum::Router,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/render")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, json)
+    }
+
+    /// Same (source, props) twice: the second answer is `cached: true` and
+    /// byte-identical in every output field.
+    #[tokio::test]
+    async fn render_cache_second_identical_request_is_hit_and_byte_identical() {
+        let app = router(state_with_token("test-key"));
+        let body = serde_json::json!({
+            "source": "<p>Hi {{ name }}</p>",
+            "props": { "name": "Ada" },
+            "subject": "S: {{ name }}"
+        });
+
+        let (status_a, json_a) = post_render(app.clone(), body.clone()).await;
+        assert_eq!(status_a, StatusCode::OK);
+        assert_eq!(json_a["metadata"]["cached"], false, "first is a miss");
+
+        let (status_b, json_b) = post_render(app.clone(), body).await;
+        assert_eq!(status_b, StatusCode::OK);
+        assert_eq!(json_b["metadata"]["cached"], true, "second must be a hit");
+        assert_eq!(json_a["html"], json_b["html"], "byte-identical html");
+        assert_eq!(json_a["plaintext"], json_b["plaintext"]);
+        assert_eq!(json_a["subject"], json_b["subject"]);
+        assert_eq!(json_a["warnings"], json_b["warnings"]);
+    }
+
+    /// Different props → different cache entry: the second render is still a
+    /// miss and produces the OTHER props' output.
+    #[tokio::test]
+    async fn render_cache_distinguishes_props() {
+        let app = router(state_with_token("test-key"));
+        let first = serde_json::json!({
+            "source": "<p>Hi {{ name }}</p>",
+            "props": { "name": "Ada" },
+        });
+        let second = serde_json::json!({
+            "source": "<p>Hi {{ name }}</p>",
+            "props": { "name": "Grace" },
+        });
+
+        let (status_a, json_a) = post_render(app.clone(), first).await;
+        assert_eq!(status_a, StatusCode::OK);
+        let (status_b, json_b) = post_render(app.clone(), second).await;
+        assert_eq!(status_b, StatusCode::OK);
+        assert_eq!(
+            json_b["metadata"]["cached"], false,
+            "different props must be a different cache entry"
+        );
+        assert!(json_a["html"].as_str().unwrap().contains("Ada"));
+        assert!(json_b["html"].as_str().unwrap().contains("Grace"));
+
+        // Re-rendering the first props hits its (still valid) entry.
+        let (_, json_again) = post_render(
+            app,
+            serde_json::json!({
+                "source": "<p>Hi {{ name }}</p>",
+                "props": { "name": "Ada" },
+            }),
+        )
+        .await;
+        assert_eq!(json_again["metadata"]["cached"], true);
+        assert!(json_again["html"].as_str().unwrap().contains("Ada"));
+    }
+
+    /// Render options participate in the identity: flipping `minify` changes
+    /// the key, so the minified variant is rendered and cached separately.
+    #[tokio::test]
+    async fn render_cache_distinguishes_options() {
+        let app = router(state_with_token("test-key"));
+        let plain = serde_json::json!({
+            "source": "<div>  <p>hello</p>  </div>",
+            "props": {},
+            "generate_plaintext": false,
+            "minify": false
+        });
+        let minified = serde_json::json!({
+            "source": "<div>  <p>hello</p>  </div>",
+            "props": {},
+            "generate_plaintext": false,
+            "minify": true
+        });
+
+        let (_, json_a) = post_render(app.clone(), plain).await;
+        let (_, json_b) = post_render(app.clone(), minified).await;
+        assert_eq!(json_b["metadata"]["cached"], false, "options change = new key");
+        assert_ne!(json_a["html"], json_b["html"]);
+    }
+
+    // ── P1 #12: /health (liveness) vs /ready (dependency honesty) ────────
+
+    /// `/health` must stay a pure liveness answer: 200 even when the DB pool
+    /// is unreachable (it must not consult dependencies).
+    #[tokio::test]
+    async fn health_stays_liveness_when_database_is_down() {
+        use tower::ServiceExt;
+
+        let config = test_config();
+        let state = Arc::new(AppState {
+            // Port 1 on loopback: nothing listens there — deterministically down.
+            db: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "healthy");
+    }
+
+    /// `/ready` with the DB pool unreachable: 503 with `status: "degraded"`
+    /// and the failing dependency NAMED.
+    #[tokio::test]
+    async fn ready_reports_degraded_with_named_dependency_when_database_is_down() {
+        use tower::ServiceExt;
+
+        let config = test_config();
+        let state = Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "degraded", "{json}");
+        assert_ne!(
+            json["dependencies"]["database"], "up",
+            "the failing dependency must be named honestly: {json}"
+        );
+    }
+
+    /// `/ready` with a live database (same TEST_DATABASE_URL convention as
+    /// the F62 stored-template tests — skipped when unset).
+    #[tokio::test]
+    async fn ready_reports_ready_when_database_is_up() {
+        use tower::ServiceExt;
+
+        let Some(database_url) = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.expect("live pool");
+
+        let config = test_config();
+        let state = Arc::new(AppState {
+            db: pool,
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ready", "{json}");
+        assert_eq!(json["dependencies"]["database"], "up", "{json}");
     }
 }

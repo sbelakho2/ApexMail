@@ -4,6 +4,7 @@
 //! OpenAPI documentation, developer onboarding, and API key management.
 
 #![deny(unsafe_code)]
+pub mod auth;
 pub mod config;
 pub mod onboarding;
 pub mod openapi;
@@ -12,3 +13,5 @@ pub mod sdk_manager;
 pub mod types;
 pub mod versioning;
 pub mod webhook_tester;
+
+pub use auth::ServiceAuth;

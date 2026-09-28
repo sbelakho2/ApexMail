@@ -17,6 +17,7 @@ use axum::{
 use serde::Serialize;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::auth::ServiceAuth;
 use crate::config::DevExConfig;
 use crate::onboarding::OnboardingService;
 use crate::openapi::OpenApiGenerator;
@@ -35,15 +36,28 @@ pub struct AppState {
     pub openapi: Arc<OpenApiGenerator>,
     pub onboarding: Arc<OnboardingService>,
     pub webhook_tester: Arc<WebhookTester>,
-    pub service_token: String,
+    /// P1 #6: per-workload credentials — the dedicated `DEVEX_AUTH_TOKEN`
+    /// is the only accepted secret when configured; the universal token is
+    /// legacy fallback (non-production).
+    pub service_auth: ServiceAuth,
 }
 
 impl AppState {
     /// Build `AppState` from a `DevExConfig`.
+    ///
+    /// P1 #6: the per-workload credential is resolved from the environment
+    /// LENIENTLY here (no production refusal) so config-driven construction
+    /// never fails on auth grounds; the binary enforces the production boot
+    /// refusal via `ServiceAuth::from_env()` — which yields the identical
+    /// resolution — before serving traffic.
     pub fn from_config(cfg: DevExConfig) -> Result<Self, crate::types::DevExError> {
         let openapi = OpenApiGenerator::new(&cfg.current_api_version, &cfg.api_base_url);
         // O-20.2: Pass all signing secrets for rotation support
         let webhook_tester = WebhookTester::new(cfg.webhook_signing_secrets.clone())?;
+        let dedicated = std::env::var(crate::auth::DEDICATED_TOKEN_ENV).ok();
+        let universal = std::env::var("INTERNAL_SERVICE_TOKEN").ok();
+        let service_auth = ServiceAuth::resolve(dedicated.as_deref(), universal.as_deref(), false)
+            .map_err(|reason| crate::types::DevExError::Validation(reason))?;
         Ok(Self {
             config: Arc::new(cfg),
             versions: Arc::new(VersionRegistry::new()),
@@ -51,7 +65,7 @@ impl AppState {
             openapi: Arc::new(openapi),
             onboarding: Arc::new(OnboardingService::new()),
             webhook_tester: Arc::new(webhook_tester),
-            service_token: std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
+            service_auth,
         })
     }
 }
@@ -84,9 +98,6 @@ async fn require_service_token(
     if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
     }
-    if state.service_token.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     let provided = req
         .headers()
         .get("x-api-key")
@@ -96,15 +107,22 @@ async fn require_service_token(
                 .get(AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
-        });
-    if provided
-        .as_deref()
-        .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
-    {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+        })
+        .unwrap_or_default();
+    if state.service_auth.authorize(&provided) {
+        return Ok(next.run(req).await);
     }
+    // P1 #6: a configured dedicated token means the universal
+    // INTERNAL_SERVICE_TOKEN no longer authorizes anything here — call out
+    // unmigrated callers loudly (they get 401 either way).
+    if state.service_auth.is_refused_universal_attempt(&provided) {
+        tracing::warn!(
+            "request refused: the universal INTERNAL_SERVICE_TOKEN was presented but \
+             DEVEX_AUTH_TOKEN is configured — the caller must migrate to the dedicated \
+             per-workload token"
+        );
+    }
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -246,7 +264,10 @@ mod tests {
 
     fn test_state() -> Result<AppState, crate::types::DevExError> {
         let mut state = AppState::from_config(DevExConfig::default())?;
-        state.service_token = "test-key".into();
+        // P1 #6: tests install the resolved per-workload `ServiceAuth`
+        // (single accepted token) instead of the bare `service_token` field.
+        state.service_auth = crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
+            .expect("test auth resolves");
         Ok(state)
     }
 
@@ -331,7 +352,15 @@ mod tests {
 
     fn state_with_token(token: &str) -> Result<AppState, crate::types::DevExError> {
         let mut state = AppState::from_config(DevExConfig::default())?;
-        state.service_token = token.into();
+        // P1 #6: the resolved per-workload `ServiceAuth` replaces the bare
+        // `service_token` field. An EMPTY token resolves to the deny-all
+        // auth (nothing accepted), matching the old empty-string behavior.
+        state.service_auth = crate::auth::ServiceAuth::resolve(
+            (!token.is_empty()).then_some(token),
+            None,
+            false,
+        )
+        .expect("test auth resolves");
         Ok(state)
     }
 
@@ -403,6 +432,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── P1 #6: per-workload token semantics over HTTP ────────────────────
+
+    /// When `DEVEX_AUTH_TOKEN` is configured it is the ONLY accepted
+    /// credential; the universal `INTERNAL_SERVICE_TOKEN` gets 401.
+    #[tokio::test]
+    async fn dedicated_token_authorizes_and_universal_token_is_refused() {
+        let mut state = AppState::from_config(DevExConfig::default()).expect("state");
+        state.service_auth =
+            crate::auth::ServiceAuth::resolve(Some("dedicated-secret"), Some("universal-legacy"), false)
+                .expect("dedicated auth resolves");
+        let app = build_router(state);
+        let probe = |app: Router, key: &'static str| async move {
+            let mut builder = Request::builder().uri("/sdks");
+            if !key.is_empty() {
+                builder = builder.header("x-api-key", key);
+            }
+            app.oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        let resp = probe(app.clone(), "dedicated-secret").await;
+        assert_eq!(resp.status(), StatusCode::OK, "dedicated token passes");
+        let resp = probe(app.clone(), "universal-legacy").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "the universal token must be refused once the dedicated one is set"
+        );
+        let resp = probe(app, "").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Legacy fallback (dedicated env unset): the universal token still
+    /// authenticates outside production — migration-safe behavior.
+    #[tokio::test]
+    async fn unset_dedicated_token_keeps_universal_token_working() {
+        let mut state = AppState::from_config(DevExConfig::default()).expect("state");
+        state.service_auth =
+            crate::auth::ServiceAuth::resolve(None, Some("universal-legacy"), false)
+                .expect("legacy auth resolves");
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sdks")
+                    .header("x-api-key", "universal-legacy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "legacy token still works");
     }
 
     #[tokio::test]

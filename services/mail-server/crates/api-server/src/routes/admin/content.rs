@@ -107,12 +107,12 @@ async fn list_content(
     let offset = params.offset.max(0);
     let author = normalize_filter(params.author.as_deref());
     let content_type = normalize_filter(params.content_type.as_deref());
-    let type_col = if column_exists(&state.db, "content_items", "content_type").await {
+    let type_col = if column_exists(&state.db, "content_items", "content_type").await? {
         "content_type"
     } else {
         "type"
     };
-    let view_col = if column_exists(&state.db, "content_items", "view_count").await {
+    let view_col = if column_exists(&state.db, "content_items", "view_count").await? {
         "view_count"
     } else {
         "views"
@@ -122,12 +122,12 @@ async fn list_content(
     // with an undefined-column error on every canonical deployment.
     // The fallback expressions are ALIASED: sqlx maps row columns by name,
     // and a bare NULL would surface as Postgres' anonymous "?column?".
-    let slug_expr = if column_exists(&state.db, "content_items", "slug").await {
+    let slug_expr = if column_exists(&state.db, "content_items", "slug").await? {
         "slug"
     } else {
         "NULL AS slug"
     };
-    let status_expr = if column_exists(&state.db, "content_items", "status").await {
+    let status_expr = if column_exists(&state.db, "content_items", "status").await? {
         "status"
     } else {
         "NULL AS status"

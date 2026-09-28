@@ -11,11 +11,13 @@
 //!    idempotency, queue inserts and worker pickup: a send really flows and
 //!    delivery is genuinely attempted (the Messages lane shows the full
 //!    queued → attempted → bounced lifecycle);
-//! 3. guards abuse with a per-IP rate limit (Redis, fail-open with a warn —
-//!    a public playground must not hard-fail on a Redis blip), an 8 KiB
-//!    body cap, and a recipient policy for the send lane: every to/cc/bcc
-//!    address must end in @example.com (RFC 2606 reserved — real delivery
-//!    attempt, harmless by construction, no relay potential);
+//! 3. guards abuse with a per-IP rate limit (Redis, with a STRICTER
+//!    in-process fixed-window emergency limiter engaged while Redis is
+//!    unavailable — a cache blip degrades to a local ceiling, never to
+//!    unlimited), an 8 KiB body cap, and a recipient policy for the send
+//!    lane: every to/cc/bcc address must end in @example.com (RFC 2606
+//!    reserved — real delivery attempt, harmless by construction, no relay
+//!    potential);
 //! 4. renders the full result page via ui_foundation (zero JS anywhere).
 //!
 //! The calculator computes with `billing_service::plans` — the canonical
@@ -37,6 +39,17 @@ use crate::state::AppState;
 const MAX_BODY_BYTES: usize = 8 * 1024;
 /// Per-IP requests per minute on the public explorer endpoints.
 const RATE_LIMIT_PER_MINUTE: i64 = 12;
+/// Per-IP requests per minute while Redis is UNAVAILABLE. STRICTER than the
+/// distributed limit: a degraded limiter must still bound abuse of this
+/// public endpoint (which dispatches through the real router — real DB and
+/// message processing), never go unlimited.
+const EMERGENCY_RATE_LIMIT_PER_MINUTE: i64 = 6;
+/// Fixed window length of the in-process emergency limiter.
+const EMERGENCY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// Beyond this many tracked buckets the emergency limiter opportunistically
+/// drops expired windows, so a spoofed-IP flood during a Redis outage cannot
+/// grow the map without bound.
+const EMERGENCY_PRUNE_THRESHOLD: usize = 10_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sandbox tenancy
@@ -50,14 +63,45 @@ struct Sandbox {
 /// 064; charset follows the existing lowercase-alphanumeric nanoid style).
 const SANDBOX_TENANT_ID: &str = "sbx0explorer0000000000000x";
 
-static SANDBOX: OnceLock<Sandbox> = OnceLock::new();
+/// Advisory-lock key serializing concurrent sandbox provisions ACROSS
+/// processes (multi-replica deployments race the same fixed tenant row; the
+/// per-process OnceCell below cannot see sibling processes).
+const SANDBOX_PROVISION_LOCK: &str = "apexmail:explorer-sandbox-provision";
+
+/// Fix (P1 cold-start race): the previous `OnceLock` + check-revoke-create
+/// sequence let two concurrent first requests interleave, and the loser's
+/// `OnceLock::set` silently failed — leaving a REVOKED credential in the
+/// static sandbox (broken until restart). `tokio::sync::OnceCell` guarantees
+/// exactly ONE provision per process: concurrent first requests await the
+/// winner's result instead of racing their own.
+static SANDBOX: tokio::sync::OnceCell<Sandbox> = tokio::sync::OnceCell::const_new();
 
 /// Provision (idempotently) and memoize the sandbox tenant + api key.
 async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
-    if let Some(s) = SANDBOX.get() {
-        return Ok(s);
-    }
+    SANDBOX
+        .get_or_try_init(|| provision_sandbox(state))
+        .await
+}
+
+/// The actual provisioning, run at most once per process by [`SANDBOX`].
+///
+/// Everything happens in ONE transaction: a transaction-scoped advisory lock
+/// serializes racing provisions (cross-process too), and revoke-old +
+/// insert-new for the api key is atomic — no interleaving can persist a
+/// sandbox whose only keys are revoked.
+async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
     let now = chrono::Utc::now();
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("sandbox provision transaction failed: {e}"))?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(SANDBOX_PROVISION_LOCK)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("sandbox provision lock failed: {e}"))?;
 
     // Tenant (VARCHAR(26) id, plan-free).
     sqlx::query(
@@ -67,7 +111,7 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
     )
     .bind(SANDBOX_TENANT_ID)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("sandbox tenant provision failed: {e}"))?;
 
@@ -78,7 +122,7 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
         "SELECT name FROM domains WHERE tenant_id = $1 AND name = 'example.com' LIMIT 1",
     )
     .bind(SANDBOX_TENANT_ID)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| format!("sandbox domain check failed: {e}"))?;
     if existing_domain.is_none() {
@@ -107,7 +151,7 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
         .bind(now)
         .bind(&key_pair.public_key)
         .bind(&encrypted)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("sandbox domain provision failed: {e}"))?;
     }
@@ -120,37 +164,24 @@ async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
         "SELECT EXISTS(SELECT 1 FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL)",
     )
     .bind(SANDBOX_TENANT_ID)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| format!("sandbox key check failed: {e}"))?;
-    let api_key = if has_key {
+    if has_key {
         // A previous process created the key but its plaintext is lost
         // (hashed at rest). Rotate: revoke old, insert new — the explorer is
-        // stateless so rotation is invisible.
+        // stateless so rotation is invisible. Atomic here: within this
+        // transaction there is never a moment where the sandbox tenant has
+        // ONLY revoked keys visible to a committed read.
         sqlx::query(
             "UPDATE api_keys SET revoked_at = $2 WHERE tenant_id = $1 AND revoked_at IS NULL",
         )
         .bind(SANDBOX_TENANT_ID)
         .bind(now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("sandbox key rotation failed: {e}"))?;
-        insert_key(state, &key_hash, now).await?;
-        raw_key
-    } else {
-        insert_key(state, &key_hash, now).await?;
-        raw_key
-    };
-
-    let _ = SANDBOX.set(Sandbox { api_key });
-    Ok(SANDBOX.get().expect("just set"))
-}
-
-async fn insert_key(
-    state: &AppState,
-    key_hash: &str,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), String> {
+    }
     let prefix: String = "sbx_".to_string();
     sqlx::query(
         "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
@@ -159,33 +190,56 @@ async fn insert_key(
     .bind(uuid::Uuid::new_v4())
     .bind(SANDBOX_TENANT_ID)
     .bind(&prefix)
-    .bind(key_hash)
+    .bind(&key_hash)
     .bind(serde_json::json!(["*"]))
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("sandbox key insert failed: {e}"))?;
-    Ok(())
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("sandbox provision commit failed: {e}"))?;
+
+    Ok(Sandbox { api_key: raw_key })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Rate limiting (public endpoints)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn rate_limit(state: &AppState, ip: &str) -> bool {
-    // Fail OPEN when Redis is unavailable (warn) — availability of a public
-    // playground outranks a hard fail on cache blips.
-    redis_rate_limit(state, &format!("explorer_rl:{ip}")).await
+/// One fixed-window bucket of the in-process emergency limiter.
+struct EmergencyWindow {
+    count: i64,
+    window_start: std::time::Instant,
 }
 
-async fn redis_rate_limit(state: &AppState, key: &str) -> bool {
-    let mut conn = match state.redis.get().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "explorer rate-limit redis unavailable — allowing");
-            return true;
-        }
-    };
+/// In-process emergency limiter buckets, keyed per-IP.
+static EMERGENCY_LIMITER: OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<String, EmergencyWindow>>,
+> = OnceLock::new();
+
+async fn rate_limit(state: &AppState, ip: &str) -> bool {
+    // Fix (P1): Redis unavailability no longer means "allowing". The
+    // distributed verdict is used when Redis answers; ONLY on failure does
+    // the stricter in-process fixed-window limiter engage — the endpoint
+    // dispatches through the real router (real DB/message processing), so a
+    // cache blip must degrade to a local ceiling, not to unlimited.
+    match redis_rate_limit(state, &format!("explorer_rl:{ip}")).await {
+        Ok(allowed) => allowed,
+        Err(()) => emergency_allow(ip, std::time::Instant::now()),
+    }
+}
+
+/// Distributed fixed-window verdict. `Ok(v)` is Redis' answer; `Err(())`
+/// means Redis could not be consulted at all (pool exhausted / incr failed).
+async fn redis_rate_limit(state: &AppState, key: &str) -> Result<bool, ()> {
+    let mut conn = state.redis.get().await.map_err(|e| {
+        tracing::warn!(
+            error = %e,
+            "explorer rate-limit redis unavailable — engaging the in-process emergency limiter"
+        );
+    })?;
     let (count,): (i64,) = match redis::pipe()
         .atomic()
         .incr(key, 1)
@@ -196,11 +250,40 @@ async fn redis_rate_limit(state: &AppState, key: &str) -> bool {
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = %e, "explorer rate-limit incr failed — allowing");
-            return true;
+            tracing::warn!(
+                error = %e,
+                "explorer rate-limit incr failed — engaging the in-process emergency limiter"
+            );
+            return Err(());
         }
     };
-    count <= RATE_LIMIT_PER_MINUTE
+    Ok(count <= RATE_LIMIT_PER_MINUTE)
+}
+
+/// In-process fixed-window fallback limiter, engaged ONLY while Redis is
+/// unavailable (the same shape as tracking-service's in-process counters).
+/// Buckets are keyed per-IP: counters never leak across IPs, and the window
+/// is STRICTER than [`RATE_LIMIT_PER_MINUTE`]. The `now` parameter keeps the
+/// window logic deterministic under test.
+fn emergency_allow(ip: &str, now: std::time::Instant) -> bool {
+    let map = EMERGENCY_LIMITER
+        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let mut map = map.lock();
+    if map.len() > EMERGENCY_PRUNE_THRESHOLD {
+        map.retain(|_, w| now.duration_since(w.window_start) < EMERGENCY_WINDOW);
+    }
+    let window = map
+        .entry(ip.to_string())
+        .or_insert(EmergencyWindow {
+            count: 0,
+            window_start: now,
+        });
+    if now.duration_since(window.window_start) >= EMERGENCY_WINDOW {
+        window.count = 0;
+        window.window_start = now;
+    }
+    window.count += 1;
+    window.count <= EMERGENCY_RATE_LIMIT_PER_MINUTE
 }
 
 /// Rate-limit bucket key for a sandbox request. Delegates to the shared
@@ -1181,18 +1264,22 @@ mod adversarial_tests {
     }
 
     #[test]
-    fn redis_rate_limit_fails_closed_at_the_bucket_and_open_without_redis() {
+    fn redis_rate_limit_fails_closed_at_the_bucket_and_the_emergency_limiter_takes_over() {
         with_dkim_env(|state| {
             Box::pin(async move {
                 let key = format!("adv_explorer_rl:{}", uuid::Uuid::new_v4());
                 for _ in 0..RATE_LIMIT_PER_MINUTE {
                     assert!(
-                        redis_rate_limit(&state, &key).await,
+                        redis_rate_limit(&state, &key).await.unwrap_or_else(
+                            |_| panic!("redis is healthy: requests within the budget pass")
+                        ),
                         "requests within the budget pass"
                     );
                 }
                 assert!(
-                    !redis_rate_limit(&state, &key).await,
+                    !redis_rate_limit(&state, &key)
+                        .await
+                        .expect("redis is healthy: verdict available"),
                     "the 13th request in the window must be refused"
                 );
                 // Cleanup so a rerun starts clean even before the TTL.
@@ -1202,15 +1289,166 @@ mod adversarial_tests {
                     .query_async(&mut *conn)
                     .await;
 
-                // Redis unavailable → fail OPEN (a public playground must not
-                // hard-fail on a cache blip).
+                // Fix (P1 Redis-down = no abuse ceiling): without Redis the
+                // distributed limiter can no longer answer (Err) — and the
+                // caller engages the in-process emergency limiter instead of
+                // allowing. The emergency ceiling is STRICTER than the
+                // distributed one.
                 let dead = crate::app::test_support::test_state_over_with_config_and_redis(
                     state.db.clone(),
                     crate::app::test_support::test_config(),
                     "redis://127.0.0.1:1",
                 )
                 .await;
-                assert!(redis_rate_limit(&dead, "adv_explorer_dead").await);
+                assert!(
+                    redis_rate_limit(&dead, "adv_explorer_dead").await.is_err(),
+                    "an unreachable Redis must surface as Err(()) — never as allow"
+                );
+                let ip = format!("adv-dead-{}", uuid::Uuid::new_v4());
+                for _ in 0..EMERGENCY_RATE_LIMIT_PER_MINUTE {
+                    assert!(
+                        rate_limit(&dead, &ip).await,
+                        "the emergency limiter allows up to its (stricter) ceiling"
+                    );
+                }
+                assert!(
+                    !rate_limit(&dead, &ip).await,
+                    "past the emergency ceiling the request is refused even with Redis down"
+                );
+                let other = format!("adv-dead-other-{}", uuid::Uuid::new_v4());
+                assert!(
+                    rate_limit(&dead, &other).await,
+                    "a different IP keeps its own emergency bucket"
+                );
+            })
+        });
+    }
+
+    #[test]
+    fn emergency_limiter_bounds_a_bucket_and_never_leaks_across_ips() {
+        let t0 = std::time::Instant::now();
+        let ip = format!("emg-{}", uuid::Uuid::new_v4());
+        let other = format!("emg-other-{}", uuid::Uuid::new_v4());
+
+        for _ in 0..EMERGENCY_RATE_LIMIT_PER_MINUTE {
+            assert!(emergency_allow(&ip, t0), "within the emergency ceiling");
+        }
+        assert!(
+            !emergency_allow(&ip, t0),
+            "one request past the emergency ceiling is refused"
+        );
+        assert!(
+            emergency_allow(&other, t0),
+            "buckets are per-IP: a fresh IP is unaffected by the exhausted one"
+        );
+
+        // A new fixed window resets the bucket.
+        let later = t0 + EMERGENCY_WINDOW;
+        assert!(
+            emergency_allow(&ip, later),
+            "the window rollover must reset the per-IP counter"
+        );
+    }
+
+    #[test]
+    fn emergency_limiter_prunes_stale_buckets_when_it_grows_large() {
+        let t0 = std::time::Instant::now();
+        // Push past the prune threshold with buckets stamped at t0.
+        for i in 0..(EMERGENCY_PRUNE_THRESHOLD + 100) {
+            emergency_allow(&format!("emg-prune-{i}"), t0);
+        }
+        // One call from the future: the retain must drop every stale t0 bucket.
+        assert!(emergency_allow("emg-prune-trigger", t0 + EMERGENCY_WINDOW));
+        let map = EMERGENCY_LIMITER.get().expect("limiter initialized").lock();
+        assert!(
+            map.len() <= 2,
+            "stale buckets must be pruned once the map grows large, got {}",
+            map.len()
+        );
+        assert!(map.contains_key("emg-prune-trigger"));
+    }
+
+    /// Fix (P1 cold-start race): concurrent FIRST provisions must end with
+    /// exactly ONE live sandbox key, and the provision results must include
+    /// that key's plaintext (hash matches the stored hash). Under the old
+    /// check→revoke→create→set sequence, racing provisions could persist a
+    /// sandbox whose only keys were revoked.
+    #[test]
+    fn concurrent_provisions_leave_exactly_one_live_key_with_a_matching_plaintext() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let provisions = 8usize;
+                let mut handles = Vec::with_capacity(provisions);
+                for _ in 0..provisions {
+                    let st = state.clone();
+                    handles.push(tokio::task::spawn(async move {
+                        provision_sandbox(&st).await.expect("provision")
+                    }));
+                }
+                let results = futures::future::join_all(handles).await;
+                let plaintexts: Vec<String> = results
+                    .into_iter()
+                    .map(|r| r.expect("join").api_key)
+                    .collect();
+                assert_eq!(plaintexts.len(), provisions);
+
+                let live: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*)::bigint FROM api_keys
+                     WHERE tenant_id = $1 AND revoked_at IS NULL",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_one(&state.db)
+                .await
+                .expect("count live keys");
+                assert_eq!(
+                    live, 1,
+                    "exactly one live sandbox key must survive racing provisions"
+                );
+
+                let stored_hash: String = sqlx::query_scalar(
+                    "SELECT key_hash FROM api_keys
+                     WHERE tenant_id = $1 AND revoked_at IS NULL",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_one(&state.db)
+                .await
+                .expect("live key hash");
+                assert!(
+                    plaintexts.iter().any(|k| {
+                        apexmail_lib::hash_api_key_with_secret(
+                            k,
+                            &state.config.api_key_hash_secret,
+                        ) == stored_hash
+                    }),
+                    "the served plaintext of the surviving provision must match the stored hash"
+                );
+            })
+        });
+    }
+
+    /// The process-wide OnceCell: concurrent first `sandbox()` calls all
+    /// receive the SAME instance (exactly one provision per process).
+    #[test]
+    fn concurrent_first_requests_share_one_sandbox_instance() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let mut handles = Vec::new();
+                for _ in 0..4 {
+                    let st = state.clone();
+                    handles.push(tokio::task::spawn(async move {
+                        sandbox(&st).await.expect("sandbox").api_key.clone()
+                    }));
+                }
+                let keys = futures::future::join_all(handles).await;
+                let mut keys = keys.into_iter().map(|k| k.expect("join"));
+                let first = keys.next().expect("at least one caller");
+                assert!(!first.is_empty());
+                for k in keys {
+                    assert_eq!(
+                        k, first,
+                        "every concurrent first request must be served the SAME credential"
+                    );
+                }
             })
         });
     }

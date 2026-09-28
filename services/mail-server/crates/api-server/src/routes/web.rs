@@ -2160,6 +2160,55 @@ async fn perform_password_login(
     if !verify_password(&user.password_hash, &password) {
         return redirect_error("Invalid email or password.", "/login", &state.config);
     }
+
+    // ── ATO protection: evaluate the successful-password authentication ──
+    // Same risk ladder as the JSON login (see
+    // `crate::routes::auth::ato_evaluate_password_login`). A high-risk
+    // refusal below returns the byte-identical wrong-password flash, so the
+    // SSR form exposes no new oracle either; a medium-risk verdict falls
+    // through into the existing MFA-challenge redirect for enrolled users
+    // (allow + flag for the rest). The real reason always lands in the
+    // auth.ato_login_risk audit row.
+    let ato_client_ip = peer_ip.map(|ip| {
+        crate::middleware::rate_limiter::extract_public_client_ip(
+            &headers,
+            ip,
+            &state.config.trusted_proxies,
+        )
+    });
+    if let crate::routes::auth::AtoLoginDecision::Refuse =
+        crate::routes::auth::ato_evaluate_password_login(
+            &state,
+            &user.id,
+            &user.tenant_id,
+            user.mfa_enabled,
+            ato_client_ip.as_deref(),
+            headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await
+    {
+        // Rate-limit the attempt exactly like a wrong password would
+        // (M-6 distinct-IP corroboration intact — the ATO path alone never
+        // disables the account). A Redis outage must not change the refusal
+        // shape, so the recording failure is logged, not propagated.
+        if let Err(error) = crate::routes::auth::record_login_failure(
+            &state.redis,
+            &crate::routes::auth::normalized_login_identifier(&email),
+            ato_client_ip.as_deref(),
+        )
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                user_id = %user.id,
+                "ATO high-risk SSR login refused; login-failure recording failed"
+            );
+        }
+        return redirect_error("Invalid email or password.", "/login", &state.config);
+    }
+
     // Email verification is a login prerequisite (checked only after the
     // password verified, so unauthenticated callers learn nothing).
     if !user.email_verified {
@@ -4566,9 +4615,7 @@ fn leptos_list_detail_page(
 ) -> String {
     let path = format!("/lists/{}", detail.id);
     let mut inner = stub_flash_banner(flash);
-    inner.push_str(&ui_foundation::leptos_views::web_list_detail_page_with_values(
-        detail,
-    ));
+    inner.push_str(&ui_foundation::leptos_views::web_list_detail_page_with_values(detail));
     let layout =
         ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, &path, csrf_token);
     let title = ui_foundation::axum_router::route_document_title("web", &path);
@@ -12216,10 +12263,8 @@ mod coverage_handler_tests {
         .await;
         // Batch-2 P0-C fix: the fabricated "request recorded" flash became
         // the honest noted-for-the-billing-team copy.
-        assert!(
-            flash_text(&response, &app.config)
-                .contains("Your plan change request was noted for the billing team")
-        );
+        assert!(flash_text(&response, &app.config)
+            .contains("Your plan change request was noted for the billing team"));
         assert!(flash_text(&response, &app.config).contains("Nothing has been charged."));
         let (headers, form) = signed_form(&app.config, &[]);
         let response = form_billing_portal(
@@ -12231,10 +12276,8 @@ mod coverage_handler_tests {
         .await;
         // Batch-2 P0-C fix: no portal session "opens" here — the flash
         // states the noted request instead.
-        assert!(
-            flash_text(&response, &app.config)
-                .contains("Your request for billing portal access was noted")
-        );
+        assert!(flash_text(&response, &app.config)
+            .contains("Your request for billing portal access was noted"));
     }
 
     // ── Batch-2 P0-A/P0-B: the list editor and detail are data-backed ──
@@ -12308,13 +12351,9 @@ mod coverage_handler_tests {
         assert_eq!(renamed, "Renamed");
 
         // ── P0-B: the data-backed detail page ───────────────────────────
-        let detail = crate::routes::web::data::load_list_detail(
-            &app.db,
-            &tenant,
-            &seeded.list_id,
-        )
-        .await
-        .expect("the seeded list must load");
+        let detail = crate::routes::web::data::load_list_detail(&app.db, &tenant, &seeded.list_id)
+            .await
+            .expect("the seeded list must load");
         // The P0-A rename above already applied, so the detail page must
         // show the UPDATED name — one row, read fresh.
         assert_eq!(detail.name, "Renamed");
@@ -12328,10 +12367,7 @@ mod coverage_handler_tests {
             "the Edit link must carry the real list id"
         );
         assert!(
-            detail_html.contains(&format!(
-                "intent=delete-list&amp;id={}",
-                seeded.list_id
-            )),
+            detail_html.contains(&format!("intent=delete-list&amp;id={}", seeded.list_id)),
             "the Delete confirm link must carry the real list id"
         );
         assert!(
@@ -12355,10 +12391,16 @@ mod coverage_handler_tests {
             "another workspace's list id must not resolve here"
         );
         assert!(
-            load_page_data(&app, "web", &format!("/lists/{}/edit", seeded.campaign_id), None, Some(&user))
-                .await
-                .list_edit
-                .is_none(),
+            load_page_data(
+                &app,
+                "web",
+                &format!("/lists/{}/edit", seeded.campaign_id),
+                None,
+                Some(&user)
+            )
+            .await
+            .list_edit
+            .is_none(),
             "an unknown list id must not yield demo edit values"
         );
     }
@@ -13297,6 +13339,319 @@ mod coverage_auth_admin_tests {
             flash_text(&response, &app.config).contains("did not match"),
             "a replayed TOTP code must be refused"
         );
+    }
+
+    // ── ATO protection on the SSR password login ─────────────────────────
+    //
+    // Same process-global runtime as the JSON login; nextest's per-test
+    // process isolation makes `install_for_tests` deterministic. The risk
+    // math mirrors auth.rs's ATO tests: a fresh user is low (4.0), an IP +
+    // device pivot is medium (6.0), and lowered thresholds push the first
+    // login into the high band.
+
+    /// Engine config with explicit thresholds (mfa < block required).
+    fn ato_ssr_config_with_thresholds(
+        mfa_threshold: f64,
+        block_threshold: f64,
+    ) -> ato_protection::config::AtoConfig {
+        ato_protection::config::AtoConfig {
+            mfa_threshold,
+            block_threshold,
+            ..ato_protection::config::AtoConfig::development()
+        }
+    }
+
+    async fn ato_ssr_audit_rows(
+        db: &sqlx::PgPool,
+        user_id: &str,
+    ) -> Vec<(String, serde_json::Value)> {
+        sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT action, details FROM audit_logs \
+             WHERE user_id = $1 AND action LIKE 'auth.ato%' ORDER BY timestamp",
+        )
+        .bind(user_id)
+        .fetch_all(db)
+        .await
+        .expect("query ato audit rows")
+    }
+
+    async fn ato_ssr_cleanup_audit(db: &sqlx::PgPool, tenant: &str) {
+        sqlx::query("DELETE FROM audit_logs WHERE tenant_id = $1 AND action LIKE 'auth.ato%'")
+            .bind(tenant)
+            .execute(db)
+            .await
+            .expect("clean ato audit rows");
+    }
+
+    /// One SSR password login against `perform_password_login` via the
+    /// `form_login` handler with an explicit peer socket + User-Agent.
+    async fn ato_ssr_login(
+        app: &AppState,
+        email: &str,
+        password: &str,
+        peer: Option<std::net::SocketAddr>,
+        user_agent: &str,
+    ) -> Response {
+        let (mut headers, form) =
+            signed_form(&app.config, &[("email", email), ("password", password)]);
+        headers.insert(header::USER_AGENT, user_agent.parse().expect("ua header"));
+        form_login(
+            State(app.clone()),
+            headers,
+            peer.map(ConnectInfo),
+            Form(form),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn ato_ssr_high_risk_refusal_is_byte_identical_to_wrong_password() {
+        let Some(app) = coverage_support::rsa_state("cov_ato_ssr_high").await else {
+            eprintln!("skipping ato_ssr_high_risk_refusal: no TEST_DATABASE_URL");
+            return;
+        };
+        ato_protection::runtime::install_for_tests(true, ato_ssr_config_with_thresholds(2.0, 3.5));
+        let (tenant, tag) = coverage_support::tenant_pair("ato");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        // seed_tenant pre-creates member0/member1-{tag} with a dead hash;
+        // set_password gives one a usable credential.
+        let email = format!("member0-{tag}@example.test");
+        let user_id = set_password(&app, &tenant, &email, "CorrectHorse1!").await;
+        let home = std::net::SocketAddr::from(([203, 0, 113, 10], 443));
+
+        // The wrong-password response is the oracle: (status, location,
+        // flash) must be reproduced exactly by the ATO refusal.
+        let wrong = ato_ssr_login(&app, &email, "WrongPassword1!", None, "ATO-UA-SSR").await;
+        assert_eq!(wrong.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&wrong), "/login");
+        let wrong_flash = flash_text(&wrong, &app.config);
+        assert_eq!(wrong_flash, "Invalid email or password.");
+        assert!(
+            !set_cookies(&wrong)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "a failed login must not mint a session"
+        );
+
+        // Correct password, first-ever login (4.0 >= block 3.5) → refused.
+        let refused = ato_ssr_login(&app, &email, "CorrectHorse1!", Some(home), "ATO-UA-SSR").await;
+        assert_eq!(refused.status(), wrong.status(), "status must match");
+        assert_eq!(
+            location(&refused),
+            location(&wrong),
+            "PRG target must match"
+        );
+        assert_eq!(
+            flash_text(&refused, &app.config),
+            wrong_flash,
+            "the flash copy must be byte-identical to the wrong-password flash"
+        );
+        assert!(!set_cookies(&refused)
+            .iter()
+            .any(|cookie| cookie.starts_with("am_session=")));
+
+        // The owner sees the real reason; the attempt is rate-limited. The
+        // exact per-identifier key is asserted (db 0 is shared with other
+        // tests' JSON logins, so a global key count would race).
+        let rows = ato_ssr_audit_rows(&app.db, &user_id).await;
+        assert_eq!(rows.len(), 1, "exactly the high verdict is audited");
+        assert_eq!(rows[0].0, "auth.ato_login_risk");
+        assert_eq!(rows[0].1["band"], "high");
+        assert_eq!(rows[0].1["step_up"], "refused");
+        let mut conn = app.redis.get().await.expect("redis");
+        let failures: Option<i64> = deadpool_redis::redis::cmd("GET")
+            .arg(format!(
+                "apexmail:auth:failures:{}",
+                crate::routes::helpers::hash_token(
+                    &crate::routes::auth::normalized_login_identifier(&email)
+                )
+            ))
+            .query_async(&mut *conn)
+            .await
+            .expect("failure counter");
+        assert_eq!(
+            failures,
+            Some(1),
+            "the refusal records exactly one failure (SSR wrong passwords record none)"
+        );
+
+        // Never a permanent lockout: detector off, the same credentials
+        // sign in immediately.
+        ato_protection::runtime::install_for_tests(
+            false,
+            ato_protection::config::AtoConfig::development(),
+        );
+        let after = ato_ssr_login(&app, &email, "CorrectHorse1!", Some(home), "ATO-UA-SSR").await;
+        assert_redirect(&after, "/dashboard");
+        assert!(flash_text(&after, &app.config) == "Signed in.");
+        assert!(set_cookies(&after)
+            .iter()
+            .any(|cookie| cookie.starts_with("am_session=")));
+
+        ato_protection::runtime::uninstall_for_tests();
+        ato_ssr_cleanup_audit(&app.db, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn ato_ssr_medium_risk_flags_unenrolled_and_challenges_enrolled() {
+        let Some(app) = coverage_support::rsa_state("cov_ato_ssr_medium").await else {
+            eprintln!("skipping ato_ssr_medium_risk: no TEST_DATABASE_URL");
+            return;
+        };
+        ato_protection::runtime::install_for_tests(
+            true,
+            ato_protection::config::AtoConfig::development(),
+        );
+        let (tenant, tag) = coverage_support::tenant_pair("ato");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let home = std::net::SocketAddr::from(([203, 0, 113, 10], 443));
+        let roamer = std::net::SocketAddr::from(([198, 51, 100, 20], 443));
+
+        // Unenrolled member: home login is low → session, no audit row.
+        // seed_tenant pre-creates member0/member1-{tag}; set_password gives
+        // member0 a usable credential.
+        let plain = format!("member0-{tag}@example.test");
+        set_password(&app, &tenant, &plain, "CorrectHorse1!").await;
+        let first = ato_ssr_login(&app, &plain, "CorrectHorse1!", Some(home), "ATO-UA-One").await;
+        assert_redirect(&first, "/dashboard");
+        assert_eq!(flash_text(&first, &app.config), "Signed in.");
+        let user_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(&plain)
+                .fetch_one(&app.db)
+                .await
+                .expect("user id");
+        assert!(ato_ssr_audit_rows(&app.db, &user_id).await.is_empty());
+
+        // Roaming login (different IP + device) is medium → allowed +
+        // flagged, still a session, audit row with the band.
+        let second =
+            ato_ssr_login(&app, &plain, "CorrectHorse1!", Some(roamer), "ATO-UA-Two").await;
+        assert_redirect(&second, "/dashboard");
+        assert_eq!(flash_text(&second, &app.config), "Signed in.");
+        let rows = ato_ssr_audit_rows(&app.db, &user_id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1["band"], "medium");
+        assert_eq!(rows[0].1["step_up"], "flagged");
+
+        // MFA-enrolled member (member1): BOTH logins get the challenge
+        // redirect (pre-existing behavior for enrolled users), but the
+        // medium-risk one is now audited as a required step-up — and the
+        // observable response is identical, so the risk path adds no new
+        // oracle.
+        let enrolled = format!("member1-{tag}@example.test");
+        let enrolled_id = set_password(&app, &tenant, &enrolled, "CorrectHorse1!").await;
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let secret: String = uuid::Uuid::new_v4()
+            .into_bytes()
+            .iter()
+            .take(20)
+            .map(|byte| alphabet[(byte & 0x1f) as usize] as char)
+            .collect();
+        let aad = format!("user_id={enrolled_id}").into_bytes();
+        let encrypted =
+            apexmail_lib::secret_at_rest::encrypt_at_rest(&secret, &aad).expect("encrypt secret");
+        sqlx::query("UPDATE users SET mfa_enabled = true, mfa_secret = $1 WHERE id = $2::uuid")
+            .bind(&encrypted)
+            .bind(&enrolled_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let low_challenge =
+            ato_ssr_login(&app, &enrolled, "CorrectHorse1!", Some(home), "ATO-UA-One").await;
+        assert!(location(&low_challenge).starts_with("/login?mfa=1&email="));
+        assert!(cookie_from(&low_challenge, "apexmail_login_challenge=").is_some());
+        assert!(
+            ato_ssr_audit_rows(&app.db, &enrolled_id).await.is_empty(),
+            "the low-band login logs the score but writes no audit row"
+        );
+
+        let stepup_challenge = ato_ssr_login(
+            &app,
+            &enrolled,
+            "CorrectHorse1!",
+            Some(roamer),
+            "ATO-UA-Two",
+        )
+        .await;
+        assert!(location(&stepup_challenge).starts_with("/login?mfa=1&email="));
+        assert!(cookie_from(&stepup_challenge, "apexmail_login_challenge=").is_some());
+        assert!(!set_cookies(&stepup_challenge)
+            .iter()
+            .any(|cookie| cookie.starts_with("am_session=")));
+        let rows = ato_ssr_audit_rows(&app.db, &enrolled_id).await;
+        assert_eq!(rows.len(), 1, "low logs, medium audits");
+        assert_eq!(rows[0].1["band"], "medium");
+        assert_eq!(rows[0].1["step_up"], "required");
+
+        ato_protection::runtime::uninstall_for_tests();
+        ato_ssr_cleanup_audit(&app.db, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn ato_ssr_disabled_is_indistinguishable_from_low_risk() {
+        let Some(app) = coverage_support::rsa_state("cov_ato_ssr_disabled").await else {
+            eprintln!("skipping ato_ssr_disabled: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant, tag) = coverage_support::tenant_pair("ato");
+        coverage_support::seed_tenant(&app.db, &tenant, &tag).await;
+        let home = std::net::SocketAddr::from(([203, 0, 113, 10], 443));
+
+        // Disabled: the pre-ATO behavior exactly. seed_tenant pre-creates
+        // member0/member1-{tag}; set_password gives member0 a credential.
+        ato_protection::runtime::install_for_tests(
+            false,
+            ato_protection::config::AtoConfig::development(),
+        );
+        let plain = format!("member0-{tag}@example.test");
+        set_password(&app, &tenant, &plain, "CorrectHorse1!").await;
+        let disabled =
+            ato_ssr_login(&app, &plain, "CorrectHorse1!", Some(home), "ATO-UA-SSR").await;
+        assert_redirect(&disabled, "/dashboard");
+        assert_eq!(flash_text(&disabled, &app.config), "Signed in.");
+        assert!(set_cookies(&disabled)
+            .iter()
+            .any(|cookie| cookie.starts_with("am_session=")));
+        let user_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(&plain)
+                .fetch_one(&app.db)
+                .await
+                .expect("user id");
+        assert!(ato_ssr_audit_rows(&app.db, &user_id).await.is_empty());
+
+        // Enabled + low risk (fresh user): identical observable outcome and
+        // still no audit row.
+        ato_protection::runtime::install_for_tests(
+            true,
+            ato_protection::config::AtoConfig::development(),
+        );
+        let other = format!("member1-{tag}@example.test");
+        set_password(&app, &tenant, &other, "CorrectHorse1!").await;
+        let enabled = ato_ssr_login(&app, &other, "CorrectHorse1!", Some(home), "ATO-UA-SSR").await;
+        assert_eq!(enabled.status(), disabled.status());
+        assert_eq!(location(&enabled), location(&disabled));
+        assert_eq!(
+            flash_text(&enabled, &app.config),
+            flash_text(&disabled, &app.config)
+        );
+        assert!(set_cookies(&enabled)
+            .iter()
+            .any(|cookie| cookie.starts_with("am_session=")));
+        let other_id: String =
+            sqlx::query_scalar("SELECT id::text FROM users WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(&other)
+                .fetch_one(&app.db)
+                .await
+                .expect("user id");
+        assert!(ato_ssr_audit_rows(&app.db, &other_id).await.is_empty());
+
+        ato_protection::runtime::uninstall_for_tests();
+        ato_ssr_cleanup_audit(&app.db, &tenant).await;
     }
 
     /// Rebuild the Cookie header from the CSRF cookie only (helper for
@@ -19880,14 +20235,13 @@ mod residual_zero_tests {
         // post it), so `consent_safe_return_to` is the only thing standing
         // between an attacker and an open redirect off the consent hop.
         let state = coverage_support::dead_state().await;
-        let post =
-            |choice: Option<&str>, return_to: &str| {
-                let request = ConsentRequest {
-                    choice: choice.map(str::to_string),
-                    return_to: Some(return_to.to_string()),
-                };
-                consent_post(State(state.clone()), Form(request))
+        let post = |choice: Option<&str>, return_to: &str| {
+            let request = ConsentRequest {
+                choice: choice.map(str::to_string),
+                return_to: Some(return_to.to_string()),
             };
+            consent_post(State(state.clone()), Form(request))
+        };
 
         // (a) A protocol-relative target must collapse to "/" while the
         //     legitimate choice still records.
@@ -20042,8 +20396,10 @@ mod residual_zero_tests {
         let admin = admin_router(state.clone())
             .layer(axum::Extension(operator))
             .with_state(state.clone());
-        let request =
-            truncated_post("/web/admin/sales/discovery/run", "https://cp.apexmail.test/sales");
+        let request = truncated_post(
+            "/web/admin/sales/discovery/run",
+            "https://cp.apexmail.test/sales",
+        );
         let response = admin.oneshot(request).await.expect("oneshot");
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(location(&response), "/sales");
@@ -20108,9 +20464,13 @@ mod residual_zero_tests {
         };
         let ghost_tenant = ghost.tenant_id.clone();
         let (headers, form) = signed_form(&app.config, &[("name", "forged.example.test")]);
-        let response =
-            form_domain_create(State(app.clone()), axum::Extension(ghost), headers, Form(form))
-                .await;
+        let response = form_domain_create(
+            State(app.clone()),
+            axum::Extension(ghost),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/domains/new");
         let flash = flash_text(&response, &app.config);
         // Batch-2 leaked-copy fix (P1-6): the entitlement failure used to
@@ -20122,14 +20482,16 @@ mod residual_zero_tests {
             flash.contains("Could not check the domain limit right now"),
             "the snapshot failure must flash the retry copy, got {flash:?}"
         );
-        let ghost_domains: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM domains WHERE tenant_id = $1",
-        )
-        .bind(&ghost_tenant)
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
-        assert_eq!(ghost_domains, 0, "no domain may be created for a ghost tenant");
+        let ghost_domains: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
+                .bind(&ghost_tenant)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            ghost_domains, 0,
+            "no domain may be created for a ghost tenant"
+        );
 
         // (b) A one-domain plan refuses the second domain and the count
         //     stays put — the gate runs BEFORE the insert.
@@ -20214,9 +20576,13 @@ mod residual_zero_tests {
             scopes: vec!["*".into()],
         };
         let (headers, form) = signed_form(&app.config, &[("name", "second.example.test")]);
-        let response =
-            form_domain_create(State(app.clone()), axum::Extension(caller), headers, Form(form))
-                .await;
+        let response = form_domain_create(
+            State(app.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/domains/new");
         let flash = flash_text(&response, &app.config);
         // Batch-2 leaked-copy fix (P1-6): the capacity refusal used to pipe
@@ -20226,12 +20592,11 @@ mod residual_zero_tests {
             flash.contains("sending-domain limit is reached"),
             "the capacity refusal must be the plain plan-limit copy, got {flash:?}"
         );
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&app.db)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
         assert_eq!(count, 1, "a gated-out create must write nothing");
     }
 
@@ -20259,21 +20624,24 @@ mod residual_zero_tests {
         .await
         .expect("seed the taken domain");
         let (headers, form) = signed_form(&app.config, &[("name", &taken.to_uppercase())]);
-        let response =
-            form_domain_create(State(app.clone()), axum::Extension(caller.clone()), headers, Form(form))
-                .await;
+        let response = form_domain_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/domains/new");
         let flash = flash_text(&response, &app.config);
         assert!(
             flash.contains("already added to this account"),
             "the unique violation must be a field error, got {flash:?}"
         );
-        let taken_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE name = $1")
-                .bind(&taken)
-                .fetch_one(&app.db)
-                .await
-                .unwrap();
+        let taken_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE name = $1")
+            .bind(&taken)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
         assert_eq!(
             taken_count, 1,
             "a duplicate create must write nothing under the colliding name"
@@ -20306,9 +20674,13 @@ mod residual_zero_tests {
             &state.config,
             &[("name", &format!("faulty-{tag}.example.test"))],
         );
-        let response =
-            form_domain_create(State(state.clone()), axum::Extension(caller), headers, Form(form))
-                .await;
+        let response = form_domain_create(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(
             flash_text(&response, &state.config),
             "Could not add the domain right now. Try again."
@@ -20336,9 +20708,13 @@ mod residual_zero_tests {
             &state.config,
             &[("name", &format!("hidden-{tag}.example.test"))],
         );
-        let response =
-            form_domain_create(State(state.clone()), axum::Extension(caller), headers, Form(form))
-                .await;
+        let response = form_domain_create(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(
             flash_text(&response, &state.config),
             "Could not add the domain. Try again."
@@ -20365,9 +20741,13 @@ mod residual_zero_tests {
             &state.config,
             &[("userName", "escalate@example.test"), ("role", "owner")],
         );
-        let response =
-            form_team_invite(State(state.clone()), axum::Extension(key_session), headers, Form(form))
-                .await;
+        let response = form_team_invite(
+            State(state.clone()),
+            axum::Extension(key_session),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/settings/team");
         let flash = flash_text(&response, &state.config);
         assert!(
@@ -20386,7 +20766,8 @@ mod residual_zero_tests {
         let mut config = test_config();
         config.kiwi_enabled = true;
         config.kiwi_secret_key = "not-dev".into();
-        let state = crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
         let (tenant, tag) = coverage_support::tenant_pair("rsk");
         coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
         let email = format!("reset-{tag}@example.test");
@@ -20417,8 +20798,7 @@ mod residual_zero_tests {
                 ("confirmPassword", "CorrectHorse2!"),
             ],
         );
-        let response =
-            form_reset_password(State(state.clone()), headers, None, Form(form)).await;
+        let response = form_reset_password(State(state.clone()), headers, None, Form(form)).await;
         assert_eq!(location(&response), expected_back);
         let flash = flash_text(&response, &state.config);
         assert!(
@@ -20454,7 +20834,10 @@ mod residual_zero_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(row.0, "x", "a captcha-refused reset must not change the password");
+        assert_eq!(
+            row.0, "x",
+            "a captcha-refused reset must not change the password"
+        );
         assert!(
             row.1.is_some(),
             "a captcha-refused reset must not consume the reset token"
@@ -20470,7 +20853,8 @@ mod residual_zero_tests {
 
         // (a) An unknown path renders NO app chrome: a bare 404 pointing
         //     home, never a half-rendered page under an attacker path.
-        let response = static_ssr_fallback("web", "/no-such-surface-xyz", &HeaderMap::new(), &config);
+        let response =
+            static_ssr_fallback("web", "/no-such-surface-xyz", &HeaderMap::new(), &config);
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(location(&response), "/dashboard");
         assert_eq!(
@@ -20491,10 +20875,12 @@ mod residual_zero_tests {
         assert_eq!(response.status(), StatusCode::OK);
         let cookies = set_cookies(&response);
         let html = body_string(response).await;
-        assert!(html.contains("boom"), "the flash must render once: got {html}");
         assert!(
-            !cookies.is_empty()
-                && cookies.iter().all(|cookie| cookie.contains("; Secure")),
+            html.contains("boom"),
+            "the flash must render once: got {html}"
+        );
+        assert!(
+            !cookies.is_empty() && cookies.iter().all(|cookie| cookie.contains("; Secure")),
             "every production render cookie must be Secure: {cookies:?}"
         );
         assert!(
@@ -20514,7 +20900,8 @@ mod residual_zero_tests {
         };
         let mut config = test_config();
         config.environment = crate::config::Environment::Production;
-        let state = crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
         let (tenant, tag) = coverage_support::tenant_pair("psm");
         coverage_support::seed_tenant(&state.db, &tenant, &tag).await;
         let (user, _email) = seed_caller(&state.db, &tenant, "member").await;
@@ -20544,8 +20931,13 @@ mod residual_zero_tests {
         let mut form = HashMap::new();
         form.insert("code".to_string(), totp_code(&secret));
         form.insert("_csrf".to_string(), csrf_token);
-        let response =
-            form_mfa_confirm(State(state.clone()), axum::Extension(user), headers, Form(form)).await;
+        let response = form_mfa_confirm(
+            State(state.clone()),
+            axum::Extension(user),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/cp/security");
         let flash = flash_text(&response, &state.config);
         assert!(flash.contains("MFA enabled"), "got {flash:?}");
@@ -20559,12 +20951,11 @@ mod residual_zero_tests {
             cookies.iter().any(|cookie| cookie.starts_with(&clear_name)),
             "the pending setup cookie must be cleared on success: {cookies:?}"
         );
-        let enabled: bool =
-            sqlx::query_scalar("SELECT mfa_enabled FROM users WHERE id = $1::uuid")
-                .bind(&user_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let enabled: bool = sqlx::query_scalar("SELECT mfa_enabled FROM users WHERE id = $1::uuid")
+            .bind(&user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(enabled, "the confirm must really enable MFA");
 
         // (b) Ending an impersonation session in production: the Strict
@@ -20572,9 +20963,13 @@ mod residual_zero_tests {
         let system_tenant = system_tenant_id(&state.db).await;
         let (operator, _op_email) = seed_caller(&state.db, &system_tenant, "admin").await;
         let (headers, form) = signed_form(&state.config, &[]);
-        let response =
-            form_impersonate_end(State(state.clone()), axum::Extension(operator), headers, Form(form))
-                .await;
+        let response = form_impersonate_end(
+            State(state.clone()),
+            axum::Extension(operator),
+            headers,
+            Form(form),
+        )
+        .await;
         assert_eq!(location(&response), "/cp");
         let flash = flash_text(&response, &state.config);
         assert!(
@@ -20674,12 +21069,15 @@ mod residual_zero_tests {
                 ("subject", "Mine now"),
             ],
         );
-        let response =
-            form_campaign_update(State(state.clone()), axum::Extension(caller), headers, Form(form))
-                .await;
+        let response = form_campaign_update(
+            State(state.clone()),
+            axum::Extension(caller),
+            headers,
+            Form(form),
+        )
+        .await;
         assert!(
-            flash_text(&response, &state.config)
-                .contains("could not be found in this workspace"),
+            flash_text(&response, &state.config).contains("could not be found in this workspace"),
             "got {:?}",
             flash_text(&response, &state.config)
         );
@@ -20689,7 +21087,10 @@ mod residual_zero_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(foreign_name, "Foreign Original", "the foreign row must not move");
+        assert_eq!(
+            foreign_name, "Foreign Original",
+            "the foreign row must not move"
+        );
 
         // (d) An empty schedule clears the stored one.
         let (caller2, _email) = seed_caller(&state.db, &tenant, "member").await;
@@ -20702,9 +21103,13 @@ mod residual_zero_tests {
                 ("scheduled_at", ""),
             ],
         );
-        let response =
-            form_campaign_update(State(state.clone()), axum::Extension(caller2), headers, Form(form))
-                .await;
+        let response = form_campaign_update(
+            State(state.clone()),
+            axum::Extension(caller2),
+            headers,
+            Form(form),
+        )
+        .await;
         assert!(flash_text(&response, &state.config).contains("Campaign saved"));
         let stored: Option<String> =
             sqlx::query_scalar("SELECT scheduled_at::text FROM campaigns WHERE id = $1::uuid")
@@ -20789,11 +21194,18 @@ mod residual_zero_tests {
         //     plan does not carry: refused, nothing written.
         let (headers, body) = signed_bytes_body(
             &app.config,
-            &[("url", "https://hooks.example.test/inbound"), ("events", "inbound")],
+            &[
+                ("url", "https://hooks.example.test/inbound"),
+                ("events", "inbound"),
+            ],
         );
-        let response =
-            form_webhook_create(State(app.clone()), axum::Extension(caller.clone()), headers, body)
-                .await;
+        let response = form_webhook_create(
+            State(app.clone()),
+            axum::Extension(caller.clone()),
+            headers,
+            body,
+        )
+        .await;
         assert_eq!(location(&response), "/settings/webhooks");
         let flash = flash_text(&response, &app.config);
         // Batch-2 leaked-copy fix (P1-6): the refusal names the missing
@@ -20987,9 +21399,20 @@ mod residual_zero_tests {
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
         for form in [
-            vec![("email", "someone@example.test"), ("password", "CorrectHorse2!"), ("confirmPassword", "CorrectHorse2!")],
-            vec![("token", "sometoken"), ("password", "CorrectHorse2!"), ("confirmPassword", "CorrectHorse2!")],
-            vec![("password", "CorrectHorse2!"), ("confirmPassword", "CorrectHorse2!")],
+            vec![
+                ("email", "someone@example.test"),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+            vec![
+                ("token", "sometoken"),
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
+            vec![
+                ("password", "CorrectHorse2!"),
+                ("confirmPassword", "CorrectHorse2!"),
+            ],
         ] {
             let (headers, form) = signed_form(&state.config, &form);
             let response =
@@ -21029,7 +21452,10 @@ mod residual_zero_tests {
         let task = tokio::spawn(async move {
             let (headers, form) = signed_form(
                 &task_state.config,
-                &[("userName", format!("severed-{tag}@example.test").as_str()), ("role", "member")],
+                &[
+                    ("userName", format!("severed-{tag}@example.test").as_str()),
+                    ("role", "member"),
+                ],
             );
             form_team_invite(
                 State(task_state),
@@ -21057,12 +21483,13 @@ mod residual_zero_tests {
             flash_text(&response, &state.config),
             "Could not create the invitation. Try again."
         );
-        let invited: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let invited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(invited, 0, "a severed invite must write nothing");
     }
 }

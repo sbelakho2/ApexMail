@@ -83,12 +83,12 @@ async fn get_calendar(
     // `system_internal_tenant01`, so the literal check always scoped them.
     let should_scope_to_tenant =
         !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
-    let events_table_exists = table_exists(db, "calendar_events").await;
-    let slots_table_exists = table_exists(db, "availability_slots").await;
+    let events_table_exists = table_exists(db, "calendar_events").await?;
+    let slots_table_exists = table_exists(db, "availability_slots").await?;
     let events_have_tenant_id =
-        events_table_exists && column_exists(db, "calendar_events", "tenant_id").await;
+        events_table_exists && column_exists(db, "calendar_events", "tenant_id").await?;
     let slots_have_tenant_id =
-        slots_table_exists && column_exists(db, "availability_slots", "tenant_id").await;
+        slots_table_exists && column_exists(db, "availability_slots", "tenant_id").await?;
     let scope_events = should_scope_to_tenant && events_have_tenant_id;
     let scope_slots = should_scope_to_tenant && slots_have_tenant_id;
 

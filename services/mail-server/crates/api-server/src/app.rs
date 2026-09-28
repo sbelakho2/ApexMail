@@ -2678,6 +2678,10 @@ mod tests {
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            pdf_renderer_auth_token: None,
+            template_renderer_auth_token: None,
+            devex_auth_token: None,
+            ai_embeddings_auth_token: None,
             cp_auth: crate::config::CpAuthConfig {
                 allowed_ips: vec![],
                 session_secret: "test-cp-session-secret-1234567890".into(),

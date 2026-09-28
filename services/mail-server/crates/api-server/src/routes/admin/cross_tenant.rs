@@ -67,9 +67,9 @@ async fn get_cross_tenant_health(
             .await
             .unwrap_or(0);
 
-    let has_messages = table_exists(db, "messages").await;
-    let has_events = table_exists(db, "events").await;
-    let has_tenants_table = table_exists(db, "tenants").await;
+    let has_messages = table_exists(db, "messages").await?;
+    let has_events = table_exists(db, "events").await?;
+    let has_tenants_table = table_exists(db, "tenants").await?;
 
     let (total_emails_sent, total_emails_delivered, total_bounces) = if has_messages {
         let sent = sqlx::query_scalar::<_, i64>(
@@ -262,9 +262,9 @@ async fn get_cross_tenant_plans(
 
     let db = &state.db;
 
-    let has_tenants = table_exists(db, "tenants").await;
-    let has_subs = table_exists(db, "stripe_subscriptions").await;
-    let has_plans = table_exists(db, "plans").await;
+    let has_tenants = table_exists(db, "tenants").await?;
+    let has_subs = table_exists(db, "stripe_subscriptions").await?;
+    let has_plans = table_exists(db, "plans").await?;
 
     let plan_tenant_counts: HashMap<String, i64> = if has_tenants {
         sqlx::query_as::<_, (String, i64)>(
@@ -295,15 +295,15 @@ async fn get_cross_tenant_plans(
     // billing-service's get_mrr_report pattern with proper yearly rounding.
     let subscriptions = if has_subs && has_plans {
         let has_billing_interval =
-            column_exists(db, "stripe_subscriptions", "billing_interval").await;
+            column_exists(db, "stripe_subscriptions", "billing_interval").await?;
         let billing_col = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {
             "'monthly'"
         };
 
-        let has_price_monthly = column_exists(db, "plans", "price_monthly").await;
-        let has_price_yearly = column_exists(db, "plans", "price_yearly").await;
+        let has_price_monthly = column_exists(db, "plans", "price_monthly").await?;
+        let has_price_yearly = column_exists(db, "plans", "price_yearly").await?;
         let price_monthly_col = if has_price_monthly {
             "COALESCE(p.price_monthly, 0)"
         } else {
@@ -486,10 +486,10 @@ async fn get_cross_tenant_growth(
     let now = Utc::now();
     let cutoff_30 = now - Duration::days(30);
 
-    let has_messages = table_exists(db, "messages").await;
-    let has_tenants = table_exists(db, "tenants").await;
-    let has_subs = table_exists(db, "stripe_subscriptions").await;
-    let has_plans = table_exists(db, "plans").await;
+    let has_messages = table_exists(db, "messages").await?;
+    let has_tenants = table_exists(db, "tenants").await?;
+    let has_subs = table_exists(db, "stripe_subscriptions").await?;
+    let has_plans = table_exists(db, "plans").await?;
 
     let total_emails_daily = if has_messages {
         sqlx::query_scalar::<_, i64>(
@@ -600,7 +600,7 @@ async fn get_cross_tenant_growth(
         // MRR growth from stripe_subscriptions (billing's writer table),
         // mirroring billing-service's get_mrr_report pattern.
         let has_billing_interval =
-            column_exists(db, "stripe_subscriptions", "billing_interval").await;
+            column_exists(db, "stripe_subscriptions", "billing_interval").await?;
         let billing_expr = if has_billing_interval {
             "COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"
         } else {

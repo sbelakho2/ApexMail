@@ -9,9 +9,10 @@ use clap::Parser;
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use pdf_renderer::auth::ServiceAuth;
 use pdf_renderer::pdf_router;
 
 #[derive(Parser, Debug)]
@@ -59,12 +60,22 @@ async fn main() -> anyhow::Result<()> {
 
     info!(addr = %addr, "Starting PDF renderer service");
 
-    let service_token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
-    if service_token.is_empty() {
-        warn!("INTERNAL_SERVICE_TOKEN is not set — all authenticated routes will reject requests (401); set INTERNAL_SERVICE_TOKEN to enable internal auth");
+    // P1 #6: per-workload credentials. When PDF_RENDERER_AUTH_TOKEN is set
+    // it is the ONLY accepted secret; when it is unset production boots
+    // REFUSE (the per-workload pattern is complete for this service — the
+    // api-server caller sends the dedicated token and the compose stacks
+    // bridge it as a Docker secret) and non-production boots fall back to
+    // the universal token with a required-soon warning.
+    let service_auth = ServiceAuth::from_env()
+        .map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
+    if service_auth.dedicated_configured() {
+        info!(
+            "per-workload auth active: {} is the only accepted credential",
+            pdf_renderer::auth::DEDICATED_TOKEN_ENV
+        );
     }
 
-    let app = pdf_router(service_token);
+    let app = pdf_router(service_auth);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(addr = %addr, "PDF renderer service listening");

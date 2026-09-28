@@ -84,6 +84,9 @@ inbox-placement = { path = "../inbox-placement" }
 # `/control/*` admin API serializes, instead of duplicating its SQL.
 sales-autopilot = { path = "../sales-autopilot" }
 kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
+# Account-takeover risk evaluation wired into the real login flows
+# (routes/auth.rs JSON login + routes/web.rs SSR password step).
+ato-protection = { path = "../ato-protection" }
 
 [features]
 default = []
