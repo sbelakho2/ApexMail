@@ -81,3 +81,6 @@ docker-compose*
 .DS_Store
 *.log
 tmp/
+# Coverage artifacts
+*.profraw
+*.profdata

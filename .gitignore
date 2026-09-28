@@ -169,3 +169,7 @@ apps/ai/training/**/*.pt
 /test_output.txt
 tools/contrast-audit/node_modules/
 dump.rdb
+
+# Coverage artifacts — never track (accidentally committed 290 MiB once)
+*.profraw
+*.profdata

@@ -164,6 +164,11 @@ validate_repo_gates() {
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
+        # Generated-binary guard: coverage artifacts and retired training
+        # outputs were accidentally committed once (~290 MiB of .profraw).
+        # `.gitignore` prevents new ones; this proves nothing slipped back.
+        ci_check "no generated artifacts tracked" bash -c \
+            '! git ls-files | grep -E "\.profraw$|\.profdata$|^apps/ai/training/(output_[0-9]+/|merged_)" | grep -q .'
     else
         ci_warn "python3 missing — panic-path guardrails skipped"
     fi

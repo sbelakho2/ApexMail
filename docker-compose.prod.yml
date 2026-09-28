@@ -526,7 +526,10 @@ services:
       SALES_UNSUBSCRIBE_SECRET_FILE: /run/secrets/sales_unsubscribe_secret
       SALES_PUBLIC_BASE_URL: ${SALES_PUBLIC_BASE_URL:-https://api.apexmail.ee/sales-api}
       SALES_UNSUBSCRIBE_REDIRECT_URL: ${SALES_UNSUBSCRIBE_REDIRECT_URL:-}
-      SALES_ALLOWED_TENANTS: ${SALES_ALLOWED_TENANTS:-}
+      # The sales brain serves the SYSTEM tenant only; any other value makes
+      # the service refuse to start (config::require_system_tenant_scope).
+      # Customer automations run in the worker fleet, not here.
+      SALES_ALLOWED_TENANTS: ${SALES_ALLOWED_TENANTS:-system}
       SALES_DISPATCH_INTERVAL_SECS: ${SALES_DISPATCH_INTERVAL_SECS:-30}
       SALES_DISPATCH_BATCH_SIZE: ${SALES_DISPATCH_BATCH_SIZE:-100}
       SALES_DISPATCH_CONCURRENCY: ${SALES_DISPATCH_CONCURRENCY:-4}
@@ -694,11 +697,16 @@ services:
       AWS_REGION: ${AWS_REGION:-eu-west-1}
       INTERNAL_SERVICE_TOKEN: ""
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      # AI-control routes (/train, /evaluate, /admin/reindex) refuse the
+      # universal internal token — they require this dedicated credential.
+      AI_ADMIN_TOKEN: ""
+      AI_ADMIN_TOKEN_FILE: /run/secrets/ai_admin_token
     volumes:
       - ./docs:/opt/apexmail/docs:ro
     secrets:
       - postgres_password
       - internal_service_token
+      - ai_admin_token
       - ai_model_api_key
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 3012"]
@@ -1237,6 +1245,9 @@ services:
       AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
       SMTP_HOST: ${SMTP_HOST:-mta}
+      # ── Customer automation executor (moved from sales-autopilot) ────────
+      WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
+      AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
       SMTP_PORT: ${SMTP_PORT:-25}
       SMTP_TLS: ${SMTP_TLS:-false}
       SMTP_USERNAME: ""
@@ -1712,6 +1723,8 @@ networks:
 secrets:
   ai_model_api_key:
     file: ${PROD_AI_MODEL_API_KEY_FILE:-/opt/apexmail/secrets/ai_model_api_key.txt}
+  ai_admin_token:
+    file: ${PROD_AI_ADMIN_TOKEN_FILE:-/opt/apexmail/secrets/ai_admin_token.txt}
   redis_password_map:
     file: ${PROD_REDIS_PASSWORD_MAP_FILE:-/opt/apexmail/secrets/redis_password_map.json}
   postgres_password:

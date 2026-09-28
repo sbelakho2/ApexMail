@@ -1,0 +1,214 @@
+{
+  "$comment": "Declarative topology \u2014 the single source of truth for which runtime images exist, how they deploy, and which alerts cover them. tools/check_topology_contracts.py DERIVES its checks from this file and proves two exhaustiveness properties: (1) every `FROM runtime-base AS <target>` in services/mail-server/Dockerfile must appear here (class build-only is allowed, silence is not), and (2) every non-infrastructure service in docker-compose.prod.yml must map to an entry. A future runtime target or compose service cannot silently escape the topology gate.",
+  "services": [
+    {
+      "name": "api-server",
+      "class": "daemon",
+      "docker_target": "api-server",
+      "compose_dev": "api-server",
+      "compose_prod": "api-server",
+      "alerts": [
+        "ApiServerDown"
+      ],
+      "notes": "SSR console + control plane + REST API"
+    },
+    {
+      "name": "tracking",
+      "class": "daemon",
+      "docker_target": null,
+      "dockerfile": "own Dockerfile (deploy.sh EXTRA_IMAGES loop)",
+      "compose_dev": "tracking",
+      "compose_prod": "tracking",
+      "alerts": [
+        "TrackingServiceDown",
+        "TrackingWalBacklog",
+        "TrackingIngestFailures"
+      ],
+      "notes": "open/click/unsubscribe edge service"
+    },
+    {
+      "name": "mta",
+      "class": "daemon",
+      "docker_target": "mta",
+      "compose_dev": "mta",
+      "compose_prod": "mta",
+      "alerts": [
+        "MtaDown"
+      ],
+      "notes": "inbound SMTP + submission"
+    },
+    {
+      "name": "outbound-mta",
+      "class": "daemon",
+      "docker_target": "outbound-mta",
+      "compose_dev": "outbound-mta",
+      "compose_prod": "outbound-mta",
+      "alerts": [
+        "OutboundMtaDown",
+        "OutboundMtaPendingOldestAgeSlo"
+      ],
+      "notes": "outbound relay with durable ledger + warmup admission"
+    },
+    {
+      "name": "imap-server",
+      "class": "daemon",
+      "docker_target": "imap-server",
+      "compose_dev": "imap-server",
+      "compose_prod": "imap-server",
+      "alerts": [],
+      "notes": "read path; no dedicated Down alert yet \u2014 declared fact"
+    },
+    {
+      "name": "mailstore",
+      "class": "daemon",
+      "docker_target": "mailstore",
+      "compose_dev": null,
+      "compose_prod": "mailstore",
+      "alerts": [],
+      "notes": "message storage service; prod only in compose (dev reaches it via the worker's embedded path)"
+    },
+    {
+      "name": "worker",
+      "class": "daemon",
+      "docker_target": "worker",
+      "compose_dev": "worker",
+      "compose_prod": "worker",
+      "alerts": [
+        "WorkerDown"
+      ],
+      "notes": "queue processors (send, bounce, campaign)"
+    },
+    {
+      "name": "enterprise",
+      "class": "daemon",
+      "docker_target": "enterprise",
+      "compose_dev": "enterprise",
+      "compose_prod": "enterprise",
+      "alerts": [
+        "EnterpriseServiceDown"
+      ],
+      "notes": "contracts/entitlement service"
+    },
+    {
+      "name": "observability",
+      "class": "daemon",
+      "docker_target": "observability",
+      "compose_dev": "observability",
+      "compose_prod": "observability",
+      "alerts": [],
+      "notes": "metrics/rules service"
+    },
+    {
+      "name": "status-server",
+      "class": "daemon",
+      "docker_target": "auth-server",
+      "compose_dev": null,
+      "compose_prod": "status-server",
+      "alerts": [],
+      "notes": "auth-server binary serving the public /status page; prod only"
+    },
+    {
+      "name": "billing-service",
+      "class": "daemon",
+      "docker_target": "billing-service",
+      "compose_dev": "billing-service",
+      "compose_prod": "billing-service",
+      "alerts": [
+        "BillingServiceDown"
+      ],
+      "notes": "Stripe + wallet + invoicing"
+    },
+    {
+      "name": "sales-autopilot",
+      "class": "daemon",
+      "docker_target": "sales-autopilot",
+      "compose_dev": "sales-autopilot",
+      "compose_prod": "sales-autopilot",
+      "alerts": [
+        "SalesAutopilotDown"
+      ],
+      "notes": "owner-only sales engine + customer automation execution (pending the split that moves customer automations out)"
+    },
+    {
+      "name": "compliance",
+      "class": "daemon",
+      "docker_target": "compliance",
+      "compose_dev": "compliance",
+      "compose_prod": "compliance",
+      "alerts": [],
+      "notes": "GDPR/DSR + XBRL + retention"
+    },
+    {
+      "name": "analytics-worker",
+      "class": "daemon",
+      "docker_target": "analytics-worker",
+      "compose_dev": "analytics-worker",
+      "compose_prod": "analytics-worker",
+      "alerts": [],
+      "notes": "ClickHouse rollups + derived usage"
+    },
+    {
+      "name": "pdf-renderer",
+      "class": "daemon",
+      "docker_target": "pdf-renderer",
+      "compose_dev": "pdf-renderer",
+      "compose_prod": "pdf-renderer",
+      "alerts": [],
+      "notes": "invoice/document rendering"
+    },
+    {
+      "name": "ai-service",
+      "class": "daemon",
+      "docker_target": "ai-service",
+      "compose_dev": "ai-service",
+      "compose_prod": "ai-service",
+      "alerts": [],
+      "notes": "AI chat/draft/training service"
+    },
+    {
+      "name": "migrator",
+      "class": "oneshot",
+      "docker_target": "migrator",
+      "compose_dev": null,
+      "compose_prod": "migrator",
+      "alerts": [],
+      "notes": "canonical schema migration job; prod compose runs it before the services"
+    },
+    {
+      "name": "ai-embeddings",
+      "class": "build-only",
+      "docker_target": "ai-embeddings",
+      "compose_dev": null,
+      "compose_prod": null,
+      "alerts": [],
+      "notes": "image is built but intentionally not deployed \u2014 declared fact, not an omission"
+    }
+  ],
+  "infrastructure_compose_services": [
+    "marketing",
+    "nginx",
+    "certbot",
+    "grafana",
+    "postgres",
+    "postgres-backup",
+    "redis",
+    "redis-backup",
+    "redis-exporter",
+    "clickhouse",
+    "clickhouse-backup",
+    "analytics-cold",
+    "analytics-backup",
+    "alertmanager",
+    "blackbox-exporter",
+    "clickhouse-exporter",
+    "clickhouse-backup",
+    "loki",
+    "mailpit",
+    "node-exporter",
+    "otel-collector",
+    "prometheus",
+    "synthetic-monitor",
+    "tempo",
+    "postgres-exporter"
+  ]
+}

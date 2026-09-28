@@ -13,6 +13,15 @@
 # executor and the deploy host cannot drift, and a gate added to `ci/` is
 # picked up here with no YAML change.
 #
+# HERMETIC EXECUTOR: every step runs in the apexmail-ci image
+# (ci/ci-image/Dockerfile) which contains EVERY tool the stages require, at
+# the deploy host's versions. CI_MISSING_TOOLS=fail is set on every step so
+# `ci_have_tool` fails closed instead of warn-and-skipping security gates on
+# a non-deploy-host executor, and the first step asserts the exact toolchain
+# (ci/woodpecker/toolchain.sh — it also runs at image build time, so a broken
+# image cannot be pushed). Bump the image tag whenever a pinned version
+# changes.
+#
 # Scope: validate → test → security. The host-only stages (fetch/migrate/
 # deploy/verify/notify) are deliberately NOT here: they act on the deploy host
 # and require its docker/compose and secrets. CI never deploys.
@@ -48,9 +57,19 @@ services:
     image: clickhouse/clickhouse-server:24.8-alpine
 
 steps:
+  # --- first-stage assertion: print and check the exact toolchain ----------
+  - name: toolchain
+    image: ghcr.io/sbelakho2/apexmail-ci:1
+    environment:
+      CI_MISSING_TOOLS: fail
+    commands:
+      - apexmail-ci-toolchain --assert
+
   # --- static validation gates (env-file/compose sanity, repo gates, migration lint) ---
   - name: validate
-    image: rust:1.98-bookworm
+    image: ghcr.io/sbelakho2/apexmail-ci:1
+    environment:
+      CI_MISSING_TOOLS: fail
     commands:
       - ./ci/woodpecker/stage.sh validate
 
@@ -60,7 +79,9 @@ steps:
   # ci/pipeline.conf); fixtures are exported into the run dir, never the
   # working tree.
   - name: ui
-    image: rust:1.98-bookworm
+    image: ghcr.io/sbelakho2/apexmail-ci:1
+    environment:
+      CI_MISSING_TOOLS: fail
     commands:
       - ./ci/woodpecker/stage.sh ui
 
@@ -68,8 +89,9 @@ steps:
   #     deny, cargo test --workspace against the postgres service, coverage
   #     ratchet, PHP/SDK/satellite lanes when their toolchains are present) ---
   - name: test
-    image: rust:1.98-bookworm
+    image: ghcr.io/sbelakho2/apexmail-ci:1
     environment:
+      CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
       CI_TEST_REDIS: service
       TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
@@ -96,8 +118,9 @@ steps:
   # --- security + supply chain (gitleaks, cargo audit/vet, semgrep,
   #     fresh-database migration validation, trivy) ---
   - name: security
-    image: rust:1.98-bookworm
+    image: ghcr.io/sbelakho2/apexmail-ci:1
     environment:
+      CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
       CI_TEST_REDIS: service
       TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci

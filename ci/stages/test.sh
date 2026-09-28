@@ -189,6 +189,12 @@ run_cargo_tests() {
             ci_err "cargo nextest run FAILED — see the output above"
             return "$CI_EXIT_FAIL"
         fi
+    elif [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
+        # Hermetic CI (the Woodpecker image): no fallback. A nextest-less
+        # environment means the image is broken — prove that, don't degrade
+        # into cargo test's threaded env-race model (§9 F10).
+        ci_err "cargo-nextest missing and CI_MISSING_TOOLS=fail — the CI image is under-provisioned; build ci/ci-image (no cargo test fallback in hermetic CI)"
+        return "$CI_EXIT_FAIL"
     else
         ci_warn "cargo-nextest missing — falling back to cargo test (known env-race, §9 F10); install nextest via ci/install.sh"
         # shellcheck disable=SC2086
