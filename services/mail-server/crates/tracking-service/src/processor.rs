@@ -2,23 +2,38 @@
 //!
 //! • Events are RPUSH'd into a Redis list (write-ahead log) _before_ the
 //! HTTP response is sent, so they survive process crashes (Redis AOF).
-//! • A background Tokio task drains batches from Redis → Postgres using an
-//! atomic Lua script (LRANGE + LTRIM in one Redis round-trip). Batch size is
-//! adaptive (LLEN-driven, capped at 500) and Postgres failures back off
-//! exponentially (1 s·2^n, capped 60 s) with a per-event retry budget.
-//! • If the Postgres write fails, events are re-RPUSH'd back to Redis so the
-//! next flush cycle retries (-500-001); after 10 retries an event is dropped
-//! as poison with an error log.
+//! • P0 (WAL durability, acknowledgement-based semantics):a background
+//! Tokio task CLAIMS a batch by atomically moving it `pending` →
+//! `processing` (a Lua multi-key move — a claim/lease, NOT a deletion),
+//! writes it to PostgreSQL, and ONLY after the commit ACKs (deletes the
+//! batch from `processing`). Every flush first RECLAIMS leftover
+//! `processing` entries back to the head of `pending` (crash recovery,
+//! no starvation). A kill at ANY point therefore loses zero accepted
+//! events; the replay after a lost ACK is absorbed by the
+//! `ON CONFLICT (id) DO NOTHING` idempotency of the `events` insert.
+//! Batch size is adaptive (LLEN-driven, capped at MAX_FLUSH_BATCH = 500)
+//! and Postgres failures back off exponentially (1 s·2^n, capped 60 s)
+//! with a per-event retry budget.
+//! • If the Postgres write fails, the claimed batch is moved BACK to
+//! `pending` (retry counter bumped) and released from `processing` in ONE
+//! atomic Lua step; after MAX_EVENT_RETRIES an event is dead-lettered to
+//! the durable `apexmail:events:dead` list (JSON envelope with a FNV-1a
+//! checksum — see `DeadLetterEntry`) instead of being silently dropped.
+//! Unparsable WAL envelopes are dead-lettered too (the actual poison
+//! shape) rather than vanishing with a log line.
 //! • Events are wrapped in versioned envelopes with a SHA-256 checksum
 //! (E-174). v2 envelopes carry the full 64-hex-char digest; v1 envelopes
 //! carry only the first 8 hex chars (32 bits) — a corruption heuristic,
 //! NOT a security integrity check — and remain readable for backward
 //! compatibility with entries already queued in Redis.
 //! • Dedup via Redis SETNX (EX 86400) keyed (message, recipient) for BOTH
-//! opens and clicks — click tokens carry no expiry (see `codec.rs`), so the
-//! 24 h dedup window is the replay bound; token-level expiry remains future
-//! work. The key is rolled back (DEL) when the subsequent WAL enqueue fails,
-//! so a failed enqueue never swallows the client's retry as a "duplicate".
+//! opens and clicks — click/open tokens minted without an embedded
+//! issued-at never expire (see `codec.rs`: legacy tokens have documented
+//! indefinite semantics; the 24 h dedup window is the replay bound), while
+//! newly minted tokens can carry a compact epoch-days issued-at that the
+//! codec enforces against `TRACKING_TOKEN_MAX_AGE_SECS`. The dedup key is
+//! rolled back (DEL) when the subsequent WAL enqueue fails, so a failed
+//! enqueue never swallows the client's retry as a "duplicate".
 //! • Unsubscribes are durable-or-failed (F2):when the suppression INSERT
 //! fails, a pending-retry record is RPUSH'd to
 //! `apexmail:suppressions:pending` (drained by the flush loop with the
@@ -68,33 +83,119 @@ const WAL_VERSION: u8 = 2;
 const WAL_VERSION_V1: u8 = 1;
 
 /// Maximum re-enqueue attempts for a WAL event whose Postgres write keeps
-/// failing. Events exceeding this are dropped as poison (with an error log)
-/// so one permanently bad event cannot wedge the WAL forever.
+/// failing. Events exceeding this are dead-lettered (see
+/// [`REDIS_DEAD_LETTER_KEY`]) so one permanently bad event cannot wedge the
+/// WAL forever — and are never silently lost.
 const MAX_EVENT_RETRIES: usize = 10;
 
 /// Upper bound for a single flush drain (adaptive: the actual batch is the
 /// current WAL length, capped at this value so one flush stays bounded).
 const MAX_FLUSH_BATCH: usize = 500;
 
+/// DLQ envelope schema version (`DeadLetterEntry.schema_version`).
+pub const DEAD_LETTER_SCHEMA_VERSION: u64 = 1;
+
+/// DLQ `failure_reason`:the envelope exhausted MAX_EVENT_RETRIES against a
+/// persistently failing PostgreSQL.
+const DEAD_LETTER_REASON_MAX_RETRIES: &str = "max_retries_exceeded";
+
+/// DLQ `failure_reason`:the WAL envelope could not be parsed AT ALL
+/// (corrupt JSON, unknown schema) — the actual poison shape.
+const DEAD_LETTER_REASON_UNPARSABLE: &str = "unparsable_envelope";
+
 /// Redis list key (without the `tracking:` keyPrefix applied by the pool).
 /// The pool's keyPrefix is `tracking:` so the effective key is
 /// `tracking:apexmail:events:pending`.
 pub const REDIS_WAL_KEY: &str = "apexmail:events:pending";
 
+/// P0 (WAL durability):claim/lease list. A flush atomically moves the batch
+/// `pending` → `processing` and deletes entries from `processing` ONLY after
+/// the PostgreSQL commit (the ACK). A crash leaves orphaned leases here,
+/// durable in Redis; the next flush reclaims them before claiming new work.
+pub const REDIS_WAL_PROCESSING_KEY: &str = "apexmail:events:processing";
+
+/// P0 (poison DLQ):durable dead-letter list. Events that exhaust
+/// MAX_EVENT_RETRIES and unparsable WAL envelopes land here as JSON
+/// [`DeadLetterEntry`] records instead of being dropped with a log line.
+/// Watched by the `TrackingDeadLetterQueue` alert (deploy/alerting-rules.yml).
+pub const REDIS_DEAD_LETTER_KEY: &str = "apexmail:events:dead";
+
 /// F2:Redis list holding suppression inserts that failed and must be
-/// retried (durable-or-failed unsubscribes). Same RPUSH/drain lifecycle as
-/// the event WAL above.
+/// retried (durable-or-failed unsubscribes). Same claim/lease/ACK lifecycle
+/// as the event WAL above.
 pub const REDIS_SUPPRESSION_RETRY_KEY: &str = "apexmail:suppressions:pending";
 
-/// Atomic Lua drain:reads up to N items from the front of the list and
-/// simultaneously trims them, all in a single Redis operation — no interleave
-/// window between LRANGE and LTRIM.
-const ATOMIC_DRAIN_SCRIPT: &str = r#"
+/// F2:claim/lease list for the suppression retry queue (same protocol as
+/// [`REDIS_WAL_PROCESSING_KEY`]).
+pub const REDIS_SUPPRESSION_PROCESSING_KEY: &str = "apexmail:suppressions:processing";
+
+/// P0 (WAL durability fix — acknowledgement-based semantics):
+///
+/// Durable invariant for every ACCEPTED tracking event:
+/// ```text
+///   accepted HTTP event
+///     → durable Redis record      RPUSH apexmail:events:pending
+///     → claim/lease WITHOUT deletion
+///                                 Lua: LRANGE pending + RPUSH processing + LTRIM pending
+///                                 (one atomic script — the batch exists in
+///                                  exactly one of the two lists at rest)
+///     → PostgreSQL COMMIT         INSERT … ON CONFLICT (id) DO NOTHING
+///     → Redis ACK                 LREM the batch from apexmail:events:processing
+/// ```
+/// A kill at ANY point loses zero accepted events:
+///   • before the claim → still in `pending`;
+///   • after the claim, before the commit → durable in `processing`, and the
+///     next flush RECLAIMS leftover leases back to the HEAD of `pending`
+///     (before claiming new work — no starvation);
+///   • after the commit, before the ACK → present in BOTH Postgres and
+///     `processing`; the reclaim replays it and the `events` insert's
+///     `ON CONFLICT (id) DO NOTHING` makes the replay a no-op
+///     (at-least-once delivery ⇒ exactly-once rows).
+///
+/// The old protocol (LRANGE + LTRIM in one script, run BEFORE the PG write)
+/// deleted the durable copy first: a kill between the LTRIM and the commit
+/// discarded up to MAX_FLUSH_BATCH (500) accepted events from both stores.
+const CLAIM_SCRIPT: &str = r#"
 local events = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
 if #events > 0 then
+  for i = 1, #events do
+    redis.call('RPUSH', KEYS[2], events[i])
+  end
   redis.call('LTRIM', KEYS[1], #events, -1)
 end
 return events
+"#;
+
+/// P0:reclamation (crash recovery). Moves EVERY entry still leased in
+/// `processing` back to the HEAD of `pending` (RPOPLPUSH preserves FIFO
+/// order) in ONE atomic script. Runs at the TOP of every flush, before new
+/// claims — orphaned events from a crash are retried before fresh traffic.
+/// A live flusher's claim either lands entirely before this script (its
+/// entries are reclaimed and replayed — safe, see the invariant above) or
+/// entirely after (untouched); Redis scripts never interleave.
+const RECLAIM_SCRIPT: &str = r#"
+local moved = {}
+while redis.call('LLEN', KEYS[1]) > 0 do
+  table.insert(moved, redis.call('RPOPLPUSH', KEYS[1], KEYS[2]))
+end
+return moved
+"#;
+
+/// P0:lease release / atomic requeue. For each ARGV pair
+/// `(original, replacement)`:
+///   • replacement ≠ "" → the bumped envelope is RPUSH'd back to `pending`
+///     AND the claimed original is LREM'd from `processing` in the SAME
+///     atomic step (no crash window can orphan or duplicate the pair);
+///   • replacement = "" → plain ACK/release (the PG commit already
+///     happened, or the entry is being dead-lettered/poison-dropped).
+const RELEASE_SCRIPT: &str = r#"
+for i = 1, #ARGV, 2 do
+  if ARGV[i + 1] ~= '' then
+    redis.call('RPUSH', KEYS[1], ARGV[i + 1])
+  end
+  redis.call('LREM', KEYS[2], 1, ARGV[i])
+end
+return #ARGV / 2
 "#;
 
 // ── Tracking event ────────────────────────────────────────────────────────────
@@ -262,7 +363,14 @@ pub struct EventProcessor {
     clickhouse_insert_timeout: Duration,
     flush_interval_ms: u64,
     max_buffer_size: usize,
-    drain_script: Script,
+    /// P0:atomic claim `pending` → `processing` (never deletes).
+    claim_script: Script,
+    /// P0:crash recovery — leftover `processing` leases back to `pending`.
+    reclaim_script: Script,
+    /// P0:ACK (release a committed lease) and atomic requeue-on-failure
+    /// (RPUSH bumped envelope to `pending` + LREM original from
+    /// `processing` in one step).
+    release_script: Script,
     shutdown: Arc<Notify>,
     running: Arc<AtomicBool>,
 }
@@ -292,7 +400,9 @@ impl EventProcessor {
             clickhouse_insert_timeout,
             flush_interval_ms,
             max_buffer_size,
-            drain_script: Script::new(ATOMIC_DRAIN_SCRIPT),
+            claim_script: Script::new(CLAIM_SCRIPT),
+            reclaim_script: Script::new(RECLAIM_SCRIPT),
+            release_script: Script::new(RELEASE_SCRIPT),
             shutdown: Arc::new(Notify::new()),
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -567,8 +677,51 @@ impl EventProcessor {
 
     // ── Flush loop ────────────────────────────────────────────────────
 
+    /// P0:claim up to `max` entries by atomically moving them
+    /// `pending` → `processing` (a lease — the durable copy is NOT deleted,
+    /// it moves). Returns the claimed raw envelopes. Shared by the flush
+    /// loop and the crash-window tests.
+    async fn claim_batch(
+        &self,
+        conn: &mut deadpool_redis::Connection,
+        max: usize,
+    ) -> Result<Vec<String>> {
+        let raw: Vec<String> = self
+            .claim_script
+            .key(REDIS_WAL_KEY)
+            .key(REDIS_WAL_PROCESSING_KEY)
+            .arg(max as i64)
+            .invoke_async(&mut *conn)
+            .await
+            .context("claim Lua script (pending → processing)")?;
+        Ok(raw)
+    }
+
+    /// P0:flush one adaptive batch under the acknowledgement protocol:
+    /// reclaim orphaned leases → claim `pending` → `processing` → PostgreSQL
+    /// COMMIT → ACK (release the lease). See the invariant on
+    /// [`CLAIM_SCRIPT`].
     async fn flush(&self) -> Result<()> {
         let mut conn = self.redis.get().await.context("redis pool get (flush)")?;
+
+        // P0 step 1 — RECLAIM BEFORE CLAIMING: any lease left in
+        // `processing` by a crash (or a lost ACK) is moved back to the HEAD
+        // of `pending` first, so recovery work is never starved by fresh
+        // traffic. Atomic script — a concurrently live flusher's claim lands
+        // entirely before or after it.
+        let reclaimed: Vec<String> = self
+            .reclaim_script
+            .key(REDIS_WAL_PROCESSING_KEY)
+            .key(REDIS_WAL_KEY)
+            .invoke_async(&mut *conn)
+            .await
+            .context("reclaim Lua script (processing → pending)")?;
+        if !reclaimed.is_empty() {
+            info!(
+                count = reclaimed.len(),
+                "P0: reclaimed orphaned WAL leases from a previous crash — re-draining first"
+            );
+        }
 
         // Adaptive batch size: drain what is actually queued (LLEN), bounded
         // by MAX_FLUSH_BATCH (500). A fixed small batch lets a deep backlog
@@ -583,111 +736,285 @@ impl EventProcessor {
         }
         let batch: usize = (llen as usize).min(MAX_FLUSH_BATCH.max(self.max_buffer_size));
 
-        let raw: Vec<String> = self
-            .drain_script
-            .key(REDIS_WAL_KEY)
-            .arg(batch as i64)
-            .invoke_async(&mut *conn)
-            .await
-            .context("atomic drain Lua script")?;
+        // P0 step 2 — atomic claim: the batch now lives ONLY in
+        // `processing` (moved, never deleted). A kill from this point on
+        // leaves it durable in Redis for reclamation.
+        let raw: Vec<String> = self.claim_batch(&mut conn, batch).await?;
 
         drop(conn);
 
         // Note: `raw` can only be empty when `llen` was > 0 but a concurrent
-        // consumer drained the list between LLEN and the atomic drain. The
-        // `events.is_empty()` guard below covers that shape (parsing nothing
-        // yields nothing), so no separate early return is needed here.
+        // consumer claimed the entries between LLEN and the atomic claim.
+        let mut events: Vec<TrackingEvent> = Vec::with_capacity(raw.len());
+        let mut parsable: Vec<String> = Vec::with_capacity(raw.len());
+        let mut unparsable: Vec<String> = Vec::new();
+        for entry in &raw {
+            match parse_single_wal_entry(entry) {
+                Ok(ev) => {
+                    events.push(ev);
+                    parsable.push(entry.clone());
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        raw = &entry[..entry.len().min(100)],
+                        "WAL entry parse error — dead-lettering"
+                    );
+                    unparsable.push(entry.clone());
+                }
+            }
+        }
 
-        let events: Vec<TrackingEvent> = parse_wal_entries(&raw);
+        // P0 (poison DLQ):unparsable envelopes are the ACTUAL poison shape —
+        // they can never parse, so retrying is pointless. Dead-letter them
+        // (durable, operator-inspectable) instead of the old silent
+        // drop-with-a-log-line, which vanished the evidence.
+        if !unparsable.is_empty() {
+            self.dead_letter_entries(&unparsable, DEAD_LETTER_REASON_UNPARSABLE, 0)
+                .await;
+        }
+
         if events.is_empty() {
             return Ok(());
         }
 
-        if let Err(write_err) = self.write_events(&events).await {
-            error!(
-                count = events.len(),
-                error = %write_err,
-                "writeEvents failed — re-pushing events to Redis WAL"
-            );
-            self.reenqueue_events(&raw).await;
-            return Err(write_err);
+        match self.write_events(&events).await {
+            Ok(()) => {
+                // P0 step 4 — ACK:the PostgreSQL transaction COMMITTED; only
+                // now are the leases released. A crash before this point
+                // replays the batch into the idempotent insert.
+                self.ack_committed_batch(&parsable).await;
+            }
+            Err(write_err) => {
+                // P0 step 4' — atomic requeue:move the batch BACK to
+                // `pending` (retry counter bumped) and release the lease in
+                // ONE Lua step; poison entries are dead-lettered.
+                error!(
+                    count = events.len(),
+                    error = %write_err,
+                    "writeEvents failed — re-queueing the claimed batch to the WAL"
+                );
+                self.requeue_after_failure(&parsable).await;
+                return Err(write_err);
+            }
         }
 
         debug!(count = raw.len(), "Flushed events from Redis WAL");
         Ok(())
     }
 
-    async fn drain_all(&self) {
-        loop {
-            let mut conn = match self.redis.get().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!(error = %e, "drain_all: redis pool error");
-                    break;
+    /// P0:ACK — the batch is committed to PostgreSQL, so the `processing`
+    /// leases can be released (LREM of the exact claimed envelopes). A failed
+    /// release is only a performance issue: the orphaned leases are reclaimed
+    /// by the next flush and the replay is absorbed by the
+    /// `ON CONFLICT (id) DO NOTHING` insert idempotency.
+    async fn ack_committed_batch(&self, claimed: &[String]) {
+        if claimed.is_empty() {
+            return;
+        }
+        let mut args: Vec<String> = Vec::with_capacity(claimed.len() * 2);
+        for entry in claimed {
+            args.push(entry.clone());
+            args.push(String::new()); // "" → release only, no requeue
+        }
+        match self.redis.get().await {
+            Ok(mut conn) => {
+                if let Err(e) = self
+                    .release_script
+                    .key(REDIS_WAL_KEY)
+                    .key(REDIS_WAL_PROCESSING_KEY)
+                    .arg(args)
+                    .invoke_async::<i64>(&mut *conn)
+                    .await
+                {
+                    warn!(
+                        error = %e,
+                        count = claimed.len(),
+                        "P0: ACK (lease release) failed — the committed entries stay leased and will be reclaimed + re-inserted idempotently"
+                    );
                 }
-            };
-            let len: i64 = match redis::cmd("LLEN")
-                .arg(REDIS_WAL_KEY)
-                .query_async(&mut *conn)
-                .await
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    error!(error = %e, "drain_all: LLEN error");
-                    break;
-                }
-            };
-            drop(conn);
-            if len == 0 {
-                break;
             }
-            info!(remaining = len, "Draining Redis WAL on shutdown");
-            if let Err(e) = self.flush().await {
-                error!(error = %e, "drain_all: flush error, stopping drain");
-                break;
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    count = claimed.len(),
+                    "P0: could not get Redis for the ACK — leases stay durable in `processing` and will be reclaimed"
+                );
             }
         }
     }
 
-    /// Re-push drained WAL entries after a Postgres write failure, bumping the
-    /// per-event retry counter in the envelope. Events that have already been
-    /// retried [`MAX_EVENT_RETRIES`] times are dropped as poison (with an
-    /// error log) so one permanently bad event cannot wedge the WAL forever.
-    async fn reenqueue_events(&self, raw: &[String]) {
-        let mut conn = match self.redis.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                error!(error = %e, count = raw.len(),
-                    "CRITICAL: failed to get Redis conn for re-enqueue — events may be lost");
-                return;
-            }
-        };
-
-        let mut pipe = redis::pipe();
-        let mut dropped: usize = 0;
-        for entry in raw {
+    /// P0:the PG write FAILED after the claim. For every claimed entry,
+    /// atomically (a) RPUSH the retry-bumped envelope back to `pending` and
+    /// (b) LREM the claimed original from `processing` — one Lua invocation,
+    /// so no crash window can leave the event in both lists (double lease)
+    /// or neither (loss). Entries whose retry budget is exhausted are
+    /// dead-lettered. If Redis itself is unreachable here, the leases simply
+    /// STAY in `processing` (durable) and are reclaimed later — nothing lost.
+    async fn requeue_after_failure(&self, claimed: &[String]) {
+        let mut requeue_args: Vec<String> = Vec::with_capacity(claimed.len() * 2);
+        let mut poison: Vec<String> = Vec::new();
+        for entry in claimed {
             match bump_envelope_retries(entry) {
-                Some(envelope) => {
-                    pipe.rpush(REDIS_WAL_KEY, envelope);
+                Some(bumped) => {
+                    requeue_args.push(entry.clone());
+                    requeue_args.push(bumped);
                 }
-                None => {
-                    dropped += 1;
+                None => poison.push(entry.clone()),
+            }
+        }
+
+        if !requeue_args.is_empty() {
+            match self.redis.get().await {
+                Ok(mut conn) => {
+                    if let Err(e) = self
+                        .release_script
+                        .key(REDIS_WAL_KEY)
+                        .key(REDIS_WAL_PROCESSING_KEY)
+                        .arg(requeue_args)
+                        .invoke_async::<i64>(&mut *conn)
+                        .await
+                    {
+                        error!(
+                            error = %e,
+                            "CRITICAL: requeue Lua failed — the batch stays leased in `processing` and will be reclaimed (no loss)"
+                        );
+                    }
+                }
+                Err(e) => {
                     error!(
-                        raw = &entry[..entry.len().min(100)],
-                        "Dropping poison tracking event after max retries"
+                        error = %e,
+                        "CRITICAL: failed to get Redis conn for requeue — the batch stays leased in `processing` and will be reclaimed (no loss)"
                     );
                 }
             }
         }
-        if dropped > 0 {
-            error!(
-                count = dropped,
-                "Dropped poison events exceeding retry budget"
-            );
+
+        if !poison.is_empty() {
+            self.dead_letter_entries(poison.as_slice(), DEAD_LETTER_REASON_MAX_RETRIES, MAX_EVENT_RETRIES as u64)
+                .await;
         }
-        if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
-            error!(error = %e, count = raw.len(),
-                "CRITICAL: failed to re-push events to Redis WAL — events may be lost");
+    }
+
+    /// P0 (poison DLQ):move entries to the durable `apexmail:events:dead`
+    /// list as JSON [`DeadLetterEntry`] envelopes, then release their
+    /// `processing` leases. Order matters: the DLQ RPUSH lands FIRST, so a
+    /// crash mid-way leaves the entry dead-lettered AND still leased → the
+    /// reclaim re-runs it and it is dead-lettered again (at-least-once into
+    /// the DLQ, never lost). If even the DLQ push fails, the lease is left
+    /// in `processing` and the entry is retried on a later flush.
+    async fn dead_letter_entries(&self, raw: &[String], failure_reason: &str, attempts: u64) {
+        let now = Utc::now();
+        let envelopes: Vec<String> = raw
+            .iter()
+            .map(|entry| build_dead_letter_entry(entry, failure_reason, attempts, now))
+            .collect();
+
+        match self.redis.get().await {
+            Ok(mut conn) => {
+                let mut pipe = redis::pipe();
+                for envelope in &envelopes {
+                    pipe.rpush(REDIS_DEAD_LETTER_KEY, envelope);
+                }
+                if let Err(e) = pipe.query_async::<()>(&mut *conn).await {
+                    error!(
+                        error = %e,
+                        count = raw.len(),
+                        "CRITICAL: dead-letter RPUSH failed — entries stay leased in `processing` and will be retried"
+                    );
+                    return;
+                }
+                metrics::counter!("apexmail_tracking_dead_letter_total").increment(raw.len() as u64);
+                warn!(
+                    count = raw.len(),
+                    failure_reason,
+                    "Tracking events dead-lettered to the durable DLQ for operator review"
+                );
+                // Release the leases now that a durable DLQ copy exists.
+                let mut args: Vec<String> = Vec::with_capacity(raw.len() * 2);
+                for entry in raw {
+                    args.push(entry.clone());
+                    args.push(String::new());
+                }
+                if let Err(e) = self
+                    .release_script
+                    .key(REDIS_WAL_KEY)
+                    .key(REDIS_WAL_PROCESSING_KEY)
+                    .arg(args)
+                    .invoke_async::<i64>(&mut *conn)
+                    .await
+                {
+                    error!(
+                        error = %e,
+                        count = raw.len(),
+                        "DLQ lease release failed — dead-lettered entries will be reclaimed and dead-lettered again (at-least-once)"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    count = raw.len(),
+                    "CRITICAL: could not reach Redis for the dead-letter push — entries stay leased in `processing` and will be retried"
+                );
+            }
+        }
+    }
+
+    async fn drain_all(&self) {
+        // P0:the shutdown drain also has to converge when a release/ack was
+        // lost (entries parked in `processing`), hence the processing LLEN in
+        // the loop condition. The round bound only matters for the
+        // pathological "commit succeeds, release keeps failing" shape — every
+        // round is an idempotent re-insert.
+        let mut rounds = 0usize;
+        loop {
+            let (pending, processing) = {
+                let Ok(mut conn) = self.redis.get().await else {
+                    error!("drain_all: redis pool error");
+                    break;
+                };
+                let pending: i64 = match redis::cmd("LLEN")
+                    .arg(REDIS_WAL_KEY)
+                    .query_async(&mut *conn)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!(error = %e, "drain_all: LLEN error");
+                        break;
+                    }
+                };
+                let processing: i64 = match redis::cmd("LLEN")
+                    .arg(REDIS_WAL_PROCESSING_KEY)
+                    .query_async(&mut *conn)
+                    .await
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        error!(error = %e, "drain_all: LLEN(processing) error");
+                        break;
+                    }
+                };
+                (pending, processing)
+            };
+            if pending == 0 && processing == 0 {
+                break;
+            }
+            rounds += 1;
+            if rounds > 2_000 {
+                error!(
+                    pending,
+                    processing,
+                    "drain_all: round bound hit — leaving the remaining entries durable in Redis"
+                );
+                break;
+            }
+            info!(remaining = pending + processing, "Draining Redis WAL on shutdown");
+            if let Err(e) = self.flush().await {
+                error!(error = %e, "drain_all: flush error, stopping drain");
+                break;
+            }
         }
     }
 
@@ -1057,27 +1384,60 @@ impl EventProcessor {
     }
 
     /// Drain pending suppression retries:attempt each insert again;
-    /// successes are dropped from the queue, failures are re-pushed with a
-    /// bumped retry counter (poison-dropped after [`MAX_EVENT_RETRIES`],
-    /// mirroring the event WAL). Runs off the flush loop's tick so a down
+    /// successes ACK (release the lease), failures are moved back to the
+    /// queue with a bumped retry counter (poison dropped after
+    /// [`MAX_EVENT_RETRIES`], mirroring the event WAL). P0:the same
+    /// claim/lease/ACK protocol as the event WAL — the batch is moved
+    /// `pending` → `processing` (never deleted before the insert), so a
+    /// crash cannot lose compliance-critical suppression retries between
+    /// the read and the write. Runs off the flush loop's tick so a down
     /// Postgres is retried with the same backoff cadence.
     async fn drain_suppression_retries(&self) {
-        let raw: Vec<String> = match self.redis.get().await {
-            Ok(mut conn) => match self
-                .drain_script
-                .key(REDIS_SUPPRESSION_RETRY_KEY)
-                .arg(MAX_FLUSH_BATCH as i64)
-                .invoke_async(&mut *conn)
-                .await
-            {
-                Ok(entries) => entries,
-                Err(e) => {
-                    warn!(error = %e, "Suppression retry drain failed (Redis)");
-                    return;
-                }
-            },
+        let mut conn = match self.redis.get().await {
+            Ok(conn) => conn,
             Err(e) => {
                 warn!(error = %e, "Suppression retry drain failed (Redis pool)");
+                return;
+            }
+        };
+
+        // P0:reclaim orphaned leases first (crash recovery), then claim.
+        if let Err(e) = self
+            .reclaim_script
+            .key(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .key(REDIS_SUPPRESSION_RETRY_KEY)
+            .invoke_async::<Vec<String>>(&mut *conn)
+            .await
+        {
+            warn!(error = %e, "Suppression retry reclaim failed (Redis)");
+            return;
+        }
+
+        let llen: i64 = match redis::cmd("LLEN")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .query_async(&mut *conn)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(error = %e, "Suppression retry LLEN failed (Redis)");
+                return;
+            }
+        };
+        if llen <= 0 {
+            return;
+        }
+        let raw: Vec<String> = match self
+            .claim_script
+            .key(REDIS_SUPPRESSION_RETRY_KEY)
+            .key(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .arg(MAX_FLUSH_BATCH as i64)
+            .invoke_async(&mut *conn)
+            .await
+        {
+            Ok(entries) => entries,
+            Err(e) => {
+                warn!(error = %e, "Suppression retry claim failed (Redis)");
                 return;
             }
         };
@@ -1090,8 +1450,9 @@ impl EventProcessor {
             let Some(retry) = parse_suppression_retry(entry) else {
                 warn!(
                     raw = &entry[..entry.len().min(100)],
-                    "Unparseable suppression retry entry dropped"
+                    "Unparseable suppression retry entry released (it can never parse)"
                 );
+                self.release_lease(&mut conn, entry, None).await;
                 continue;
             };
             // F54:26-char entity id on the retry path too — the pending
@@ -1121,26 +1482,55 @@ impl EventProcessor {
                         &retry.email.to_lowercase(),
                         retry.category.as_deref(),
                     );
+                    // P0:ACK — the row is committed, release the lease.
+                    self.release_lease(&mut conn, entry, None).await;
                 }
-                Err(e) => match bump_suppression_retry(entry) {
-                    Some(requeued) => {
-                        if let Ok(mut conn) = self.redis.get().await {
-                            let _: Result<(), _> = redis::cmd("RPUSH")
-                                .arg(REDIS_SUPPRESSION_RETRY_KEY)
-                                .arg(&requeued)
-                                .query_async(&mut *conn)
-                                .await;
-                        }
-                        warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed — re-queued");
-                    }
-                    None => {
+                Err(e) => {
+                    let requeued = bump_suppression_retry(entry);
+                    if requeued.is_none() {
                         error!(
                             tenant_id = %retry.tenant_id,
                             "CRITICAL: pending suppression dropped after max retries — operator intervention required"
                         );
                     }
-                },
+                    // P0:atomic requeue (bumped replacement) + lease release;
+                    // a poison entry (None) is simply released (same
+                    // drop-after-budget semantics as before the fix).
+                    let was_requeued = requeued.is_some();
+                    self.release_lease(&mut conn, entry, requeued)
+                        .await;
+                    if was_requeued {
+                        warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed — re-queued");
+                    }
+                }
             }
+        }
+    }
+
+    /// P0:release (and optionally requeue) ONE suppression-retry lease via
+    /// the atomic [`RELEASE_SCRIPT`] on the caller's connection. Failures
+    /// are swallowed-with-a-log: a failed release leaves the entry leased
+    /// in `processing`, where the next drain's reclaim step finds it
+    /// (no loss).
+    async fn release_lease(
+        &self,
+        conn: &mut deadpool_redis::Connection,
+        original: &str,
+        replacement: Option<String>,
+    ) {
+        let args = [original.to_string(), replacement.unwrap_or_default()];
+        if let Err(e) = self
+            .release_script
+            .key(REDIS_SUPPRESSION_RETRY_KEY)
+            .key(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .arg(&args)
+            .invoke_async::<i64>(&mut *conn)
+            .await
+        {
+            warn!(
+                error = %e,
+                "Suppression retry lease release failed — the entry stays leased for reclamation"
+            );
         }
     }
 
@@ -1229,19 +1619,6 @@ impl EventProcessor {
 }
 
 // ── WAL parsing ───────────────────────────────────────────────────────────────
-
-fn parse_wal_entries(raw: &[String]) -> Vec<TrackingEvent> {
-    let mut out = Vec::with_capacity(raw.len());
-    for entry in raw {
-        match parse_single_wal_entry(entry) {
-            Ok(ev) => out.push(ev),
-            Err(e) => {
-                warn!(error = %e, raw = &entry[..entry.len().min(100)], "WAL entry parse error, skipping")
-            }
-        }
-    }
-    out
-}
 
 fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
     let outer: serde_json::Value = serde_json::from_str(raw).context("outer JSON")?;
@@ -1386,6 +1763,63 @@ fn bump_envelope_retries(raw: &str) -> Option<String> {
         });
         Some(envelope.to_string())
     }
+}
+
+// ── Poison dead-letter queue (P0) ─────────────────────────────────────────────
+
+/// A poison tracking event parked in the durable `apexmail:events:dead`
+/// list (JSON envelope). Field names are the operator-facing contract
+/// consumed by DLQ inspection tooling and asserted by the adversarial tests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeadLetterEntry {
+    /// The original raw WAL envelope, VERBATIM (also the checksum input).
+    /// For unparsable envelopes this is the only recoverable evidence; for
+    /// poison events the original `TrackingEvent` (including its occurrence
+    /// `timestamp`) can be re-derived from it.
+    pub payload: String,
+    /// Why the event landed here (`max_retries_exceeded` or
+    /// `unparsable_envelope`).
+    pub failure_reason: String,
+    /// Flush attempts observed when dead-lettering (the retry counter for
+    /// poison events; 0 for unparsable envelopes, which are never retried).
+    pub attempts: u64,
+    /// RFC 3339 DLQ-ingestion time. first == last at ingestion; the ORIGINAL
+    /// occurrence time lives inside `payload`.
+    pub first_seen: String,
+    /// RFC 3339 DLQ-ingestion time (see `first_seen`).
+    pub last_seen: String,
+    /// Envelope schema version ([`DEAD_LETTER_SCHEMA_VERSION`]).
+    pub schema_version: u64,
+    /// FNV-1a 64-bit hex over `payload` — a dependency-free corruption
+    /// heuristic for DLQ triage, NOT a security integrity check.
+    pub checksum: String,
+}
+
+/// FNV-1a 64-bit (no new dependencies):offset basis 0xcbf29ce484222325,
+/// prime 0x100000001b3, wrapping multiply per byte.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// Serialize a [`DeadLetterEntry`] for the DLQ list.
+fn build_dead_letter_entry(raw: &str, failure_reason: &str, attempts: u64, now: DateTime<Utc>) -> String {
+    let entry = DeadLetterEntry {
+        payload: raw.to_string(),
+        failure_reason: failure_reason.to_string(),
+        attempts,
+        first_seen: now.to_rfc3339(),
+        last_seen: now.to_rfc3339(),
+        schema_version: DEAD_LETTER_SCHEMA_VERSION,
+        checksum: format!("{:016x}", fnv1a64(raw.as_bytes())),
+    };
+    serde_json::to_string(&entry).unwrap_or_default()
 }
 
 // ── Suppression retry records (F2) ────────────────────────────────────────────

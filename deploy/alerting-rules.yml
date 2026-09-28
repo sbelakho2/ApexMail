@@ -324,6 +324,20 @@ groups:
           description: "More than 10,000 events have been queued in the tracking WAL Redis list (apexmail:events:pending) for 15 minutes — the flush loop cannot keep up (Postgres/ClickHouse slow or down)."
           runbook_url: "https://apexmail.ee/docs/alerts#tracking-wal-backlog"
 
+      # The poison dead-letter queue: events that exhausted MAX_EVENT_RETRIES
+      # or arrived unparsable are durably parked in apexmail:events:dead
+      # (never discarded). ANY depth means analytics data needs operator
+      # recovery — treat as a data-integrity signal, not noise.
+      - alert: TrackingDeadLetterQueue
+        expr: redis_key_size{job="redis",key="apexmail:events:dead"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tracking poison DLQ is non-empty"
+          description: "Events have been dead-lettered to apexmail:events:dead (persistent Postgres failures or unparsable envelopes). The records are durable — inspect, repair, and re-enqueue them."
+          runbook_url: "https://apexmail.ee/docs/alerts#tracking-dead-letter-queue"
+
       # The service's own honest "processing broken" counter: every failed
       # ClickHouse flush bumps apexmail_tracking_clickhouse_failures_total
       # (events remain safe in Postgres).

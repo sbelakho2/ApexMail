@@ -51,6 +51,11 @@ async fn main() -> anyhow::Result<()> {
     let _guard = init_tracing();
 
     let config = analytics::config::AnalyticsConfig::from_env();
+    // FINDING C (migration 231): state the cold-storage durability contract
+    // at startup — the compaction ledger is the source of truth, the storage
+    // root is a materialization and must be a durable mount (or backed by
+    // object storage). Warning only; local dev is unaffected.
+    analytics::config::warn_if_cold_storage_not_durable(&config.storage_path);
     let args = Args::parse();
 
     info!("Starting analytics worker");

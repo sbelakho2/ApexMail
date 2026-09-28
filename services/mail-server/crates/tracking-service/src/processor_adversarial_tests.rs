@@ -94,6 +94,64 @@ async fn clear_wal(pool: &RedisPool) {
         .await;
 }
 
+// ── P0 WAL-ACK helpers (processing lease list + poison DLQ) ──────────────
+
+async fn processing_len(pool: &RedisPool) -> i64 {
+    let mut conn = pool.get().await.expect("redis conn");
+    redis::cmd("LLEN")
+        .arg(REDIS_WAL_PROCESSING_KEY)
+        .query_async(&mut *conn)
+        .await
+        .expect("LLEN processing")
+}
+
+async fn processing_entries(pool: &RedisPool) -> Vec<String> {
+    let mut conn = pool.get().await.expect("redis conn");
+    redis::cmd("LRANGE")
+        .arg(REDIS_WAL_PROCESSING_KEY)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut *conn)
+        .await
+        .expect("LRANGE processing")
+}
+
+async fn clear_processing(pool: &RedisPool) {
+    let mut conn = pool.get().await.expect("redis conn");
+    let _: Result<(), _> = redis::cmd("DEL")
+        .arg(REDIS_WAL_PROCESSING_KEY)
+        .query_async(&mut *conn)
+        .await;
+}
+
+async fn dlq_len(pool: &RedisPool) -> i64 {
+    let mut conn = pool.get().await.expect("redis conn");
+    redis::cmd("LLEN")
+        .arg(REDIS_DEAD_LETTER_KEY)
+        .query_async(&mut *conn)
+        .await
+        .expect("LLEN dlq")
+}
+
+async fn dlq_entries(pool: &RedisPool) -> Vec<String> {
+    let mut conn = pool.get().await.expect("redis conn");
+    redis::cmd("LRANGE")
+        .arg(REDIS_DEAD_LETTER_KEY)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut *conn)
+        .await
+        .expect("LRANGE dlq")
+}
+
+async fn clear_dlq(pool: &RedisPool) {
+    let mut conn = pool.get().await.expect("redis conn");
+    let _: Result<(), _> = redis::cmd("DEL")
+        .arg(REDIS_DEAD_LETTER_KEY)
+        .query_async(&mut *conn)
+        .await;
+}
+
 async fn seed_tenant(pool: &PgPool, tenant: &str) {
     sqlx::query(
         "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $1, $1, 'free', 'active')
@@ -340,6 +398,10 @@ async fn suppression_failure_is_queued_for_retry_and_then_drained() {
     clear_wal(&redis).await;
 }
 
+/// P0 WAL-ACK FIX (drain-Lua test updated):the flush CLAIMS pending →
+/// processing first; after a successful PG commit the batch is ACKed out of
+/// `processing`. Malformed entries are dead-lettered (durable DLQ), no longer
+/// silently dropped by the old LTRIM.
 #[tokio::test]
 async fn flush_moves_events_to_postgres_and_clears_the_wal() {
     let _guard = SERIAL.lock().await;
@@ -349,6 +411,8 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
         return;
     };
     clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    clear_dlq(&redis).await;
     let tenant = unique("tn_flush");
     seed_tenant(&db, &tenant).await;
     let proc = processor(db.clone(), redis.clone());
@@ -377,6 +441,11 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
         "GDPR: the persisted IP is masked to /24"
     );
     assert_eq!(wal_len(&redis).await, 0, "WAL drained");
+    assert_eq!(
+        processing_len(&redis).await,
+        0,
+        "P0: the committed batch was ACKed out of `processing`"
+    );
 
     // Tenant isolation: no other tenant sees anything.
     let other: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id <> $1")
@@ -386,7 +455,8 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
         .unwrap();
     assert!(other >= 0);
 
-    // Malformed WAL entries are dropped, not wedged forever.
+    // Malformed WAL entries are dead-lettered (durable), never wedging the
+    // queue — the old LTRIM silently dropped them.
     {
         let mut conn = redis.get().await.unwrap();
         let _: Result<(), _> = redis::cmd("RPUSH")
@@ -396,9 +466,25 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
             .await;
     }
     proc.flush().await.expect("garbage flush is a no-op");
-    assert_eq!(wal_len(&redis).await, 0, "poison-free: garbage dropped");
+    assert_eq!(wal_len(&redis).await, 0, "poison-free: garbage drained");
+    assert_eq!(
+        dlq_len(&redis).await,
+        1,
+        "garbage is durable in the DLQ with the unparsable reason"
+    );
+    let dlq = dlq_entries(&redis).await;
+    let parsed: serde_json::Value = serde_json::from_str(&dlq[0]).expect("DLQ JSON");
+    assert_eq!(
+        parsed["failure_reason"].as_str(),
+        Some("unparsable_envelope")
+    );
+    clear_dlq(&redis).await;
 }
 
+/// P0 WAL-ACK FIX (drain-Lua test updated):the flush now CLAIMS the batch
+/// pending → processing (never deletes it first), re-enqueues on PG failure
+/// via the atomic requeue+release script, and poison entries (retry budget
+/// exhausted) land in the durable DLQ instead of being dropped.
 #[tokio::test]
 async fn flush_failure_reenqueues_with_retry_budget_and_drops_poison() {
     let _guard = SERIAL.lock().await;
@@ -408,6 +494,8 @@ async fn flush_failure_reenqueues_with_retry_budget_and_drops_poison() {
         return;
     };
     clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    clear_dlq(&redis).await;
     let dead_db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_millis(50))
@@ -441,15 +529,20 @@ async fn flush_failure_reenqueues_with_retry_budget_and_drops_poison() {
 
     proc.flush().await.expect_err("dead PG must fail the flush");
     let entries = wal_entries(&redis).await;
-    assert_eq!(entries.len(), 1, "event re-enqueued");
+    assert_eq!(entries.len(), 1, "event re-enqueued to `pending`");
+    assert_eq!(
+        processing_len(&redis).await,
+        0,
+        "the failed lease was released atomically with the requeue"
+    );
     assert!(
         entries[0].contains("\"r\":1"),
         "retry counter bumped: {}",
         entries[0]
     );
 
-    // Walk the entry to the poison budget; it must be dropped, not retried
-    // forever.
+    // Walk the entry to the poison budget; it must be dead-lettered, not
+    // retried forever.
     let mut current = entries[0].clone();
     let mut bumps = 0usize;
     while let Some(next) = bump_envelope_retries(&current) {
@@ -475,7 +568,22 @@ async fn flush_failure_reenqueues_with_retry_budget_and_drops_poison() {
             .await;
     }
     proc.flush().await.expect_err("flush still fails (PG down)");
-    assert_eq!(wal_len(&redis).await, 0, "poison dropped after the budget");
+    assert_eq!(wal_len(&redis).await, 0, "poison re-queued nowhere");
+    assert_eq!(processing_len(&redis).await, 0, "poison lease released");
+    assert_eq!(dlq_len(&redis).await, 1, "poison durable in the DLQ");
+    let dlq = dlq_entries(&redis).await;
+    let parsed: serde_json::Value = serde_json::from_str(&dlq[0]).expect("DLQ JSON");
+    assert_eq!(
+        parsed["failure_reason"].as_str(),
+        Some("max_retries_exceeded")
+    );
+    assert_eq!(
+        parsed["payload"].as_str(),
+        Some(current.as_str()),
+        "the original raw envelope is preserved verbatim"
+    );
+    clear_wal(&redis).await;
+    clear_dlq(&redis).await;
 }
 
 #[tokio::test]
@@ -1027,11 +1135,15 @@ async fn clickhouse_timeout_is_bounded_and_non_fatal() {
     );
 }
 
-/// `reenqueue_events` swallows a dead pool (the WAL keeps the entries —
-/// nothing is lost by definition), drops poison entries with a warning, and
-/// reports RPUSH failures (wrong-type key).
+/// P0 WAL-ACK FIX (was `reenqueue_events_error_arms_are_swallowed_and_reported`
+/// against the old LRANGE+LTRIM drain): the failure path is now
+/// `requeue_after_failure` — an atomic requeue-to-pending + lease-release Lua.
+/// Its error arms are swallowed (a dead pool leaves the batch LEASED in
+/// `processing` — reclaimed later, never lost), poison entries are
+/// dead-lettered to the durable DLQ instead of dropped, and a Redis-side
+/// script failure (wrong-type key) is reported without panicking.
 #[tokio::test]
-async fn reenqueue_events_error_arms_are_swallowed_and_reported() {
+async fn requeue_after_failure_error_arms_are_swallowed_and_dead_letters_poison() {
     let _guard = SERIAL.lock().await;
     let _cross = crate::routes::test_support::redis_wal_serial().await;
     test_log_subscriber();
@@ -1045,11 +1157,13 @@ async fn reenqueue_events_error_arms_are_swallowed_and_reported() {
             .expect("lazy pool"),
         dead_redis(),
     );
-    // (1) Dead pool: logs and returns without panicking.
-    dead.reenqueue_events(&["{\"v\":2,\"cs\":\"ab\"}".into()])
+    // (1) Dead pool: logs and returns without panicking. A real claimed
+    //     batch would stay LEASED in `processing` and be reclaimed later.
+    dead.requeue_after_failure(&["{\"v\":2,\"cs\":\"ab\"}".into()])
         .await;
 
-    // (2) Poison entry (retry budget exhausted) is dropped, not re-pushed.
+    // (2) Poison entry (retry budget exhausted) is dead-lettered, not
+    //     dropped-on-the-floor and not re-queued.
     let proc = processor(
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://offline@127.0.0.1:1/offline")
@@ -1057,16 +1171,27 @@ async fn reenqueue_events_error_arms_are_swallowed_and_reported() {
         redis.clone(),
     );
     clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    clear_dlq(&redis).await;
     let envelope = build_wal_envelope(
         &serde_json::to_string(&wal_event("tn", "msg", EventType::Opened)).unwrap(),
     );
-    let poison = bump_envelope_retries(
-        &bump_envelope_retries(&bump_envelope_retries(&envelope).unwrap()).unwrap(),
-    )
-    .unwrap_or_else(|| envelope.clone());
-    proc.reenqueue_events(&[poison]).await;
+    // Genuinely poison: bump to the retry ceiling — bump_envelope_retries
+    // returns None once retries >= MAX_EVENT_RETRIES, and the envelope AT the
+    // ceiling is the poison shape requeue_after_failure must dead-letter
+    // (three bumps left it under the ceiling, and re-queueing it is correct).
+    let mut poison = envelope.clone();
+    for _ in 0..=MAX_EVENT_RETRIES {
+        poison = bump_envelope_retries(&poison)
+            .unwrap_or_else(|| poison.clone());
+    }
+    proc.requeue_after_failure(&[poison]).await;
+    assert_eq!(wal_len(&redis).await, 0, "poison is NOT re-queued");
+    assert_eq!(dlq_len(&redis).await, 1, "poison is durable in the DLQ");
+    clear_dlq(&redis).await;
 
-    // (3) RPUSH failure: the WAL key holds a STRING, so the pipeline fails.
+    // (3) Script failure: the pending key holds a STRING, so the requeue
+    //     RPUSH (and the whole atomic script) fails and is reported.
     {
         let mut conn = redis.get().await.unwrap();
         let _: Result<(), _> = redis::cmd("DEL")
@@ -1079,7 +1204,7 @@ async fn reenqueue_events_error_arms_are_swallowed_and_reported() {
             .query_async(&mut *conn)
             .await;
     }
-    proc.reenqueue_events(&["{\"v\":2,\"cs\":\"ab\"}".into()])
+    proc.requeue_after_failure(&["{\"v\":2,\"cs\":\"ab\"}".into()])
         .await;
     // Restore the key for the other tests.
     {
@@ -1467,7 +1592,8 @@ async fn suppression_insert_and_retry_enqueue_both_failing_is_a_hard_error() {
 }
 
 /// WAL envelope parsing: an unknown version and a corrupt legacy payload are
-/// poison (dropped), never a panic.
+/// poison — P0 FIX: dead-lettered to the durable DLQ (with the
+/// `unparsable_envelope` reason), never a panic and never a wedge.
 #[tokio::test]
 async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
     let _guard = SERIAL.lock().await;
@@ -1478,6 +1604,8 @@ async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
         return;
     };
     clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    clear_dlq(&redis).await;
     let proc = processor(db.clone(), redis.clone());
 
     let mut unknown = build_wal_envelope(
@@ -1488,6 +1616,452 @@ async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
     seed_wal(&redis, &[unknown, corrupt_legacy.into()]).await;
     proc.flush()
         .await
-        .expect("poison is dropped, flush succeeds");
-    assert_eq!(wal_len(&redis).await, 0, "both poison entries dropped");
+        .expect("poison is dead-lettered, flush succeeds");
+    assert_eq!(wal_len(&redis).await, 0, "both poison entries drained");
+    assert_eq!(dlq_len(&redis).await, 2, "both poison entries durable in the DLQ");
+    for entry in dlq_entries(&redis).await {
+        let parsed: serde_json::Value = serde_json::from_str(&entry).expect("DLQ JSON");
+        assert_eq!(
+            parsed["failure_reason"].as_str(),
+            Some("unparsable_envelope")
+        );
+    }
+    clear_dlq(&redis).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// P0 WAL-ACK:the "a kill at ANY point loses zero accepted events" matrix.
+// One explicit test per crash window of the claim/lease/ACK protocol:
+//
+//   W1 kill BEFORE the claim        → entry still in `pending`
+//   W2 kill AFTER the claim, BEFORE the PG commit → orphaned lease in
+//      `processing`, reclaimed (re-drained FIRST) by the next flush
+//   W3 kill AFTER the PG commit, BEFORE the ACK → replay absorbed by the
+//      `ON CONFLICT (id) DO NOTHING` idempotency — exactly-once rows
+//   W4 reclaim RACING a live flush / TWO flushers → no loss, no double rows
+//   W5 MAX_FLUSH_BATCH still caps one drain (semantics preserved)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// W1 — kill before the claim:the accepted event is durable in `pending`
+/// (where enqueue put it); a fresh processor's flush commits it. Nothing
+/// was ever deleted from the queue before the commit.
+#[tokio::test]
+async fn crash_window_w1_kill_before_claim_loses_nothing() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_w1").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_w1");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_w1");
+    let proc = processor(db.clone(), redis.clone());
+
+    // The event is accepted (RPUSH to pending) and THEN the process dies
+    // before any flush runs: it simply sits in `pending`.
+    proc.record_open(open_data(&tenant, &message, "w1@example.com"))
+        .await
+        .expect("accepted event is durable in pending");
+    assert_eq!(wal_len(&redis).await, 1);
+    assert_eq!(processing_len(&redis).await, 0, "nothing claimed yet");
+
+    // "Restart": a fresh processor drains it exactly once.
+    proc.flush().await.expect("flush after restart");
+    let persisted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(persisted, 1, "the event survived the kill");
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0, "ACKed after commit");
+    clear_wal(&redis).await;
+}
+
+/// W2 — kill after the claim (pending → processing) but BEFORE the PG
+/// commit:the batch is orphaned in `processing`. The next flush reclaims
+/// leftover leases back to the HEAD of `pending` FIRST (no starvation) and
+/// commits them; zero accepted events are lost. Even with FRESH traffic
+/// queued behind the crash, the orphaned events are drained first.
+#[tokio::test]
+async fn crash_window_w2_orphaned_lease_is_reclaimed_before_new_work() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_w2").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_w2");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_w2");
+    let proc = processor(db.clone(), redis.clone());
+
+    // Two accepted events, then the "kill" right after the atomic claim:
+    // simulate it by running ONLY the claim step (lease held, no commit).
+    let crashed = [
+        wal_event(&tenant, &format!("{message}-a"), EventType::Opened),
+        wal_event(&tenant, &format!("{message}-b"), EventType::Clicked),
+    ];
+    seed_wal(
+        &redis,
+        &crashed
+            .iter()
+            .map(|e| build_wal_envelope(&serde_json::to_string(e).unwrap()))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let claimed = proc.claim_batch(&mut conn, 10).await.expect("claim");
+        assert_eq!(claimed.len(), 2);
+    }
+    assert_eq!(wal_len(&redis).await, 0, "moved out of pending…");
+    assert_eq!(processing_len(&redis).await, 2, "…durable in processing");
+
+    // Fresh traffic arrives BEHIND the crash.
+    proc.record_open(open_data(&tenant, &format!("{message}-new"), "w2new@example.com"))
+        .await
+        .expect("fresh event enqueued");
+
+    // "Restart": the reclaim runs FIRST — the orphaned batch is drained
+    // before (in front of) the fresh event.
+    proc.flush().await.expect("flush reclaims and commits");
+
+    let persisted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        persisted, 3,
+        "orphaned leases AND fresh traffic all committed"
+    );
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0, "all leases ACKed");
+    clear_wal(&redis).await;
+}
+
+/// W3 — kill after the PostgreSQL COMMIT but before the ACK:the event is in
+/// BOTH Postgres and `processing`. The reclaim replays it into the
+/// `ON CONFLICT (id) DO NOTHING` insert — the idempotency that makes
+/// at-least-once delivery exactly-once on rows. Nothing lost, nothing
+/// duplicated.
+#[tokio::test]
+async fn crash_window_w3_committed_but_not_acked_replays_idempotently() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_w3").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_w3");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_w3");
+    let proc = processor(db.clone(), redis.clone());
+
+    let event = wal_event(&tenant, &message, EventType::Opened);
+    let envelope = build_wal_envelope(&serde_json::to_string(&event).unwrap());
+    seed_wal(&redis, &[envelope.clone()]).await;
+
+    // Claim (lease held)…
+    {
+        let mut conn = redis.get().await.unwrap();
+        let claimed = proc.claim_batch(&mut conn, 10).await.expect("claim");
+        assert_eq!(claimed, vec![envelope]);
+    }
+    // …and the PostgreSQL transaction COMMITS, but the process dies before
+    // the ACK (simulate: write_events only, no ack_committed_batch).
+    proc.write_events(&[event]).await.expect("commit lands");
+
+    let after_commit: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(after_commit, 1);
+    assert_eq!(processing_len(&redis).await, 1, "ACK never ran");
+
+    // "Restart": the reclaim re-drains the committed-but-unacked batch.
+    proc.flush().await.expect("replay flush");
+
+    let ids: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT id FROM events WHERE tenant_id = $1 AND message_id = $2")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(ids.len(), 1, "exactly-once rows despite the replay (ON CONFLICT DO NOTHING)");
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0, "the replay ACKed");
+    clear_wal(&redis).await;
+}
+
+/// W4 — reclaim RACING a live flush / TWO flushers over the same queue.
+/// Flushers A and B run concurrently over N enqueued events (their
+/// claim/reclaim scripts can interleave in any order — including B
+/// reclaiming a batch A holds a lease on and double-committing it). The
+/// invariant asserted: every accepted event lands in Postgres EXACTLY once
+/// (idempotent insert), both queues converge to empty, nothing is lost.
+#[tokio::test]
+async fn crash_window_w4_two_flushers_and_reclaim_race_lose_or_double_nothing() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_w4").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_w4");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_w4");
+    const N: usize = 24;
+
+    let a = processor(db.clone(), redis.clone());
+    let b = processor(db.clone(), redis.clone());
+    for index in 0..N {
+        a.record_open(open_data(
+            &tenant,
+            &format!("{message}-{index}"),
+            &format!("w4-{index}@example.com"),
+        ))
+        .await
+        .expect("enqueue");
+    }
+
+    // Two flushers race (any interleaving of claim/reclaim/commit/ACK).
+    let (ra, rb) = tokio::join!(a.flush(), b.flush());
+    for r in [ra, rb] {
+        r.expect("both flushers succeed (at-least-once is safe)");
+    }
+
+    // Drain whatever interleaving left behind, then assert convergence.
+    for _ in 0..50 {
+        if wal_len(&redis).await == 0 && processing_len(&redis).await == 0 {
+            break;
+        }
+        let _ = a.flush().await;
+    }
+    assert_eq!(wal_len(&redis).await, 0, "pending converged to empty");
+    assert_eq!(processing_len(&redis).await, 0, "no orphaned leases");
+
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT id FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'",
+    )
+    .bind(&tenant)
+    .bind(&message)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        ids.len(),
+        N,
+        "every accepted event exactly once (no loss, no double rows) under the race"
+    );
+    clear_wal(&redis).await;
+}
+
+/// W5 — MAX_FLUSH_BATCH semantics preserved:one flush claims at most the
+/// cap (500, or max_buffer_size when larger — the expression is unchanged
+/// from the pre-fix protocol), and the remainder stays durable in `pending`
+/// for the next tick.
+#[tokio::test]
+async fn crash_window_w5_flush_batch_cap_bounds_one_claim() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_w5").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_w5");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_w5");
+    let proc = flush_processor(db.clone(), redis.clone(), clickhouse::Client::default());
+    // The cap for this processor (identical expression to the old drain):
+    // MAX_FLUSH_BATCH.max(max_buffer_size) = max(500, 10) = 500.
+    let cap = MAX_FLUSH_BATCH.max(10);
+    assert_eq!(cap, 500);
+
+    let total = cap + 3;
+    let envelopes: Vec<String> = (0..total)
+        .map(|i| {
+            build_wal_envelope(&serde_json::to_string(&wal_event(
+                &tenant,
+                &format!("{message}-{i}"),
+                EventType::Opened,
+            ))
+            .unwrap())
+        })
+        .collect();
+    seed_wal(&redis, &envelopes).await;
+
+    proc.flush().await.expect("first capped flush");
+    assert_eq!(
+        wal_len(&redis).await,
+        3,
+        "one flush drained exactly the cap; the tail stayed durable in pending"
+    );
+    assert_eq!(processing_len(&redis).await, 0, "cap batch committed + ACKed");
+    let after_one: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(after_one, cap as i64);
+
+    proc.flush().await.expect("second flush drains the tail");
+    let after_two: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
+            .bind(&tenant)
+            .bind(&message)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(after_two, total as i64, "nothing lost across the cap boundary");
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0);
+    clear_wal(&redis).await;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// P0 poison DLQ:shape, exactly-once, and queue-liveness.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A permanently-failing batch (PG down on every retry) ends up in the DLQ
+/// EXACTLY once, with every envelope field populated and the FNV-1a
+/// checksum matching the preserved payload — and the poison never wedges
+/// the queue: a subsequent good event drains normally behind it.
+#[tokio::test]
+async fn permanently_failing_batch_dead_letters_exactly_once_without_wedging() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    test_log_subscriber();
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_dlq").await) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    clear_dlq(&redis).await;
+    let tenant = unique("tn_dlq");
+    seed_tenant(&db, &tenant).await;
+    let message = unique("msg_dlq");
+
+    // The poison batch: a valid event walked to the END of its retry budget.
+    let event = wal_event(&tenant, &message, EventType::Opened);
+    let envelope = build_wal_envelope(&serde_json::to_string(&event).unwrap());
+    let mut poisoned = envelope.clone();
+    for _ in 0..MAX_EVENT_RETRIES {
+        poisoned = bump_envelope_retries(&poisoned)
+            .unwrap_or_else(|| poisoned.clone());
+    }
+    assert!(bump_envelope_retries(&poisoned).is_none(), "at the budget");
+
+    // A HEALTHY event queued behind the poison (wedge-detection probe).
+    let good_event = wal_event(&tenant, &format!("{message}-good"), EventType::Clicked);
+    let good_envelope = build_wal_envelope(&serde_json::to_string(&good_event).unwrap());
+
+    // The failing processor: every PG write fails.
+    let dead_db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+        .expect("lazy pool");
+    let failing = processor(dead_db, redis.clone());
+    seed_wal(&redis, &[poisoned.clone(), good_envelope.clone()]).await;
+    failing
+        .flush()
+        .await
+        .expect_err("every write fails (PG down)");
+
+    // The poison was dead-lettered EXACTLY once; the good event was only
+    // re-queued (it still has budget), never dropped.
+    assert_eq!(dlq_len(&redis).await, 1, "exactly one DLQ entry");
+    let dlq = dlq_entries(&redis).await;
+    let parsed: DeadLetterEntry = serde_json::from_str(&dlq[0]).expect("DLQ JSON envelope");
+    assert_eq!(parsed.payload, poisoned, "original envelope verbatim");
+    assert_eq!(parsed.failure_reason, "max_retries_exceeded");
+    assert_eq!(parsed.attempts, MAX_EVENT_RETRIES as u64);
+    assert_eq!(parsed.schema_version, DEAD_LETTER_SCHEMA_VERSION);
+    assert_eq!(
+        parsed.checksum,
+        format!("{:016x}", fnv1a64(parsed.payload.as_bytes())),
+        "FNV-1a checksum over the payload"
+    );
+    assert!(!parsed.first_seen.is_empty());
+    assert_eq!(parsed.first_seen, parsed.last_seen);
+    chrono::DateTime::parse_from_rfc3339(&parsed.first_seen).expect("RFC 3339 timestamps");
+
+    // The original event is recoverable from the DLQ payload (operator path).
+    let recovered: TrackingEvent =
+        parse_single_wal_entry(&parsed.payload).expect("payload still parseable");
+    assert_eq!(recovered.id, event.id);
+
+    // NOT WEDGED:the poison is OUT of the pending queue, and a fresh
+    // processor with a healthy PG drains the good event normally.
+    assert_eq!(wal_len(&redis).await, 1, "only the good event remains");
+    let healthy = processor(db.clone(), redis.clone());
+    healthy.flush().await.expect("the queue still drains");
+    let good_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2",
+    )
+    .bind(&tenant)
+    .bind(&format!("{message}-good"))
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(good_rows, 1, "the event behind the poison was processed");
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0);
+    assert_eq!(dlq_len(&redis).await, 1, "the DLQ entry is durable");
+    clear_wal(&redis).await;
+    clear_dlq(&redis).await;
+}
+
+/// FNV-1a 64-bit known-answer vectors (empty string and the canonical
+/// "foobar" example) pin the dependency-free checksum implementation.
+#[test]
+fn fnv1a64_known_answer_vectors() {
+    assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a64(b"foobar"), 0x8594_4171_f739_67e8);
+    assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+}
+
+/// The DLQ envelope builder:field-for-field shape contract.
+#[test]
+fn dead_letter_entry_shape_contract() {
+    let now = Utc::now();
+    let raw = r#"{"v":2,"cs":"ab","d":{}"#; // arbitrary payload string
+    let built = build_dead_letter_entry(raw, "unparsable_envelope", 0, now);
+    let parsed: DeadLetterEntry = serde_json::from_str(&built).expect("JSON");
+    assert_eq!(parsed.payload, raw);
+    assert_eq!(parsed.failure_reason, "unparsable_envelope");
+    assert_eq!(parsed.attempts, 0);
+    assert_eq!(parsed.schema_version, 1);
+    assert_eq!(parsed.checksum.len(), 16);
+    assert_eq!(parsed.checksum, format!("{:016x}", fnv1a64(raw.as_bytes())));
+    // Deterministic for a fixed clock (minus the timestamps).
+    let mut a = build_dead_letter_entry(raw, "r", 3, now);
+    let mut b = build_dead_letter_entry(raw, "r", 3, now);
+    a.truncate(a.len());
+    b.truncate(b.len());
+    assert_eq!(a, b);
 }

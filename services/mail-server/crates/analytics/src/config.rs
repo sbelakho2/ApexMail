@@ -247,6 +247,44 @@ impl AnalyticsConfig {
     }
 }
 
+// ── cold-storage durability contract (FINDING C, migration 231) ──────────────
+
+/// True when the operator explicitly marked the analytics cold-storage root
+/// as a durable mount (`ANALYTICS_COLD_STORAGE_DURABLE=1`).
+///
+/// The contract (see the crate README and `compaction` module docs): the
+/// `analytics_compaction_batches` ledger row is the source of truth for what
+/// cold storage must contain; the objects under the storage root are a
+/// materialization. That makes the root a CACHE in durability terms — losing
+/// it is recoverable ONLY if the operator has object storage/backup or
+/// accepts the data loss of the materialized tier. A non-durable root must
+/// therefore be an explicit, visible choice.
+pub fn cold_storage_marked_durable() -> bool {
+    std::env::var("ANALYTICS_COLD_STORAGE_DURABLE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Loud (but non-fatal) warning when the cold-storage root is not explicitly
+/// marked durable. Called at worker startup and at the start of every
+/// compaction run. A warning, never an error:the ledger is the commit
+/// record, so local development against a scratch directory still behaves
+/// correctly — but an operator running on, say, an ephemeral container
+/// volume gets told, on every run, exactly what they would lose.
+pub fn warn_if_cold_storage_not_durable(storage_path: &str) {
+    if !cold_storage_marked_durable() {
+        tracing::warn!(
+            storage_path = %storage_path,
+            "ANALYTICS_COLD_STORAGE_DURABLE is not set to 1: the cold-storage root is NOT \
+             explicitly marked durable. The compaction ledger (analytics_compaction_batches) \
+             is the source of truth and the objects under this path are only its \
+             materialization — if this mount is ephemeral or non-redundant, configure durable \
+             object storage/backup for it or set ANALYTICS_COLD_STORAGE_DURABLE=1 to silence \
+             this warning after wiring durability up."
+        );
+    }
+}
+
 /// True when NODE_ENV indicates production (the convention used by the
 /// sibling services).
 fn is_production_environment() -> bool {
@@ -315,6 +353,38 @@ mod tests {
         match saved_node {
             Some(v) => std::env::set_var("NODE_ENV", v),
             None => std::env::remove_var("NODE_ENV"),
+        }
+    }
+
+    /// FINDING C:the durability marker is env-gated and only `1` counts —
+    /// anything else (unset, "0", "true", "yes") keeps the loud warning path
+    /// active, so an operator cannot accidentally opt out of it.
+    #[test]
+    fn cold_storage_durability_marker_is_strictly_env_one() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("ANALYTICS_COLD_STORAGE_DURABLE").ok();
+        for (value, expected) in [
+            (None, false),
+            (Some("0"), false),
+            (Some("true"), false),
+            (Some("1 "), false),
+            (Some("1"), true),
+        ] {
+            match value {
+                Some(v) => std::env::set_var("ANALYTICS_COLD_STORAGE_DURABLE", v),
+                None => std::env::remove_var("ANALYTICS_COLD_STORAGE_DURABLE"),
+            }
+            assert_eq!(
+                cold_storage_marked_durable(),
+                expected,
+                "ANALYTICS_COLD_STORAGE_DURABLE={value:?}"
+            );
+            // The warning path must stay non-fatal for local dev either way.
+            warn_if_cold_storage_not_durable("/tmp/some-cold-root");
+        }
+        match saved {
+            Some(v) => std::env::set_var("ANALYTICS_COLD_STORAGE_DURABLE", v),
+            None => std::env::remove_var("ANALYTICS_COLD_STORAGE_DURABLE"),
         }
     }
 }

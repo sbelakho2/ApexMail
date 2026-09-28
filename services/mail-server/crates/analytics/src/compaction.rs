@@ -1,10 +1,35 @@
 //! Compaction worker – hot→cold migration, batch deletes, checksums.
+//!
+//! DURABILITY CONTRACT (migration 231, findings A/B/C): the durable ledger
+//! row in `analytics_compaction_batches` — not the filesystem — is the
+//! source of truth for what cold storage must contain. Objects under the
+//! storage root are a materialization of committed rows. The protocol per
+//! batch is:
+//!
+//!   1. write the JSONL object + manifest to unique temp files in the target
+//!      directory → fsync each file → atomic rename onto the final
+//!      UUID-named path (`events_<uuid>.jsonl`, never wall-clock names — two
+//!      batches in the same millisecond used to collide and `fs::write`
+//!      truncation destroyed the first one);
+//!   2. INSERT the batch row + one covered-id row per event in ONE
+//!      transaction (the COMMIT POINT);
+//!   3. ONLY THEN delete the migrated rows from `events`.
+//!
+//! Crash windows, honestly documented: a crash in (1→2) leaves an orphan
+//! object (harmless — the hot rows still exist, the rerun re-writes and
+//! commits them; at worst a cold duplicate for one crashed batch that ages
+//! out with the month directory). A crash in (2→3) leaves duplicate
+//! coverage that the rerun resolves from the LEDGER (indexed per-batch
+//! membership probe — work ∝ batch, never ∝ history) without re-writing.
+//! The storage root itself must be a durable mount — see
+//! [`crate::config::warn_if_cold_storage_not_durable`] and the crate README.
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::{debug, info};
+use uuid::Uuid;
 
 use crate::config::CompactionConfig;
 use crate::types::*;
@@ -36,6 +61,12 @@ impl CompactionWorker {
 
     /// Run full compaction cycle:hot→cold migration + cold retention cleanup.
     pub async fn run(&self) -> anyhow::Result<CompactionStatus> {
+        // FINDING C:state the durability contract loudly on every run (the
+        // worker also warns once at startup). A warning, never an error: the
+        // ledger row is the source of truth, so local dev against a
+        // non-durable root still behaves correctly.
+        crate::config::warn_if_cold_storage_not_durable(&self.storage_path);
+
         let lock_key = format!("compaction:lock:{}", Utc::now().format("%Y-%m-%d"));
         if !self.acquire_lock(&lock_key).await? {
             info!("Compaction already running, skipping");
@@ -93,11 +124,6 @@ impl CompactionWorker {
         for tenant_id in &tenants {
             debug!(tenant_id = %tenant_id, "compacting tenant events");
 
-            // F13:ids already manifested in a previous (possibly crashed) run.
-            // A crash between the JSONL write and the DELETE used to duplicate
-            // cold rows on rerun — manifested ids are never re-written.
-            let mut manifested = load_manifested_ids(&self.storage_path, tenant_id).await;
-
             loop {
                 // F83: provider/region do not exist as columns on the
                 // canonical PostgreSQL events table. They are derived from
@@ -135,38 +161,65 @@ impl CompactionWorker {
                     break;
                 }
 
-                // F13:split the batch — ids already manifested (a previous run
-                // wrote the cold copy but died before the DELETE) skip the
-                // JSONL write; they still get deleted below to finish the
-                // interrupted migration.
-                let pending: Vec<&EventRow> = rows
-                    .iter()
-                    .filter(|r| !manifested.contains(&r.id))
-                    .collect();
+                // FINDING B:ids already committed by a previous (possibly
+                // crashed) run are resolved from the LEDGER with one indexed
+                // probe over THIS batch's ids — work ∝ batch, never ∝
+                // history. (The old load_manifested_ids() recursively scanned
+                // every year/month manifest per tenant on every run.)
+                let row_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+                let manifested =
+                    load_committed_event_ids(&self.pool, tenant_id, &row_ids).await;
+
+                // F13:split the batch — ids already committed (a previous run
+                // wrote the cold copy and committed the ledger row but died
+                // before the DELETE) skip the JSONL write; they still get
+                // deleted below to finish the interrupted migration.
+                let pending: Vec<&EventRow> = split_pending(&rows, &manifested);
                 let count = pending.len() as i64;
 
                 if !pending.is_empty() {
-                    // Manifest BEFORE the DELETE:once the (ids + file) pair is
-                    // on disk, a crash at any later point is recoverable — the
-                    // rerun sees the ids manifested and only deletes them.
-                    // Residual window: a crash between the JSONL write and the
-                    // manifest write can duplicate one batch in cold storage;
-                    // the ids then manifest on the rerun, so it happens at
-                    // most once per crash.
-                    let (bytes, batch_data, file) = self.write_jsonl_batch(&pending).await?;
+                    // FINDING A commit protocol:write objects → COMMIT the
+                    // ledger row → only then DELETE. A crash between the
+                    // object write and the ledger commit leaves an orphan
+                    // file (harmless — the rerun re-writes those ids under a
+                    // fresh UUID and commits; at worst a cold duplicate for
+                    // one batch, aging out with its month directory). A crash
+                    // after the commit but before the delete is resolved by
+                    // the ledger probe above, never by rescanning files.
+                    let batch_id = Uuid::new_v4();
+                    let (bytes, batch_data, object_key, manifest_key) =
+                        self.write_cold_objects(&pending, batch_id).await?;
                     hasher.update(&batch_data);
                     total_bytes += bytes;
 
-                    let dir = jsonl_dir(&self.storage_path, pending[0]);
-                    write_batch_manifest(&dir, &file, pending.iter().map(|r| r.id.clone())).await?;
-                    manifested.extend(pending.iter().map(|r| r.id.clone()));
+                    let first = pending[0];
+                    let checksum = compute_checksum(&batch_data);
+                    commit_batch_to_ledger(
+                        &self.pool,
+                        &CommittedBatch {
+                            batch_id,
+                            tenant_id: first.tenant_id.clone(),
+                            year: first.timestamp.year(),
+                            month: first.timestamp.month() as i32,
+                            object_key,
+                            manifest_key,
+                            event_count: count,
+                            checksum,
+                            // DEFAULT NOW() supplies the durable timestamp;
+                            // the struct's copy is filled by ledger reads.
+                            committed_at: Utc::now(),
+                        },
+                        pending.iter().map(|r| r.id.clone()).collect(),
+                    )
+                    .await?;
                 }
 
-                // Delete migrated rows (both fresh writes and ids whose cold
-                // copy already existed from an interrupted run).
-                let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+                // Delete migrated rows (both fresh writes and ids whose
+                // committed ledger row already existed from an interrupted
+                // run) — the commit point above has been reached, so this
+                // delete can never lose data.
                 sqlx::query("DELETE FROM events WHERE id = ANY($1)")
-                    .bind(&ids)
+                    .bind(&row_ids)
                     .execute(&self.pool)
                     .await?;
 
@@ -197,18 +250,29 @@ impl CompactionWorker {
         })
     }
 
-    /// Serialize batch of events to JSONL and write to storage path.
-    /// #182:Use tokio::task::spawn_blocking to avoid blocking the Tokio runtime.
+    /// Serialize a batch of events, then write the JSONL object AND its
+    /// manifest to cold storage under a UUIDv4 identity.
+    ///
+    /// FINDING A:object names are `events_<uuid>.jsonl`, NOT
+    /// `events_{millis}.jsonl` — wall-clock names collided when two batches
+    /// landed in the same millisecond and `std::fs::write` truncation made
+    /// the collision a silent overwrite (data loss). A UUIDv4 name is unique
+    /// per batch by construction. Manifests stay on disk next to the object
+    /// as human-readable materialization; the LEDGER row is authoritative.
+    ///
+    /// #182:file IO runs on the blocking pool.
     ///
     /// GDPR:the cold copy stores the MASKED client IP (IPv4 → /24, IPv6 →
     /// /48 — see [`crate::ip_mask`]); the 730-day cold tier must not retain
     /// a full address.
     ///
-    /// Returns `(bytes_written, batch_bytes_for_checksum, filename)`.
-    async fn write_jsonl_batch(
+    /// Returns `(bytes_written, batch_bytes_for_checksum, object_key,
+    /// manifest_key)` with storage-root-RELATIVE keys (the root may move).
+    async fn write_cold_objects(
         &self,
         rows: &[&EventRow],
-    ) -> anyhow::Result<(u64, Vec<u8>, String)> {
+        batch_id: Uuid,
+    ) -> anyhow::Result<(u64, Vec<u8>, String, String)> {
         let mut buf = Vec::with_capacity(rows.len().saturating_mul(256));
         for row in rows {
             let mut masked = (*row).clone();
@@ -218,23 +282,35 @@ impl CompactionWorker {
             buf.push(b'\n');
         }
 
-        let mut filename = String::new();
-        if let Some(first) = rows.first() {
-            let dir = jsonl_dir(&self.storage_path, first);
-            filename = format!("events_{}.jsonl", Utc::now().timestamp_millis());
-            let path = format!("{dir}/{filename}");
-            let buf_clone = buf.clone();
-            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                std::fs::create_dir_all(&dir)?;
-                std::fs::write(&path, &buf_clone)?;
-                Ok(())
-            })
-            .await??;
-            debug!("Wrote cold storage batch ({} bytes)", buf.len());
-        }
+        let first = rows.first().ok_or_else(|| {
+            anyhow::anyhow!("write_cold_objects called with an empty batch")
+        })?;
+        let dir = jsonl_dir(&self.storage_path, first);
+        let (file, manifest_file) = cold_batch_file_names(batch_id);
+        let object_key = object_key_relative(&self.storage_path, &dir, &file);
+        let manifest_key = object_key_relative(&self.storage_path, &dir, &manifest_file);
+        let manifest = BatchManifest {
+            file: file.clone(),
+            ids: rows.iter().map(|r| r.id.clone()).collect(),
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest)?;
+
+        let dir_clone = dir.clone();
+        let buf_clone = buf.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            write_cold_objects_sync(
+                std::path::Path::new(&dir_clone),
+                &file,
+                &manifest_file,
+                &buf_clone,
+                &manifest_bytes,
+            )
+        })
+        .await??;
+        debug!("Wrote cold storage batch {} ({} bytes)", batch_id, buf.len());
 
         let len = buf.len() as u64;
-        Ok((len, buf, filename))
+        Ok((len, buf, object_key, manifest_key))
     }
 
     /// Remove cold storage files older than cold_retention_days.
@@ -245,6 +321,18 @@ impl CompactionWorker {
         let storage_path = self.storage_path.clone();
 
         info!("Cold storage cleanup: removing files before {cutoff_year_month}");
+
+        // FINDING A/B:the ledger ages out with the same {YYYY/MM} cutoff rule
+        // as the files, so committed rows never outlive their materialization
+        // and the recovery lookup stays bounded by retention.
+        sqlx::query(
+            "DELETE FROM analytics_compaction_batches \
+             WHERE year < $1 OR (year = $1 AND month < $2)",
+        )
+        .bind(cutoff.year())
+        .bind(cutoff.month() as i32)
+        .execute(&self.pool)
+        .await?;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if let Ok(entries) = std::fs::read_dir(&storage_path) {
@@ -306,6 +394,268 @@ impl CompactionWorker {
     }
 }
 
+// ── Commit protocol (FINDING A / migration 231) ──────────────────────────────
+
+/// A committed cold batch — one row of `analytics_compaction_batches`.
+/// THE commit point of the protocol; recovery/verification reads these rows,
+/// never "whatever files exist" (finding C).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CommittedBatch {
+    pub batch_id: Uuid,
+    pub tenant_id: String,
+    pub year: i32,
+    pub month: i32,
+    /// Storage-root-relative JSONL path (materialization).
+    pub object_key: String,
+    /// Storage-root-relative manifest path (materialization).
+    pub manifest_key: String,
+    pub event_count: i64,
+    /// SHA-256 hex of the exact JSONL bytes.
+    pub checksum: String,
+    pub committed_at: DateTime<Utc>,
+}
+
+/// Object names for a batch: `events_<uuid>.jsonl` + `events_<uuid>.manifest.json`.
+///
+/// FINDING A:the previous `events_{unix_millis}.jsonl` derived identity from
+/// the wall clock, so two batches in the same millisecond shared a name and
+/// the second `std::fs::write` truncated the first. A UUIDv4 name has a
+/// collision probability of ~2^-122 per pair — identity is per-batch, not
+/// per-moment.
+fn cold_batch_file_names(batch_id: Uuid) -> (String, String) {
+    (
+        format!("events_{batch_id}.jsonl"),
+        format!("events_{batch_id}.manifest.json"),
+    )
+}
+
+/// Storage-root-relative key for `file` written under `dir`.
+fn object_key_relative(storage_path: &str, dir: &str, file: &str) -> String {
+    let root = storage_path.trim_end_matches('/');
+    let dir = dir.strip_prefix(root).unwrap_or(dir);
+    let dir = dir.trim_start_matches('/');
+    format!("{dir}/{file}")
+}
+
+/// Split fetched rows into the ones that still need a cold copy (F13).
+fn split_pending<'a>(
+    rows: &'a [EventRow],
+    committed: &std::collections::HashSet<String>,
+) -> Vec<&'a EventRow> {
+    rows.iter()
+        .filter(|r| !committed.contains(&r.id))
+        .collect()
+}
+
+/// Write the JSONL object + manifest durably into `dir` (blocking core).
+///
+/// Sequence per file:unique temp name (create_new — concurrent writers never
+/// clobber each other's temp) → write → `sync_all` (the bytes must survive a
+/// crash BEFORE the rename) → existence check on the final path → atomic
+/// `rename` → best-effort directory fsync.
+///
+/// The final-name guarantee, honestly:the UUIDv4 identity makes a collision
+/// negligible (~2^-122 per pair); the explicit existence check before the
+/// rename converts any theoretical collision into a loud error instead of a
+/// silent clobber, but check-then-rename is not atomic — the residual race is
+/// exactly as probable as a UUIDv4 collision. `rename` itself IS atomic, so
+/// readers never observe a partial object.
+///
+/// Directory fsync:std has no portable directory-fsync; opening the
+/// directory and `sync_all`-ing it works on Linux and is best-effort on
+/// macOS (it cannot match F_FULLFSYNC there). This is why the durable ledger
+/// row — not the file — is the commit point (finding C).
+fn write_cold_objects_sync(
+    dir: &std::path::Path,
+    file: &str,
+    manifest_file: &str,
+    jsonl: &[u8],
+    manifest: &[u8],
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    write_object_atomically_sync(dir, file, jsonl)?;
+    write_object_atomically_sync(dir, manifest_file, manifest)?;
+    Ok(())
+}
+
+/// Atomically materialize one object inside `dir` (see
+/// [`write_cold_objects_sync`] for the durability argument).
+fn write_object_atomically_sync(dir: &std::path::Path, file: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let final_path = dir.join(file);
+    let temp_path = dir.join(format!(".{file}.tmp"));
+    let write = || -> anyhow::Result<()> {
+        use std::io::Write;
+        // create_new:an existing temp is a previous crashed attempt under the
+        // SAME batch id — the rename below can never have happened for it
+        // (temp → final is the last step), so failing loudly is correct and
+        // never loses an already-committed object.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        if final_path.exists() {
+            anyhow::bail!(
+                "cold object {} already exists — refusing to clobber (FINDING A)",
+                final_path.display()
+            );
+        }
+        // Atomic within the same filesystem (temp lives in the same dir).
+        std::fs::rename(&temp_path, &final_path)?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => {
+            // Best-effort durability of the rename itself. std cannot do a
+            // guaranteed dir fsync portably — documented limit; the ledger
+            // row is the commit point, so an unreached rename after a crash
+            // simply leaves an orphan/pending object, never lost data.
+            if let Ok(d) = std::fs::File::open(dir) {
+                if let Err(e) = d.sync_all() {
+                    debug!("directory fsync not effective on this platform: {e}");
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            std::fs::remove_file(&temp_path).ok();
+            Err(e)
+        }
+    }
+}
+
+/// THE COMMIT POINT:insert the batch row + one covered-id row per event in
+/// ONE transaction. Runs AFTER the objects are on disk and BEFORE the hot
+/// DELETE — see the module docs for the crash windows. Public because
+/// recovery/verification tooling re-commits nothing but must be able to
+/// replay the exact protocol (and the canonical DB tests simulate the
+/// commit-before-delete crash window with it).
+pub async fn commit_batch_to_ledger(
+    pool: &PgPool,
+    batch: &CommittedBatch,
+    event_ids: Vec<String>,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO analytics_compaction_batches \
+         (batch_id, tenant_id, year, month, object_key, manifest_key, event_count, checksum) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(batch.batch_id)
+    .bind(&batch.tenant_id)
+    .bind(batch.year)
+    .bind(batch.month)
+    .bind(&batch.object_key)
+    .bind(&batch.manifest_key)
+    .bind(batch.event_count)
+    .bind(&batch.checksum)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO analytics_compaction_batch_event_ids (batch_id, tenant_id, event_id) \
+         SELECT $1, $2, e FROM unnest($3) AS e",
+    )
+    .bind(batch.batch_id)
+    .bind(&batch.tenant_id)
+    .bind(&event_ids)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    debug!(
+        batch_id = %batch.batch_id,
+        "Committed compaction batch ({} events) to ledger",
+        batch.event_count
+    );
+    Ok(())
+}
+
+// ── Ledger-driven id coverage (FINDING B) ────────────────────────────────────
+
+/// Which of `candidate_ids` already have a COMMITTED cold copy for
+/// `tenant_id`?
+///
+/// One indexed probe over THE BATCH (`tenant_id = $1 AND event_id = ANY($2)`
+/// on `idx_compaction_event_ids_tenant_event`):work ∝ batch, never ∝
+/// history. This replaces load_manifested_ids(), which recursively scanned
+/// every year/month manifest per tenant and loaded all ids of the tenant's
+/// entire history into a HashSet on every run. Public: recovery tooling and
+/// the canonical DB tests (old-scan-vs-ledger property) use the same
+/// coverage oracle as the worker.
+pub async fn load_committed_event_ids(
+    pool: &PgPool,
+    tenant_id: &str,
+    candidate_ids: &[String],
+) -> std::collections::HashSet<String> {
+    if candidate_ids.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT event_id FROM analytics_compaction_batch_event_ids \
+         WHERE tenant_id = $1 AND event_id = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(candidate_ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect()
+}
+
+/// Recovery/verification entry point:read the COMMITTED rows for a tenant —
+/// never "whatever files exist" (finding C). Ordered newest-first by
+/// committed_at via `idx_compaction_batches_tenant_committed`.
+pub async fn load_committed_batches(pool: &PgPool, tenant_id: &str) -> anyhow::Result<Vec<CommittedBatch>> {
+    Ok(sqlx::query_as::<_, CommittedBatch>(
+        "SELECT batch_id, tenant_id, year, month, object_key, manifest_key, event_count, \
+         checksum, committed_at \
+         FROM analytics_compaction_batches WHERE tenant_id = $1 \
+         ORDER BY committed_at DESC",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+// ── Batch manifests (materialization only — the ledger is authoritative) ────
+
+/// Per-batch manifest recording WHICH event ids were written to WHICH cold
+/// file. Written durably alongside the JSONL object. FINDING B:recovery no
+/// longer READS manifests (the ledger answers coverage); these files remain
+/// as human-readable materialization for operators.
+#[derive(Debug, Serialize, Deserialize)]
+struct BatchManifest {
+    /// Cold JSONL file name (inside the manifest's own directory).
+    file: String,
+    /// Event ids contained in that file (canonical text ids).
+    ids: Vec<String>,
+}
+
+/// Directory a batch's JSONL (+ manifest) lives in:
+/// `{storage}/{tenant}/{YYYY/MM}` (by the first row's timestamp).
+fn jsonl_dir(storage_path: &str, first_row: &EventRow) -> String {
+    let date = first_row.timestamp.format("%Y/%m");
+    format!("{}/{}/{}", storage_path, first_row.tenant_id, date)
+}
+
+/// Parse a manifest file's bytes. FINDING B:coverage decisions go through
+/// the ledger, so the only remaining in-crate parser consumers are tests
+/// asserting the materialization stays well-formed (operators read manifests
+/// directly, e.g. `jq`).
+#[cfg(test)]
+fn parse_manifest(data: &[u8]) -> Option<BatchManifest> {
+    serde_json::from_slice(data).ok()
+}
+
+/// Compute SHA-256 checksum for data.
+pub fn compute_checksum(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
+}
+
 /// Free-standing directory cleanup (used inside spawn_blocking).
 fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> anyhow::Result<()> {
     if let Ok(years) = std::fs::read_dir(tenant_dir) {
@@ -327,117 +677,6 @@ fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> any
         }
     }
     Ok(())
-}
-
-/// Compute SHA-256 checksum for data.
-pub fn compute_checksum(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
-}
-
-// ── Batch manifests (F13:idempotent compaction) ──────────────────────────────
-
-/// Per-batch manifest recording WHICH event ids were written to WHICH cold
-/// file. Written after the JSONL write but BEFORE the Postgres DELETE, so a
-/// crash between file-write and delete never duplicates cold rows on rerun:
-/// the rerun loads the manifested ids, skips re-writing them, and only
-/// completes the DELETE.
-#[derive(Debug, Serialize, Deserialize)]
-struct BatchManifest {
-    /// Cold JSONL file name (inside the manifest's own directory).
-    file: String,
-    /// Event ids contained in that file (canonical text ids).
-    ids: Vec<String>,
-}
-
-/// Directory a batch's JSONL (+ manifest) lives in:
-/// `{storage}/{tenant}/{YYYY/MM}` (by the first row's timestamp).
-fn jsonl_dir(storage_path: &str, first_row: &EventRow) -> String {
-    let date = first_row.timestamp.format("%Y/%m");
-    format!("{}/{}/{}", storage_path, first_row.tenant_id, date)
-}
-
-/// Write the manifest for a just-written batch (spawn_blocking; same dir as
-/// the JSONL so retention cleanup removes them together).
-async fn write_batch_manifest(
-    dir: &str,
-    file: &str,
-    ids: impl Iterator<Item = String>,
-) -> anyhow::Result<()> {
-    let manifest = BatchManifest {
-        file: file.to_string(),
-        ids: ids.collect(),
-    };
-    let path = format!("{}/{}.manifest.json", dir, file.trim_end_matches(".jsonl"));
-    let data = serde_json::to_vec(&manifest)?;
-    let dir = dir.to_string();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(&path, &data)?;
-        Ok(())
-    })
-    .await??;
-    Ok(())
-}
-
-/// Parse a manifest file's bytes (testable / used by [`load_manifested_ids`]).
-fn parse_manifest(data: &[u8]) -> Option<BatchManifest> {
-    serde_json::from_slice(data).ok()
-}
-
-/// Load all event ids already manifested for a tenant (scans every
-/// `*.manifest.json` under the tenant's storage tree). Missing directories
-/// or unreadable/corrupt manifests are skipped — a corrupt manifest costs a
-/// possible cold duplicate for those ids, never data loss.
-///
-/// The scan is a blocking `std::fs` tree walk, so it runs on the blocking
-/// pool (audit: it used to run directly on the async runtime thread); a
-/// panic inside the blocking task degrades to an empty set (same
-/// fail-open semantics as an unreadable manifest).
-async fn load_manifested_ids(
-    storage_path: &str,
-    tenant_id: &str,
-) -> std::collections::HashSet<String> {
-    let storage_path = storage_path.to_string();
-    let tenant_id = tenant_id.to_string();
-    tokio::task::spawn_blocking(move || scan_manifested_ids(&storage_path, &tenant_id))
-        .await
-        .unwrap_or_default()
-}
-
-/// Synchronous core of [`load_manifested_ids`] (runs on the blocking pool).
-fn scan_manifested_ids(storage_path: &str, tenant_id: &str) -> std::collections::HashSet<String> {
-    let mut ids = std::collections::HashSet::new();
-    let tenant_dir = std::path::Path::new(storage_path).join(tenant_id);
-    let year_entries = match std::fs::read_dir(&tenant_dir) {
-        Ok(entries) => entries,
-        Err(_) => return ids,
-    };
-    for year in year_entries.flatten() {
-        let months = match std::fs::read_dir(year.path()) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        for month in months.flatten() {
-            let files = match std::fs::read_dir(month.path()) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            for file in files.flatten() {
-                let name = file.file_name().to_string_lossy().to_string();
-                if !name.ends_with(".manifest.json") {
-                    continue;
-                }
-                if let Ok(data) = std::fs::read(file.path()) {
-                    if let Some(manifest) = parse_manifest(&data) {
-                        ids.extend(manifest.ids);
-                    }
-                }
-            }
-        }
-    }
-    ids
 }
 
 #[cfg(test)]
@@ -530,53 +769,113 @@ mod tests {
         assert!(parse_manifest(b"{\"file\":123}").is_none());
     }
 
-    /// A crash between JSONL write and DELETE must not duplicate cold rows on
-    /// rerun:the rerun loads the manifested ids and skips re-writing them.
-    /// Drives the async wrapper so the blocking-pool path is exercised.
-    #[tokio::test]
-    async fn load_manifested_ids_finds_written_manifests() {
-        let root = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
-            .join(format!(
-                "apexmail_compact_test_{}_{}",
-                std::process::id(),
-                uuid::Uuid::new_v4().simple()
-            ));
+    /// FINDING A:two batches written in the same millisecond must get
+    /// DISTINCT object names. The old `events_{millis}.jsonl` derived
+    /// identity from the wall clock and truncated on collision; the UUIDv4
+    /// name is unique per batch by construction, and the name itself carries
+    /// the batch identity (manifest stays paired with its object).
+    #[test]
+    fn same_millisecond_batches_get_distinct_object_names() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let (a_obj, a_manifest) = cold_batch_file_names(a);
+        let (b_obj, b_manifest) = cold_batch_file_names(b);
+
+        assert_ne!(a_obj, b_obj, "same-millisecond batches must not collide");
+        assert_ne!(a_manifest, b_manifest);
+        assert!(a_obj.starts_with("events_") && a_obj.ends_with(".jsonl"), "{a_obj}");
+        assert!(a_manifest.ends_with(".manifest.json"), "{a_manifest}");
+        // The uuid identity is embedded in both names (matches migration 231).
+        assert!(a_obj.contains(&a.to_string()), "{a_obj}");
+        assert!(a_manifest.contains(&a.to_string()), "{a_manifest}");
+    }
+
+    /// FINDING A:durable object write — temp file → fsync → atomic rename.
+    /// Two batches materialized into the SAME directory must both survive
+    /// intact (no truncation/overwrite), temp files must be gone, and a
+    /// second write under an identity whose object already exists must fail
+    /// loudly instead of clobbering (the honest no-clobber guarantee).
+    #[test]
+    fn write_cold_objects_atomic_no_clobber_no_truncation() {
+        let root = std::env::temp_dir().join(format!(
+            "apexmail_compact_write_{}_{}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ));
         let dir = root.join("tenant_a/2026/08");
-        std::fs::create_dir_all(&dir).unwrap();
 
-        let ids: Vec<String> = vec![
-            uuid::Uuid::new_v4().to_string(),
-            uuid::Uuid::new_v4().to_string(),
-        ];
-        let manifest = BatchManifest {
-            file: "events_1.jsonl".into(),
-            ids: ids.clone(),
-        };
-        std::fs::write(
-            dir.join("events_1.manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        // Non-manifest files must be ignored.
-        std::fs::write(dir.join("events_1.jsonl"), b"{}\n").unwrap();
+        let (fa, ma) = cold_batch_file_names(Uuid::new_v4());
+        let (fb, mb) = cold_batch_file_names(Uuid::new_v4());
+        write_cold_objects_sync(&dir, &fa, &ma, b"{\"id\":\"a\"}\n", b"{\"file\":..a..}")
+            .expect("first batch write");
+        // Same-millisecond second batch into the same directory.
+        write_cold_objects_sync(&dir, &fb, &mb, b"{\"id\":\"b\"}\n", b"{\"file\":..b..}")
+            .expect("second batch write (same dir, same millisecond)");
 
-        let loaded = load_manifested_ids(root.to_str().unwrap(), "tenant_a").await;
-        assert_eq!(loaded.len(), 2);
-        for id in &ids {
-            assert!(loaded.contains(id));
-        }
+        assert_eq!(
+            std::fs::read(dir.join(&fa)).unwrap(),
+            b"{\"id\":\"a\"}\n",
+            "first object must not be truncated by the second batch"
+        );
+        assert_eq!(std::fs::read(dir.join(&fb)).unwrap(), b"{\"id\":\"b\"}\n");
+        assert_eq!(
+            std::fs::read(dir.join(&ma)).unwrap(),
+            b"{\"file\":..a..}",
+            "manifest must survive alongside its object"
+        );
+        // Temp files are always cleaned up (success or failure).
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
 
-        // A different tenant / missing tree yields an empty set.
-        assert!(load_manifested_ids(root.to_str().unwrap(), "tenant_b")
-            .await
-            .is_empty());
-        assert!(
-            load_manifested_ids(root.join("nope").to_str().unwrap(), "tenant_a")
-                .await
-                .is_empty()
+        // No-clobber:rewriting an existing identity is a loud error, and the
+        // original bytes are untouched.
+        let err = write_cold_objects_sync(&dir, &fa, &ma, b"OVERWRITE", b"x")
+            .expect_err("must refuse to clobber a committed object");
+        assert!(err.to_string().contains("refusing to clobber"), "{err}");
+        assert_eq!(
+            std::fs::read(dir.join(&fa)).unwrap(),
+            b"{\"id\":\"a\"}\n",
+            "existing object must be intact after the refused write"
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// FINDING B:the pending split — ids with a committed ledger row skip
+    /// the cold re-write but stay in the delete set (they finish the
+    /// interrupted migration).
+    #[test]
+    fn split_pending_skips_committed_ids_keeps_deleting_them() {
+        let committed_id = uuid::Uuid::new_v4().to_string();
+        let fresh_id = uuid::Uuid::new_v4().to_string();
+        let rows = vec![example_row(committed_id.clone(), None), example_row(fresh_id.clone(), None)];
+        let committed: std::collections::HashSet<String> = [committed_id].into();
+
+        let pending = split_pending(&rows, &committed);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, fresh_id);
+        // The delete set is ALL row ids (fresh + covered).
+        assert_eq!(rows.len(), 2);
+    }
+
+    /// FINDING B / FINDING A(relative keys):ledger keys are stored relative
+    /// to the storage root so verification does not depend on where the root
+    /// was mounted.
+    #[test]
+    fn object_keys_are_storage_root_relative() {
+        let row = example_row(uuid::Uuid::new_v4().to_string(), None);
+        let storage = "/var/lib/apexmail/analytics";
+        let dir = jsonl_dir(storage, &row);
+        let (file, _manifest) = cold_batch_file_names(Uuid::new_v4());
+        let key = object_key_relative(storage, &dir, &file);
+        assert!(!key.starts_with(storage), "{key}");
+        assert!(key.starts_with("tenant_a/"), "{key}");
+        assert!(key.ends_with(&file), "{key}");
     }
 
     /// GDPR:the cold JSONL line carries the MASKED IP, never the full one.
