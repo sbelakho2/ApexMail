@@ -1075,6 +1075,64 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// PINNED (considered by the 2026-09 privilege-boundary audit): the
+    /// observability service has NO tenant dimension to fail closed on. It
+    /// is the platform's own telemetry plane: the ingest schema
+    /// (`LogIngestEntry`) carries no tenant field, the query surface filters
+    /// by level/service/limit only, metrics/traces/alerts/SLOs are
+    /// system-scoped, and the system_alerts persistence writes platform
+    /// rows. The all-entries `/logs` view is therefore a deliberate
+    /// fleet-level operations aggregate (like compliance's /risk/stats), not
+    /// an absent-tenant-filter fallback — there is no tenant to filter by.
+    /// What IS pinned here: the service filter keeps producers isolated, an
+    /// ingested `tenant_id` key cannot smuggle a tenant dimension in
+    /// (unknown fields are ignored, nothing tenant-shaped is stored), and
+    /// the protected routes still require the token.
+    #[tokio::test]
+    async fn logs_are_platform_scoped_service_filtered_and_tenant_free() {
+        let state = test_state();
+        let app = router(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(log_ingest_request(
+                json!([
+                    { "level": "error", "service": "tenant-a-worker", "message": "a failed",
+                      "tenant_id": "ten_a_should_not_become_a_dimension" },
+                    { "level": "error", "service": "tenant-b-worker", "message": "b failed" }
+                ]),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // Service-scoped query returns only that producer's entries.
+        let req = Request::builder()
+            .uri("/logs?service=tenant-a-worker")
+            .header("x-api-key", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1, "service filter isolates producers: {json:?}");
+        assert_eq!(json[0]["service"], "tenant-a-worker");
+        let serialized = json[0].to_string();
+        assert!(
+            !serialized.contains("ten_a_should_not_become_a_dimension"),
+            "no tenant dimension may materialize on stored entries: {serialized}"
+        );
+
+        // The unfiltered view stays token-gated (the aggregate is platform-
+        // internal, not public).
+        let req = Request::builder().uri("/logs").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn log_ingest_rejects_empty_oversized_and_unknown_level_batches() {
         let app = router(test_state());
@@ -1295,5 +1353,193 @@ mod tests {
             parse_alert_status("garbage"),
             crate::types::AlertStatus::Firing
         );
+    }
+
+    // ── Outage matrix (audit item 10) ─────────────────────────────────
+    //
+    // Dependency × failure-mode × expected honest outcome:
+    //
+    // │ Postgres down │ POST /alerts   │ 202 + in-memory alert (persistence
+    // │               │                │ failure is logged, never propagated —
+    // │               │                │ bounded by the pool acquire timeout)
+    // │ Postgres down │ GET /alerts    │ serves the in-memory truth
+    // │ Postgres down │ POST /logs     │ 202 (in-memory aggregation only)
+    // │ Redis down    │ /health/details│ "degraded" + redis_connected=false,
+    // │               │                │ bounded by check_redis's 2 s timeout
+    // │ both down     │ /health,/metrics│ still 200 — metrics keep serving
+    //
+    // The service has NO ClickHouse dependency (OLAP ingest lives in the
+    // tracking service), so there is no ClickHouse arm for this crate.
+
+    /// A lazy pool bound to a refused port: every acquire fails within the
+    /// short, deterministic timeout.
+    fn dead_pg_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy("postgres://outage:outage@127.0.0.1:1/absent")
+            .expect("lazy dead pool")
+    }
+
+    fn dead_redis_pool() -> Arc<RedisPool> {
+        Arc::new(
+            deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("dead redis pool"),
+        )
+    }
+
+    fn outaged_state(pg: Option<sqlx::PgPool>, redis: Option<Arc<RedisPool>>) -> AppState {
+        let state = test_state();
+        let state = match pg {
+            Some(pool) => state.with_db_pool(pool),
+            None => state,
+        };
+        match redis {
+            Some(pool) => state.with_redis_pool(pool),
+            None => state,
+        }
+    }
+
+    async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-api-key", "test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    /// Postgres down × alert ingest: honest and bounded. The webhook is
+    /// ACCEPTED, the alert is visible in memory, and the (failing)
+    /// persistence attempt never breaks the ingest or hangs the request.
+    #[tokio::test]
+    async fn outage_pg_down_alert_ingest_stays_honest_and_bounded() {
+        let state = outaged_state(Some(dead_pg_pool()), None);
+        let app = router(state.clone());
+        let payload = json!({
+            "alerts": [ {
+                "status": "firing",
+                "labels": { "alertname": "PgDownProbe", "severity": "critical" },
+                "annotations": { "summary": "postgres unreachable" },
+                "fingerprint": "pg-down-probe"
+            } ]
+        });
+        let started = std::time::Instant::now();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/alerts")
+                    .header("x-api-key", "test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the ingest must stay bounded under a PG outage, took {:?}",
+            started.elapsed()
+        );
+        // The in-memory alert truth is intact (alerts fail honest).
+        let active = state.alerts.list_active_alerts();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].rule_name, "PgDownProbe");
+
+        // The query surface keeps serving the in-memory truth.
+        let (status, body) = get_json(router(state.clone()), "/alerts").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["rule_name"], "PgDownProbe");
+    }
+
+    /// Postgres down × log ingest: in-memory aggregation unaffected.
+    #[tokio::test]
+    async fn outage_pg_down_log_ingest_still_accepted() {
+        let state = outaged_state(Some(dead_pg_pool()), None);
+        let app = router(state.clone());
+        let payload = json!([{ "level": "error", "service": "t", "message": "boom" }]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logs")
+                    .header("x-api-key", "test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(state.logs.len() == 1);
+    }
+
+    /// Redis down × /health/details: honest degradation, bounded by
+    /// check_redis's 2 s timeout — never a hang, never a fake "ok".
+    #[tokio::test]
+    async fn outage_redis_down_health_details_reports_degraded_bounded() {
+        let state = outaged_state(None, Some(dead_redis_pool()));
+        let app = router(state);
+        let started = std::time::Instant::now();
+        let (status, body) = get_json(app, "/health/details").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["redis_connected"], false);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the Redis probe must stay bounded, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Both dependencies down: liveness and the metrics surface keep
+    /// serving — an outage must never take observability itself down.
+    #[tokio::test]
+    async fn outage_both_down_health_and_metrics_keep_serving() {
+        let state = outaged_state(Some(dead_pg_pool()), Some(dead_redis_pool()));
+        state
+            .metrics
+            .record_gauge("outage_probe", 1.0, "probe gauge");
+        let app = router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("outage_probe"), "{text}");
     }
 }

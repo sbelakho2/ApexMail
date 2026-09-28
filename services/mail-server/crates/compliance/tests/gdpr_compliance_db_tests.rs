@@ -857,9 +857,12 @@ async fn access_export_covers_all_stores_and_downloads() {
         .unwrap();
 
     let state = download_test_state(pool.clone()).await;
+    // P1-SECURITY (required tenant scoping): the download asserts the
+    // export's tenant via ?tenant_id=.
     let response = compliance::routes::gdpr_download_export(
         axum::extract::State(state),
         auth_headers(),
+        query_tenant(&tenant),
         axum::extract::Path(export_id.clone()),
     )
     .await
@@ -879,11 +882,25 @@ async fn access_export_covers_all_stores_and_downloads() {
     let missing = compliance::routes::gdpr_download_export(
         axum::extract::State(download_test_state(pool.clone()).await),
         auth_headers(),
+        query_tenant(&tenant),
         axum::extract::Path("no-such-export-id".to_string()),
     )
     .await
     .unwrap_err();
     assert_eq!(missing.0, axum::http::StatusCode::NOT_FOUND);
+
+    // P1-SECURITY: ANOTHER tenant's selector → the same 404 (the tenant
+    // filter excludes the row; the raw id alone no longer authorizes the
+    // download of a full personal-data export).
+    let stranger = compliance::routes::gdpr_download_export(
+        axum::extract::State(download_test_state(pool.clone()).await),
+        auth_headers(),
+        query_tenant(&unique_tenant()),
+        axum::extract::Path(export_id.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stranger.0, axum::http::StatusCode::NOT_FOUND);
 
     // Expired export → 410 Gone.
     sqlx::query(
@@ -896,6 +913,7 @@ async fn access_export_covers_all_stores_and_downloads() {
     let gone = compliance::routes::gdpr_download_export(
         axum::extract::State(download_test_state(pool.clone()).await),
         auth_headers(),
+        query_tenant(&tenant),
         axum::extract::Path(export_id),
     )
     .await
@@ -1046,6 +1064,15 @@ fn auth_headers() -> axum::http::HeaderMap {
         "Bearer test-service-token".parse().unwrap(),
     );
     headers
+}
+
+/// P1-SECURITY (required tenant scoping): build the `?tenant_id=` selector
+/// the tenant-scoped download route now requires.
+fn query_tenant(tenant: &str) -> axum::extract::Query<std::collections::HashMap<String, String>> {
+    axum::extract::Query(std::collections::HashMap::from([(
+        "tenant_id".to_string(),
+        tenant.to_string(),
+    )]))
 }
 
 // ── E: audit chain under concurrency and archival ───────────────────────────

@@ -397,4 +397,69 @@ mod tests {
         assert_eq!(sanitize_filename_component("..."), "document");
         assert_eq!(sanitize_filename_component(""), "document");
     }
+
+    /// PINNED (considered by the 2026-09 privilege-boundary audit): the PDF
+    /// renderer has NO tenant dimension to fail closed on. The only surface
+    /// is `POST /v1/pdf/render[,/json]` — a pure function of
+    /// `(platform-template-name, caller-supplied data)` over the
+    /// token-gated platform template directory (`PDF_TEMPLATES_DIR`,
+    /// charset-validated, path-traversal refused). It stores nothing, reads
+    /// no tenant rows, accepts no tenant selector, and holds no per-caller
+    /// state — identical inputs render identical bytes for any caller, so
+    /// there is no cross-tenant read to probe and no default bucket to
+    /// exploit. The token check (empty-token fail-closed, 401 matrix) is
+    /// pinned by the sibling tests above; this test pins the STATELESSNESS —
+    /// the property that makes tenancy inapplicable here.
+    #[tokio::test]
+    async fn renders_are_stateless_pure_functions_of_template_and_data() {
+        let body_for = |invoice: &str| {
+            serde_json::json!({
+                "template": "invoice",
+                "data": { "invoice_number": invoice, "total": 4200 }
+            })
+            .to_string()
+        };
+        let render = |app: Router, invoice: &str| {
+            let body = body_for(invoice);
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/pdf/render/json")
+                        .header("x-api-key", "super-secret")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // "Tenant A" and "Tenant B" render the SAME inputs → identical
+        // output (no per-caller state, no tenant-scoped variation).
+        let first = render(pdf_router("super-secret".into()), "INV-SAME").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = render(pdf_router("super-secret".into()), "INV-SAME").await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let bytes_a = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bytes_b = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(bytes_a, bytes_b, "identical inputs must render identically");
+
+        // Different inputs (another tenant's data) → different output; and
+        // neither render influences the other (no shared mutable state).
+        let other = render(pdf_router("super-secret".into()), "INV-OTHER").await;
+        assert_eq!(other.status(), StatusCode::OK);
+        let bytes_other = axum::body::to_bytes(other.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_ne!(
+            bytes_a, bytes_other,
+            "different data must render differently"
+        );
+    }
 }

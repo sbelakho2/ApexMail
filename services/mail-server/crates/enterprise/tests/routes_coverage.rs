@@ -37,6 +37,16 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
     test_runtime().block_on(future)
 }
 
+/// Serializes the tests that mutate the process-global `PDF_RENDERER_URL`
+/// env (`pdf_endpoints_degrade_honestly_…` and `qbr_pdf_renders_…`): the
+/// renderer URL is read per call, so concurrent mutations made both tests
+/// order-dependent (a 503-unconfigured probe could observe a sibling's
+/// dead-port URL and fail 502 ≠ 503). Assertions unchanged.
+fn pdf_env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 struct Harness {
     app: Router,
     db: PgPool,
@@ -763,6 +773,7 @@ async fn spawn_pdf_mock(mode: PdfRenderer) -> String {
 
 #[test]
 fn pdf_endpoints_degrade_honestly_when_rendering_is_unconfigured_or_broken() {
+    let _pdf_env = pdf_env_test_lock().lock().unwrap();
     run(async {
         let Some(h) = harness().await else { return };
         let app = h.app.clone();
@@ -808,6 +819,7 @@ fn pdf_endpoints_degrade_honestly_when_rendering_is_unconfigured_or_broken() {
 
 #[test]
 fn qbr_pdf_renders_through_the_configured_renderer() {
+    let _pdf_env = pdf_env_test_lock().lock().unwrap();
     run(async {
         let Some(h) = harness().await else { return };
         let app = h.app.clone();

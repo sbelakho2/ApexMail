@@ -36,7 +36,10 @@ fn spawn_service(health_addr: SocketAddr, extra_env: &[(&str, &str)]) -> Child {
         .env("DB_PORT", "5432")
         .env("DB_NAME", "apexmail_scratch_base")
         .env("DB_USER", "apexmail")
-        .env("DB_PASSWORD", "bebc8cefdc096e5247f8864e5c0edf78099df23058133321")
+        .env(
+            "DB_PASSWORD",
+            "bebc8cefdc096e5247f8864e5c0edf78099df23058133321",
+        )
         .env("RUST_LOG", "error")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .stdout(Stdio::piped())
@@ -44,7 +47,9 @@ fn spawn_service(health_addr: SocketAddr, extra_env: &[(&str, &str)]) -> Child {
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    command.spawn().expect("spawn the observability-service binary")
+    command
+        .spawn()
+        .expect("spawn the observability-service binary")
 }
 
 fn wait_for_health(addr: SocketAddr) -> (u16, String) {
@@ -121,7 +126,11 @@ fn service_serves_health_and_metrics_and_sigterm_exits_cleanly() {
         .output()
         .expect("kill utility");
     let exit = reap(&mut child, STOP_DEADLINE);
-    assert_eq!(exit.code(), Some(0), "SIGTERM must drain cleanly, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGTERM must drain cleanly, got {exit}"
+    );
 }
 
 /// A SIGINT drains to exit code 0 as well.
@@ -136,7 +145,11 @@ fn service_sigint_exits_cleanly() {
         .output()
         .expect("kill utility");
     let exit = reap(&mut child, STOP_DEADLINE);
-    assert_eq!(exit.code(), Some(0), "SIGINT must drain cleanly, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGINT must drain cleanly, got {exit}"
+    );
 }
 
 /// A malformed environment (LOG_LEVEL=off fails validation) must refuse
@@ -147,7 +160,11 @@ fn service_refuses_an_invalid_configuration() {
     let addr = reserve_addr();
     let mut child = spawn_service(addr, &[("LOG_LEVEL", "off")]);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
     let output = output_of(&mut child);
     assert!(
         output.contains("Invalid observability configuration"),
@@ -163,7 +180,11 @@ fn service_refuses_a_taken_port() {
     let _occupant = TcpListener::bind(addr).expect("occupy the port");
     let mut child = spawn_service(addr, &[]);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
     let output = output_of(&mut child);
     assert!(
         output.contains("failed to bind listener"),

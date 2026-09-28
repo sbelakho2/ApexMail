@@ -618,10 +618,9 @@ impl RetentionSweeper {
                     }
                 };
                 let (predicate, bind_ids) = match tenants {
-                    Some(_) if days == &default_days => (
-                        default_group_predicate(&held_ids),
-                        Some(ids.as_slice()),
-                    ),
+                    Some(_) if days == &default_days => {
+                        (default_group_predicate(&held_ids), Some(ids.as_slice()))
+                    }
                     Some(_) => (
                         format!("{ts} < $1 AND tenant_id = ANY($2)"),
                         Some(ids.as_slice()),

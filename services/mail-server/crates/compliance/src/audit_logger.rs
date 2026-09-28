@@ -129,6 +129,11 @@ impl AuditLogger {
 
         let mut map = self.last_hashes.write().await;
         for (tenant_id, hash) in rows {
+            // The "global" key exists ONLY for pre-existing NULL-tenant rows
+            // (history cannot be rewritten). P1-SECURITY: new appends can no
+            // longer land there — `log` refuses unattributed entries, so the
+            // global chain is frozen legacy state, never a mixing point for
+            // per-tenant trails.
             let chain_key = tenant_id.unwrap_or_else(|| "global".into());
             map.insert(chain_key, hash);
         }
@@ -171,7 +176,25 @@ impl AuditLogger {
         ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
         let id = Uuid::new_v4().to_string();
-        let chain_key = ctx.tenant_id.clone().unwrap_or_else(|| "global".into());
+        // P1-SECURITY: audit hash chains are PER-TENANT by design —
+        // verify_chain(Some(tenant)) can only attest a tenant's own trail. A
+        // missing/blank tenant context used to silently merge the entry into
+        // the legacy NULL-tenant "global" chain, so a tenant-scoped event
+        // would vanish from the chain that is supposed to attest it (and an
+        // attacker able to trigger tenant-less appends could interleave
+        // entries across tenants in one shared chain). Appends now FAIL
+        // CLOSED: every caller must attribute its entry. The "global" chain
+        // remains only for pre-existing NULL-tenant rows, which `initialize`
+        // must still be able to load and verify (history cannot be rewritten).
+        let tenant_id = ctx
+            .tenant_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                "audit entries require a tenant context: per-tenant hash chains refuse unattributed appends".to_string()
+            })?;
+        let chain_key = tenant_id.to_string();
 
         // E-1: serialize chain appends per chain in-process — cheap fast path
         // that also cuts advisory-lock churn; correctness comes from the DB
@@ -195,8 +218,10 @@ impl AuditLogger {
             .map_err(|e| format!("DB error: {e}"))?;
 
         // Authoritative chain head (live ∪ archive, F12) under the lock.
+        // The VALIDATED tenant is used everywhere below — never the raw
+        // context value (a padded value must not fork the chain key).
         let head: Option<(String, DateTime<Utc>)> =
-            Self::chain_head(&mut tx, ctx.tenant_id.as_deref()).await?;
+            Self::chain_head(&mut tx, Some(tenant_id)).await?;
         let previous_hash = head.as_ref().map(|(hash, _)| hash.clone());
 
         // Microsecond-precision, strictly-increasing per chain (see doc above).
@@ -209,7 +234,7 @@ impl AuditLogger {
 
         let hash = self.compute_hash(
             &id,
-            &ctx.tenant_id,
+            &Some(tenant_id.to_string()),
             &ctx.user_id,
             &ctx.session_id,
             &action,
@@ -228,7 +253,7 @@ impl AuditLogger {
 
         let entry = AuditLogEntry {
             id,
-            tenant_id: ctx.tenant_id.clone(),
+            tenant_id: Some(tenant_id.to_string()),
             user_id: ctx.user_id.clone(),
             session_id: ctx.session_id.clone(),
             action,
@@ -1898,6 +1923,87 @@ mod db_tests {
             logger.export(&query, "xml").await.is_err(),
             "an unknown format is refused, never silently rendered"
         );
+    }
+
+    /// P1-SECURITY: audit hash chains are per-tenant by design, so an
+    /// unattributed append is REFUSED instead of silently merging into the
+    /// legacy NULL-tenant "global" chain — where a tenant-scoped event would
+    /// vanish from the chain meant to attest it and tenants would share one
+    /// interleaved chain. Nothing may be written without a tenant.
+    #[tokio::test]
+    async fn unattributed_appends_are_refused_and_write_nothing() {
+        let Some((pool, logger)) = logger("xchain").await else {
+            return;
+        };
+        let details = serde_json::json!({"probe": "cross-tenant"});
+        let no_tenant = LogContext {
+            tenant_id: None,
+            user_id: Some("user-1".into()),
+            session_id: None,
+            ip_address: None,
+            user_agent: Some("unit-test".into()),
+        };
+        let blank_tenant = LogContext {
+            tenant_id: Some("   ".into()),
+            ..no_tenant.clone()
+        };
+        for context in [&no_tenant, &blank_tenant] {
+            let result = logger
+                .log(
+                    AuditAction::Login,
+                    AuditResource::User,
+                    None,
+                    details.clone(),
+                    AuditOutcome::Success,
+                    None,
+                    context,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "a {context:?} tenant must be refused, not merged into a global chain"
+            );
+            assert!(result.unwrap_err().contains("require a tenant context"));
+        }
+
+        // The pad-trimming contract: a padded-but-real tenant is normalized
+        // onto ONE chain, not a padded fork of it.
+        let padded = logger
+            .log(
+                AuditAction::Login,
+                AuditResource::User,
+                None,
+                details.clone(),
+                AuditOutcome::Success,
+                None,
+                &LogContext {
+                    tenant_id: Some(format!("  {}  ", test_support::unique_tenant())),
+                    ..no_tenant.clone()
+                },
+            )
+            .await
+            .expect("a padded tenant is still a tenant");
+        assert_eq!(
+            logger
+                .query(&AuditLogQuery {
+                    tenant_id: padded.tenant_id.clone(),
+                    ..Default::default()
+                })
+                .await
+                .expect("query")
+                .1,
+            1,
+            "the trimmed tenant owns the entry"
+        );
+
+        // The refused appends wrote nothing anywhere.
+        let (entries, total) = logger
+            .query(&AuditLogQuery::default())
+            .await
+            .expect("query");
+        assert_eq!(total, 1, "only the padded append persisted");
+        assert_eq!(entries.len(), 1);
+        pool.close().await;
     }
 
     #[tokio::test]

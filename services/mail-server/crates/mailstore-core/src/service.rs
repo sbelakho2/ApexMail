@@ -2098,6 +2098,168 @@ mod tests {
             .unwrap();
     }
 
+    /// PINNED + adversarially proven (2026-09 privilege-boundary audit):
+    /// mailstore-core is ACCOUNT-addressed by design. Every RPC names its
+    /// `account_id` selector explicitly and every query filters by that
+    /// account — there is no tenant dimension in the storage schema
+    /// (`mail_accounts`/`mail_mailboxes`/`mail_messages` carry no tenant_id),
+    /// so there is no redundant tenant identity to bind: the shared internal
+    /// service token IS the trust boundary, and the IMAP/API layers above
+    /// mailstore resolve the authenticated user's account. What MUST hold —
+    /// and is pinned here — is that the account selector FAILS CLOSED: an
+    /// unknown or malformed account never degrades into an aggregate of all
+    /// accounts, and account B can never observe account A's stored mail
+    /// through same-named mailboxes or guessed UIDs.
+    #[tokio::test]
+    async fn cross_account_reads_stay_scoped_and_unknown_accounts_fail_closed() {
+        let Some(pool) = crate::test_db::canonical_pool("cross_account_reads_stay_scoped").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        // Two accounts, same mailbox name — the collision case a naive
+        // name-only lookup would confuse.
+        let account_a = svc
+            .storage
+            .create_account(
+                &format!("a-{}@example.com", Uuid::new_v4()),
+                "not-a-real-hash",
+                None,
+            )
+            .await
+            .unwrap();
+        let account_b = svc
+            .storage
+            .create_account(
+                &format!("b-{}@example.com", Uuid::new_v4()),
+                "not-a-real-hash",
+                None,
+            )
+            .await
+            .unwrap();
+        let inbox_a = svc
+            .storage
+            .list_mailboxes(&account_a.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap();
+        let inbox_b = svc
+            .storage
+            .list_mailboxes(&account_b.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap();
+        assert_eq!(inbox_a.name, inbox_b.name, "both accounts have an INBOX");
+
+        // Account A stores a message in its INBOX.
+        let raw = format!(
+            "From: sender@example.com\r\nSubject: account-a-private\r\nMessage-ID: <{}@example.com>\r\n\r\nbody",
+            Uuid::new_v4()
+        );
+        let stored = svc
+            .store_message(Request::new(StoreMessageRequest {
+                account_id: account_a.id.to_string(),
+                mailbox: inbox_a.name.clone(),
+                raw_message: raw.as_bytes().to_vec().into(),
+                flags: None,
+                internal_date: 0,
+                dedup_exempt: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Account B's same-named mailbox stays empty...
+        let list_b = svc
+            .list_messages(Request::new(ListMessagesRequest {
+                account_id: account_b.id.to_string(),
+                mailbox: inbox_b.name.clone(),
+                uid_min: 0,
+                uid_max: 0,
+                limit: 100,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            list_b.messages.is_empty(),
+            "account B must not see account A's messages through the same mailbox name"
+        );
+
+        // ...and a UID-guided fetch of A's message through B's account is a
+        // not_found, not the message.
+        let cross = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account_b.id.to_string(),
+                mailbox: inbox_b.name.clone(),
+                uid: stored.uid,
+                include_body: true,
+            }))
+            .await;
+        assert!(cross.is_err(), "a cross-account UID fetch must fail closed");
+
+        // An UNKNOWN account selector fails closed (never an aggregate).
+        let unknown = Uuid::new_v4().to_string();
+        for probe_account in [unknown.clone(), String::new()] {
+            assert!(
+                svc.list_messages(Request::new(ListMessagesRequest {
+                    account_id: probe_account.clone(),
+                    mailbox: "INBOX".to_string(),
+                    uid_min: 0,
+                    uid_max: 0,
+                    limit: 100,
+                }))
+                .await
+                .is_err(),
+                "account selector {probe_account:?} must fail closed, not list everything"
+            );
+        }
+
+        // The owner still reads its own message (legit flow).
+        let own = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account_a.id.to_string(),
+                mailbox: inbox_a.name.clone(),
+                uid: stored.uid,
+                include_body: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            own.meta.expect("meta").uid,
+            stored.uid,
+            "the owning account keeps reading its own message"
+        );
+
+        // Cleanup.
+        for account in [account_a.id, account_b.id] {
+            for table in ["mail_messages", "mail_mailboxes"] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                    .bind(account)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+                .bind(account)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
     #[test]
     fn proto_flag_labels_ignores_system_prefixed_customs() {
         let proto = MessageFlags {

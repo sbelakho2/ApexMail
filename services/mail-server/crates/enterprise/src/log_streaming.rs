@@ -737,14 +737,38 @@ pub fn is_private_or_reserved_ip(ip: std::net::IpAddr) -> bool {
 
 /// Addresses explicitly allow-listed via `LOG_STREAMING_SSRF_ALLOWLIST`
 /// (comma-separated IPs) — an escape hatch for internal test destinations.
-static SSRF_ALLOWLIST: std::sync::LazyLock<Vec<std::net::IpAddr>> =
-    std::sync::LazyLock::new(|| {
-        std::env::var("LOG_STREAMING_SSRF_ALLOWLIST")
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|entry| entry.trim().parse().ok())
-            .collect()
-    });
+///
+/// Read-from-env ONCE and cached (`None` = not yet read). The `Option`
+/// wrapper (instead of a plain `LazyLock`) exists so tests can RESET the
+/// cache: the coverage tests mutate the process env, and a `LazyLock` would
+/// permanently pin whichever value was visible at first touch, making the
+/// sibling tests order-dependent in both directions (see the isolation note
+/// on `ssrf_guard_rejects_literal_private_ip_host`). Production behaviour is
+/// unchanged: the first guard evaluation reads the env and caches it for the
+/// process lifetime.
+static SSRF_ALLOWLIST: std::sync::Mutex<Option<Vec<std::net::IpAddr>>> =
+    std::sync::Mutex::new(None);
+
+fn ssrf_allowlist() -> Vec<std::net::IpAddr> {
+    let mut cached = SSRF_ALLOWLIST.lock().unwrap();
+    if cached.is_none() {
+        *cached = Some(
+            std::env::var("LOG_STREAMING_SSRF_ALLOWLIST")
+                .unwrap_or_default()
+                .split(',')
+                .filter_map(|entry| entry.trim().parse().ok())
+                .collect(),
+        );
+    }
+    cached.clone().unwrap_or_default()
+}
+
+/// Test-only: drop the cached allowlist so the next guard evaluation re-reads
+/// `LOG_STREAMING_SSRF_ALLOWLIST`. Callers must hold [`ssrf_env_test_lock`].
+#[cfg(test)]
+fn reset_ssrf_allowlist_for_tests() {
+    *SSRF_ALLOWLIST.lock().unwrap() = None;
+}
 
 /// Cached per-destination clients whose DNS is pinned to the validated
 /// address (fix F: closes the DNS-rebinding TOCTOU between validation and
@@ -831,7 +855,7 @@ pub async fn ssrf_guard_url(url: &str) -> Result<GuardedDestination, String> {
         return Err(format!("DNS resolution returned no addresses for {host}"));
     }
 
-    let allowlist = &*SSRF_ALLOWLIST;
+    let allowlist = ssrf_allowlist();
     for ip in &ips {
         if is_private_or_reserved_ip(*ip) && !allowlist.contains(ip) {
             return Err(format!(
@@ -969,6 +993,15 @@ pub fn hmac_sign(key: &[u8], data: &[u8]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serializes the tests that touch the `LOG_STREAMING_SSRF_ALLOWLIST`
+    /// process env (or first-initialize the allowlist LazyLock) so their
+    /// windows cannot interleave — see the isolation note on
+    /// `ssrf_guard_rejects_literal_private_ip_host`.
+    fn ssrf_env_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
     use chrono::Utc;
 
     // ── SSRF guard unit tests (fix F) ─────────────────────────────────
@@ -1030,6 +1063,14 @@ mod tests {
 
     #[test]
     fn ssrf_guard_rejects_literal_private_ip_host() {
+        // Test-isolation: the allowlist is read from the process env and
+        // cached, and sibling coverage tests mutate that env. The tests that
+        // touch it (directly or through the cache) hold a shared mutex and
+        // RESET the cache, so this test always observes the empty default
+        // allowlist regardless of execution order. Assertions unchanged.
+        let _guard = ssrf_env_test_lock().lock().unwrap();
+        std::env::remove_var("LOG_STREAMING_SSRF_ALLOWLIST");
+        reset_ssrf_allowlist_for_tests();
         let rt = tokio::runtime::Runtime::new().unwrap();
         for url in [
             "https://10.0.0.5/hook",
@@ -1263,7 +1304,12 @@ mod tests {
     #[tokio::test]
     async fn ssrf_guard_reports_each_failure_shape() {
         // The allowlist is read once per process: set it before anything
-        // touches the guard so the loopback case below can pass.
+        // touches the guard so the loopback case below can pass. Hold the
+        // shared env lock so no sibling's guard initializes inside this
+        // allow-listing window (see `ssrf_guard_rejects_literal_private_ip_
+        // host`).
+        let _guard = ssrf_env_test_lock().lock().unwrap();
+        reset_ssrf_allowlist_for_tests();
         std::env::set_var("LOG_STREAMING_SSRF_ALLOWLIST", "127.0.0.1");
         // Unparsable URL.
         assert!(ssrf_guard_url("not a url at all")
@@ -1301,6 +1347,7 @@ mod tests {
         assert_eq!(allowed.host, "127.0.0.1");
         assert_eq!(allowed.addr.to_string(), "127.0.0.1:9");
         std::env::remove_var("LOG_STREAMING_SSRF_ALLOWLIST");
+        reset_ssrf_allowlist_for_tests();
     }
 
     #[test]
@@ -1493,7 +1540,10 @@ mod tests {
 
         // A webhook stream pointing at a black-holed loopback port (the
         // SSRF guard is explicitly told this destination is allowed): the
-        // delivery failure surfaces honestly.
+        // delivery failure surfaces honestly. Hold the shared env lock so
+        // the allow-listing window cannot overlap a sibling's guard init.
+        let _guard = ssrf_env_test_lock().lock().unwrap();
+        reset_ssrf_allowlist_for_tests();
         std::env::set_var("LOG_STREAMING_SSRF_ALLOWLIST", "127.0.0.1");
         let dead_port = spawn_accept_and_drop().await;
         let dead = service
@@ -1555,5 +1605,6 @@ mod tests {
             "the failed heartbeat is recorded: {failures}"
         );
         std::env::remove_var("LOG_STREAMING_SSRF_ALLOWLIST");
+        reset_ssrf_allowlist_for_tests();
     }
 }

@@ -374,12 +374,10 @@ async fn run(
     let addr = bind_addr(config.port);
     tracing::info!(%addr, "Listening");
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, %addr, "failed to bind listener");
-            format!("failed to bind listener on {addr}: {err}")
-        })?;
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|err| {
+        tracing::error!(error = %err, %addr, "failed to bind listener");
+        format!("failed to bind listener on {addr}: {err}")
+    })?;
 
     let shutdown = {
         let flag = shutdown_flag.clone();
@@ -531,8 +529,14 @@ mod tests {
             .iter()
             .map(|rule| rule.name.clone())
             .collect();
-        assert!(names.contains(&"high_redis_eviction_rate".to_string()), "{names:?}");
-        assert!(names.contains(&"high_log_error_rate".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"high_redis_eviction_rate".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"high_log_error_rate".to_string()),
+            "{names:?}"
+        );
     }
 
     // ── run(): process orchestration ───────────────────────────────────
@@ -621,7 +625,10 @@ mod tests {
         assert!(result.is_ok(), "clean drain: {result:?}");
 
         let rebinding = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
-        assert!(rebinding.is_ok(), "the drained service must release its port");
+        assert!(
+            rebinding.is_ok(),
+            "the drained service must release its port"
+        );
     }
 
     /// Duplicate-instance conflict: a second instance on the same port must
@@ -639,10 +646,7 @@ mod tests {
         };
         let result = run(config, std::future::pending()).await;
         let error = result.expect_err("an occupied port must refuse startup");
-        assert!(
-            error.contains("failed to bind listener"),
-            "error: {error}"
-        );
+        assert!(error.contains("failed to bind listener"), "error: {error}");
         drop(listener);
     }
 

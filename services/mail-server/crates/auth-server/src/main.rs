@@ -1343,6 +1343,68 @@ mod tests {
         assert!(json["updated"].as_str().unwrap().contains('T'));
     }
 
+    /// PINNED (considered by the 2026-09 privilege-boundary audit): the
+    /// auth-server status surface has NO tenant dimension to fail closed
+    /// on. It is deliberately public and aggregate-only: every probe is a
+    /// COUNT(*)/SELECT 1/TCP reachability check, and the responses carry
+    /// ONLY {status, services[{name, status}], updated} — never tenant ids,
+    /// emails, or rows. There is no tenant selector on any routed endpoint
+    /// (login/register are unrouted), so the AI-audit bypass class
+    /// (missing-tenant → broad default) has no foothold here. This test
+    /// pins the exact payload shape so a future probe that starts leaking
+    /// tenant-attributed data is caught.
+    #[tokio::test]
+    async fn status_surface_is_aggregate_only_and_carries_no_tenant_data() {
+        let Some(pool) = canonical_pool("auth_status_aggregate_only").await else {
+            return;
+        };
+        // Seed real tenants/users so a leak would have something to leak.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'pin-a', 'pin-a', 'free', 'active') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind("tn_statuspin0000000001")
+        .execute(&pool)
+        .await
+        .ok();
+        let state = live_state(pool);
+
+        let response = status_api(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+
+        // The payload exposes exactly three keys.
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("status api object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["services", "status", "updated"], "{json}");
+
+        // Each service entry exposes exactly name + status.
+        for service in json["services"].as_array().expect("services array") {
+            let mut entry_keys: Vec<&str> = service
+                .as_object()
+                .expect("service object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            entry_keys.sort();
+            assert_eq!(
+                entry_keys,
+                vec!["name", "status"],
+                "service entries must stay aggregate-only: {service}"
+            );
+        }
+        let serialized = json.to_string();
+        assert!(
+            !serialized.contains("tn_statuspin0000000001"),
+            "no tenant identifier may appear in the status payload"
+        );
+    }
+
     /// A totally unreachable database must render an honest total outage,
     /// not a fabricated page: every probe flipped to degraded and the
     /// overall state is "Service disruption".

@@ -147,7 +147,10 @@ async fn legal_hold_keeps_unattributable_rows_in_event_stores() {
 
     let messages = category(&report, "messages");
     assert_eq!(messages.status, SweepStatus::Deleted);
-    assert_eq!(messages.skipped_legal_hold, 1, "the held tenant's expired row");
+    assert_eq!(
+        messages.skipped_legal_hold, 1,
+        "the held tenant's expired row"
+    );
     assert_eq!(messages.deleted, 1, "only the normal tenant's expired row");
 
     assert_eq!(
@@ -155,7 +158,11 @@ async fn legal_hold_keeps_unattributable_rows_in_event_stores() {
         2,
         "the held tenant keeps its fresh row AND the expired one"
     );
-    assert_eq!(tenant_messages_count(&pool, Some(&normal)).await, 1, "only fresh row kept");
+    assert_eq!(
+        tenant_messages_count(&pool, Some(&normal)).await,
+        1,
+        "only fresh row kept"
+    );
     assert_eq!(
         tenant_messages_count(&pool, None).await,
         2,
@@ -167,7 +174,10 @@ async fn legal_hold_keeps_unattributable_rows_in_event_stores() {
     .fetch_one(&pool)
     .await
     .expect("expired null rows");
-    assert_eq!(expired_null, 1, "the EXPIRED unattributable row is the one kept");
+    assert_eq!(
+        expired_null, 1,
+        "the EXPIRED unattributable row is the one kept"
+    );
     // The events store is unaffected but swept at its own cutoff.
     assert_eq!(category(&report, "events").status, SweepStatus::Deleted);
 }
@@ -199,17 +209,29 @@ async fn missing_timestamp_column_reports_skipped_store() {
         .expect("sweep runs");
 
     let messages = category(&report, "messages");
-    assert_eq!(messages.status, SweepStatus::SkippedMissingStore, "{messages:?}");
+    assert_eq!(
+        messages.status,
+        SweepStatus::SkippedMissingStore,
+        "{messages:?}"
+    );
     assert_eq!(messages.deleted, 0);
     assert!(
-        messages.error.as_deref().unwrap_or_default().contains("created_at"),
+        messages
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("created_at"),
         "{messages:?}"
     );
     // Events (untouched schema) still swept honestly.
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Deleted);
     assert_eq!(events.deleted, 1);
-    assert_eq!(tenant_messages_count(&pool, Some(&tenant)).await, 1, "row kept");
+    assert_eq!(
+        tenant_messages_count(&pool, Some(&tenant)).await,
+        1,
+        "row kept"
+    );
     // The run itself still persisted a report.
     let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retention_report")
         .fetch_one(&pool)
@@ -240,7 +262,10 @@ async fn missing_tenants_table_degrades_to_flat_defaults() {
 
     assert_eq!(report.plan_tier, "default");
     for category in &report.categories {
-        assert_eq!(category.legal_hold_check, LegalHoldCheck::TenantsTableMissing);
+        assert_eq!(
+            category.legal_hold_check,
+            LegalHoldCheck::TenantsTableMissing
+        );
         assert_eq!(category.zero_retention_tenants, 0);
         assert_eq!(category.custom_retention_tenants, 0);
     }
@@ -289,7 +314,10 @@ async fn tenants_without_new_columns_still_sweep_with_defaults() {
     assert_eq!(report.plan_tier, "default", "no overrides could be read");
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Deleted);
-    assert_eq!(events.deleted, 1, "the expired row is swept at the plan-tier default");
+    assert_eq!(
+        events.deleted, 1,
+        "the expired row is swept at the plan-tier default"
+    );
     assert_eq!(tenant_events_count(&pool, Some(&tenant)).await, 0);
 }
 
@@ -369,7 +397,10 @@ async fn privilege_failure_fails_the_target_without_stalling_the_run() {
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Failed, "{events:?}");
     assert!(events.error.is_some());
-    assert_eq!(events.deleted, 0, "nothing may be deleted once the store failed");
+    assert_eq!(
+        events.deleted, 0,
+        "nothing may be deleted once the store failed"
+    );
     // Messages swept at its own cutoff regardless.
     assert_eq!(category(&report, "messages").status, SweepStatus::Deleted);
 }
@@ -385,7 +416,10 @@ async fn degraded_optional_stores_are_reported_not_fatal() {
     seed_tenant(&pool, &tenant, false, None).await;
     seed_event(&pool, Some(&tenant), 40).await;
 
-    sqlx::query("DROP TABLE gdpr_exports").execute(&pool).await.expect("drop exports");
+    sqlx::query("DROP TABLE gdpr_exports")
+        .execute(&pool)
+        .await
+        .expect("drop exports");
     sqlx::query("DROP TABLE audit_logs_archive")
         .execute(&pool)
         .await
@@ -402,7 +436,10 @@ async fn degraded_optional_stores_are_reported_not_fatal() {
         .expect("sweep runs");
 
     assert_eq!(report.gdpr_exports_deleted, 0);
-    assert_eq!(report.audit_logs_archived, -1, "the archive failure is reported as -1");
+    assert_eq!(
+        report.audit_logs_archived, -1,
+        "the archive failure is reported as -1"
+    );
     assert_eq!(report.archive_expired, 0);
     assert_eq!(report.archive_deleted, 0);
     // The canonical event stores still swept and the report persisted.
@@ -448,12 +485,23 @@ async fn row_lock_timeout_fails_the_target_and_preserves_counts() {
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Failed, "{events:?}");
     assert!(
-        events.error.as_deref().unwrap_or_default().contains("lock timeout"),
+        events
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("lock timeout"),
         "the lock timeout is the failure: {events:?}"
     );
     assert_eq!(events.considered, 1, "the expired row was considered");
-    assert_eq!(events.deleted, 0, "the locked row survived the failed batch");
-    assert_eq!(tenant_events_count(&pool, Some(&tenant)).await, 2, "nothing deleted");
+    assert_eq!(
+        events.deleted, 0,
+        "the locked row survived the failed batch"
+    );
+    assert_eq!(
+        tenant_events_count(&pool, Some(&tenant)).await,
+        2,
+        "nothing deleted"
+    );
     // Messages unaffected.
     assert_eq!(category(&report, "messages").status, SweepStatus::Deleted);
 }
@@ -481,11 +529,13 @@ async fn distinct_overrides_drive_distinct_cutoffs_in_one_sweep() {
         .execute(&pool)
         .await
         .expect("long tenant");
-    sqlx::query("INSERT INTO tenants (id, name, slug, plan, legal_hold) VALUES ($1,'n',$1,'free',false)")
-        .bind(&flat)
-        .execute(&pool)
-        .await
-        .expect("flat tenant");
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, legal_hold) VALUES ($1,'n',$1,'free',false)",
+    )
+    .bind(&flat)
+    .execute(&pool)
+    .await
+    .expect("flat tenant");
 
     // A 6-day-old row: inside the long window, past the short one, inside
     // the default window.
@@ -504,7 +554,10 @@ async fn distinct_overrides_drive_distinct_cutoffs_in_one_sweep() {
 
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Deleted);
-    assert_eq!(events.custom_retention_tenants, 2, "both in-bounds overrides honored");
+    assert_eq!(
+        events.custom_retention_tenants, 2,
+        "both in-bounds overrides honored"
+    );
     // Deleted: short's 6d row (5d override) and flat's 35d row (30d default).
     // flat's 6d row is inside the default window; long keeps BOTH rows
     // inside its 90d window.
@@ -546,7 +599,10 @@ async fn negative_retention_override_falls_back_to_plan_default() {
 
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Deleted);
-    assert_eq!(events.custom_retention_tenants, 0, "a negative override is not an override");
+    assert_eq!(
+        events.custom_retention_tenants, 0,
+        "a negative override is not an override"
+    );
     assert_eq!(events.deleted, 1, "rows are judged at the 30d default");
     assert_eq!(tenant_events_count(&pool, Some(&tenant)).await, 1);
 }
@@ -596,8 +652,14 @@ async fn export_and_outbox_purges_respect_legal_holds() {
         .await
         .expect("sweep runs");
 
-    assert_eq!(report.gdpr_exports_deleted, 1, "only the unheld tenant's export");
-    assert_eq!(report.dsr_outbox_purged, 1, "only the unheld tenant's outbox row");
+    assert_eq!(
+        report.gdpr_exports_deleted, 1,
+        "only the unheld tenant's export"
+    );
+    assert_eq!(
+        report.dsr_outbox_purged, 1,
+        "only the unheld tenant's outbox row"
+    );
     let held_exports: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM gdpr_exports WHERE tenant_id = $1")
             .bind(&held)
@@ -611,5 +673,8 @@ async fn export_and_outbox_purges_respect_legal_holds() {
             .fetch_one(&pool)
             .await
             .expect("held outbox");
-    assert_eq!(held_outbox, 2, "the raw token must not be purged under hold");
+    assert_eq!(
+        held_outbox, 2,
+        "the raw token must not be purged under hold"
+    );
 }

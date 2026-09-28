@@ -1117,6 +1117,14 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Serializes the tests that observe the process-global regex failure
+    /// counter so their read-assert windows cannot interleave (see the
+    /// isolation note on `broken_regex_is_counted_and_degrades_to_none`).
+    fn regex_counter_test_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     fn dummy_config() -> ContentScanningConfig {
         ContentScanningConfig {
             enabled: true,
@@ -1252,8 +1260,18 @@ mod tests {
 
     /// The regex-compile failure path increments the global counter and
     /// degrades to "no rule" — never a panic.
+    ///
+    /// Test-isolation note: `regex_failure_count` is a PROCESS-GLOBAL
+    /// counter, and this test's sibling
+    /// `compile_helpers_reject_invalid_patterns_and_count_failures` asserts
+    /// an exact `before + 1` delta. When the two ran concurrently, this
+    /// test's own invalid compile could land inside the sibling's
+    /// read-assert window and fail it spuriously. Both counter tests hold a
+    /// shared mutex so the global counter is only observed serially — the
+    /// assertions themselves are unchanged.
     #[test]
     fn broken_regex_is_counted_and_degrades_to_none() {
+        let _guard = regex_counter_test_lock().lock().unwrap();
         let before = regex_failure_count();
         assert!(compile_regex("(unclosed", "broken_test").is_none());
         let after = regex_failure_count();
@@ -1704,6 +1722,10 @@ mod tests {
     /// failure input.)
     #[test]
     fn compile_helpers_reject_invalid_patterns_and_count_failures() {
+        // Serialize the two tests that observe the process-global failure
+        // counter (see the isolation note on
+        // `broken_regex_is_counted_and_degrades_to_none`).
+        let _guard = regex_counter_test_lock().lock().unwrap();
         let before = regex_failure_count();
         assert!(
             compile_regex("(?P<", "unit_invalid_regex").is_none(),

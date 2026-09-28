@@ -2557,3 +2557,84 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
         );
     });
 }
+
+// ── P1-SECURITY: the absent x-tenant-id path (2026-09 privilege-boundary
+// audit) ────────────────────────────────────────────────────────────────────
+
+/// PINNED + adversarially proven: `resolve_tenant_id`'s ABSENT-header arm
+/// resolves to the JWT-AUTHENTICATED tenant — never to a broad default
+/// bucket (the `_control-plane` shape the AI audit fixed). A request with no
+/// tenant header is scoped to the caller's own tenant: a regular user sees
+/// only their tenant's contracts, and even an ADMIN without the header gets
+/// only their own tenant (the override must be asserted per request, not
+/// silently implied). Cross-tenant reads therefore require BOTH an admin
+/// claim AND the explicit header — and the non-admin header override stays a
+/// 403.
+#[test]
+fn absent_tenant_header_scopes_to_the_authenticated_tenant_never_a_broader_bucket() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        let app = h.app.clone();
+
+        // One contract per tenant, each created by that tenant's admin with
+        // NO x-tenant-id header (the absent-header path under test).
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/contracts",
+            Some(&h.admin_token),
+            Some(contract_body()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        let contract_a = json["id"].as_str().expect("contract id").to_string();
+
+        let admin_b = mint_token(&h.tenant_b, "admin-b-subject", true);
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/contracts",
+            Some(&admin_b),
+            Some(contract_body()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{json}");
+        let contract_b = json["id"].as_str().expect("contract id").to_string();
+
+        // Regular users without the header see ONLY their own tenant.
+        let (status, json) = call(&app, "GET", "/contracts", Some(&h.token_a), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = json["contracts"].as_array().expect("contracts array");
+        assert!(
+            listed.iter().any(|c| c["id"] == contract_a.as_str()),
+            "tenant A sees its own contract (legit flow)"
+        );
+        assert!(
+            !listed.iter().any(|c| c["id"] == contract_b.as_str()),
+            "an absent header must not widen tenant A's view to tenant B"
+        );
+
+        let (status, json) = call(&app, "GET", "/contracts", Some(&h.token_b), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = json["contracts"].as_array().expect("contracts array");
+        assert!(
+            listed.iter().any(|c| c["id"] == contract_b.as_str()),
+            "tenant B sees its own contract (legit flow)"
+        );
+        assert!(
+            !listed.iter().any(|c| c["id"] == contract_a.as_str()),
+            "an absent header must not widen tenant B's view to tenant A"
+        );
+
+        // Even the admin, omitting the header, stays scoped to the JWT
+        // tenant: no implicit all-tenant aggregate.
+        let (status, json) = call(&app, "GET", "/contracts", Some(&h.admin_token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = json["contracts"].as_array().expect("contracts array");
+        assert!(listed.iter().any(|c| c["id"] == contract_a.as_str()));
+        assert!(
+            !listed.iter().any(|c| c["id"] == contract_b.as_str()),
+            "an admin without the header sees their own tenant, not every tenant"
+        );
+    });
+}

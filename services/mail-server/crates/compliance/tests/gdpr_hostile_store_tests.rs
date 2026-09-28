@@ -5,10 +5,10 @@
 //! the `no_runtime_schema_ddl_in_compliance_source` release guard forbids
 //! DDL strings anywhere under `crates/compliance/src`.)
 
+use chrono::Utc;
 use compliance::config::GdprConfig;
 use compliance::gdpr_automation::{ErasureStore, GdprAutomation, StoreErasureStatus};
 use compliance::types::{DataSubjectRequest, DataSubjectRequestType, RequestStatus};
-use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -115,10 +115,10 @@ async fn erasure_store_outcomes_are_reported_honestly() {
             },
         )
         .await;
-    assert!(matches!(
-        missing.status,
-        StoreErasureStatus::SkippedMissingTable
-    ), "{missing:?}");
+    assert!(
+        matches!(missing.status, StoreErasureStatus::SkippedMissingTable),
+        "{missing:?}"
+    );
 
     // A retained store answers with its reason and touches nothing.
     let retained = gdpr
@@ -130,10 +130,13 @@ async fn erasure_store_outcomes_are_reported_honestly() {
             },
         )
         .await;
-    assert!(matches!(
-        retained.status,
-        StoreErasureStatus::Retained("retained: accountability trail (Art. 30)")
-    ), "{retained:?}");
+    assert!(
+        matches!(
+            retained.status,
+            StoreErasureStatus::Retained("retained: accountability trail (Art. 30)")
+        ),
+        "{retained:?}"
+    );
     assert_eq!(retained.rows_affected, 0);
 
     // Anonymize-by-column against a real table: the subject's copy is
@@ -158,14 +161,21 @@ async fn erasure_store_outcomes_are_reported_honestly() {
             },
         )
         .await;
-    assert!(matches!(anonymized.status, StoreErasureStatus::Anonymized), "{anonymized:?}");
-    assert_eq!(anonymized.rows_affected, 2, "both email-bearing columns rewritten");
-    let remaining: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM dsr_redact_demo WHERE email = $1 OR alt_email = $1")
-            .bind(&email)
-            .fetch_one(&pool)
-            .await
-            .expect("demo count");
+    assert!(
+        matches!(anonymized.status, StoreErasureStatus::Anonymized),
+        "{anonymized:?}"
+    );
+    assert_eq!(
+        anonymized.rows_affected, 2,
+        "both email-bearing columns rewritten"
+    );
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM dsr_redact_demo WHERE email = $1 OR alt_email = $1",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("demo count");
     assert_eq!(remaining, 0);
 
     // A table where NO candidate column exists: skipped.
@@ -183,10 +193,10 @@ async fn erasure_store_outcomes_are_reported_honestly() {
             },
         )
         .await;
-    assert!(matches!(
-        skipped.status,
-        StoreErasureStatus::SkippedMissingTable
-    ), "{skipped:?}");
+    assert!(
+        matches!(skipped.status, StoreErasureStatus::SkippedMissingTable),
+        "{skipped:?}"
+    );
 
     // A genuine update failure (CHECK constraint rejects the marker) is a
     // FAILED store, not a skip.
@@ -212,7 +222,10 @@ async fn erasure_store_outcomes_are_reported_honestly() {
             },
         )
         .await;
-    assert!(matches!(failed.status, StoreErasureStatus::Failed), "{failed:?}");
+    assert!(
+        matches!(failed.status, StoreErasureStatus::Failed),
+        "{failed:?}"
+    );
     assert!(failed.error.is_some());
 
     // The AI chat history of the subject's account is deleted.
@@ -235,8 +248,13 @@ async fn erasure_store_outcomes_are_reported_honestly() {
     .execute(&pool)
     .await
     .expect("chat");
-    let chat = gdpr.erase_store(&request, ErasureStore::AiChatByUserEmail).await;
-    assert!(matches!(chat.status, StoreErasureStatus::Deleted), "{chat:?}");
+    let chat = gdpr
+        .erase_store(&request, ErasureStore::AiChatByUserEmail)
+        .await;
+    assert!(
+        matches!(chat.status, StoreErasureStatus::Deleted),
+        "{chat:?}"
+    );
     assert_eq!(chat.rows_affected, 1);
 }
 
@@ -285,7 +303,9 @@ async fn clickhouse_purge_reports_mutation_submitted_when_reachable() {
     let gdpr = automation_with(pool.clone(), cfg);
 
     let request = erasure_request("t-ch", "Victim@Example.test");
-    let outcome = gdpr.erase_store(&request, ErasureStore::ClickHouseEvents).await;
+    let outcome = gdpr
+        .erase_store(&request, ErasureStore::ClickHouseEvents)
+        .await;
     assert!(
         matches!(outcome.status, StoreErasureStatus::MutationSubmitted),
         "a live node must accept the mutation submission: {outcome:?}"
@@ -297,10 +317,10 @@ async fn clickhouse_purge_reports_mutation_submitted_when_reachable() {
     let outcome = disabled
         .erase_store(&request, ErasureStore::ClickHouseEvents)
         .await;
-    assert!(matches!(
-        outcome.status,
-        StoreErasureStatus::SkippedNotConfigured
-    ), "{outcome:?}");
+    assert!(
+        matches!(outcome.status, StoreErasureStatus::SkippedNotConfigured),
+        "{outcome:?}"
+    );
 }
 
 // ── CP mirror outage must not fail the subject's submission ─────────────────
@@ -317,7 +337,11 @@ async fn mirror_write_failure_does_not_fail_the_submission() {
         .expect("drop mirror");
     let tenant = unique_tenant();
     let (request, token) = gdpr
-        .submit_request(&tenant, DataSubjectRequestType::Access, "mirror@example.test")
+        .submit_request(
+            &tenant,
+            DataSubjectRequestType::Access,
+            "mirror@example.test",
+        )
         .await
         .expect("the DSR itself must survive a CP-mirror outage");
     assert!(!token.is_empty());

@@ -15,19 +15,19 @@ use std::collections::BTreeMap;
 
 use compliance::xbrl_taxonomy::{
     declared_concept, numeric_kind_of, parse_instance, validate_instance, Balance, Concept,
-    Context, ContextPeriod, DecimalAmount, DeclaredConcept, Decimals, ExtensionSchema, Fact,
+    Context, ContextPeriod, DecimalAmount, Decimals, DeclaredConcept, ExtensionSchema, Fact,
     FactValue, InstanceDocument, InstanceError, MemoryResolver, NumericKind, PeriodType, QName,
     TaxonomyError, TaxonomyLimits, TaxonomyLocation, TaxonomyResolver, TaxonomySource,
     XbrlReadiness, XbrlTaxonomy, FAIL_ABSTRACT_CONCEPT, FAIL_CALCULATION_OVERFLOW,
     FAIL_CONCEPT_NOT_ITEM, FAIL_CONTEXT_PERIOD_INVALID, FAIL_DUPLICATE_CONTEXT,
     FAIL_DUPLICATE_FACT, FAIL_DUPLICATE_UNIT, FAIL_EMPTY_CONTEXT_ID, FAIL_MISSING_CONTEXT_PERIOD,
-    FAIL_MISSING_DECIMALS, FAIL_MISSING_PERIOD_TYPE, FAIL_MISSING_UNIT_MEASURE, FAIL_UNKNOWN_UNIT,
-    FAIL_UNEXPECTED_DECIMALS,
+    FAIL_MISSING_DECIMALS, FAIL_MISSING_PERIOD_TYPE, FAIL_MISSING_UNIT_MEASURE,
+    FAIL_UNEXPECTED_DECIMALS, FAIL_UNKNOWN_UNIT,
 };
 use compliance::xbrl_taxonomy::{
-    FAIL_MISSING_ENTITY_IDENTIFIER, FAIL_MISSING_ENTITY_SCHEME, FAIL_MISSING_UNIT,
-    FAIL_NON_NUMERIC_VALUE, FAIL_PERIOD_TYPE_MISMATCH, FAIL_UNEXPECTED_UNIT, FAIL_UNKNOWN_CONTEXT,
-    FAIL_CONCEPT_UNDECLARED,
+    FAIL_CONCEPT_UNDECLARED, FAIL_MISSING_ENTITY_IDENTIFIER, FAIL_MISSING_ENTITY_SCHEME,
+    FAIL_MISSING_UNIT, FAIL_NON_NUMERIC_VALUE, FAIL_PERIOD_TYPE_MISMATCH, FAIL_UNEXPECTED_UNIT,
+    FAIL_UNKNOWN_CONTEXT,
 };
 
 // ── Shared fixture helpers ─────────────────────────────────────────────────
@@ -128,8 +128,20 @@ fn decimal_amount_parse_rejects_hostile_lexical_forms() {
     assert_eq!(parse("--1"), None);
     assert_eq!(parse("+-1"), None);
     // Fraction-only and integer-only forms are valid.
-    assert_eq!(parse(".5"), Some(DecimalAmount { unscaled: 5, scale: 1 }));
-    assert_eq!(parse("1."), Some(DecimalAmount { unscaled: 1, scale: 0 }));
+    assert_eq!(
+        parse(".5"),
+        Some(DecimalAmount {
+            unscaled: 5,
+            scale: 1
+        })
+    );
+    assert_eq!(
+        parse("1."),
+        Some(DecimalAmount {
+            unscaled: 1,
+            scale: 0
+        })
+    );
     // A fraction wider than 18 digits is refused (excess precision).
     assert_eq!(parse("1.0000000000000000000"), None);
     assert_eq!(parse("1.000000000000000000").unwrap().scale, 18);
@@ -138,7 +150,10 @@ fn decimal_amount_parse_rejects_hostile_lexical_forms() {
     assert_eq!(parse("9".repeat(39).as_str()), None);
     let max = "170141183460469231731687303715884105727";
     assert_eq!(parse(max).map(|d| d.unscaled), Some(i128::MAX));
-    assert_eq!(parse(&format!("-{max}")).map(|d| d.unscaled), Some(-i128::MAX));
+    assert_eq!(
+        parse(&format!("-{max}")).map(|d| d.unscaled),
+        Some(-i128::MAX)
+    );
     // i128::MIN is NOT representable: the magnitude would exceed i128::MAX.
     assert_eq!(parse("-170141183460469231731687303715884105728"), None);
     // Exact display: sign, padding, no exponent.
@@ -175,13 +190,30 @@ fn decimal_amount_checked_arithmetic_never_panics_or_wraps() {
             .checked_mul(DecimalAmount::parse("2.25").unwrap()),
         DecimalAmount::parse("3.375")
     );
-    let tenth_power = |n: u32| DecimalAmount { unscaled: 1, scale: n };
-    assert_eq!(tenth_power(10).checked_mul(tenth_power(10)), None, "scale 20 > 18");
-    assert_eq!(tenth_power(9).checked_mul(tenth_power(9)).unwrap().scale, 18);
-    assert_eq!(max.checked_mul(max), None, "magnitude overflow degrades to None");
+    let tenth_power = |n: u32| DecimalAmount {
+        unscaled: 1,
+        scale: n,
+    };
+    assert_eq!(
+        tenth_power(10).checked_mul(tenth_power(10)),
+        None,
+        "scale 20 > 18"
+    );
+    assert_eq!(
+        tenth_power(9).checked_mul(tenth_power(9)).unwrap().scale,
+        18
+    );
+    assert_eq!(
+        max.checked_mul(max),
+        None,
+        "magnitude overflow degrades to None"
+    );
     assert_eq!(
         max.checked_mul(DecimalAmount::from_cents(-1)),
-        Some(DecimalAmount { unscaled: -i128::MAX, scale: 2 }),
+        Some(DecimalAmount {
+            unscaled: -i128::MAX,
+            scale: 2
+        }),
         "MAX * -1 cent is exact: -1 unscaled at scale 2"
     );
 }
@@ -193,43 +225,129 @@ fn taxonomy_error_codes_are_stable_and_exhaustive() {
     let err = |e: TaxonomyError| (e.code().to_string(), e.to_string());
     let cases = vec![
         TaxonomyError::NotConfigured,
-        TaxonomyError::InvalidSource { value: "v".into(), reason: "r".into() },
-        TaxonomyError::Io { location: "l".into(), detail: "d".into() },
-        TaxonomyError::UnsupportedLocation { location: "l".into(), detail: "d".into() },
-        TaxonomyError::UnresolvableReference { from: "f".into(), reference: "r".into(), detail: "d".into() },
-        TaxonomyError::DocumentTooLarge { location: "l".into(), limit: 1 },
+        TaxonomyError::InvalidSource {
+            value: "v".into(),
+            reason: "r".into(),
+        },
+        TaxonomyError::Io {
+            location: "l".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::UnsupportedLocation {
+            location: "l".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::UnresolvableReference {
+            from: "f".into(),
+            reference: "r".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::DocumentTooLarge {
+            location: "l".into(),
+            limit: 1,
+        },
         TaxonomyError::TotalBytesExceeded { limit: 1 },
         TaxonomyError::TooManyDocuments { limit: 1 },
-        TaxonomyError::MaxDepthExceeded { location: "l".into(), limit: 1 },
-        TaxonomyError::ImportCycle { chain: "a -> b".into() },
-        TaxonomyError::MissingImport { from: "f".into(), reference: "r".into(), location: "l".into() },
-        TaxonomyError::MalformedXml { location: "l".into(), detail: "d".into() },
-        TaxonomyError::UnsupportedDocument { location: "l".into(), detail: "d".into() },
-        TaxonomyError::MissingTargetNamespace { location: "l".into() },
-        TaxonomyError::Malformed { location: "l".into(), detail: "d".into() },
-        TaxonomyError::DuplicateElementId { id: "i".into(), location: "l".into() },
-        TaxonomyError::DuplicateConcept { concept: "c".into(), location: "l".into() },
-        TaxonomyError::UnresolvedLocator { location: "l".into(), href: "h".into(), detail: "d".into() },
-        TaxonomyError::InvalidWeight { value: "w".into(), location: "l".into() },
-        TaxonomyError::UnknownConcept { concept: "c".into(), target_namespace: "t".into() },
-        TaxonomyError::AbstractConcept { concept: "c".into() },
-        TaxonomyError::NotAnItemConcept { concept: "c".into() },
-        TaxonomyError::BadQName { value: "v".into(), detail: "d".into() },
-        TaxonomyError::UnknownPrefix { value: "v".into(), prefix: "p".into() },
+        TaxonomyError::MaxDepthExceeded {
+            location: "l".into(),
+            limit: 1,
+        },
+        TaxonomyError::ImportCycle {
+            chain: "a -> b".into(),
+        },
+        TaxonomyError::MissingImport {
+            from: "f".into(),
+            reference: "r".into(),
+            location: "l".into(),
+        },
+        TaxonomyError::MalformedXml {
+            location: "l".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::UnsupportedDocument {
+            location: "l".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::MissingTargetNamespace {
+            location: "l".into(),
+        },
+        TaxonomyError::Malformed {
+            location: "l".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::DuplicateElementId {
+            id: "i".into(),
+            location: "l".into(),
+        },
+        TaxonomyError::DuplicateConcept {
+            concept: "c".into(),
+            location: "l".into(),
+        },
+        TaxonomyError::UnresolvedLocator {
+            location: "l".into(),
+            href: "h".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::InvalidWeight {
+            value: "w".into(),
+            location: "l".into(),
+        },
+        TaxonomyError::UnknownConcept {
+            concept: "c".into(),
+            target_namespace: "t".into(),
+        },
+        TaxonomyError::AbstractConcept {
+            concept: "c".into(),
+        },
+        TaxonomyError::NotAnItemConcept {
+            concept: "c".into(),
+        },
+        TaxonomyError::BadQName {
+            value: "v".into(),
+            detail: "d".into(),
+        },
+        TaxonomyError::UnknownPrefix {
+            value: "v".into(),
+            prefix: "p".into(),
+        },
     ];
     let expected = [
-        "not_configured", "invalid_source", "io", "unsupported_location",
-        "unresolvable_reference", "document_too_large", "total_bytes_exceeded",
-        "too_many_documents", "max_depth_exceeded", "import_cycle", "missing_import",
-        "malformed_xml", "unsupported_document", "missing_target_namespace", "malformed",
-        "duplicate_element_id", "duplicate_concept", "unresolved_locator", "invalid_weight",
-        "concept_undeclared", "concept_abstract", "concept_not_item", "bad_qname",
+        "not_configured",
+        "invalid_source",
+        "io",
+        "unsupported_location",
+        "unresolvable_reference",
+        "document_too_large",
+        "total_bytes_exceeded",
+        "too_many_documents",
+        "max_depth_exceeded",
+        "import_cycle",
+        "missing_import",
+        "malformed_xml",
+        "unsupported_document",
+        "missing_target_namespace",
+        "malformed",
+        "duplicate_element_id",
+        "duplicate_concept",
+        "unresolved_locator",
+        "invalid_weight",
+        "concept_undeclared",
+        "concept_abstract",
+        "concept_not_item",
+        "bad_qname",
         "unknown_prefix",
     ];
-    assert_eq!(cases.len(), expected.len(), "every variant needs a pinned code");
+    assert_eq!(
+        cases.len(),
+        expected.len(),
+        "every variant needs a pinned code"
+    );
     for (case, code) in cases.into_iter().zip(expected) {
         let (actual, message) = err(case);
-        assert_eq!(actual, code, "code drifted for {code}: message was {message}");
+        assert_eq!(
+            actual, code,
+            "code drifted for {code}: message was {message}"
+        );
         assert!(!message.is_empty());
     }
 }
@@ -276,7 +394,10 @@ fn concept_item_and_tuple_classification_follows_substitution_group() {
     assert!(!foreign.is_tuple());
 
     // Without a group, an item requires a period type.
-    let no_period = Concept { period_type: None, ..item };
+    let no_period = Concept {
+        period_type: None,
+        ..item
+    };
     assert!(!no_period.is_item());
 }
 
@@ -329,7 +450,10 @@ fn resolve_qname_accepts_only_wellformed_references() {
         taxonomy.resolve_qname("Assets").unwrap(),
         QName::new(NS, "Assets")
     );
-    assert_eq!(taxonomy.resolve_qname("  Assets  ").unwrap(), QName::new(NS, "Assets"));
+    assert_eq!(
+        taxonomy.resolve_qname("  Assets  ").unwrap(),
+        QName::new(NS, "Assets")
+    );
 
     // Hostile references are typed errors, never guesses.
     for bad in ["", "   "] {
@@ -396,7 +520,11 @@ fn numeric_kind_survives_type_cycles_and_deep_chains() {
         type_bases: BTreeMap::from([(a.clone(), b.clone()), (b.clone(), a.clone())]),
         ..taxonomy_for_resolution()
     };
-    assert_eq!(cycle.numeric_kind(&QName::new(NS, "C")), None, "cycle must abort");
+    assert_eq!(
+        cycle.numeric_kind(&QName::new(NS, "C")),
+        None,
+        "cycle must abort"
+    );
 
     // A chain that leaves the loaded package is None, never a guess.
     let dangling = XbrlTaxonomy {
@@ -474,7 +602,9 @@ fn numeric_kind_survives_type_cycles_and_deep_chains() {
     assert_eq!(declared.numeric, Some(NumericKind::Monetary));
     assert!(declared.is_item);
     assert_eq!(declared.period_type, Some(PeriodType::Instant));
-    assert!(monetary_concept.declare(&QName::new(NS, "Missing")).is_none());
+    assert!(monetary_concept
+        .declare(&QName::new(NS, "Missing"))
+        .is_none());
     // Test-only helpers mirror the methods.
     assert_eq!(
         numeric_kind_of(&monetary_concept, &QName::new(NS, "C")),
@@ -634,7 +764,11 @@ struct RefusingResolver;
 
 impl TaxonomyResolver for RefusingResolver {
     fn load(&self, _location: &TaxonomyLocation) -> Result<Vec<u8>, TaxonomyError> {
-        Ok(schema(Some(NS), "<xs:import namespace=\"urn:out\" schemaLocation=\"out.xsd\"/>").into_bytes())
+        Ok(schema(
+            Some(NS),
+            "<xs:import namespace=\"urn:out\" schemaLocation=\"out.xsd\"/>",
+        )
+        .into_bytes())
     }
 
     fn resolve(
@@ -658,7 +792,9 @@ fn custom_resolver_unsupported_location_becomes_unresolvable_reference() {
     )
     .expect_err("the refusing resolver must fail the import");
     match error {
-        TaxonomyError::UnresolvableReference { reference, detail, .. } => {
+        TaxonomyError::UnresolvableReference {
+            reference, detail, ..
+        } => {
             assert_eq!(reference, "out.xsd");
             assert_eq!(detail, "resolver refuses to resolve");
         }
@@ -734,12 +870,13 @@ fn diamond_imports_load_the_shared_document_exactly_once() {
 #[test]
 fn locationless_imports_skip_known_namespaces_and_refuse_unknown_ones() {
     // xbrli is known: the import carries nothing to fetch and is skipped.
-    let known = schema(
-        Some(NS),
-        &format!("<xs:import namespace=\"{XBRLI}\"/>"),
-    );
-    let taxonomy = load_memory("memory://known/entry.xsd", known, &TaxonomyLimits::default())
-        .expect("known-namespace import without a location is skippable");
+    let known = schema(Some(NS), &format!("<xs:import namespace=\"{XBRLI}\"/>"));
+    let taxonomy = load_memory(
+        "memory://known/entry.xsd",
+        known,
+        &TaxonomyLimits::default(),
+    )
+    .expect("known-namespace import without a location is skippable");
     assert_eq!(taxonomy.documents.len(), 1);
 
     // An unknown namespace without a schemaLocation is a typed missing import.
@@ -750,7 +887,11 @@ fn locationless_imports_skip_known_namespaces_and_refuse_unknown_ones() {
         &TaxonomyLimits::default(),
     ));
     match error {
-        TaxonomyError::MissingImport { reference, location, .. } => {
+        TaxonomyError::MissingImport {
+            reference,
+            location,
+            ..
+        } => {
             assert!(reference.contains("urn:ghost"), "{reference}");
             assert_eq!(location, "unresolvable reference without a location");
         }
@@ -761,7 +902,10 @@ fn locationless_imports_skip_known_namespaces_and_refuse_unknown_ones() {
 #[test]
 fn missing_include_and_missing_linkbase_describe_their_reference_kind() {
     // xs:include to a document that is not in the fixture set.
-    let entry = schema(Some(NS), "<xs:include schemaLocation=\"ghost-include.xsd\"/>");
+    let entry = schema(
+        Some(NS),
+        "<xs:include schemaLocation=\"ghost-include.xsd\"/>",
+    );
     let error = expect_error(load_memory(
         "memory://desc/entry.xsd",
         entry,
@@ -770,7 +914,8 @@ fn missing_include_and_missing_linkbase_describe_their_reference_kind() {
     match error {
         TaxonomyError::MissingImport { reference, .. } => {
             assert!(
-                reference.contains("xs:include schemaLocation") && reference.contains("ghost-include.xsd"),
+                reference.contains("xs:include schemaLocation")
+                    && reference.contains("ghost-include.xsd"),
                 "describe must name the include: {reference}"
             );
         }
@@ -827,7 +972,10 @@ fn malformed_xml_and_unbound_prefixes_never_panic() {
         "<xs:schema xmlns:xs=".to_string(),
         &TaxonomyLimits::default(),
     ));
-    assert!(matches!(error, TaxonomyError::MalformedXml { .. }), "{error:?}");
+    assert!(
+        matches!(error, TaxonomyError::MalformedXml { .. }),
+        "{error:?}"
+    );
 
     // An element whose prefix is never bound.
     let error = expect_error(load_memory(
@@ -981,7 +1129,10 @@ fn element_declaration_hostility_is_refused_with_typed_errors() {
     ));
     match error {
         TaxonomyError::Malformed { detail, .. } => {
-            assert!(detail.contains("periodType") && detail.contains("forever"), "{detail}")
+            assert!(
+                detail.contains("periodType") && detail.contains("forever"),
+                "{detail}"
+            )
         }
         other => panic!("expected Malformed, got {other:?}"),
     }
@@ -993,7 +1144,10 @@ fn element_declaration_hostility_is_refused_with_typed_errors() {
     ));
     match error {
         TaxonomyError::Malformed { detail, .. } => {
-            assert!(detail.contains("balance") && detail.contains("sideways"), "{detail}")
+            assert!(
+                detail.contains("balance") && detail.contains("sideways"),
+                "{detail}"
+            )
         }
         other => panic!("expected Malformed, got {other:?}"),
     }
@@ -1086,7 +1240,10 @@ fn element_type_attribute_qname_forms_are_handled_strictly() {
 #[test]
 fn global_elements_without_names_are_skipped() {
     let taxonomy = load_one("<xs:element abstract=\"true\"/>").expect("loads");
-    assert!(taxonomy.concepts.is_empty(), "a nameless global element is not a concept");
+    assert!(
+        taxonomy.concepts.is_empty(),
+        "a nameless global element is not a concept"
+    );
 }
 
 #[test]
@@ -1332,7 +1489,10 @@ fn labels_resolve_through_label_arcs_with_roles_and_cdata() {
     let taxonomy = load_memory_many(
         "memory://labels/entry.xsd",
         &[
-            ("memory://labels/entry.xsd", concepts_schema_with("labels.xml")),
+            (
+                "memory://labels/entry.xsd",
+                concepts_schema_with("labels.xml"),
+            ),
             ("memory://labels/labels.xml", labels),
         ],
         &TaxonomyLimits::default(),
@@ -1346,7 +1506,10 @@ fn labels_resolve_through_label_arcs_with_roles_and_cdata() {
     );
     // A labelArc to a missing resource is silently ignored — no crash, no
     // fabricated label.
-    assert_eq!(taxonomy.label(&QName::new(NS, "Cash"), "http://r/labels2"), None);
+    assert_eq!(
+        taxonomy.label(&QName::new(NS, "Cash"), "http://r/labels2"),
+        None
+    );
     // Unrelated roles return nothing.
     assert_eq!(taxonomy.label(&assets, "http://no-such/role"), None);
 }
@@ -1472,10 +1635,7 @@ fn parse_instance_reads_the_full_document_shape() {
     assert_eq!(document.units.len(), 1);
     assert_eq!(document.facts.len(), 3);
     assert_eq!(document.schema_refs, vec!["entry.xsd".to_string()]);
-    assert_eq!(
-        document.namespaces.get("ee").map(String::as_str),
-        Some(NS)
-    );
+    assert_eq!(document.namespaces.get("ee").map(String::as_str), Some(NS));
 
     let instant = &document.contexts[0];
     assert_eq!(instant.id, "c-ins");
@@ -1503,7 +1663,10 @@ fn parse_instance_reads_the_full_document_shape() {
     assert_eq!(instant.period.unwrap().period_type(), PeriodType::Instant);
 
     // Numeric and text fact values, decimals including INF.
-    assert_eq!(document.facts[0].value, FactValue::Numeric(DecimalAmount::from_cents(12345)));
+    assert_eq!(
+        document.facts[0].value,
+        FactValue::Numeric(DecimalAmount::from_cents(12345))
+    );
     assert_eq!(document.facts[0].decimals, Some(Decimals::Finite(2)));
     assert_eq!(document.facts[1].decimals, Some(Decimals::Infinite));
     assert_eq!(document.facts[2].value, FactValue::Text("hello".into()));
@@ -1549,10 +1712,17 @@ fn parse_instance_survives_hostile_but_wellformed_shapes() {
     ));
     let document = parse_instance(&xml).expect("hostile-but-wellformed parses");
     assert_eq!(document.contexts.len(), 3);
-    assert_eq!(document.schema_refs.len(), 0, "schemaRef without xlink:href records nothing");
+    assert_eq!(
+        document.schema_refs.len(),
+        0,
+        "schemaRef without xlink:href records nothing"
+    );
 
     // Identifier captured even without the entity wrapper.
-    assert_eq!(document.contexts[0].entity_identifier.as_deref(), Some("1234"));
+    assert_eq!(
+        document.contexts[0].entity_identifier.as_deref(),
+        Some("1234")
+    );
     // instant wins over the duration trio.
     assert!(matches!(
         document.contexts[0].period,
@@ -1577,7 +1747,10 @@ fn parse_instance_survives_hostile_but_wellformed_shapes() {
     // empty text value; the CDATA fact parses numerically.
     assert_eq!(document.facts.len(), 2);
     assert_eq!(document.facts[0].value, FactValue::Text(String::new()));
-    assert_eq!(document.facts[1].value, FactValue::Numeric(DecimalAmount::from_cents(4250)));
+    assert_eq!(
+        document.facts[1].value,
+        FactValue::Numeric(DecimalAmount::from_cents(4250))
+    );
 }
 
 #[test]
@@ -1695,10 +1868,19 @@ fn hostile_taxonomy() -> XbrlTaxonomy {
     };
     let monetary = QName::new(XBRLI, "monetaryItemType");
     let string = QName::new(XBRLI, "stringItemType");
-    push("Assets", item("Assets", PeriodType::Instant, monetary.clone()));
+    push(
+        "Assets",
+        item("Assets", PeriodType::Instant, monetary.clone()),
+    );
     push("Cash", item("Cash", PeriodType::Instant, monetary.clone()));
-    push("Equity", item("Equity", PeriodType::Instant, monetary.clone()));
-    push("Revenue", item("Revenue", PeriodType::Duration, monetary.clone()));
+    push(
+        "Equity",
+        item("Equity", PeriodType::Instant, monetary.clone()),
+    );
+    push(
+        "Revenue",
+        item("Revenue", PeriodType::Duration, monetary.clone()),
+    );
     push("Note", item("Note", PeriodType::Duration, string));
     push(
         "Heading",
@@ -1753,7 +1935,10 @@ fn fact_numeric(name: &str, context: &str, cents: i64) -> Fact {
     }
 }
 
-fn validate(taxonomy: &XbrlTaxonomy, document: &InstanceDocument) -> Vec<compliance::xbrl_taxonomy::ValidationFailure> {
+fn validate(
+    taxonomy: &XbrlTaxonomy,
+    document: &InstanceDocument,
+) -> Vec<compliance::xbrl_taxonomy::ValidationFailure> {
     validate_instance(taxonomy, &ExtensionSchema::default(), document)
 }
 
@@ -1767,7 +1952,10 @@ fn context_and_unit_structural_rules_are_all_enforced() {
     });
 
     // Empty context id.
-    document.contexts.push(Context { id: "   ".into(), ..context_instant("x") });
+    document.contexts.push(Context {
+        id: "   ".into(),
+        ..context_instant("x")
+    });
     // Duplicate context id (both named dup).
     document.contexts.push(context_instant("dup"));
     document.contexts.push(context_instant("dup"));
@@ -1798,22 +1986,42 @@ fn context_and_unit_structural_rules_are_all_enforced() {
     let failures = validate(&taxonomy, &document);
     let codes = |needle: &str| failures.iter().filter(|f| f.code == needle).count();
     assert_eq!(codes(FAIL_EMPTY_CONTEXT_ID), 1, "{failures:?}");
-    assert_eq!(codes(FAIL_DUPLICATE_CONTEXT), 1, "exactly one duplicate report for the pair");
+    assert_eq!(
+        codes(FAIL_DUPLICATE_CONTEXT),
+        1,
+        "exactly one duplicate report for the pair"
+    );
     assert_eq!(codes(FAIL_MISSING_ENTITY_IDENTIFIER), 1);
     assert_eq!(codes(FAIL_MISSING_ENTITY_SCHEME), 1);
     assert_eq!(codes(FAIL_MISSING_CONTEXT_PERIOD), 1);
-    assert_eq!(codes(FAIL_CONTEXT_PERIOD_INVALID), 2, "noscheme and rev both reverse");
+    assert_eq!(
+        codes(FAIL_CONTEXT_PERIOD_INVALID),
+        2,
+        "noscheme and rev both reverse"
+    );
 
     // Duplicate units.
     let mut document = InstanceDocument::empty();
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "EUR".into(), measures: vec!["m".into()] });
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "EUR".into(), measures: vec!["m".into()] });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "EUR".into(),
+        measures: vec!["m".into()],
+    });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "EUR".into(),
+        measures: vec!["m".into()],
+    });
     document.contexts.push(context_instant("c"));
     let failures = validate(&taxonomy, &document);
-    assert!(failures.iter().any(|f| f.code == FAIL_DUPLICATE_UNIT), "{failures:?}");
+    assert!(
+        failures.iter().any(|f| f.code == FAIL_DUPLICATE_UNIT),
+        "{failures:?}"
+    );
     // A unit without any measure is refused.
     let mut document = InstanceDocument::empty();
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "u".into(), measures: vec![] });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "u".into(),
+        measures: vec![],
+    });
     let failures = validate(&taxonomy, &document);
     assert!(failures.iter().any(|f| f.code == FAIL_MISSING_UNIT_MEASURE));
 }
@@ -1823,7 +2031,10 @@ fn fact_level_failures_name_the_concept_and_context() {
     let taxonomy = hostile_taxonomy();
     let mut document = InstanceDocument::empty();
     document.contexts.push(context_instant("c"));
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "EUR".into(), measures: vec!["m".into()] });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "EUR".into(),
+        measures: vec!["m".into()],
+    });
 
     // Duplicate fact: same concept/context/unit twice — and a third copy so
     // the dedup logic must collapse identical reports.
@@ -1868,7 +2079,11 @@ fn fact_level_failures_name_the_concept_and_context() {
 
     let failures = validate(&taxonomy, &document);
     let count = |code: &str| failures.iter().filter(|f| f.code == code).count();
-    assert_eq!(count(FAIL_DUPLICATE_FACT), 1, "identical duplicate reports dedup: {failures:?}");
+    assert_eq!(
+        count(FAIL_DUPLICATE_FACT),
+        1,
+        "identical duplicate reports dedup: {failures:?}"
+    );
     assert_eq!(count(FAIL_UNKNOWN_CONTEXT), 1);
     assert_eq!(count(FAIL_CONCEPT_UNDECLARED), 1);
     assert_eq!(count(FAIL_CONCEPT_NOT_ITEM), 1);
@@ -1885,13 +2100,24 @@ fn fact_level_failures_name_the_concept_and_context() {
     assert_eq!(count(FAIL_UNEXPECTED_DECIMALS), 1);
 
     // Messages name the involved names for machine consumers.
-    let dup = failures.iter().find(|f| f.code == FAIL_DUPLICATE_FACT).unwrap();
+    let dup = failures
+        .iter()
+        .find(|f| f.code == FAIL_DUPLICATE_FACT)
+        .unwrap();
     assert!(dup.concepts.iter().any(|c| c.contains("Assets")), "{dup:?}");
     assert!(dup.message.contains("c"), "{dup:?}");
-    assert!(failures.iter().any(|f| f.code == FAIL_PERIOD_TYPE_MISMATCH
-        && f.message.contains("ee:Revenue")), "{failures:?}");
-    assert!(failures.iter().any(|f| f.code == FAIL_PERIOD_TYPE_MISMATCH
-        && f.message.contains("duration")), "{failures:?}");
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.code == FAIL_PERIOD_TYPE_MISMATCH && f.message.contains("ee:Revenue")),
+        "{failures:?}"
+    );
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.code == FAIL_PERIOD_TYPE_MISMATCH && f.message.contains("duration")),
+        "{failures:?}"
+    );
 
     // Deterministic order: sorted, no adjacent duplicates.
     assert!(
@@ -1907,23 +2133,30 @@ fn calculation_overflow_is_reported_not_panicked_on() {
 
     // ADD overflow: two children at MAX sum beyond i128.
     let mut taxonomy = hostile_taxonomy();
-    taxonomy.calculation_arcs.push(compliance::xbrl_taxonomy::CalculationArc {
-        role: "http://r/calc".into(),
-        parent: QName::new(NS, "Assets"),
-        child: QName::new(NS, "Cash"),
-        weight: DecimalAmount::from_cents(100),
-        order: None,
-    });
-    taxonomy.calculation_arcs.push(compliance::xbrl_taxonomy::CalculationArc {
-        role: "http://r/calc".into(),
-        parent: QName::new(NS, "Assets"),
-        child: QName::new(NS, "Equity"),
-        weight: DecimalAmount::from_cents(100),
-        order: None,
-    });
+    taxonomy
+        .calculation_arcs
+        .push(compliance::xbrl_taxonomy::CalculationArc {
+            role: "http://r/calc".into(),
+            parent: QName::new(NS, "Assets"),
+            child: QName::new(NS, "Cash"),
+            weight: DecimalAmount::from_cents(100),
+            order: None,
+        });
+    taxonomy
+        .calculation_arcs
+        .push(compliance::xbrl_taxonomy::CalculationArc {
+            role: "http://r/calc".into(),
+            parent: QName::new(NS, "Assets"),
+            child: QName::new(NS, "Equity"),
+            weight: DecimalAmount::from_cents(100),
+            order: None,
+        });
     let mut document = InstanceDocument::empty();
     document.contexts.push(context_instant("c"));
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "EUR".into(), measures: vec!["m".into()] });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "EUR".into(),
+        measures: vec!["m".into()],
+    });
     let mut parent = fact_numeric("Assets", "c", 0);
     parent.value = FactValue::Numeric(max_value);
     let mut child1 = fact_numeric("Cash", "c", 0);
@@ -1937,21 +2170,30 @@ fn calculation_overflow_is_reported_not_panicked_on() {
         .iter()
         .find(|f| f.code == FAIL_CALCULATION_OVERFLOW)
         .unwrap_or_else(|| panic!("expected calculation overflow, got {failures:?}"));
-    assert!(overflow.message.contains("overflows"), "{}", overflow.message);
+    assert!(
+        overflow.message.contains("overflows"),
+        "{}",
+        overflow.message
+    );
     assert!(overflow.concepts.iter().any(|c| c.contains("Assets")));
 
     // MULTIPLY overflow: a hostile weight at MAX times any child at MAX.
     let mut taxonomy = hostile_taxonomy();
-    taxonomy.calculation_arcs.push(compliance::xbrl_taxonomy::CalculationArc {
-        role: "http://r/calc".into(),
-        parent: QName::new(NS, "Assets"),
-        child: QName::new(NS, "Cash"),
-        weight: DecimalAmount::parse(max_text).unwrap(),
-        order: None,
-    });
+    taxonomy
+        .calculation_arcs
+        .push(compliance::xbrl_taxonomy::CalculationArc {
+            role: "http://r/calc".into(),
+            parent: QName::new(NS, "Assets"),
+            child: QName::new(NS, "Cash"),
+            weight: DecimalAmount::parse(max_text).unwrap(),
+            order: None,
+        });
     let mut document = InstanceDocument::empty();
     document.contexts.push(context_instant("c"));
-    document.units.push(compliance::xbrl_taxonomy::Unit { id: "EUR".into(), measures: vec!["m".into()] });
+    document.units.push(compliance::xbrl_taxonomy::Unit {
+        id: "EUR".into(),
+        measures: vec!["m".into()],
+    });
     let mut parent = fact_numeric("Assets", "c", 0);
     parent.value = FactValue::Numeric(max_value);
     let mut child = fact_numeric("Cash", "c", 0);
@@ -2020,10 +2262,11 @@ fn extension_declarations_participate_like_taxonomy_concepts() {
 
     // Display names: extension facts read as apex:<name>, taxonomy facts use
     // the bound prefix, and unknown namespaces fall back to Clark notation.
-    let undeclared = failures
-        .iter()
-        .find(|f| f.code == FAIL_CONCEPT_UNDECLARED);
-    assert!(undeclared.is_none(), "extension facts are declared: {failures:?}");
+    let undeclared = failures.iter().find(|f| f.code == FAIL_CONCEPT_UNDECLARED);
+    assert!(
+        undeclared.is_none(),
+        "extension facts are declared: {failures:?}"
+    );
 
     let mut document = InstanceDocument::empty();
     document.contexts.push(context_instant("c"));
@@ -2040,7 +2283,11 @@ fn extension_declarations_participate_like_taxonomy_concepts() {
         .iter()
         .find(|f| f.code == FAIL_CONCEPT_UNDECLARED)
         .expect("undeclared extension fact");
-    assert!(undeclared.message.contains("apex:Ghost"), "{}", undeclared.message);
+    assert!(
+        undeclared.message.contains("apex:Ghost"),
+        "{}",
+        undeclared.message
+    );
 
     // A concept in a THIRD namespace displays as Clark notation.
     let mut document = InstanceDocument::empty();
@@ -2071,7 +2318,11 @@ fn extension_declarations_participate_like_taxonomy_concepts() {
     fact.unit_ref = None;
     document.facts.push(fact);
     let failures = validate_instance(&taxonomy, &extensions, &document);
-    assert!(failures[0].message.contains("ee:Assets"), "{}", failures[0].message);
+    assert!(
+        failures[0].message.contains("ee:Assets"),
+        "{}",
+        failures[0].message
+    );
 }
 
 #[test]
@@ -2083,16 +2334,16 @@ fn readiness_summary_reports_each_state_honestly() {
         missing: vec![],
         validation_failures: vec![],
     };
-    assert_eq!(ready.summary(), "submission-ready for the configured taxonomy");
+    assert_eq!(
+        ready.summary(),
+        "submission-ready for the configured taxonomy"
+    );
 
     // Missing taxonomy entry point names the first missing item.
     let missing = XbrlReadiness::not_ready(vec!["APEXMAIL_X".into(), "APEXMAIL_Y".into()]);
     assert!(!missing.submission_ready);
     assert_eq!(missing.taxonomy, None);
-    assert_eq!(
-        missing.summary(),
-        "not submission-ready: APEXMAIL_X"
-    );
+    assert_eq!(missing.summary(), "not submission-ready: APEXMAIL_X");
 
     // Validation failures are summarized with the first failure.
     let mut failing = XbrlReadiness::not_ready(vec![]);
@@ -2125,10 +2376,18 @@ fn taxonomy_identity_and_prefix_preference_are_reported() {
     taxonomy.prefixes.insert("x2".into(), "urn:other".into());
     assert_eq!(taxonomy.prefix_for_namespace("urn:other"), Some("x1"));
     // An empty prefix never wins.
-    taxonomy.prefixes.insert(String::new(), "urn:empty-only".into());
+    taxonomy
+        .prefixes
+        .insert(String::new(), "urn:empty-only".into());
     assert_eq!(taxonomy.prefix_for_namespace("urn:empty-only"), None);
-    assert_eq!(taxonomy.display_name(&QName::new("urn:empty-only", "X")), "{urn:empty-only}X");
-    assert_eq!(taxonomy.display_name(&QName::new(NS, "Assets")), "ee:Assets");
+    assert_eq!(
+        taxonomy.display_name(&QName::new("urn:empty-only", "X")),
+        "{urn:empty-only}X"
+    );
+    assert_eq!(
+        taxonomy.display_name(&QName::new(NS, "Assets")),
+        "ee:Assets"
+    );
 
     let identity = taxonomy.identity();
     assert_eq!(identity.concept_count, taxonomy.concepts.len());

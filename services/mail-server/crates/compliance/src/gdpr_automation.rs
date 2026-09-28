@@ -4239,8 +4239,11 @@ mod hostile_db_tests {
     use crate::types::{ConsentSource, ConsentType, RequestStatus};
 
     async fn hostile_db(suffix: &str) -> Option<PgPool> {
-        test_support::canonical_pool(&format!("gdpr_hostile_{suffix}"), &format!("gdpr_hostile_{suffix}"))
-            .await
+        test_support::canonical_pool(
+            &format!("gdpr_hostile_{suffix}"),
+            &format!("gdpr_hostile_{suffix}"),
+        )
+        .await
     }
 
     fn automation_with(pool: PgPool, config: GdprConfig) -> GdprAutomation {
@@ -4278,13 +4281,7 @@ mod hostile_db_tests {
             .expect("seed tenant");
     }
 
-    async fn seed_request(
-        pool: &PgPool,
-        id: &str,
-        tenant: &str,
-        email: &str,
-        request_type: &str,
-    ) {
+    async fn seed_request(pool: &PgPool, id: &str, tenant: &str, email: &str, request_type: &str) {
         sqlx::query(
             "INSERT INTO data_subject_requests
                (id, tenant_id, request_type, email, verification_token_hash, verified,
@@ -4304,7 +4301,11 @@ mod hostile_db_tests {
     async fn request_row(
         pool: &PgPool,
         id: &str,
-    ) -> (String, Option<serde_json::Value>, Option<chrono::DateTime<Utc>>) {
+    ) -> (
+        String,
+        Option<serde_json::Value>,
+        Option<chrono::DateTime<Utc>>,
+    ) {
         sqlx::query_as(
             "SELECT status, result, completed_at FROM data_subject_requests WHERE id = $1",
         )
@@ -4342,27 +4343,44 @@ mod hostile_db_tests {
 
         // Every unjustified or impossible extension is refused BEFORE any
         // write happens.
-        assert!(gdpr
-            .extend_request("REQ-ext", "   ", Utc::now())
-            .await
-            .is_err(), "whitespace reason refused");
-        assert!(gdpr
-            .extend_request("REQ-ext", "too short", Utc::now())
-            .await
-            .is_err(), "a nine-character reason is not a justification");
-        assert!(gdpr
-            .extend_request("REQ-ext", "complex accounting records", received - TimeDelta::seconds(1))
-            .await
-            .is_err(), "notification cannot precede receipt");
-        assert!(gdpr
-            .extend_request("REQ-ext", "complex accounting records", Utc::now() + TimeDelta::minutes(6))
-            .await
-            .is_err(), "notification cannot be in the future");
-        let untouched: Option<chrono::DateTime<Utc>> =
-            sqlx::query_scalar("SELECT extension_due_at FROM data_subject_requests WHERE id = 'REQ-ext'")
-                .fetch_one(&pool)
+        assert!(
+            gdpr.extend_request("REQ-ext", "   ", Utc::now())
                 .await
-                .expect("extension_due_at");
+                .is_err(),
+            "whitespace reason refused"
+        );
+        assert!(
+            gdpr.extend_request("REQ-ext", "too short", Utc::now())
+                .await
+                .is_err(),
+            "a nine-character reason is not a justification"
+        );
+        assert!(
+            gdpr.extend_request(
+                "REQ-ext",
+                "complex accounting records",
+                received - TimeDelta::seconds(1)
+            )
+            .await
+            .is_err(),
+            "notification cannot precede receipt"
+        );
+        assert!(
+            gdpr.extend_request(
+                "REQ-ext",
+                "complex accounting records",
+                Utc::now() + TimeDelta::minutes(6)
+            )
+            .await
+            .is_err(),
+            "notification cannot be in the future"
+        );
+        let untouched: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT extension_due_at FROM data_subject_requests WHERE id = 'REQ-ext'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("extension_due_at");
         assert_eq!(untouched, None, "refused extensions must not write");
 
         // A justified, notified extension moves the clock by exactly two
@@ -4374,7 +4392,10 @@ mod hostile_db_tests {
             .expect("valid extension");
         let expected_due = extended_due_at(statutory_due_at(received));
         assert_eq!(extended.extension_due_at, Some(expected_due));
-        assert_eq!(extended.extension_reason.as_deref(), Some("complex accounting records"));
+        assert_eq!(
+            extended.extension_reason.as_deref(),
+            Some("complex accounting records")
+        );
         let stored: (Option<chrono::DateTime<Utc>>, Option<String>) = sqlx::query_as(
             "SELECT extension_due_at, extension_reason FROM data_subject_requests WHERE id = 'REQ-ext'",
         )
@@ -4386,17 +4407,20 @@ mod hostile_db_tests {
 
         // The overdue decision reads the STORED clock: within the extension
         // the request is not overdue; past it, only OPEN requests are.
-        assert!(!GdprAutomation::is_statutorily_overdue(&extended, Utc::now()));
+        assert!(!GdprAutomation::is_statutorily_overdue(
+            &extended,
+            Utc::now()
+        ));
         assert!(GdprAutomation::is_statutorily_overdue(
             &extended,
             expected_due + TimeDelta::seconds(1)
         ));
         let mut done = extended.clone();
         done.status = RequestStatus::Completed;
-        assert!(!GdprAutomation::is_statutorily_overdue(
-            &done,
-            expected_due + TimeDelta::days(1)
-        ), "a completed request is never overdue");
+        assert!(
+            !GdprAutomation::is_statutorily_overdue(&done, expected_due + TimeDelta::days(1)),
+            "a completed request is never overdue"
+        );
         for status in [
             RequestStatus::Rejected,
             RequestStatus::Expired,
@@ -4412,10 +4436,16 @@ mod hostile_db_tests {
         let mut no_clock = extended.clone();
         no_clock.extension_due_at = None;
         no_clock.statutory_due_at = None;
-        assert!(!GdprAutomation::is_statutorily_overdue(&no_clock, Utc::now()));
+        assert!(!GdprAutomation::is_statutorily_overdue(
+            &no_clock,
+            Utc::now()
+        ));
 
         // Unknown request: an error, not a fabrication.
-        assert!(gdpr.extend_request("REQ-none", "complex accounting records", notified).await.is_err());
+        assert!(gdpr
+            .extend_request("REQ-none", "complex accounting records", notified)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -4485,7 +4515,10 @@ mod hostile_db_tests {
                 .contains("capped"),
             "{manifest}"
         );
-        assert_eq!(manifest["stores"]["events"]["records"], serde_json::json!(1));
+        assert_eq!(
+            manifest["stores"]["events"]["records"],
+            serde_json::json!(1)
+        );
         // contact_list_members does not exist on the canonical chain: the
         // store is reported skipped and the export is PARTIAL, not complete.
         assert_eq!(
@@ -4494,7 +4527,10 @@ mod hostile_db_tests {
         );
         assert_eq!(result.partial, Some(true));
         let (status, completed, _) = request_row(&pool, "REQ-port").await;
-        assert_eq!(status, "partial", "a partial export must not claim completed");
+        assert_eq!(
+            status, "partial",
+            "a partial export must not claim completed"
+        );
         assert!(completed.is_some());
 
         // Tenant-owned resources are listed without being queried.
@@ -4534,7 +4570,10 @@ mod hostile_db_tests {
         if redis_configured() {
             // The retry state was durably recorded and the entry requeued.
             let outcome = first.expect("retrying requests report Ok so the queue can ack");
-            assert_eq!(outcome.data.as_ref().unwrap()["retry_attempt"], serde_json::json!(1));
+            assert_eq!(
+                outcome.data.as_ref().unwrap()["retry_attempt"],
+                serde_json::json!(1)
+            );
             let (status, _, _) = request_row(&pool, "REQ-inv").await;
             assert_eq!(status, "retrying");
             let error = outcome.data.as_ref().unwrap()["error"].as_str().unwrap();
@@ -4560,22 +4599,25 @@ mod hostile_db_tests {
         // snapshot anonymization fails loudly instead of skipping.
         let request = gdpr.fetch_request("REQ-inv").await.unwrap().unwrap();
         let outcome = gdpr
-            .erase_store(&request, ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" })
+            .erase_store(
+                &request,
+                ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" },
+            )
             .await;
         assert!(
             matches!(outcome.status, StoreErasureStatus::Failed),
             "invoices are required: {outcome:?}"
         );
-        assert!(outcome.error.as_deref().unwrap_or("").contains("required store"));
+        assert!(outcome
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("required store"));
     }
 
     // ── Invoice snapshot redaction (F82) ────────────────────────────────────
 
-    async fn seed_invoice(
-        pool: &PgPool,
-        tenant: &str,
-        snapshot: Option<&str>,
-    ) -> uuid::Uuid {
+    async fn seed_invoice(pool: &PgPool, tenant: &str, snapshot: Option<&str>) -> uuid::Uuid {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO invoices (id, tenant_id, amount, currency, status, billing_address, issued_at)
@@ -4652,16 +4694,27 @@ mod hostile_db_tests {
             extension_notified_at: None,
         };
         let outcome = gdpr
-            .erase_store(&request, ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" })
+            .erase_store(
+                &request,
+                ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" },
+            )
             .await;
         assert!(
             matches!(outcome.status, StoreErasureStatus::Anonymized),
             "{outcome:?}"
         );
-        assert_eq!(outcome.rows_affected, 2, "only the subject's snapshots are rewritten");
+        assert_eq!(
+            outcome.rows_affected, 2,
+            "only the subject's snapshots are rewritten"
+        );
 
         let marker = redact_marker(&email);
-        for (id, expected_marker) in [(matching, true), (mixed, true), (malformed, false), (other_email, false)] {
+        for (id, expected_marker) in [
+            (matching, true),
+            (mixed, true),
+            (malformed, false),
+            (other_email, false),
+        ] {
             let snapshot: Option<String> =
                 sqlx::query_scalar("SELECT billing_address FROM invoices WHERE id = $1")
                     .bind(id)
@@ -4709,7 +4762,10 @@ mod hostile_db_tests {
         assert!(rendered.contains(&marker), "{rendered}");
         assert!(!rendered.contains(&email), "{rendered}");
         let count = invoices.as_array().unwrap().len();
-        assert_eq!(count, 5, "a tenant user's invoices are all disclosed (anonymized)");
+        assert_eq!(
+            count, 5,
+            "a tenant user's invoices are all disclosed (anonymized)"
+        );
     }
 
     #[tokio::test]
@@ -4734,7 +4790,11 @@ mod hostile_db_tests {
         seed_request(&pool, "REQ-bare", &tenant, &email, "access").await;
         let result = gdpr.process_request("REQ-bare").await.expect("export");
         let invoices = result.data.unwrap()["invoices"].as_array().unwrap().clone();
-        assert_eq!(invoices.len(), 1, "only the snapshot-matching invoice: {invoices:?}");
+        assert_eq!(
+            invoices.len(),
+            1,
+            "only the snapshot-matching invoice: {invoices:?}"
+        );
         let rendered = serde_json::to_string(&invoices).unwrap();
         assert!(rendered.contains(&redact_marker(&email)));
         let _ = theirs;
@@ -4748,11 +4808,13 @@ mod hostile_db_tests {
         let gdpr = automation_with(pool.clone(), config());
         let email = format!("chat-{}@example.test", Uuid::new_v4().simple());
         seed_tenant(&pool, "t-chat").await;
-        sqlx::query("INSERT INTO users (tenant_id, email, password_hash) VALUES ('t-chat', $1, 'x')")
-            .bind(&email)
-            .execute(&pool)
-            .await
-            .expect("user");
+        sqlx::query(
+            "INSERT INTO users (tenant_id, email, password_hash) VALUES ('t-chat', $1, 'x')",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("user");
         let request = DataSubjectRequest {
             id: "REQ-chat".into(),
             tenant_id: "t-chat".into(),
@@ -4778,7 +4840,9 @@ mod hostile_db_tests {
             .execute(&pool)
             .await
             .expect("revoke delete");
-        let outcome = gdpr.erase_store(&request, ErasureStore::AiChatByUserEmail).await;
+        let outcome = gdpr
+            .erase_store(&request, ErasureStore::AiChatByUserEmail)
+            .await;
         assert!(
             matches!(outcome.status, StoreErasureStatus::BestEffortFailed),
             "a failed delete is best-effort, never skipped or deleted: {outcome:?}"
@@ -4823,19 +4887,17 @@ mod hostile_db_tests {
 
         let expired = gdpr.expire_overdue_requests().await.expect("expire");
         assert_eq!(expired, 1, "exactly the overdue pending request");
-        let status: String = sqlx::query_scalar(
-            "SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-old'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("status");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-old'")
+                .fetch_one(&pool)
+                .await
+                .expect("status");
         assert_eq!(status, "expired");
-        let still: String = sqlx::query_scalar(
-            "SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-new'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("status");
+        let still: String =
+            sqlx::query_scalar("SELECT status FROM data_subject_requests WHERE id = 'REQ-exp-new'")
+                .fetch_one(&pool)
+                .await
+                .expect("status");
         assert_eq!(still, "verified");
 
         // Stale double-opt-in tokens are deleted; live ones stay.
@@ -4859,13 +4921,12 @@ mod hostile_db_tests {
         .expect("live token");
         let purged = gdpr.expire_stale_opt_in_tokens().await.expect("purge");
         assert_eq!(purged, 1);
-        let live: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM double_opt_in_tokens WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_one(&pool)
-        .await
-        .expect("live count");
+        let live: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM double_opt_in_tokens WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("live count");
         assert_eq!(live, 1);
     }
 

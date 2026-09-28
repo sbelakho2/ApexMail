@@ -536,4 +536,77 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["valid"], false, "{json}");
     }
+
+    /// PINNED (considered by the 2026-09 privilege-boundary audit): the
+    /// template renderer has NO tenant dimension to fail closed on. It never
+    /// fetches tenant rows: templates arrive as `source` in the token-gated
+    /// request body (the callers — api-server/enterprise — select the tenant
+    /// row and pass its compiled source), the handlers touch neither the
+    /// `db` pool nor the response cache, and no route accepts a tenant
+    /// selector. Identical inputs render identical output for any caller,
+    /// so there is no cross-tenant fetch to probe and no default bucket to
+    /// exploit. This test pins the statelessness and the isolation between
+    /// two callers' renders.
+    #[tokio::test]
+    async fn renders_are_stateless_and_never_leak_between_callers() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = router(state_with_token("test-key"));
+        let render = |source: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/render")
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "source": source,
+                                "props": { "marker": "x" },
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Caller "A" and caller "B" render distinct sources; each output
+        // carries only its own content.
+        let response_a = render("<p>A {{ marker }}</p>").await;
+        assert_eq!(response_a.status(), StatusCode::OK);
+        let body_a = axum::body::to_bytes(response_a.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+        assert!(
+            json_a["html"].as_str().unwrap().contains(">A x<"),
+            "{json_a}"
+        );
+
+        let response_b = render("<p>B {{ marker }}</p>").await;
+        assert_eq!(response_b.status(), StatusCode::OK);
+        let body_b = axum::body::to_bytes(response_b.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json_b: serde_json::Value = serde_json::from_slice(&body_b).unwrap();
+        assert!(
+            json_b["html"].as_str().unwrap().contains(">B x<"),
+            "{json_b}"
+        );
+        assert!(
+            !json_b["html"].as_str().unwrap().contains(">A"),
+            "caller B's render must not contain caller A's content"
+        );
+        assert_eq!(
+            json_b["metadata"]["cached"], false,
+            "the HTTP render path is uncached: no shared per-tenant state"
+        );
+    }
 }

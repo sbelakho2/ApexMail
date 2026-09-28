@@ -237,6 +237,78 @@ fn extract_caller_id(headers: &HeaderMap, _config: &ComplianceConfig) -> String 
         .unwrap_or_else(|| "api-user".to_string())
 }
 
+// ── P1-SECURITY: required tenant identity (mirrors the ai-service fix) ──────
+//
+// The service Bearer token authenticates the upstream caller but carries NO
+// tenant identity — one shared token fronts many callers. Every route that
+// serves tenant-scoped data must therefore resolve the tenant EXPLICITLY from
+// the request and FAIL CLOSED when it is absent: a missing selector is a 401,
+// never an all-tenant aggregate or a default bucket (`"default"`, `"global"`,
+// `NULL`-filter). Where two selectors are supplied and disagree, that is a
+// cross-tenant attempt: 403, logged. This is the same lateral-movement shape
+// the AI audit fixed (missing header → `_control-plane` broad default).
+
+/// Maximum accepted length for a request-supplied tenant identity (canonical
+/// tenant ids are 26-char ULIDs; `test_support::unique_tenant` is shorter).
+const MAX_TENANT_ID_LEN: usize = 64;
+
+/// Trim + bound a raw tenant-selector string; `None` when effectively absent
+/// and `Err` when overlong (a fixed caller-error message is used).
+fn bounded_tenant(raw: Option<&str>) -> Result<Option<String>, ()> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(value) if value.len() > MAX_TENANT_ID_LEN => Err(()),
+        Some(value) => Ok(Some(value.to_string())),
+    }
+}
+
+/// Read the tenant selector from the `tenant_id` query parameter or the
+/// `X-Tenant-Id` header (query wins — it is the more specific assertion).
+/// When BOTH are supplied they must agree exactly: a disagreement is a
+/// cross-tenant attempt and is rejected with 403 + a warn log.
+pub(crate) fn required_tenant_identity(
+    params: Option<&std::collections::HashMap<String, String>>,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let query_tenant = bounded_tenant(params.and_then(|p| p.get("tenant_id").map(String::as_str)))
+        .map_err(|_| {
+            err_json(
+                StatusCode::BAD_REQUEST,
+                "tenant_id must be at most 64 characters",
+            )
+        })?;
+    let header_tenant = bounded_tenant(headers.get("X-Tenant-Id").and_then(|v| v.to_str().ok()))
+        .map_err(|_| {
+            err_json(
+                StatusCode::BAD_REQUEST,
+                "X-Tenant-Id must be at most 64 characters",
+            )
+        })?;
+
+    match (query_tenant, header_tenant) {
+        (Some(query), Some(header)) => {
+            if query != header {
+                tracing::warn!(
+                    query_tenant = %query,
+                    header_tenant = %header,
+                    "tenant identity mismatch between tenant_id query parameter and X-Tenant-Id header"
+                );
+                return Err(err_json(
+                    StatusCode::FORBIDDEN,
+                    "tenant identity mismatch between tenant_id and X-Tenant-Id",
+                ));
+            }
+            Ok(query)
+        }
+        (Some(query), None) => Ok(query),
+        (None, Some(header)) => Ok(header),
+        (None, None) => Err(err_json(
+            StatusCode::UNAUTHORIZED,
+            "a tenant identity is required: pass ?tenant_id= or the X-Tenant-Id header",
+        )),
+    }
+}
+
 // ── Response helpers ──────────────────────────────────────────────────────
 
 /// Create a JSON error response.
@@ -446,9 +518,15 @@ async fn audit_create(
         .get("resource")
         .and_then(|v| v.as_str())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing resource"))?;
+    // P1-SECURITY: the tenant must be present AND non-blank. Audit hash
+    // chains are keyed per tenant by design; a blank tenant used to mint a
+    // ""-keyed chain (an unattributable trail), and a missing one was already
+    // refused.
     let tenant_id = entry
         .get("tenant_id")
         .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"))?;
 
     let action = parse_audit_action(action_str)
@@ -473,10 +551,9 @@ async fn audit_create(
     };
 
     let ctx = LogContext {
-        tenant_id: entry
-            .get("tenant_id")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        // The validated, trimmed tenant from above — never the raw body value
+        // (a padded value must not mint a differently-keyed chain).
+        tenant_id: Some(tenant_id.to_string()),
         user_id: entry
             .get("user_id")
             .and_then(|v| v.as_str())
@@ -517,12 +594,24 @@ async fn audit_create(
 }
 
 /// POST /audit/query — query audit log entries.
+///
+/// P1-SECURITY: the tenant filter is REQUIRED. `AuditLogQuery.tenant_id` is
+/// `Option<String>` and a `None` filter matched EVERY tenant's audit trail
+/// (user ids, IP addresses, action details) — the absent-filter → aggregate-
+/// all shape. The route refuses a missing/blank tenant instead of widening
+/// the query.
 async fn audit_query(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(query): Json<AuditLogQuery>,
+    Json(mut query): Json<AuditLogQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match query.tenant_id.as_deref().map(str::trim) {
+        None | Some("") => {
+            return Err(err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"));
+        }
+        Some(trimmed) => query.tenant_id = Some(trimmed.to_string()),
+    }
     match state.audit_logger.query(&query).await {
         Ok((entries, total)) => Ok(ok_json(serde_json::json!({
             "entries": entries,
@@ -539,14 +628,32 @@ async fn audit_query(
 }
 
 /// GET /audit/{id} — get a single audit log entry.
+///
+/// P1-SECURITY: the fetch is tenant-SCOPED. The entry id alone used to serve
+/// any tenant's entry to any token holder (by-ID reads crossed tenants); the
+/// caller must now assert the tenant (`?tenant_id=` or `X-Tenant-Id`) and an
+/// entry attributed to another tenant — or to no tenant — is a 404 that does
+/// not reveal its existence.
 async fn audit_get_entry(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    let tenant_id = required_tenant_identity(Some(&params), &headers)?;
     match state.audit_logger.get_entry(&id).await {
-        Ok(Some(entry)) => Ok(ok_json(entry)),
+        Ok(Some(entry)) => {
+            if entry.tenant_id.as_deref() != Some(tenant_id.as_str()) {
+                tracing::warn!(
+                    entry_id = %id,
+                    tenant_id = %tenant_id,
+                    "audit entry fetch refused: entry belongs to another tenant"
+                );
+                return Err(err_json(StatusCode::NOT_FOUND, "Audit entry not found"));
+            }
+            Ok(ok_json(entry))
+        }
         Ok(None) => Err(err_json(StatusCode::NOT_FOUND, "Audit entry not found")),
         Err(e) => {
             error!("Failed to get audit entry {id}: {e}");
@@ -625,12 +732,18 @@ async fn audit_export(
 }
 
 /// GET /audit/stats — get audit statistics.
+///
+/// P1-SECURITY: tenant-scoped. `get_stats(None)` aggregated action/resource/
+/// outcome counts across ALL tenants for any token holder; the tenant is now
+/// REQUIRED (`?tenant_id=` or `X-Tenant-Id`, mismatch → 403, absent → 401).
 async fn audit_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
-    match state.audit_logger.get_stats(None).await {
+    let tenant_id = required_tenant_identity(Some(&params), &headers)?;
+    match state.audit_logger.get_stats(Some(&tenant_id)).await {
         Ok(stats) => Ok(ok_json(stats)),
         Err(e) => {
             error!("Failed to get audit stats: {e}");
@@ -698,6 +811,12 @@ async fn secret_create(
 }
 
 /// GET /secrets — list all secrets (requires tenant_id query param).
+///
+/// P1-SECURITY: the tenant parameter is REQUIRED. It used to default to the
+/// literal tenant `"default"` when omitted — a missing-selector fallback that
+/// silently served one tenant's secret metadata to a caller that named no
+/// tenant at all (the AI-audit bug shape). A missing/blank parameter is now a
+/// 400 and nothing is listed.
 async fn secret_list(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -706,8 +825,15 @@ async fn secret_list(
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
     let tenant_id = params
         .get("tenant_id")
-        .map(|s| s.as_str())
-        .unwrap_or("default");
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"))?;
+    if tenant_id.len() > MAX_TENANT_ID_LEN {
+        return Err(err_json(
+            StatusCode::BAD_REQUEST,
+            "tenant_id must be at most 64 characters",
+        ));
+    }
     match state
         .secret_manager
         .list_secrets(tenant_id, None, 100, 0)
@@ -1184,28 +1310,23 @@ async fn gdpr_get_consent_certificate(
 /// GET /gdpr/stats — get GDPR statistics.
 ///
 /// I-1: the tenant is threaded from the request (`?tenant_id=` query param or
-/// the X-Tenant-Id header); without either, stats aggregate all tenants.
-/// Previously a literal "" was passed, which matched zero rows and always
-/// reported zeros.
+/// the X-Tenant-Id header).
+///
+/// P1-SECURITY: the tenant is now REQUIRED. This route is internal-token
+/// protected, so the old absent-selector fallback aggregated GDPR request
+/// statistics across ALL tenants for any token holder — the absent-filter →
+/// aggregate-all shape from the AI audit. Missing both selectors is a 401;
+/// supplying both with different values is a cross-tenant attempt (403,
+/// logged).
 async fn gdpr_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
-    let tenant_id = params
-        .get("tenant_id")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            headers
-                .get("X-Tenant-Id")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
+    let tenant_id = required_tenant_identity(Some(&params), &headers)?;
     // L-03: Use GDPR request stats instead of audit log stats
-    match state.gdpr.get_request_stats(tenant_id.as_deref()).await {
+    match state.gdpr.get_request_stats(Some(tenant_id.as_str())).await {
         Ok(stats) => Ok(ok_json(stats)),
         Err(e) => {
             error!("Failed to get GDPR stats: {e}");
@@ -1223,24 +1344,40 @@ async fn gdpr_stats(
 /// `export_base_url`), so exports are actually downloadable. Token-gated via
 /// the service Bearer token like every other route; serves the stored export
 /// JSON with a Content-Disposition attachment header.
+///
+/// P1-SECURITY: the download is tenant-SCOPED. The export row carries the
+/// subject's full personal-data export, and the id alone used to serve it to
+/// any token holder; the caller must now assert the tenant (`?tenant_id=` or
+/// `X-Tenant-Id`) and the SQL only matches a row of THAT tenant — another
+/// tenant's export (or an unknown id) is the same 404.
 pub async fn gdpr_download_export(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     axum::extract::Path(export_id): axum::extract::Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    let tenant_id = required_tenant_identity(Some(&params), &headers)?;
 
-    let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> =
-        sqlx::query_as("SELECT data, expires_at FROM gdpr_exports WHERE id = $1")
-            .bind(&export_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                error!("Failed to fetch GDPR export {export_id}: {e}");
-                err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch export")
-            })?;
+    let row: Option<(serde_json::Value, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT data, expires_at FROM gdpr_exports WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(&export_id)
+    .bind(&tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        error!("Failed to fetch GDPR export {export_id}: {e}");
+        err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch export")
+    })?;
 
     let Some((data, expires_at)) = row else {
+        // Unknown id AND another tenant's export are indistinguishable here.
+        tracing::warn!(
+            export_id = %export_id,
+            tenant_id = %tenant_id,
+            "gdpr export download refused: unknown id or export belongs to another tenant"
+        );
         return Err(err_json(StatusCode::NOT_FOUND, "Export not found"));
     };
 
@@ -2974,6 +3111,7 @@ mod tests {
         let response = rt.block_on(gdpr_download_export(
             State(state),
             HeaderMap::new(), // no auth header
+            axum::extract::Query(std::collections::HashMap::new()),
             axum::extract::Path("some-export-id".to_string()),
         ));
         assert_eq!(response.unwrap_err().0, StatusCode::UNAUTHORIZED);
@@ -2982,14 +3120,19 @@ mod tests {
     /// G: unknown export id never yields 200 — with the fake pool the DB
     /// fetch fails, exercising only the wiring (the real 404 path is covered
     /// by the DB-gated integration tests).
+    /// P1-SECURITY (required tenant scoping): the caller now also asserts the
+    /// export's tenant via X-Tenant-Id, so this probe reaches the (failing)
+    /// tenant-scoped fetch instead of stopping at the selector check.
     #[test]
     fn test_download_export_unknown_id_is_never_200() {
         let state = test_app_state();
-        let headers = doi_auth_headers();
+        let mut headers = doi_auth_headers();
+        headers.insert("X-Tenant-Id", "ten_probe_0000000000001".parse().unwrap());
         let rt = test_runtime();
         let response = rt.block_on(gdpr_download_export(
             State(state),
             headers,
+            axum::extract::Query(std::collections::HashMap::new()),
             axum::extract::Path("no-such-export".to_string()),
         ));
         let status = match response {
@@ -3310,12 +3453,14 @@ mod db_tests {
                 )
                 .await,
             ),
-            status(audit_get_entry(State(state.clone()), none.clone(), path("id")).await),
+            status(
+                audit_get_entry(State(state.clone()), none.clone(), q.clone(), path("id")).await,
+            ),
             status(
                 audit_verify_chain(State(state.clone()), none.clone(), Json(body.clone())).await,
             ),
             status(audit_export(State(state.clone()), none.clone(), Json(body.clone())).await),
-            status(audit_stats(State(state.clone()), none.clone()).await),
+            status(audit_stats(State(state.clone()), none.clone(), q.clone()).await),
             status(
                 secret_create(
                     State(state.clone()),
@@ -3377,7 +3522,10 @@ mod db_tests {
                 .await,
             ),
             status(gdpr_stats(State(state.clone()), none.clone(), q.clone()).await),
-            status(gdpr_download_export(State(state.clone()), none.clone(), path("e")).await),
+            status(
+                gdpr_download_export(State(state.clone()), none.clone(), q.clone(), path("e"))
+                    .await,
+            ),
             status(
                 breach_report(State(state.clone()), none.clone(), Json(breach_input("t"))).await,
             ),
@@ -3621,6 +3769,9 @@ mod db_tests {
             json!({"action": "create", "resource": "nope", "tenant_id": tenant}),
             json!({"action": "create", "resource": "email"}),
             json!({"action": "create", "resource": "email", "tenant_id": tenant, "outcome": "maybe"}),
+            // P1-SECURITY: a blank tenant would mint an unattributed ""-keyed
+            // hash chain — refused like a missing one.
+            json!({"action": "create", "resource": "email", "tenant_id": "   "}),
         ] {
             let (code, _) = error_of(audit_create(State(state.clone()), auth(), Json(bad)).await);
             assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -3651,12 +3802,30 @@ mod db_tests {
             status(audit_query(State(state.clone()), auth(), Json(query_body)).await),
             StatusCode::OK
         );
+        // P1-SECURITY (required tenant scoping): the stats aggregate and the
+        // by-entry read are tenant-scoped — the caller asserts the tenant via
+        // ?tenant_id= (or X-Tenant-Id).
         assert_eq!(
-            status(audit_stats(State(state.clone()), auth()).await),
+            status(
+                audit_stats(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", tenant.as_str())])
+                )
+                .await
+            ),
             StatusCode::OK
         );
         assert_eq!(
-            status(audit_get_entry(State(state.clone()), auth(), path("no-such-entry")).await),
+            status(
+                audit_get_entry(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", tenant.as_str())]),
+                    path("no-such-entry")
+                )
+                .await
+            ),
             StatusCode::NOT_FOUND
         );
         let (code, _) =
@@ -4023,28 +4192,52 @@ mod db_tests {
 
         // Stats: explicit zeros for a tenant with no requests, and the tenant
         // comes from the query string or the header.
-        assert_eq!(
-            status(gdpr_stats(State(state.clone()), auth(), query(&[])).await),
-            StatusCode::OK
-        );
+        // P1-SECURITY (required tenant scoping): with NEITHER selector the
+        // route no longer aggregates all tenants — it refuses with 401. The
+        // same request with the X-Tenant-Id header stays a scoped OK.
+        let (code, _) = error_of(gdpr_stats(State(state.clone()), auth(), query(&[])).await);
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
         let mut tenant_header = auth();
         tenant_header.insert("X-Tenant-Id", tenant.parse().unwrap());
         assert_eq!(
             status(
                 gdpr_stats(
                     State(state.clone()),
-                    tenant_header,
+                    tenant_header.clone(),
                     query(&[("tenant_id", " ")])
                 )
                 .await
             ),
             StatusCode::OK
         );
+        // Supplying BOTH selectors with different tenants is a cross-tenant
+        // attempt: 403.
+        let mut other = auth();
+        other.insert(
+            "X-Tenant-Id",
+            test_support::unique_tenant().parse().unwrap(),
+        );
+        let (code, _) = error_of(
+            gdpr_stats(
+                State(state.clone()),
+                other,
+                query(&[("tenant_id", tenant.as_str())]),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::FORBIDDEN);
 
-        // Export download: unknown id is 404.
+        // Export download: unknown id is 404 (the required tenant selector is
+        // asserted too — see P1-SECURITY above).
         assert_eq!(
             status(
-                gdpr_download_export(State(state.clone()), auth(), path("no-such-export")).await
+                gdpr_download_export(
+                    State(state.clone()),
+                    tenant_header,
+                    query(&[]),
+                    path("no-such-export")
+                )
+                .await
             ),
             StatusCode::NOT_FOUND
         );
@@ -4505,11 +4698,32 @@ mod db_tests {
             "audit create",
         );
         assert_server_error(
-            status(audit_query(State(state.clone()), auth(), Json(AuditLogQuery::default())).await),
+            status(
+                audit_query(
+                    State(state.clone()),
+                    auth(),
+                    // P1-SECURITY (required tenant scoping): a tenant-less
+                    // query is now a 400 before any DB access; the outage is
+                    // still exercised with the tenant filter set.
+                    Json(AuditLogQuery {
+                        tenant_id: Some(tenant.clone()),
+                        ..Default::default()
+                    }),
+                )
+                .await,
+            ),
             "audit query",
         );
         assert_server_error(
-            status(audit_get_entry(State(state.clone()), auth(), path("entry_x")).await),
+            status(
+                audit_get_entry(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", tenant.as_str())]),
+                    path("entry_x"),
+                )
+                .await,
+            ),
             "audit get entry",
         );
         assert_server_error(
@@ -4535,7 +4749,16 @@ mod db_tests {
             "audit export",
         );
         assert_server_error(
-            status(audit_stats(State(state.clone()), auth()).await),
+            status(
+                audit_stats(
+                    State(state.clone()),
+                    auth(),
+                    // P1-SECURITY (required tenant scoping): the tenant is
+                    // required so the outage still reaches the scoped query.
+                    query(&[("tenant_id", tenant.as_str())]),
+                )
+                .await,
+            ),
             "audit stats",
         );
 
@@ -4551,7 +4774,19 @@ mod db_tests {
             .await,
         );
         assert_server_error(code, "secret create");
+        // P1-SECURITY (required tenant scoping): a missing tenant_id is a 400
+        // before any DB access — the literal-"default" fallback is gone — so
+        // the outage is exercised with the parameter present.
         let (code, _) = error_of(secret_list(State(state.clone()), auth(), query(&[])).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = error_of(
+            secret_list(
+                State(state.clone()),
+                auth(),
+                query(&[("tenant_id", tenant.as_str())]),
+            )
+            .await,
+        );
         assert_server_error(code, "secret list");
         let (code, _) =
             error_of(secret_get(State(state.clone()), auth(), path("sup_outage")).await);
@@ -4604,7 +4839,16 @@ mod db_tests {
             "gdpr submit",
         );
         assert_server_error(
-            status(gdpr_stats(State(state.clone()), auth(), query(&[])).await),
+            status(
+                gdpr_stats(
+                    State(state.clone()),
+                    auth(),
+                    // P1-SECURITY (required tenant scoping): the tenant is
+                    // required so the outage still reaches the scoped query.
+                    query(&[("tenant_id", tenant.as_str())]),
+                )
+                .await,
+            ),
             "gdpr stats",
         );
         assert_server_error(
@@ -4735,8 +4979,18 @@ mod db_tests {
         let Some(state) = state("download").await else {
             return;
         };
+        // P1-SECURITY (required tenant scoping): the download asserts a
+        // tenant; an unknown id in a valid tenant is a 404.
         assert_eq!(
-            status(gdpr_download_export(State(state.clone()), auth(), path("missing")).await),
+            status(
+                gdpr_download_export(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", "ten_download_000000001")]),
+                    path("missing")
+                )
+                .await
+            ),
             StatusCode::NOT_FOUND
         );
 
@@ -4761,7 +5015,257 @@ mod db_tests {
                 .fetch_one(&state.db)
                 .await
                 .expect("the processed export row exists");
-        let response = gdpr_download_export(State(state.clone()), auth(), path(&export_id)).await;
+        let response = gdpr_download_export(
+            State(state.clone()),
+            auth(),
+            query(&[("tenant_id", tenant.as_str())]),
+            path(&export_id),
+        )
+        .await;
         assert_eq!(status(response), StatusCode::OK);
+    }
+
+    // ── P1-SECURITY: cross-tenant probes (the AI-audit bypass class) ───────
+    //
+    // The compliance Bearer token carries NO tenant identity, so every
+    // tenant-scoped route must resolve the tenant EXPLICITLY and fail closed.
+    // Two tenants are seeded; one of them (or nobody) acts, and the probe
+    // asserts the other tenant's rows stay unreachable.
+
+    #[tokio::test]
+    async fn cross_tenant_probes_are_refused_and_tenants_stay_scoped() {
+        let Some(state) = state("xprobes").await else {
+            return;
+        };
+        let tenant_a = test_support::unique_tenant();
+        let tenant_b = test_support::unique_tenant();
+
+        // Legit flow: each tenant writes one audit entry through the API.
+        for tenant in [&tenant_a, &tenant_b] {
+            assert_eq!(
+                status(
+                    audit_create(
+                        State(state.clone()),
+                        auth(),
+                        Json(json!({
+                            "action": "create",
+                            "resource": "secret",
+                            "tenant_id": tenant,
+                            "details": {"probe": tenant},
+                        })),
+                    )
+                    .await
+                ),
+                StatusCode::CREATED,
+                "the legit write path must keep working"
+            );
+        }
+        let entry_a: String = sqlx::query_scalar("SELECT id FROM audit_logs WHERE tenant_id = $1")
+            .bind(&tenant_a)
+            .fetch_one(&state.db)
+            .await
+            .expect("tenant A's entry exists");
+
+        // 1. NO selector on a tenant-scoped aggregate is a 401 — never an
+        //    all-tenant aggregate (the old `get_stats(None)` /
+        //    `get_request_stats(None)` behaviour).
+        assert_eq!(
+            status(audit_stats(State(state.clone()), auth(), query(&[])).await),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(gdpr_stats(State(state.clone()), auth(), query(&[])).await),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(audit_get_entry(State(state.clone()), auth(), query(&[]), path(&entry_a)).await),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // 2. A WHITESPACE-PADDED selector is the same as absent (trimmed to
+        //    nothing → 401), and a padded-but-real selector is normalized.
+        assert_eq!(
+            status(audit_stats(State(state.clone()), auth(), query(&[("tenant_id", "   ")])).await),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(
+                audit_stats(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", format!("  {tenant_b}  ").as_str())])
+                )
+                .await
+            ),
+            StatusCode::OK,
+            "a padded-but-real tenant is trimmed, not refused"
+        );
+
+        // 3. A selector MISMATCH (query says A, header says B) is a 403.
+        let mut forged = auth();
+        forged.insert("X-Tenant-Id", tenant_b.parse().expect("header value"));
+        let (code, _) = error_of(
+            gdpr_stats(
+                State(state.clone()),
+                forged,
+                query(&[("tenant_id", tenant_a.as_str())]),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::FORBIDDEN);
+
+        // 4. A tenant-less audit query is a 400 and each tenant's scoped
+        //    query returns ONLY its own entries.
+        let (code, _) = error_of(
+            audit_query(State(state.clone()), auth(), Json(AuditLogQuery::default())).await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        for (reader, other) in [(&tenant_a, &tenant_b), (&tenant_b, &tenant_a)] {
+            let response = audit_query(
+                State(state.clone()),
+                auth(),
+                Json(AuditLogQuery {
+                    tenant_id: Some(reader.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("scoped query");
+            let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+                .await
+                .expect("body");
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            let serialized = payload.to_string();
+            assert!(
+                serialized.contains(reader.as_str()),
+                "the reader must see its own entries"
+            );
+            assert!(
+                !serialized.contains(other.as_str()),
+                "tenant {reader} must never see tenant {other}'s audit rows"
+            );
+        }
+
+        // 5. A by-entry read with the WRONG tenant selector is a 404 that
+        //    does not reveal the entry's existence; the right selector is 200.
+        assert_eq!(
+            status(
+                audit_get_entry(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", tenant_b.as_str())]),
+                    path(&entry_a),
+                )
+                .await
+            ),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(
+                audit_get_entry(
+                    State(state.clone()),
+                    auth(),
+                    query(&[("tenant_id", tenant_a.as_str())]),
+                    path(&entry_a),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        // 6. Per-tenant audit stats count only their own chain: the fresh
+        //    database holds exactly one entry per tenant.
+        for tenant in [&tenant_a, &tenant_b] {
+            let response = audit_stats(
+                State(state.clone()),
+                auth(),
+                query(&[("tenant_id", tenant.as_str())]),
+            )
+            .await
+            .expect("scoped stats");
+            let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+                .await
+                .expect("body");
+            let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(
+                payload["data"]["total_entries"],
+                json!(1),
+                "tenant {tenant} stats must not include the other tenant's entry"
+            );
+        }
+
+        // 7. Secret listing: the literal-"default" bucket is gone (400), and
+        //    the other tenant's secret metadata is unreachable.
+        assert_eq!(
+            status(
+                secret_create(
+                    State(state.clone()),
+                    auth(),
+                    Json(secret_create_body(&tenant_a, "cross-probe-secret")),
+                )
+                .await
+            ),
+            StatusCode::CREATED
+        );
+        let (code, _) = error_of(secret_list(State(state.clone()), auth(), query(&[])).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let response = secret_list(
+            State(state.clone()),
+            auth(),
+            query(&[("tenant_id", tenant_b.as_str())]),
+        )
+        .await
+        .expect("scoped list");
+        let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(
+            !payload.to_string().contains("cross-probe-secret"),
+            "tenant B's secret list must not contain tenant A's secret"
+        );
+        let response = secret_list(
+            State(state.clone()),
+            auth(),
+            query(&[("tenant_id", tenant_a.as_str())]),
+        )
+        .await
+        .expect("scoped list");
+        let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+            .await
+            .expect("body");
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("cross-probe-secret"),
+            "the owning tenant still lists its own secret (legit flow)"
+        );
+    }
+
+    /// PINNED (deliberate design, considered by the 2026-09 privilege-
+    /// boundary audit): `/risk/stats` and `/risk/critical` are FLEET-level
+    /// operations aggregates — the platform operator legitimately needs the
+    /// all-tenant view (which tenants are at critical risk) and the risk
+    /// engine offers no per-tenant variant of these two. Unlike
+    /// `/gdpr/stats` and `/audit/stats` they were never tenant-parameterized,
+    /// so there is no absent-filter fallback to close: the aggregate IS the
+    /// contract. Per-tenant risk data stays behind the explicit
+    /// `/{route}/:tenant_id` path contract, and every route still requires
+    /// the service Bearer token. If these ever grow a tenant selector, the
+    /// required-identity rule applies to them too.
+    #[tokio::test]
+    async fn fleet_level_risk_aggregates_remain_token_gated_platform_views() {
+        let Some(state) = state("xpinfleet").await else {
+            return;
+        };
+        // Both aggregates stay authenticated (no token → 401) and reachable
+        // with it — pinned so a future silent change of that decision is
+        // visible to the next audit.
+        assert_eq!(
+            status(risk_stats(State(state.clone()), HeaderMap::new()).await),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(risk_critical_tenants(State(state.clone()), HeaderMap::new()).await),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
