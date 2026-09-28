@@ -13,9 +13,9 @@ last_updated = "2026-07-29"
 
 - TLS 1.2+ required for all API and SMTP connections.
 - TLS 1.3 preferred where supported by the receiving MTA.
-- MTA-STS policy with `mode: enforce` for inbound SMTP.
-- DANE (TLSA record) validation for supported recipient domains on outbound SMTP delivery.
-- WireGuard or private networking for inter-service communication.
+- Private, non-public networking for inter-service communication (isolated deployment networks; no service-to-service traffic crosses the public internet).
+
+[roadmap] MTA-STS policy publication (`mode: enforce`) and DANE (TLSA record) validation of recipient MX servers are planned capabilities; they are not enforced on the managed cloud's mail paths today.
 
 ### Data at Rest
 
@@ -29,34 +29,28 @@ last_updated = "2026-07-29"
 
 - API keys scoped per environment (live/test) with configurable permissions.
 - Webhook HMAC signatures (SHA-256) for event payload integrity.
-- SAML SSO on Business and Enterprise plans; any provisioning commitment is confirmed in the applicable contract.
+- Single sign-on (SSO) via SAML/OIDC is in active development — not yet available on any plan; any future provisioning commitment would be confirmed in the applicable contract. [roadmap]
 - Role-based access control (RBAC) with custom roles on Enterprise plan.
 - Multi-factor authentication (TOTP) for dashboard access.
 - Session management with configurable timeout and IP binding.
 
 ## Application Security
 
-### Web Application Firewall (WAF)
+### Request Screening (Web Application Firewall)
 
-- SQL injection detection (AST-based).
-- XSS detection (AST-based).
-- OWASP CRS-compatible rules.
-- Input validation and sanitization on all API endpoints.
+[roadmap] A request-screening firewall (WAF) built on SQLi/XSS/traversal/command-injection/SSRF rules evaluates the method, path, query string and headers of public API requests in monitor mode today: verdicts are logged, not blocked. Enabling blocking enforcement by default and extending inspection to request bodies are on the roadmap; the managed cloud's default posture does not include WAF blocking. Intrusion detection/prevention (IDS/IPS) exists as a library that inspects zero live traffic and is likewise not an active control.
+
+- Input validation and sanitization on all API endpoints (handler-level validation).
 - Rate limiting per endpoint and API key.
 
-### Intrusion Detection and Prevention (IDS/IPS)
+### DDoS and Abuse Protection
 
-- Signature-based detection.
-- Protocol anomaly detection.
-- Connection tracking and alerting.
+Application-layer defenses wired into the public API request path:
 
-### DDoS Protection (5-layer defense)
-
-1. Layer 3/4: Rate limiting, SYN flood protection
-2. Layer 7: Request signature analysis, challenge-response
-3. ML-based anomaly detection
-4. SMTP state machine protection
-5. Adaptive throttling
+1. Cost-based request rate limiting with per-tenant budgets.
+2. Adaptive per-IP thresholds (statistical z-score anomaly detection over request patterns).
+3. Request fingerprinting (JA4/TLS and HTTP/2 fingerprints) feeding reputation decisions.
+4. Load-shedding middleware that runs ahead of authentication and rate-limit work.
 
 ### API Authentication
 

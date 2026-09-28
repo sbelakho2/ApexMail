@@ -21,7 +21,7 @@ Enterprise es una oferta contractual de entrega de email para organizaciones que
 | Dominios y miembros del equipo | Ilimitados |
 | Retención | 730 días |
 | IP dedicadas | 10 incluidas |
-| Controles de acceso | SAML SSO y registros de auditoría |
+| Controles de acceso | Registros de auditoría y RBAC; el inicio de sesión único (SSO) vía SAML/OIDC está en desarrollo activo — aún no disponible |
 | Nivel de soporte | Dedicado |
 | Private Cloud / BYOIP | Sujeto a revisión contractual y técnica |
 

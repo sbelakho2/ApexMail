@@ -20,7 +20,7 @@ verdict_points = [
   "Flujos de trabajo orientados al RGPD, registros de consentimiento y registros de auditoría",
   "Perspectivas de entregabilidad sin decisiones de envío automáticas de caja negra",
   "Revisiones de despliegue personalizadas para programas empresariales regulados",
-  "SSO en Business y Enterprise con el empaquetado de planes actual",
+  "SSO en desarrollo (aún no disponible) con el empaquetado de planes actual",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -53,7 +53,7 @@ comparison_sections = [
   { title = "PRECIOS", rows = [
     { feature = "Nivel gratuito", apex = '<span class="text-brand-600 font-semibold">30.000 emails/mes</span>', comp = '<span class="text-surface-600">100 emails/día</span>', winner = "none" },
     { feature = "100K emails/mes", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials desde €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO incluido", apex = '<span class="text-brand-600 font-semibold">Planes Business y Enterprise</span>', comp = '<span class="text-surface-600">Incluido en Pro</span>', winner = "none" },
+    { feature = "SSO incluido", apex = 'En desarrollo — aún no disponible', comp = '<span class="text-surface-600">Incluido en Pro</span>', winner = "none" },
     { feature = "Revisión de despliegue personalizado", apex = '<span class="text-brand-600 font-semibold">Revisión Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "INFORMACIÓN E INTELIGENCIA", rows = [

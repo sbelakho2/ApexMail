@@ -33,7 +33,7 @@ ApexMail fournit des workflows de sécurité et de confidentialité autour de la
 | Domaine | Position actuelle |
 |---|---|
 | Documentation de traitement des données | La DPA et les informations sur les sous-traitants sont disponibles pour examen |
-| Capacités d'identité et d'audit | Fonctionnalités d'exécution conditionnées au forfait ; le SAML SSO démarre sur Scale |
+| Capacités d'identité et d'audit | Fonctionnalités d'exécution conditionnées au forfait (journaux d'audit, RBAC, MFA) ; l'authentification unique (SSO) via SAML/OIDC est en développement actif — pas encore disponible |
 | Revue Enterprise | Revue contractuelle de sécurité, de déploiement et d'opérations |
 | HIPAA / BAA | Non proposé actuellement |
 

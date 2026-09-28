@@ -1,5 +1,14 @@
 # Single Sign-On (SSO)
 
+> **Status: in active development — NOT YET AVAILABLE.**
+> Single sign-on (SAML/OIDC) cannot be used today: the SAML and OIDC login
+> endpoints deliberately return `501 Not Implemented`
+> (`services/mail-server/crates/enterprise/src/routes.rs`, "Fix G (dead
+> ACS)") and no ACS/callback route is wired, so login cannot complete. This
+> page documents the **target-state design** — configuration storage and the
+> SCIM directory already exist, but nothing below is a usable, supported
+> workflow until this banner is removed.
+
 ApexMail supports enterprise Single Sign-On through both SAML 2.0 and OpenID Connect (OIDC) protocols.
 
 ## Overview
@@ -228,6 +237,9 @@ curl -X PUT https://enterprise.apexmail.ee/sso/config/{account_id} \
 ## API Reference
 
 All Enterprise SSO endpoints are served under the `/enterprise/v1/sso` prefix.
+These endpoints are the designed surface; the login endpoints currently
+return `501 Not Implemented` (see the status banner above), so the flows
+below cannot complete today.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

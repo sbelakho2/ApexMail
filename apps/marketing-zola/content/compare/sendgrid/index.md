@@ -19,7 +19,7 @@ verdict_points = [
   "GDPR-oriented workflows, consent records, and audit logs",
   "Deliverability insights without automatic black-box send decisions",
   "Custom deployment reviews for regulated enterprise programs",
-  "SSO on Business and Enterprise with current plan packaging",
+  "SSO in development (not yet available) with current plan packaging",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -52,7 +52,7 @@ comparison_sections = [
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000 emails/mo</span>', comp = '<span class="text-surface-600">100 emails/day</span>', winner = "none" },
     { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials from €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO Included", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise plans</span>', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "none" },
+    { feature = "SSO Included", apex = 'In development — not yet available', comp = '<span class="text-surface-600">Included on Pro</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "INSIGHTS & INTELLIGENCE", rows = [

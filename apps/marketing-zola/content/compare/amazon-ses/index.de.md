@@ -44,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Systemimmanent — der Kunde betreibt im eigenen AWS-Konto; SES ist ein AWS-Dienst<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE-KONTROLLEN", rows = [
-    { feature = "SAML SSO", apex = 'Scale- und Enterprise-Tarife', comp = 'Über AWS IAM Identity Center — erfordert AWS-Organizations-Setup und IAM-Konfiguration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'In Entwicklung — noch nicht verfügbar', comp = 'Über AWS IAM Identity Center — erfordert AWS-Organizations-Setup und IAM-Konfiguration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
     { feature = "Verwalteter Support", apex = 'Tarifspezifische Support-Konditionen', comp = 'AWS-Support-Pläne (Developer, Business, Enterprise) — getrennt von der SES-Nutzung zu erwerben<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
     { feature = "HIPAA-Verfügbarkeit", apex = 'Derzeit nicht angeboten', comp = 'Ja — AWS-BAA verfügbar; SES ist ein HIPAA-fähiger Dienst<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},

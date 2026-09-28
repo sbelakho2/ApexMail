@@ -14,7 +14,7 @@
           <div class="w-1.5 h-1.5 bg-brand-500"></div> GDPR workflows
         </span>
         <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
-          <div class="w-1.5 h-1.5 bg-brand-500"></div> SAML SSO
+          <div class="w-1.5 h-1.5 bg-brand-500"></div> SAML SSO (in development)
         </span>
         <span class="min-w-0 justify-center text-xs font-bold text-surface-950 tracking-widest flex items-center gap-2">
           <div class="w-1.5 h-1.5 bg-brand-500"></div> Contract review
@@ -44,7 +44,7 @@
 
     {# ── Row 2: the larger Business card (2M volume, isolation) ── #}
     <div class="mt-6 max-w-3xl mx-auto">
-      {% set plan_name = "Business" %}{% set plan_price = "€699" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume senders needing isolation." %}{% set plan_features = ["2,000,000 emails/month", "Unlimited sending domains", "50 team members", "1 dedicated IP included; second assigned where useful", "SAML SSO and inbound email", "Tenant isolation per customer", "99.9% SLA with tiered service credits", "Priority support"] %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+      {% set plan_name = "Business" %}{% set plan_price = "€699" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume senders needing isolation." %}{% set plan_features = ["2,000,000 emails/month", "Unlimited sending domains", "50 team members", "1 dedicated IP included; second assigned where useful", "Inbound email", "Tenant isolation per customer", "99.9% SLA with tiered service credits", "Priority support"] %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
     </div>
 
@@ -61,7 +61,7 @@
             <span class="price-value" style="font-size:24px">from €1,750</span>
             <span class="text-sm text-surface-500">/mo, annual contract</span>
           </div>
-          <p class="text-sm text-surface-600 mt-2 flex-1">Contractual features on shared-adjacent infrastructure: 5M emails/month, SSO, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</p>
+          <p class="text-sm text-surface-600 mt-2 flex-1">Contractual features on shared-adjacent infrastructure: 5M emails/month, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits. SAML/OIDC single sign-on is in active development — not yet available on any plan.</p>
           <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Contact sales</a>
         </div>
         <div class="card-dna p-6 flex flex-col">

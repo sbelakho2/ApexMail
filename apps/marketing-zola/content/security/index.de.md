@@ -13,9 +13,9 @@ last_updated = "2026-07-29"
 
 - TLS 1.2+ für alle API- und SMTP-Verbindungen erforderlich.
 - TLS 1.3 bevorzugt, wo vom empfangenden MTA unterstützt.
-- MTA-STS-Richtlinie mit `mode: enforce` für eingehende SMTP.
-- DANE-Validierung (TLSA-Einträge) für unterstützte Empfängerdomänen bei der ausgehenden SMTP-Zustellung.
-- WireGuard oder private Vernetzung für die dienstübergreifende Kommunikation.
+- Private, nicht öffentliche Vernetzung für die dienstübergreifende Kommunikation (isolierte Deploy-Netzwerke; kein Dienst-zu-Dienst-Verkehr über das öffentliche Internet).
+
+[roadmap] MTA-STS-Richtlinienveröffentlichung (`mode: enforce`) und DANE-Validierung (TLSA-Einträge) der MX-Server von Empfängern sind geplante Funktionen; sie werden auf den Mail-Pfaden der Managed Cloud heute nicht durchgesetzt.
 
 ### Daten im Ruhezustand
 
@@ -29,34 +29,28 @@ last_updated = "2026-07-29"
 
 - API-Schlüssel pro Umgebung (Live/Test) mit konfigurierbaren Berechtigungen.
 - Webhook-HMAC-Signaturen (SHA-256) für die Integrität von Ereignisnutzdaten.
-- SAML SSO für Scale- und Enterprise-Tarife; Bereitstellungszusagen werden im jeweiligen Vertrag bestätigt.
+- Single Sign-On (SSO) über SAML/OIDC ist in aktiver Entwicklung — noch nicht verfügbar; künftige Bereitstellungszusagen würden im jeweiligen Vertrag bestätigt. [roadmap]
 - Rollenbasierte Zugriffskontrolle (RBAC) mit benutzerdefinierten Rollen im Enterprise-Tarif.
 - Multi-Faktor-Authentifizierung (TOTP) für den Dashboard-Zugriff.
 - Sitzungsverwaltung mit konfigurierbarem Timeout und IP-Bindung.
 
 ## Anwendungssicherheit
 
-### Web Application Firewall (WAF)
+### Anforderungsprüfung (Web Application Firewall)
 
-- SQL-Injection-Erkennung (AST-basiert).
-- XSS-Erkennung (AST-basiert).
-- OWASP-CRS-kompatible Regeln.
-- Eingabevalidierung und -bereinigung an allen API-Endpunkten.
+[roadmap] Eine Anforderungsprüf-Firewall (WAF) auf Basis von SQLi/XSS/Traversal/Command-Injection/SSRF-Regeln wertet heute Methode, Pfad, Query-String und Header öffentlicher API-Anfragen im Monitor-Modus aus: Entscheidungen werden protokolliert, nicht blockiert. Die standardmäßige Blockierdurchsetzung und die Prüfung von Anfragekörpern sind auf der Roadmap; die Standardkonfiguration der Managed Cloud umfasst kein WAF-Blocking. Intrusion Detection/Prevention (IDS/IPS) existiert als Bibliothek, die keinen Live-Verkehr prüft, und ist ebenfalls kein aktives Kontrollelement.
+
+- Eingabevalidierung und -bereinigung an allen API-Endpunkten (Handler-Ebene).
 - Ratenbegrenzung pro Endpunkt und API-Schlüssel.
 
-### Intrusion Detection und Prevention (IDS/IPS)
+### DDoS- und Missbrauchsschutz
 
-- Signaturbasierte Erkennung.
-- Protokollanomalieerkennung.
-- Verbindungsverfolgung und Alarmierung.
+Auf Anwendungsebene in den öffentlichen API-Anforderungspfad integrierte Abwehrmaßnahmen:
 
-### DDoS-Schutz (5-Schichten-Verteidigung)
-
-1. Schicht 3/4: Ratenbegrenzung, SYN-Flood-Schutz
-2. Schicht 7: Signaturanalyse von Anfragen, Challenge-Response
-3. ML-basierte Anomalieerkennung
-4. SMTP-Zustandsautomaten-Schutz
-5. Adaptive Drosselung
+1. Kostenbasierte Anforderungsratenbegrenzung mit Mandanten-Budgets.
+2. Adaptive Schwellenwerte pro IP (statistische z-Score-Anomalieerkennung über Anfragemuster).
+3. Anforderungs-Fingerprinting (JA4/TLS- und HTTP/2-Fingerprints) für Reputationsentscheidungen.
+4. Load-Shedding-Middleware vor der Authentifizierungs- und Ratenbegrenzungsarbeit.
 
 ### API-Authentifizierung
 

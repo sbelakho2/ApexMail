@@ -13,7 +13,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **Supported TLS versions**: TLS 1.3 for all external connections; TLS 1.2 is the minimum accepted version with cipher restrictions rejecting weak ciphers (RC4, 3DES, export-grade).
 - **HTTPS enforcement**: All HTTP requests are redirected (301) to HTTPS. HSTS is set with `max-age=31536000; includeSubDomains; preload`.
 - **SMTP TLS**: TLS is mandatory on port 587 (STARTTLS required). SMTP on port 25 is opportunistic STARTTLS; plaintext SMTP without STARTTLS is rejected on port 587.
-- **Internal service traffic**: All inter-service communication within the production network uses TLS 1.3 (mutual TLS where service identity verification is required). gRPC and internal HTTP calls are encrypted.
+- **Internal service traffic**: Inter-service communication runs on isolated, non-public deployment networks and does not cross the public internet. [roadmap] Service-to-service TLS (mutual TLS where service identity verification is required) is planned.
 - **Certificate management**: Certificates are issued via Let's Encrypt (automated ACME renewal every 60 days). Certificate expiry monitoring triggers alerts at 30, 14, 7, and 1 day before expiry.
 
 ### Encryption at Rest
@@ -28,7 +28,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 ### Authentication
 
 - **Password requirements**: Minimum 12 characters; must include uppercase, lowercase, digit, and special character. Passwords are hashed with Argon2id (memory=19456 KiB, iterations=2, parallelism=1). Breached-password checking via k-anonymity API.
-- **MFA availability**: TOTP-based two-factor authentication (2FA) is available for all accounts. SSO/SAML integration is available on Enterprise plans. WebAuthn/FIDO2 is planned.
+- **MFA availability**: TOTP-based two-factor authentication (2FA) is available for all accounts. Single sign-on via SAML/OIDC is in active development — not yet available. [roadmap] WebAuthn/FIDO2 is planned.
 - **Social login**: Google OAuth 2.0 and GitHub OAuth are supported for dashboard authentication.
 - **Session duration**: Dashboard sessions expire after 24 hours of inactivity. API sessions are token-based with configurable expiry. Absolute maximum session lifetime is 7 days, after which re-authentication is required.
 - **Session revocation**: Users can revoke all active sessions from the dashboard security settings page. Administrative session revocation is available to account owners. Sessions are automatically revoked on password change, role change, or account suspension.
@@ -68,7 +68,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 - **Application monitoring**: Prometheus metrics for all services, including request rates, error rates, latency percentiles, queue depth, and connection counts. Custom application metrics for business operations (messages processed, delivery attempts, bounce rates).
 - **Infrastructure monitoring**: Host-level metrics (CPU, memory, disk, network) collected via node_exporter. Database metrics (connections, query performance, replication lag) via postgres_exporter. Probe-based external monitoring from multiple geographic locations via blackbox_exporter.
-- **Security alerting**: Alerts for: failed authentication spikes, new admin user creation, API key creation, permission changes, WAF rule triggers, IDS/IPS alerts, DDoS detection events, certificate expiry, and secret-scanning hits. All security alerts page the on-call engineer.
+- **Security alerting**: Alerts for failed-authentication anomalies, service health (service-down, queue-backlog), and certificate expiry. [roadmap] Security-event alerting for request-screening (WAF) verdicts and IDS/IPS signals is planned; those engines are not active blocking controls today (see Security Measures).
 - **Log retention**: Application and access logs retained per the retention registry (30 days by default, up to 365 days for Enterprise). Security audit logs retained for 365 days minimum (configurable via `AUDIT_RETENTION_DAYS`). Logs are immutable once written. Log archives are encrypted at rest.
 - **On-call process**: 24/7/365 on-call rotation with primary and secondary responders. Alerts are routed via Alertmanager to PagerDuty. On-call handoff occurs at 09:00 UTC daily with documented status transfer.
 - **Incident escalation**: Escalation from primary to secondary on-call after 15 minutes without acknowledgment. Escalation to SRE lead after 30 minutes. Escalation to CTO after 1 hour. See [Incident Response Policy](incident-response.md).
@@ -79,7 +79,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 - **Backup retention**: Backups are retained for a configured window (`BACKUP_RETENTION_DAYS`, default 90 days) and purged by an automated daily cleanup; analytics-store backups default to 30 days. WAL archives retained for 7 days. No backup tier is kept beyond the configured retention window.
 - **Restore testing**: Full database restore tested monthly in an isolated environment. Backup integrity verified automatically after each backup completes (checksum validation). Restore test results are logged and reviewed.
 - **Recovery Point Objective (RPO)**: 24 hours for full database restore from daily backups. Point-in-time recovery available within the 7-day WAL archive window (near-real-time).
-- **Recovery Time Objective (RTO)**: 4 hours for critical services (API, SMTP, queue). 8 hours for non-critical services (dashboard, analytics). Cross-region failover available for Enterprise within 2 hours.
+- **Recovery Time Objective (RTO)**: 4 hours for critical services (API, SMTP, queue). 8 hours for non-critical services (dashboard, analytics). [roadmap] Cross-region failover is a planned Dedicated Tenant capability — not live; recovery is restore-based on the current single-host topology.
 - **Geographic separation**: Primary and backup locations are selected by the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
 
 ### Data Deletion
@@ -141,10 +141,10 @@ ApexMail operates a responsible disclosure program with safe harbor for security
 
 ### Business Continuity and Disaster Recovery
 
-- **Backup frequency**: Daily automated backups with 30-day retention.
+- **Backup frequency**: Daily automated backups with the configured retention window (default 90 days).
 - **Recovery Time Objective (RTO)**: 4 hours for critical services.
-- **Recovery Point Objective (RPO)**: 24 hours for transactional data; real-time replication for critical state.
-- **Failover**: Multi-AZ deployment in primary region; cross-region failover capability for Enterprise.
+- **Recovery Point Objective (RPO)**: 24 hours for transactional data; point-in-time recovery within the WAL archive window.
+- **Failover**: Service-level failover on the current single-host topology — health-checked services with automatic restart; queue and message persistence to disk (PostgreSQL WAL). [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
 - **Testing**: Disaster recovery tested annually (Enterprise: semi-annually).
 
 ### Incident Response

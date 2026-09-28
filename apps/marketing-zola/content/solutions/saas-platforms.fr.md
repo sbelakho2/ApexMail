@@ -1,6 +1,6 @@
 +++
 title = "Solution email pour plateformes SaaS"
-description = "Infrastructure email multi-tenant pour le SaaS B2B et B2C. Isolation des tenants, isolation de domaine, RBAC, SSO et livraison en marque blanche."
+description = "Infrastructure email multi-tenant pour le SaaS B2B et B2C. Isolation des tenants, isolation de domaine, RBAC, SSO (en développement actif — pas encore disponible) et livraison en marque blanche."
 template = "prose.html"
 +++
 
@@ -28,7 +28,7 @@ Les plateformes qui envoient des emails pour leurs clients héritent du risque d
 - **Isolation des tenants** — Chaque tenant dispose de ses propres domaines, clés API, points de terminaison webhook avec un secret HMAC par tenant, listes de suppression, IP dédiées et flux d'événements.
 - **Isolation de domaine** — Vérification et authentification de domaine par tenant (SPF, DKIM, DMARC) pour éviter la contamination croisée des réputations.
 - **RBAC personnalisé** — Administrateur au niveau plateforme, administrateur au niveau tenant et rôles en lecture seule. Provisioning SCIM sur Enterprise.
-- **SSO** — SAML 2.0 pour les opérateurs de plateforme et les administrateurs de tenants.
+- **SSO** — L'authentification unique SAML 2.0/OIDC pour les opérateurs de plateforme et les administrateurs de tenants est en développement actif — pas encore disponible.
 - **Quotas d'usage** — Limites strictes et souples par tenant pour le volume, le débit et la concurrence.
 - **Marque blanche** — Retirez la marque ApexMail des tableaux de bord, des pieds d'email et des modèles de notification.
 

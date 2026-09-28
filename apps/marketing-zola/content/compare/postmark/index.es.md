@@ -41,7 +41,7 @@ comparison_sections = [
     { feature = "Envío programado", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business y Enterprise</span>', comp = '<span class="text-surface-600">Disponible a petición</span>', winner = "none" },
+    { feature = "SSO/SAML", apex = 'En desarrollo — aún no disponible', comp = '<span class="text-surface-600">Disponible a petición</span>', winner = "none" },
     { feature = "Revisión de despliegue personalizado", apex = '<span class="text-brand-600 font-semibold">Revisión Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Opciones de despliegue dedicado", apex = '<span class="text-brand-600 font-semibold">Revisión personalizada</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

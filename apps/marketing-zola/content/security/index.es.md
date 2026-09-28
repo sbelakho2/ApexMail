@@ -13,9 +13,9 @@ last_updated = "2026-07-29"
 
 - TLS 1.2+ requerido para todas las conexiones API y SMTP.
 - TLS 1.3 preferido cuando sea compatible con el MTA receptor.
-- Política MTA-STS con `mode: enforce` para SMTP entrante.
-- Validación DANE (registros TLSA) para dominios destinatarios compatibles en la entrega SMTP saliente.
-- WireGuard o red privada para comunicación entre servicios.
+- Red privada y no pública para la comunicación entre servicios (redes de despliegue aisladas; sin tráfico servicio-a-servicio por internet público).
+
+[roadmap] La publicación de política MTA-STS (`mode: enforce`) y la validación DANE (registros TLSA) de los servidores MX destinatarios son capacidades planificadas; no se aplican hoy en las rutas de correo de la nube gestionada.
 
 ### Datos en reposo
 
@@ -29,34 +29,28 @@ last_updated = "2026-07-29"
 
 - Claves API con ámbito por entorno (live/test) con permisos configurables.
 - Firmas HMAC de webhooks (SHA-256) para integridad de carga útil de eventos.
-- SAML SSO en los planes Business y Enterprise; los compromisos de aprovisionamiento se confirman en el contrato aplicable.
+- Inicio de sesión único (SSO) vía SAML/OIDC: en desarrollo activo — aún no disponible; cualquier compromiso futuro de aprovisionamiento se confirmaría en el contrato aplicable. [roadmap]
 - Control de acceso basado en roles (RBAC) con roles personalizados en plan Enterprise.
 - Autenticación multifactor (TOTP) para acceso al panel.
 - Gestión de sesiones con tiempo de espera configurable y vinculación IP.
 
 ## Seguridad de aplicaciones
 
-### Firewall de aplicaciones web (WAF)
+### Inspección de solicitudes (firewall de aplicaciones web)
 
-- Detección de inyección SQL (basada en AST).
-- Detección de XSS (basada en AST).
-- Reglas compatibles con OWASP CRS.
-- Validación y saneamiento de entrada en todos los endpoints de la API.
+[roadmap] Un firewall de inspección de solicitudes (WAF) basado en reglas SQLi/XSS/traversal/inyección-de-comandos/SSRF evalúa hoy método, ruta, cadena de consulta y encabezados de las solicitudes públicas de la API en modo monitor: los veredictos se registran, no se bloquean. Habilitar el bloqueo por defecto y extender la inspección a los cuerpos de solicitud está en la hoja de ruta; la postura por defecto de la nube gestionada no incluye bloqueo WAF. La detección/prevención de intrusiones (IDS/IPS) existe como biblioteca que no inspecciona tráfico real y tampoco es un control activo.
+
+- Validación y saneamiento de entrada en todos los endpoints de la API (a nivel de handler).
 - Limitación de velocidad por endpoint y clave API.
 
-### Detección y prevención de intrusiones (IDS/IPS)
+### Protección DDoS y contra abusos
 
-- Detección basada en firmas.
-- Detección de anomalías de protocolo.
-- Seguimiento de conexiones y alertas.
+Defensas de capa de aplicación integradas en la ruta pública de solicitudes de la API:
 
-### Protección DDoS (defensa de 5 capas)
-
-1. Capa 3/4: Limitación de velocidad, protección contra inundación SYN
-2. Capa 7: Análisis de firma de solicitudes, desafío-respuesta
-3. Detección de anomalías basada en ML
-4. Protección de máquina de estados SMTP
-5. Estrangulamiento adaptativo
+1. Limitación de velocidad basada en coste con presupuestos por tenant.
+2. Umbrales adaptativos por IP (detección estadística de anomalías z-score sobre patrones de solicitud).
+3. Huella digital de solicitudes (fingerprints JA4/TLS y HTTP/2) para decisiones de reputación.
+4. Middleware de load-shedding previa al trabajo de autenticación y limitación de velocidad.
 
 ### Autenticación API
 

@@ -19,7 +19,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - API keys and SMTP credentials are scoped to minimum required permissions.
 - Session-based authentication with automatic timeout after inactivity.
 - TOTP-based two-factor authentication (2FA) supported.
-- SSO/SAML integration (Enterprise plans).
+- Single sign-on via SAML/OIDC: in active development — not yet available. [roadmap]
 - IP allowlists (Enterprise plans).
 - Audit logging of all authentication events and administrative actions.
 
@@ -50,24 +50,17 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 
 - Production network segmented from development and corporate networks.
 - Firewall rules restrict inbound/outbound traffic to required services only.
-- DDoS protection at network edge (5-layer defense):
-  - Layer 3/4: Rate limiting, SYN flood protection.
-  - Layer 7: Request signature analysis, challenge-response.
-  - ML-based anomaly detection.
-  - SMTP state machine protection.
-  - Adaptive throttling.
-- Intrusion Detection and Prevention System (IDS/IPS):
-  - Signature-based detection.
-  - Protocol anomaly detection.
-  - Connection tracking and rate limiting.
-- Network traffic monitoring and alerting.
+- Application-layer DDoS and abuse protection:
+  - Cost-based request rate limiting with per-tenant budgets.
+  - Adaptive per-IP thresholds (statistical z-score anomaly detection over request patterns).
+  - Request fingerprinting (JA4/TLS and HTTP/2 fingerprints) feeding reputation decisions.
+  - Load-shedding middleware ahead of authentication and rate-limit work.
+- [roadmap] Planned capabilities that are NOT active controls in the current deployment: network-edge DDoS layers (SYN-flood/XDP filtering, ML-based anomaly detection, challenge-response), an intrusion detection and prevention system (IDS/IPS), and network-traffic monitoring/alerting of the IDS/IPS kind. The IDS/IPS and threat-intelligence implementations exist as libraries that inspect zero live traffic.
+- Network traffic monitoring and alerting for service health (Prometheus/Alertmanager).
 
 ## 4. Application Security
 
-- Web Application Firewall (WAF):
-  - AST-based SQL injection detection.
-  - AST-based cross-site scripting (XSS) detection.
-  - OWASP Core Rule Set (CRS) compatible.
+- Request screening (web application firewall) on the public API: SQLi/XSS/traversal/command-injection/SSRF rules evaluate method, path, query string and headers in monitor mode (verdicts are logged; blocking enforcement is not enabled by default). [roadmap]
 - Input validation and output encoding.
 - Parameterized database queries (no SQL injection).
 - Cross-Site Request Forgery (CSRF) tokens on all state-changing requests.
@@ -80,43 +73,24 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 ### 5.1 Sending
 
 - SPF, DKIM, and DMARC enforced for all outgoing email.
-- MTA-STS policy published for TLS enforcement.
-- DANE/TLSA support for DANE verification.
-- Spam and phishing filtering (outbound):
-  - Bayesian content analysis.
-  - Header analysis.
-  - URL reputation checking.
-  - Attachment sandboxing.
+- [roadmap] Planned, not active in the current deployment: MTA-STS policy publication and DANE/TLSA verification; outbound spam and phishing filtering (Bayesian content analysis, header analysis, URL reputation checking) and attachment sandboxing. These capabilities exist as library implementations that are not wired into the outbound delivery path.
 
 ### 5.2 Inbound
 
-- Attachment sandbox:
-  - File type detection via magic bytes (not extension).
-  - SHA-256 hash checking against known malware.
-  - OLE2/macro detection.
-  - Executable and risky file type blocking.
-- Spam and phishing filtering for inbound email.
+- SPF, DKIM, and DMARC evaluation of inbound mail with policy-based dispositions.
+- [roadmap] Planned, not active in the current deployment: attachment sandboxing (file-type detection via magic bytes, SHA-256 hash checking against known malware, OLE2/macro detection, executable/risky-file blocking) and inbound spam/phishing filtering. The sandbox exists as a library that is not wired into the inbound mail flow.
 
 ## 6. Account Security
 
-- Account Takeover (ATO) Protection:
-  - Impossible travel detection (Haversine distance).
-  - Device fingerprinting.
-  - Login anomaly detection with KiwiCaptcha integration.
 - Brute-force protection: rate limiting on authentication endpoints.
+- Challenge (KiwiCaptcha) integration on selected public endpoints.
+- [roadmap] Planned, not active in the current deployment: Account Takeover (ATO) protection (impossible-travel detection, device fingerprinting, login anomaly detection). The ATO engine exists as a library that is not wired into the authentication path.
 - API key rotation supported without downtime.
 - Automatic suspension after repeated failed authentication attempts.
 
 ## 7. Data Security
 
-- Data Loss Prevention (DLP):
-  - PII pattern detection (Luhn algorithm for credit card numbers).
-  - Shannon entropy scoring for sensitive data detection.
-  - Content policy enforcement.
-- Threat Intelligence:
-  - IP and domain blocklist integration.
-  - CIDR range blocking.
-  - Reputation scoring.
+- [roadmap] Planned, not active in the current deployment: Data Loss Prevention (DLP) with PII pattern detection (Luhn algorithm for credit card numbers), Shannon-entropy scoring for sensitive data, and outbound content-policy enforcement; threat-intelligence feed ingestion (IP/domain blocklists, CIDR range blocking, reputation scoring). These engines exist as libraries that are not wired into the mail or API paths.
 - Data classification and labeling.
 
 ## 8. Operational Security

@@ -151,27 +151,19 @@ ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email a
 
 ### DANE (DNS-based Authentication of Named Entities) — RFC 6698 / RFC 7672
 
-- TLSA records published for ApexMail's SMTP endpoints.
-- DANE verification of recipient MX servers on outbound delivery.
-- Provides stronger assurance than opportunistic TLS by binding TLS certificates to DNS.
+[roadmap] DANE/TLSA verification of recipient MX servers is implemented in the MTA codebase but is not enforced on the default delivery path today; enabling it for supported recipient domains is on the roadmap.
 
 ### MTA-STS (SMTP MTA Strict Transport Security) — RFC 8461
 
-- MTA-STS policy published for `apexmail.ee`.
-- Policy enforces TLS for all inbound SMTP connections.
-- `mode: enforce` with `max_age` for caching.
-- TLSRPT (TLS Reporting, RFC 8460) for TLS failure visibility.
+[roadmap] MTA-STS policy publication and outbound MTA-STS enforcement (with TLSRPT/TLS Reporting) are planned; they are not enforced on the managed cloud's mail paths today.
 
 ### ARC (Authenticated Received Chain) — RFC 8617
 
-- ARC is applied to forwarded or modified email to preserve original authentication results.
-- Useful for email that passes through intermediate MTAs (mailing lists, forwarding services).
+[roadmap] ARC sealing is implemented in the MTA and can be enabled per deployment; it is disabled by default and is not applied on the managed cloud's default mail path today.
 
 ### BIMI (Brand Indicators for Message Identification)
 
-- BIMI support enables verified brand logos in supporting email clients (Gmail, Yahoo, Apple Mail).
-- Requires DMARC policy at `p=quarantine` or `p=reject`.
-- Verified Mark Certificate (VMC) supported for BIMI logo verification.
+[roadmap] BIMI logo verification is not performed on the delivery path today (the deliverability grader can check whether a BIMI DNS record exists); full BIMI support with Verified Mark Certificate (VMC) verification is on the roadmap.
 
 ## Data Flow
 
@@ -190,7 +182,6 @@ Sender Application
              ├─ DKIM signing
              ├─ Return-path configuration
              ├─ Content modification (tracking pixel, link rewriting)
-             ├─ Spam/phishing analysis (outbound)
                     │
               Delivery Attempt
              ├─ Configured delivery provider (self-hosted SMTP or SES integration)
@@ -209,22 +200,10 @@ Sender Application
 ```
 Internet
     │
-    ├─ DDoS Protection (5-layer defense)
-    │   ├─ Layer 3/4: Rate limiting, SYN flood protection
-    │   ├─ Layer 7: Request signature analysis, challenge-response
-    │   ├─ ML-based anomaly detection
-    │   ├─ SMTP state machine protection
-    │   └─ Adaptive throttling
-    │
-    ├─ WAF (Web Application Firewall)
-    │   ├─ SQLi detection (AST-based)
-    │   ├─ XSS detection (AST-based)
-    │   └─ OWASP CRS-compatible rules
-    │
-    ├─ IDS/IPS (Intrusion Detection/Prevention)
-    │   ├─ Signature-based detection
-    │   ├─ Protocol anomaly detection
-    │   └─ Connection tracking
+    ├─ DDoS / Abuse Protection (application layer, wired)
+    │   ├─ Cost-based request rate limiting (per-tenant budgets)
+    │   ├─ Adaptive per-IP thresholds (statistical anomaly detection)
+    │   └─ Request fingerprinting (JA4/TLS, HTTP/2)
     │
     ├─ API Gateway / Load Balancer
     │   └─ TLS termination, rate limiting, routing
@@ -241,6 +220,8 @@ Internet
         ├─ Redis (caching, rate limiting, sessions)
         └─ Object Storage (attachments, backups)
 ```
+
+[roadmap] Planned, not part of the managed cloud's active defense path today: WAF blocking enforcement (a request-screening WAF currently runs in monitor mode on the public API — verdicts logged, not blocked), IDS/IPS intrusion detection/prevention, and ML-based DDoS layers.
 
 ## Infrastructure Stack
 
@@ -310,7 +291,7 @@ Internet
 │  │              Customer-Managed                │     │
 │  └──────────────────────────────────────────────┘     │
 │                                                       │
-│  Customer DNS ─── Ingress ─── WAF ─── LB              │
+│  Customer DNS ─── Ingress ─── Edge filtering ─── LB   │
 │                                                       │
 └───────────────────────┬─────────────────────────────┘
                         │
@@ -334,7 +315,7 @@ Internet
 
 Trust boundaries:
 ─── Trust boundary (Customer | ApexMail)
-Internet-facing: Ingress, WAF, LB
+Internet-facing: Ingress, edge filtering, LB
 Private: Compute, Database, Queue, MTA
 Customer-controlled: Cloud account, networking, IAM, encryption keys
 ApexMail-controlled: Application layer, upgrades, monitoring, incident coordination
@@ -379,14 +360,14 @@ ApexMail-controlled: Application layer, upgrades, monitoring, incident coordinat
 │  │  Monitoring │ Backup │ DNS │ DDoS Protection │     │
 │  └─────────────────────────────────────────────┘     │
 │                                                       │
-│  Customer DNS ─── Ingress ─── DDoS ─── WAF ─── LB    │
+│  Customer DNS ─── Ingress ─── DDoS ─── Edge filter ─ LB │
 │                                                       │
 └───────────────────────────────────────────────────────┘
 
 Trust boundaries:
 Customer-dedicated: Compute, Database, Storage, Application, IP Pool
 ApexMail-managed: Infrastructure patching, monitoring, backups
-Shared (ApexMail): DDoS protection, DNS infrastructure, WAF
+Shared (ApexMail): DDoS protection, DNS infrastructure, edge filtering
 Encryption boundary: Data at rest (customer-managed keys available)
 ```
 
@@ -421,7 +402,7 @@ Encryption boundary: Data at rest (customer-managed keys available)
 - **RPO (Recovery Point Objective):** 15 minutes (transaction log shipping).
 - **RTO (Recovery Time Objective):** 60 minutes (automated failover and restore).
 - **DR testing:** Quarterly full restore tests with results shared with Enterprise customers.
-- **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
+- **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. [roadmap] Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
 
 ### High Availability
 
@@ -430,6 +411,6 @@ The standard shared deployment runs on a single EU host with:
 - Health-checked services with automatic restart and automated rollback deploys.
 - Queue and message persistence to disk (PostgreSQL WAL) — no in-flight mail is lost to a service restart.
 - Daily encrypted backups with verified restore (see Backup Policy above).
-- Management-plane redundancy (replication, multi-node failover) is available on Dedicated Tenant deployments under a separate agreement.
+- Management-plane redundancy (replication, multi-node failover) is a planned Dedicated Tenant capability under a separate agreement — it is not part of the standard shared deployment. [roadmap]
 
 We do not claim multi-region active-active availability on the shared plans. If your workload requires it, ask about Dedicated Tenant.

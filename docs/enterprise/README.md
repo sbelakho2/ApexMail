@@ -6,7 +6,7 @@ This section covers ApexMail's enterprise-grade features designed for large orga
 
 ApexMail Enterprise provides:
 
-- **Single Sign-On (SSO)** - SAML 2.0 and OIDC authentication
+- **Single Sign-On (SSO)** - SAML 2.0 and OIDC authentication is **in active development — not yet available** (the SAML/OIDC login endpoints deliberately return 501; see [sso.md](./sso.md))
 - **Sub-Account Management** - Hierarchical multi-tenant architecture
 - **White Labeling** - Complete brand customization
 - **Template Approval Workflows** - Governance and compliance
@@ -20,7 +20,7 @@ ApexMail Enterprise provides:
 
 | Feature | Documentation | Status |
 |---------|--------------|--------|
-| SSO | [sso.md](./sso.md) | Production |
+| SSO | [sso.md](./sso.md) | **In active development — not yet available.** SSO configuration storage exists, but SAML/OIDC login returns 501 by design. |
 | Sub-Accounts | [sub-accounts.md](./sub-accounts.md) | Production |
 | White Labeling | [whitelabel.md](./whitelabel.md) | Production |
 | Template Approval | [template-approval.md](./template-approval.md) | Production |
@@ -50,10 +50,12 @@ See the [API Reference](../api/sdk-reference.md) for complete documentation.
 ## Getting Started
 
 1. Contact sales to enable Enterprise features
-2. Configure SSO for your organization
-3. Set up sub-accounts for your teams
-4. Configure compliance settings
-5. Enable log streaming to your SIEM
+2. Set up sub-accounts for your teams
+3. Configure compliance settings
+4. Enable log streaming to your SIEM
+
+(Single sign-on is in active development — not yet available — so there is
+no SSO configuration step today.)
 
 ## Support
 

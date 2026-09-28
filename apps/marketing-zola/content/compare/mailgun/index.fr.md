@@ -44,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "CONTRÔLES ENTERPRISE", rows = [
-    { feature = "SAML SSO", apex = 'Forfaits Business et Enterprise', comp = 'Forfaits Foundation 100K et supérieurs<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'En développement — pas encore disponible', comp = 'Forfaits Foundation 100K et supérieurs<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Forfait Enterprise', comp = 'Non documenté à la date de vérification — provisioning des utilisateurs via l’API Mailgun<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Journaux d’audit", apex = 'Forfait Growth et supérieurs — activité du compte, usage des clés API, changements de configuration ; consultables, exportables', comp = 'Journaux d’événements accessibles via l’API Events ; rétention variable selon le forfait ; pas de piste d’audit consolidée au niveau du compte<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},

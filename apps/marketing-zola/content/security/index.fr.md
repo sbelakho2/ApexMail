@@ -13,9 +13,9 @@ last_updated = "2026-07-29"
 
 - TLS 1.2+ requis pour toutes les connexions API et SMTP.
 - TLS 1.3 préféré lorsque pris en charge par le MTA destinataire.
-- Politique MTA-STS avec `mode: enforce` pour le SMTP entrant.
-- Validation DANE (enregistrements TLSA) pour les domaines destinataires pris en charge en livraison SMTP sortante.
-- WireGuard ou réseau privé pour la communication inter-services.
+- Réseau privé et non public pour la communication inter-services (réseaux de déploiement isolés ; aucun trafic service-à-service via l'internet public).
+
+[roadmap] La publication d'une politique MTA-STS (`mode: enforce`) et la validation DANE (enregistrements TLSA) des serveurs MX destinataires sont des capacités planifiées ; elles ne sont pas appliquées aujourd'hui sur les chemins de messagerie du cloud géré.
 
 ### Données au repos
 
@@ -29,34 +29,28 @@ last_updated = "2026-07-29"
 
 - Clés API limitées par environnement (live/test) avec permissions configurables.
 - Signatures HMAC des webhooks (SHA-256) pour l'intégrité des charges utiles d'événements.
-- SAML SSO sur les forfaits Business et Enterprise ; tout engagement de provisionnement est confirmé dans le contrat applicable.
+- Authentification unique (SSO) via SAML/OIDC : en développement actif — pas encore disponible ; tout engagement futur de provisionnement serait confirmé dans le contrat applicable. [roadmap]
 - Contrôle d'accès basé sur les rôles (RBAC) avec rôles personnalisés sur le forfait Enterprise.
 - Authentification multi-facteurs (TOTP) pour l'accès au tableau de bord.
 - Gestion des sessions avec délai d'expiration configurable et liaison IP.
 
 ## Sécurité des applications
 
-### Pare-feu applicatif Web (WAF)
+### Inspection des requêtes (pare-feu applicatif web)
 
-- Détection d'injection SQL (basée sur AST).
-- Détection XSS (basée sur AST).
-- Règles compatibles OWASP CRS.
-- Validation et assainissement des entrées sur tous les points de terminaison API.
+[roadmap] Un pare-feu d'inspection des requêtes (WAF) fondé sur des règles SQLi/XSS/traversal/injection-de-commandes/SSRF évalue aujourd'hui la méthode, le chemin, la chaîne de requête et les en-têtes des requêtes API publiques en mode monitor : les verdicts sont journalisés, pas bloqués. Activer le blocage par défaut et étendre l'inspection aux corps de requête figurent sur la feuille de route ; la posture par défaut du cloud géré n'inclut pas de blocage WAF. La détection/prévention d'intrusion (IDS/IPS) existe comme bibliothèque qui n'inspecte aucun trafic réel et n'est pas non plus un contrôle actif.
+
+- Validation et assainissement des entrées sur tous les points de terminaison API (au niveau des handlers).
 - Limitation de débit par point de terminaison et clé API.
 
-### Détection et prévention d'intrusion (IDS/IPS)
+### Protection DDoS et anti-abus
 
-- Détection basée sur les signatures.
-- Détection d'anomalies de protocole.
-- Suivi des connexions et alertes.
+Défenses de couche application intégrées au chemin public des requêtes API :
 
-### Protection DDoS (défense à 5 couches)
-
-1. Couche 3/4 : Limitation de débit, protection contre les inondations SYN
-2. Couche 7 : Analyse de signature des requêtes, défi-réponse
-3. Détection d'anomalies basée sur le ML
-4. Protection de la machine d'état SMTP
-5. Étranglement adaptatif
+1. Limitation de débit basée sur le coût avec budgets par tenant.
+2. Seuils adaptatifs par IP (détection statistique d'anomalies z-score sur les motifs de requêtes).
+3. Empreinte des requêtes (fingerprints JA4/TLS et HTTP/2) alimentant les décisions de réputation.
+4. Middleware de load-shedding en amont de l'authentification et de la limitation de débit.
 
 ### Authentification API
 
