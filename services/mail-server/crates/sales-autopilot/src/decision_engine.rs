@@ -3847,4 +3847,133 @@ mod tests {
             "live reservations count toward the weekly budget"
         );
     }
+
+    /// Crash consistency — a decision worker dies BETWEEN the budget
+    /// reservation (committed by `revalidate_execution`) and the send's
+    /// settle. The crashed run's slot must not leak a budget slot: while it
+    /// is live it holds budget (blocking NEW logical sends), and the
+    /// recovery path must either reuse it (same logical send) or free it
+    /// (a refusal releases it in the same transaction) so a new logical send
+    /// can take the slot again.
+    #[tokio::test]
+    async fn crash_between_reserve_and_settle_never_leaks_the_budget_slot() {
+        let Some(pool) = live_pool("decision_engine::tests::crash_reserve_settle").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("crash-reserve");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        // The worker revalidates (the reservation COMMITS), then dies before
+        // sending or settling.
+        let first = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(first.allowed, "{:?}", first.reasons);
+        let (state,): (String,) =
+            sqlx::query_as("SELECT state FROM sales_account_touch_reservations WHERE account_id = $1")
+                .bind(fixture.account_id)
+                .fetch_one(&pool)
+                .await
+                .expect("reservation row");
+        assert_eq!(state, "reserved", "the crash strands the slot as 'reserved'");
+
+        // The stranded slot holds the weekly budget: with a budget of ONE,
+        // a NEW logical send is refused while the crashed run's reservation
+        // is live.
+        let blocked = {
+            let mut tx = pool.begin().await.unwrap();
+            lock_account_budget_conn(&mut tx, &tenant, fixture.account_id)
+                .await
+                .unwrap();
+            let admitted = reserve_account_touch_with_budget_conn(
+                &mut tx,
+                &tenant,
+                fixture.account_id,
+                "sa-send:crash-window-other",
+                1,
+            )
+            .await
+            .unwrap();
+            tx.rollback().await.unwrap();
+            admitted
+        };
+        assert!(
+            !blocked,
+            "the crashed run's live reservation must hold the last budget slot"
+        );
+
+        // Recovery path A — the retry re-validates the SAME logical send:
+        // idempotent (no second slot) and still admitted.
+        let retry = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(retry.allowed, "{:?}", retry.reasons);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_account_touch_reservations \
+             WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "the same logical send never consumes a second slot");
+
+        // Recovery path B — the gates now REFUSE (the recipient suppressed
+        // while the worker was dead): the refusal releases the crashed run's
+        // slot in the same transaction.
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let refused = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !refused.allowed,
+            "a suppressed recipient must refuse: {:?}",
+            refused.reasons
+        );
+        let (state,): (String,) =
+            sqlx::query_as("SELECT state FROM sales_account_touch_reservations WHERE account_id = $1")
+                .bind(fixture.account_id)
+                .fetch_one(&pool)
+                .await
+                .expect("reservation row");
+        assert_eq!(
+            state, "released",
+            "the refused re-validation must free the crashed run's slot"
+        );
+
+        // The budget is whole again: the SAME new logical send that was
+        // blocked by the crash now admits.
+        let admitted = {
+            let mut tx = pool.begin().await.unwrap();
+            lock_account_budget_conn(&mut tx, &tenant, fixture.account_id)
+                .await
+                .unwrap();
+            let admitted = reserve_account_touch_with_budget_conn(
+                &mut tx,
+                &tenant,
+                fixture.account_id,
+                "sa-send:crash-window-other",
+                1,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            admitted
+        };
+        assert!(
+            admitted,
+            "the released slot must be reusable by a new logical send"
+        );
+    }
 }

@@ -713,6 +713,10 @@ const PERMANENT_FAILURE_UPDATE_SQL: &str = r#"
 
 /// G.3c: duplicate-window reclaim bookkeeping — drop the recipient from the
 /// pending set and append it to an auditable `possibly_sent` metadata list.
+/// When the pending set empties the row terminalizes 'sent' AND `sent_at` is
+/// stamped (COALESCE keeps the first stamp on re-runs): the crash-recovery
+/// path must leave the same complete terminal evidence handle_success does —
+/// a 'sent' row with a NULL sent_at strands the send's timestamp forever.
 const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
     UPDATE email_queue
     SET metadata = jsonb_set(
@@ -740,6 +744,15 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
                 '[]'::jsonb
             ) - $2::text = '[]'::jsonb
             THEN 'sent' ELSE status END,
+        sent_at = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $2::text = '[]'::jsonb
+            THEN COALESCE(sent_at, NOW()) ELSE sent_at END,
         updated_at = NOW()
     WHERE id = $1::uuid
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
@@ -11137,6 +11150,308 @@ mod end_to_end_db_tests {
             Some("accepted"),
             "the reclaimed row records the acceptance"
         );
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── crash consistency: a death at ANY point of the dispatch sequence ──
+    //
+    // Each test kills the process at one seam of the dispatch pipeline
+    // (modelled exactly: real claimed rows, real ledger rows, real recovery
+    // through the production reclaim paths) and asserts the invariant: the
+    // message is submitted exactly once, the queue row reaches exactly one
+    // terminal state, and the counters write exactly once — with no operator
+    // intervention.
+
+    /// Count of successful delivery-log rows for one queue row.
+    async fn delivery_log_count(pool: &PgPool, queue_id: uuid::Uuid) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM email_delivery_log \
+             WHERE email_id = $1 AND success",
+        )
+        .bind(queue_id)
+        .fetch_one(pool)
+        .await
+        .expect("delivery log count")
+    }
+
+    /// Count of 'sent' events for one (message, recipient) pair.
+    async fn sent_event_count(pool: &PgPool, fixture: &E2eFixture) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM events \
+             WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'sent'",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .fetch_one(pool)
+        .await
+        .expect("sent event count")
+    }
+
+    async fn queue_metadata(pool: &PgPool, queue_id: uuid::Uuid) -> serde_json::Value {
+        sqlx::query_scalar("SELECT metadata FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue metadata")
+    }
+
+    /// Window 1 — crash BETWEEN CLAIM AND SEND. The row is claimed
+    // ('processing' under a lease a dead worker will never renew), then the
+    // lease expires and a replacement worker re-claims it with a FRESH lease
+    // token: the recovery delivers exactly once, and the crashed claim's
+    // ghost (its job object resurrected after the recovery completed) can
+    // neither submit again nor touch the new owner's row.
+    #[tokio::test]
+    async fn crash_between_claim_and_send_recovers_exactly_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_crash_claim_send").await else { return Ok(()) };
+        let fixture = seed(&pool, "crash-claim").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let crashed = build_processor(&pool, transport.clone()).await;
+
+        let ghost = crashed
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("the crashed worker holds a claim");
+        assert!(lease_token_of(&ghost).is_some(), "the claim holds a lease");
+        let (status, locked_until): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, locked_until FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("queue row");
+        assert_eq!(status, "processing");
+        assert!(locked_until.is_some(), "the lease is held by the dead worker");
+
+        // The process dies. The visibility lease expires unrenewed.
+        sqlx::query("UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("expire lease");
+
+        // The replacement worker re-claims the same row (fresh lease token)
+        // and delivers it.
+        let recovered = build_processor(&pool, transport.clone()).await;
+        let job = recovered
+            .fetch_jobs(1)
+            .await
+            .expect("reclaim")
+            .into_iter()
+            .next()
+            .expect("the abandoned lease is reclaimed");
+        assert_ne!(
+            lease_token_of(&job),
+            lease_token_of(&ghost),
+            "the re-claim mints a fresh lease token"
+        );
+        recovered.process_job(job).await.expect("recovered dispatch");
+
+        assert_eq!(transport.calls(), 1, "exactly one submission");
+        let (status, sent_at, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert!(sent_at.is_some());
+        assert_eq!(
+            delivery_log_count(&pool, fixture.queue_id).await,
+            1,
+            "one delivery attempt was logged"
+        );
+        assert_eq!(sent_event_count(&pool, &fixture).await, 1, "one sent event");
+
+        // The ghost of the crashed worker wakes up and re-runs its job: the
+        // acceptance ledger refuses a second submission and its stale lease
+        // token fences every row write.
+        recovered
+            .process_job(ghost)
+            .await
+            .expect("the ghost re-run must not error");
+        assert_eq!(
+            transport.calls(),
+            1,
+            "the ledger must refuse the crashed claim a second submission"
+        );
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent", "the ghost cannot un-send or re-state the row");
+        assert_eq!(delivery_log_count(&pool, fixture.queue_id).await, 1);
+        assert_eq!(sent_event_count(&pool, &fixture).await, 1);
+
+        // The terminal row is never re-claimed: the system converged.
+        let drained = recovered.fetch_jobs(1).await.expect("drain claim");
+        assert!(drained.is_empty(), "a sent row is never re-claimed");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Window 2 — crash AFTER THE TRANSPORT ACCEPTED but before any row
+    /// bookkeeping (the ledger acceptance itself DID commit). Recovery must
+    /// complete the row through the already-accepted path: the recipient is
+    /// marked possibly-sent, the row terminalizes, and the transport is NEVER
+    /// called a second time.
+    #[tokio::test]
+    async fn crash_after_external_acceptance_completes_without_a_second_send(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_crash_post_accept").await else { return Ok(()) };
+        let fixture = seed(&pool, "crash-accept").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let crashed = build_processor(&pool, transport.clone()).await;
+
+        let job = crashed
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        let route = DeliveryRoute::SesShared;
+
+        // Mid-flight: reserve the unit, the transport ACCEPTS, the acceptance
+        // is recorded — then the process dies before handle_success.
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await?,
+            AcceptanceClaim::Claimed
+        );
+        let prepared = PreparedEmail {
+            send_unit: send_unit_of(&job),
+            from: job.from.clone(),
+            to: job.to.clone(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: job.subject.clone(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+            verp: None,
+        };
+        let receipt = transport.send(&prepared, &route).await?;
+        record_acceptance_accepted(&pool, &send_unit_of(&job), &receipt, None).await?;
+        // DIED. The row is 'processing' under a lease nobody will renew.
+        sqlx::query("UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("expire lease");
+
+        // Recovery: the replacement worker re-claims and the ledger answers
+        // AlreadyAccepted — the row completes as possibly-sent.
+        let recovered = build_processor(&pool, transport.clone()).await;
+        let job = recovered
+            .fetch_jobs(1)
+            .await
+            .expect("reclaim")
+            .into_iter()
+            .next()
+            .expect("the abandoned row is reclaimed");
+        recovered
+            .process_job(job.clone())
+            .await
+            .expect("recovered dispatch");
+
+        assert_eq!(
+            transport.calls(),
+            1,
+            "the accepted send must never be submitted again"
+        );
+        let (status, sent_at, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent", "the row reaches its terminal state");
+        assert!(sent_at.is_some());
+        let metadata = queue_metadata(&pool, fixture.queue_id).await;
+        let possibly_sent = metadata["possibly_sent"]
+            .as_array()
+            .expect("possibly_sent list");
+        assert_eq!(
+            possibly_sent,
+            &vec![serde_json::Value::String(fixture.recipient.clone())],
+            "the recipient is recorded as possibly-sent (the send exists externally)"
+        );
+        assert_eq!(
+            metadata["pending_recipients"].as_array().map(Vec::len),
+            Some(0),
+            "nothing is still owed on this row"
+        );
+        assert_eq!(
+            acceptance_state(&pool, &send_unit_of(&job)).await.as_deref(),
+            Some("accepted")
+        );
+        // The crashed attempt's delivery log never landed (it died before
+        // writing it) and the recovery path must not fabricate a second one.
+        assert_eq!(
+            delivery_log_count(&pool, fixture.queue_id).await,
+            0,
+            "the recovery path records no duplicate delivery attempt"
+        );
+        let drained = recovered.fetch_jobs(1).await.expect("drain claim");
+        assert!(drained.is_empty());
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Window 3 — crash AFTER THE RESULT WRITE but before/around the counters
+    /// (events, reputation). The committed result fences every late write of
+    /// the crashed worker: recovery (its own ghost re-run, or any later
+    /// claim) can never double a counter, double-log, or re-send.
+    #[tokio::test]
+    async fn counters_write_exactly_once_after_the_result_commits(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_crash_counters").await else { return Ok(()) };
+        let fixture = seed(&pool, "crash-counters").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor.process_job(job.clone()).await.expect("dispatch");
+
+        // Every durable surface wrote exactly once.
+        assert_eq!(transport.calls(), 1);
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert_eq!(delivery_log_count(&pool, fixture.queue_id).await, 1);
+        assert_eq!(sent_event_count(&pool, &fixture).await, 1);
+        let reputation: i64 =
+            sqlx::query_scalar("SELECT sent FROM sender_reputation WHERE domain = $1")
+                .bind(fixture.sender.rsplit('@').next().expect("domain"))
+                .fetch_one(&pool)
+                .await
+                .expect("reputation counter");
+        assert_eq!(reputation, 1, "the domain sent counter counted the send once");
+
+        // The crashed worker's late re-run (same claim, result already
+        // committed): the ledger refuses a re-send and every counter is
+        // fenced against a second write.
+        processor
+            .process_job(job)
+            .await
+            .expect("the ghost re-run must not error");
+        assert_eq!(transport.calls(), 1, "no second submission");
+        assert_eq!(delivery_log_count(&pool, fixture.queue_id).await, 1);
+        assert_eq!(sent_event_count(&pool, &fixture).await, 1);
+        let reputation: i64 =
+            sqlx::query_scalar("SELECT sent FROM sender_reputation WHERE domain = $1")
+                .bind(fixture.sender.rsplit('@').next().expect("domain"))
+                .fetch_one(&pool)
+                .await
+                .expect("reputation counter");
+        assert_eq!(reputation, 1, "no counter double-counts");
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+
+        let drained = processor.fetch_jobs(1).await.expect("drain claim");
+        assert!(drained.is_empty(), "a sent row is never re-claimed");
         pool.close().await;
         Ok(())
     }

@@ -485,6 +485,8 @@ pub(crate) fn is_exclusion_violation(err: &sqlx::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Connection as _;
+
     use crate::calendar::timezone::DEFAULT_CALENDAR_TIMEZONE;
 
     fn lazy_db() -> PgPool {
@@ -1127,5 +1129,209 @@ mod tests {
     #[test]
     fn exclusion_violation_detection_is_narrow() {
         assert!(!is_exclusion_violation(&sqlx::Error::RowNotFound));
+    }
+
+    // -------------------------------------------------------------------
+    // Crash consistency: a death inside the booking transaction
+    // -------------------------------------------------------------------
+
+    /// Row-level INSERT fault on `sales_meetings`, keyed on the booking's
+    /// TENANT: any insert for the given tenant raises, everything else is
+    /// untouched. The canonical sales database is SHARED across test
+    /// processes, so a global statement counter would be nondeterministic;
+    /// the tenant key scopes the fault to exactly this test's booking.
+    mod booking_fault {
+        use sqlx::PgPool;
+
+        pub async fn arm_first_insert(pool: &PgPool, tag: &str, tenant_id: &str) {
+            let function = "_fi_booking_trigger_fn";
+            sqlx::query(&format!(
+                "CREATE OR REPLACE FUNCTION {function}() RETURNS trigger AS $body$ \
+                 BEGIN \
+                   IF NEW.tenant_id = TG_ARGV[1] THEN \
+                     RAISE EXCEPTION 'fault-injected booking failure (tag=%)', TG_ARGV[0]; \
+                   END IF; \
+                   RETURN NEW; \
+                 END; \
+                 $body$ LANGUAGE plpgsql"
+            ))
+            .execute(pool)
+            .await
+            .expect("fault function");
+            let trigger = format!("_fi_{tag}");
+            sqlx::query(&format!(
+                "DROP TRIGGER IF EXISTS {trigger} ON sales_meetings"
+            ))
+            .execute(pool)
+            .await
+            .expect("drop stale trigger");
+            sqlx::query(&format!(
+                "CREATE TRIGGER {trigger} BEFORE INSERT ON sales_meetings \
+                 FOR EACH ROW EXECUTE FUNCTION {function}('{tag}', '{tenant_id}')"
+            ))
+            .execute(pool)
+            .await
+            .expect("arm trigger");
+        }
+
+        pub async fn disarm(pool: &PgPool, tag: &str) {
+            let trigger = format!("_fi_{tag}");
+            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON sales_meetings"))
+                .execute(pool)
+                .await
+                .expect("disarm trigger");
+        }
+    }
+
+    /// Window 1 — the process dies at the `sales_meetings` insert of the
+    /// booking transaction, AFTER the availability insert succeeded in the
+    /// SAME transaction. The death must roll back BOTH rows and free the
+    /// slot: no orphan row in either table, and the same wall-clock slot is
+    /// bookable again immediately.
+    #[tokio::test]
+    async fn aborted_booking_transaction_leaks_no_slot() {
+        let Some((pool, provider, tenant)) = live_provider("calendar_crash_abort").await else {
+            return;
+        };
+        let request = booking_request(&tenant, utc_at(14, 0), 30);
+
+        // The death happens exactly at the `sales_meetings` insert.
+        booking_fault::arm_first_insert(&pool, "crash_meeting_insert", &tenant).await;
+        let result = provider
+            .record_event(&request, "internal", None, String::new())
+            .await;
+        assert!(
+            result.is_err(),
+            "the injected fault must abort the booking: {result:?}"
+        );
+        booking_fault::disarm(&pool, "crash_meeting_insert").await;
+
+        // NOTHING leaked: both rows were one transaction, and the abort
+        // rolled it all back.
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("calendar events");
+        let meetings: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_meetings WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("meetings");
+        assert_eq!(events, 0, "the availability row rolled back with the abort");
+        assert_eq!(meetings, 0, "the store-of-record row rolled back with the abort");
+
+        // The slot is free: the SAME wall-clock slot books again through the
+        // normal path, with no exclusion-constraint phantom.
+        let booked = provider
+            .record_event(&request, "internal", None, String::new())
+            .await
+            .expect("the freed slot books again");
+        assert_eq!(booked.status, "booked");
+        cleanup_calendar_tenant(&pool, &tenant).await;
+    }
+
+    /// Window 2 — the CONNECTION DIES after both inserts, before COMMIT. The
+    /// Postgres server rolls back the orphaned transaction when the socket
+    /// dies; the slot must be free once it does. (The two inserts are issued
+    /// on a raw connection exactly as the provider issues them, then the
+    /// connection is dropped without a COMMIT.)
+    #[tokio::test]
+    async fn connection_death_before_commit_leaves_the_slot_free() {
+        let Some((pool, provider, tenant)) = live_provider("calendar_crash_conn").await else {
+            return;
+        };
+        // The canonical sales database URL (same derivation as test_db).
+        let raw = std::env::var("SALES_TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TEST_DATABASE_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .expect("sales test database must be configured when the pool exists");
+        let mut url = url::Url::parse(&raw).expect("parseable test database url");
+        url.set_path("/apexmail_sales_test");
+
+        // A dedicated connection begins the booking transaction, inserts both
+        // rows, and DIES (dropped without commit — the socket closes).
+        let start = utc_at(15, 0);
+        let end = start + Duration::minutes(30);
+        let event_id = Uuid::new_v4();
+        {
+            let mut conn = sqlx::postgres::PgConnection::connect(url.as_str())
+                .await
+                .expect("dedicated connection");
+            let mut tx = conn.begin().await.expect("booking transaction");
+            sqlx::query(
+                "INSERT INTO sales_calendar_events \
+                     (id, tenant_id, title, attendees, start_at, end_at, meeting_link) \
+                 VALUES ($1, $2, 'Doomed', '{}', $3, $4, 'apexmail-meeting://fixture')",
+            )
+            .bind(event_id)
+            .bind(&tenant)
+            .bind(start)
+            .bind(end)
+            .execute(&mut *tx)
+            .await
+            .expect("availability insert");
+            sqlx::query(
+                "INSERT INTO sales_meetings \
+                     (id, tenant_id, provider, start_at, end_at, timezone, status) \
+                 VALUES ($1, $2, 'internal', $3, $4, 'UTC', 'booked')",
+            )
+            .bind(event_id)
+            .bind(&tenant)
+            .bind(start)
+            .bind(end)
+            .execute(&mut *tx)
+            .await
+            .expect("meeting insert");
+            // ⚡ the connection dies here: both tx and connection are dropped
+            // without a COMMIT.
+            drop(tx);
+        }
+
+        // The server notices the dead socket and rolls the orphaned
+        // transaction back; poll briefly so the assertion is deterministic
+        // against the backend's asynchronous termination.
+        let mut rolled_back = false;
+        for _ in 0..50 {
+            let rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM sales_meetings WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("meetings count");
+            if rows == 0 {
+                rolled_back = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            rolled_back,
+            "the connection death must roll back the whole booking transaction"
+        );
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("calendar events");
+        assert_eq!(events, 0, "the availability row rolled back too");
+
+        // The slot is free: the provider books the same wall-clock window.
+        let request = booking_request(&tenant, start, 30);
+        let booked = provider
+            .record_event(&request, "internal", None, String::new())
+            .await
+            .expect("the slot freed by the connection death books again");
+        assert_eq!(booked.status, "booked");
+        cleanup_calendar_tenant(&pool, &tenant).await;
     }
 }

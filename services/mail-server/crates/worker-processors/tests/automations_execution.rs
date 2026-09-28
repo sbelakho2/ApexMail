@@ -337,6 +337,138 @@ async fn event_status(pool: &PgPool, tenant: &str, event_key: &str) -> Option<St
 }
 
 // ---------------------------------------------------------------------------
+// Crash-injection machinery (trigger-based per-statement fault injection)
+// ---------------------------------------------------------------------------
+
+/// Statement-level fault injection, modeled on the api-server route tests'
+/// `_fault_injection_*` machinery: a BEFORE trigger raises on the (skip+1)-th
+/// write to `table`. Everything committed before the raise STAYS committed
+/// (the executor runs on autocommit statements and explicit transactions that
+/// commit before the armed statement), so arming a fault at statement N
+/// models a process death at exactly that point of the executor's sequence.
+/// Every test provisions its own canonical database, so armed triggers and
+/// state tables never leak between tests and `disarm` only has to undo its
+/// own tag.
+mod fi {
+    use sqlx::PgPool;
+
+    const STATE_TABLE: &str = "_fault_injection_state";
+    const FUNCTION: &str = "_fault_injection_trigger_fn";
+
+    async fn ensure_machinery(pool: &PgPool) -> Result<(), sqlx::Error> {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS {STATE_TABLE} (\
+                 tag TEXT PRIMARY KEY, \
+                 fires INT NOT NULL DEFAULT 0, \
+                 skip INT NOT NULL, \
+                 done BOOLEAN NOT NULL DEFAULT FALSE)"
+        ))
+        .execute(pool)
+        .await?;
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION {FUNCTION}() RETURNS trigger AS $body$ \
+             DECLARE \
+               st {STATE_TABLE}%ROWTYPE; \
+             BEGIN \
+               SELECT * INTO st FROM {STATE_TABLE} WHERE tag = TG_ARGV[0]; \
+               IF NOT FOUND THEN \
+                 RETURN NULL; \
+               END IF; \
+               UPDATE {STATE_TABLE} SET fires = fires + 1 WHERE tag = TG_ARGV[0]; \
+               IF st.fires >= st.skip THEN \
+                 RAISE EXCEPTION 'fault-injected database failure (tag=%, table=%)', \
+                   TG_ARGV[0], TG_TABLE_NAME; \
+               END IF; \
+               RETURN NULL; \
+             END; \
+             $body$ LANGUAGE plpgsql"
+        ))
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Arm: the first `skip` INSERT statements against `table` succeed, every
+    /// INSERT from the (`skip` + 1)-th on fails with a database error.
+    /// Statement-level counting: one multi-row statement is ONE fire.
+    ///
+    /// The trigger is INSERT-only ON PURPOSE: a statement-level trigger
+    /// declared `INSERT OR UPDATE` fires on BOTH command events of an upsert
+    /// (`INSERT ... ON CONFLICT DO UPDATE`), so every executor upsert would
+    /// consume TWO fires and the skip window would be untargetable. The
+    /// executor's writes under test (run rows, action records) are all
+    /// INSERTs.
+    pub async fn arm_write_fault(pool: &PgPool, table: &str, tag: &str, skip: usize) {
+        ensure_machinery(pool).await.expect("fault machinery");
+        let trigger = format!("_fi_{tag}");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+            .execute(pool)
+            .await
+            .expect("drop stale trigger");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger} BEFORE INSERT ON {table} \
+             FOR EACH STATEMENT EXECUTE FUNCTION {FUNCTION}('{tag}')"
+        ))
+        .execute(pool)
+        .await
+        .expect("arm trigger");
+        sqlx::query(&format!(
+            "INSERT INTO {STATE_TABLE} (tag, skip) VALUES ($1, $2) \
+             ON CONFLICT (tag) DO UPDATE SET skip = EXCLUDED.skip, fires = 0, done = FALSE"
+        ))
+        .bind(tag)
+        .bind(skip as i32)
+        .execute(pool)
+        .await
+        .expect("arm state");
+    }
+
+    /// Remove the armed fault: recovery (the re-run) may proceed.
+    pub async fn disarm(pool: &PgPool, tag: &str) {
+        let trigger = format!("_fi_{tag}");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON automation_runs"))
+            .execute(pool)
+            .await
+            .expect("disarm trigger (automation_runs)");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON automation_run_actions"))
+            .execute(pool)
+            .await
+            .expect("disarm trigger (automation_run_actions)");
+        sqlx::query(&format!("DELETE FROM {STATE_TABLE} WHERE tag = $1"))
+            .bind(tag)
+            .execute(pool)
+            .await
+            .expect("disarm state");
+    }
+}
+
+/// Simulate the crash residue on an event whose lease was abandoned: the
+/// claim left `status = 'processing'` with a `locked_until` deadline that no
+/// live process will renew. Expiring it is what the reclaim branch of
+/// `claim_due_events` keys on (`locked_until < NOW()`).
+async fn abandon_event_lease(pool: &PgPool, tenant: &str, event_key: &str) {
+    sqlx::query(
+        "UPDATE automation_trigger_events \
+         SET locked_until = NOW() - interval '1 second' \
+         WHERE tenant_id = $1 AND event_key = $2",
+    )
+    .bind(tenant)
+    .bind(event_key)
+    .execute(pool)
+    .await
+    .expect("expire lease");
+}
+
+async fn contact_tags(pool: &PgPool, tenant: &str, contact: Uuid) -> serde_json::Value {
+    sqlx::query_scalar("SELECT tags FROM contacts WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant)
+        .bind(contact)
+        .fetch_one(pool)
+        .await
+        .expect("contact tags")
+}
+
+// ---------------------------------------------------------------------------
 // 1. Matching trigger -> one run + one admission-gated queued message
 // ---------------------------------------------------------------------------
 
@@ -923,4 +1055,331 @@ async fn inbound_reply_trigger_sends_transactional() {
     let runs = run_rows(&pool, &tenant, automation).await;
     assert_eq!(runs[0].0, "succeeded");
     assert_eq!(backend.used(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 9. Crash consistency: a death at ANY point of the executor's sequence is
+//    recovered by the lease + the derived identities, without operator help
+// ---------------------------------------------------------------------------
+
+/// Window 1 — crash between CLAIM and any effect. The fault kills the tick at
+/// the statement that would open the run (before admission, before any send).
+/// The abandoned lease must be reclaimed, the event executed exactly once,
+/// and the settled event never re-claimed.
+#[tokio::test]
+async fn crash_between_claim_and_any_effect_is_recovered_by_the_lease() {
+    let Some(pool) = fresh_pool("autoexec_crash_claim").await else {
+        return;
+    };
+    let backend = Arc::new(FakeAdmissionBackend::new());
+    let engine = executor(&pool, backend.clone());
+
+    let tenant = fresh_tenant();
+    insert_tenant(&pool, &tenant).await;
+    let domain = insert_domain(&pool, &tenant).await;
+    let template = insert_template(&pool, &tenant).await;
+    let automation = insert_automation(
+        &pool,
+        &tenant,
+        "Crash at run open",
+        json!({"type": "event", "event": "contact.created"}),
+        json!({}),
+        send_email_action(&format!("welcome@{domain}"), &template),
+    )
+    .await;
+    let contact = insert_contact(&pool, &tenant, "crash-claim@example.com", &[]).await;
+    let event_key = format!("contact.created:{contact}");
+
+    // The process dies at the exact statement that would create the run.
+    fi::arm_write_fault(&pool, "automation_runs", "crash_claim", 0).await;
+    let crashed = engine.tick().await;
+    assert!(
+        crashed.is_err(),
+        "the injected fault must kill the tick mid-execution"
+    );
+
+    // Crash state: the event was claimed (lease held by a dead process) but
+    // nothing durable happened — no run, no admission, no send.
+    let (status, locked_until): (String, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT status, locked_until FROM automation_trigger_events \
+         WHERE tenant_id = $1 AND event_key = $2",
+    )
+    .bind(&tenant)
+    .bind(&event_key)
+    .fetch_one(&pool)
+    .await
+    .expect("event row");
+    assert_eq!(status, "processing", "the claim is stranded by the crash");
+    assert!(locked_until.is_some(), "the dead worker held a lease");
+    assert_eq!(run_rows(&pool, &tenant, automation).await.len(), 0);
+    assert!(message_categories(&pool, &tenant).await.is_empty());
+    assert_eq!(
+        backend.reserves(),
+        0,
+        "the crash happened before the admission gate"
+    );
+
+    // Recovery needs NO operator: disarm the fault and let the lease expire —
+    // the reclaim branch of the claim picks the event back up.
+    fi::disarm(&pool, "crash_claim").await;
+    abandon_event_lease(&pool, &tenant, &event_key).await;
+    let recovered = engine.tick().await.expect("recovery tick");
+    assert_eq!(
+        recovered.events_claimed, 1,
+        "the abandoned lease must be reclaimed"
+    );
+    assert_eq!(recovered.runs_succeeded, 1, "{recovered:?}");
+    assert_eq!(recovered.actions_enqueued, 1);
+
+    // Exactly once: one run, one message, one queue row, one action record,
+    // one quota reservation.
+    assert_eq!(run_rows(&pool, &tenant, automation).await.len(), 1);
+    assert_eq!(message_categories(&pool, &tenant).await.len(), 1);
+    assert_eq!(queue_categories(&pool, &tenant).await.len(), 1);
+    assert_eq!(action_rows(&pool, &tenant).await.len(), 1);
+    assert_eq!(backend.used(), 1);
+    assert_eq!(backend.reserves(), 1);
+    assert_eq!(
+        event_status(&pool, &tenant, &event_key).await.as_deref(),
+        Some("processed")
+    );
+
+    // The settled event is never re-claimed: the system converged.
+    let drained = engine.tick().await.expect("drain tick");
+    assert_eq!(drained.events_claimed, 0);
+}
+
+/// Window 2 — a HALF-EXECUTED action ladder (crash after 2 of 3 actions
+/// physically executed, only the first recorded). Recovery must resume the
+/// SAME run and re-execute the unrecorded prefix WITHOUT repeating its
+/// effects: the tag stays a set of one, the list keeps one membership row,
+/// and the send happens exactly once.
+#[tokio::test]
+async fn half_executed_action_ladder_resumes_without_repeating_effects() {
+    let Some(pool) = fresh_pool("autoexec_crash_ladder").await else {
+        return;
+    };
+    let backend = Arc::new(FakeAdmissionBackend::new());
+    let engine = executor(&pool, backend.clone());
+
+    let tenant = fresh_tenant();
+    insert_tenant(&pool, &tenant).await;
+    let domain = insert_domain(&pool, &tenant).await;
+    let template = insert_template(&pool, &tenant).await;
+    let list_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO lists (id, tenant_id, name) VALUES ($1, $2, 'Crash Ladder')")
+        .bind(list_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert list");
+
+    let ladder = json!([
+        { "type": "add_tag", "config": { "tag": "vip" } },
+        { "type": "add_to_list", "config": { "list_id": list_id.to_string() } },
+        { "type": "send_email",
+          "config": { "template_id": template, "from": format!("welcome@{domain}") } },
+    ]);
+    let automation = insert_automation(
+        &pool,
+        &tenant,
+        "Ladder",
+        json!({"type": "event", "event": "contact.created"}),
+        json!({}),
+        ladder,
+    )
+    .await;
+    let contact = insert_contact(&pool, &tenant, "ladder@example.com", &[]).await;
+    let event_key = format!("contact.created:{contact}");
+
+    // Record-action #1 lands (action 0 executed AND recorded), record-action
+    // #2 raises: actions 0 AND 1 physically executed, only 0 is recorded, and
+    // the process dies before the send.
+    fi::arm_write_fault(&pool, "automation_run_actions", "crash_ladder", 1).await;
+    assert!(
+        engine.tick().await.is_err(),
+        "the fault must kill the tick mid-ladder"
+    );
+
+    // The half-executed crash state, verified row by row.
+    let tags = contact_tags(&pool, &tenant, contact).await;
+    assert_eq!(
+        tags,
+        json!(["vip"]),
+        "action 0 executed exactly once despite losing its bookkeeping"
+    );
+    let list_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM list_subscribers \
+         WHERE list_id = $1 AND contact_id = $2",
+    )
+    .bind(list_id)
+    .bind(contact)
+    .fetch_one(&pool)
+    .await
+    .expect("list membership");
+    assert_eq!(list_rows, 1, "action 1 executed exactly once");
+    let recorded: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT action_index, status FROM automation_run_actions WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_all(&pool)
+    .await
+    .expect("recorded actions");
+    assert_eq!(
+        recorded,
+        vec![(0, "succeeded".to_string())],
+        "only the first action's bookkeeping survived"
+    );
+    let (run_status,): (String,) =
+        sqlx::query_as("SELECT status FROM automation_runs WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("run row");
+    assert_eq!(run_status, "running", "the run is resumable, not terminal");
+    assert!(message_categories(&pool, &tenant).await.is_empty());
+
+    // Recovery: disarm, lease expires, the SAME run resumes.
+    fi::disarm(&pool, "crash_ladder").await;
+    abandon_event_lease(&pool, &tenant, &event_key).await;
+    let recovered = engine.tick().await.expect("recovery tick");
+    assert_eq!(recovered.runs_started, 1, "the run resumes (not a new one)");
+    assert_eq!(recovered.runs_replayed, 0);
+    assert_eq!(recovered.runs_succeeded, 1, "{recovered:?}");
+
+    // The ladder completed without repeating effects:
+    assert_eq!(
+        contact_tags(&pool, &tenant, contact).await,
+        json!(["vip"]),
+        "the re-executed tag action must not duplicate the tag"
+    );
+    let list_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM list_subscribers \
+         WHERE list_id = $1 AND contact_id = $2",
+    )
+    .bind(list_id)
+    .bind(contact)
+    .fetch_one(&pool)
+    .await
+    .expect("list membership after resume");
+    assert_eq!(list_rows, 1, "the re-executed list action must not duplicate");
+    let messages = message_categories(&pool, &tenant).await;
+    assert_eq!(messages.len(), 1, "the send happened exactly once");
+    assert_eq!(queue_categories(&pool, &tenant).await.len(), 1);
+    let actions: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT action_index, status FROM automation_run_actions \
+         WHERE tenant_id = $1 ORDER BY action_index",
+    )
+    .bind(&tenant)
+    .fetch_all(&pool)
+    .await
+    .expect("action rows");
+    assert_eq!(
+        actions,
+        vec![
+            (0, "succeeded".to_string()),
+            (1, "succeeded".to_string()),
+            (2, "succeeded".to_string()),
+        ],
+        "all three actions carry a terminal record"
+    );
+    let runs = run_rows(&pool, &tenant, automation).await;
+    assert_eq!(runs.len(), 1, "still the SAME run");
+    assert_eq!(runs[0].0, "succeeded");
+    assert_eq!(
+        event_status(&pool, &tenant, &event_key).await.as_deref(),
+        Some("processed")
+    );
+    assert_eq!(backend.used(), 1, "quota reserved exactly once");
+}
+
+/// Window 3 — crash AFTER the send transaction committed but BEFORE the
+/// action bookkeeping was written. The derived message idempotency key
+/// (`autoact:{run_id}:{index}`) must make the recovery a no-op re-enqueue:
+/// one message, one queue row, one quota reservation across the crash.
+#[tokio::test]
+async fn crash_between_send_commit_and_bookkeeping_reuses_message_and_quota() {
+    let Some(pool) = fresh_pool("autoexec_crash_book").await else {
+        return;
+    };
+    let backend = Arc::new(FakeAdmissionBackend::new());
+    let engine = executor(&pool, backend.clone());
+
+    let tenant = fresh_tenant();
+    insert_tenant(&pool, &tenant).await;
+    let domain = insert_domain(&pool, &tenant).await;
+    let template = insert_template(&pool, &tenant).await;
+    let automation = insert_automation(
+        &pool,
+        &tenant,
+        "Crash after commit",
+        json!({"type": "event", "event": "contact.created"}),
+        json!({}),
+        send_email_action(&format!("welcome@{domain}"), &template),
+    )
+    .await;
+    let contact = insert_contact(&pool, &tenant, "crash-book@example.com", &[]).await;
+    let event_key = format!("contact.created:{contact}");
+
+    // The send's `messages` + `email_queue` transaction commits, admission is
+    // reserved, then the FIRST bookkeeping statement raises: process death
+    // with the message already enqueued.
+    fi::arm_write_fault(&pool, "automation_run_actions", "crash_book", 0).await;
+    assert!(engine.tick().await.is_err(), "the fault kills the tick");
+
+    let messages = message_categories(&pool, &tenant).await;
+    assert_eq!(messages.len(), 1, "the send committed before the crash");
+    assert_eq!(queue_categories(&pool, &tenant).await.len(), 1);
+    assert!(action_rows(&pool, &tenant).await.is_empty(), "bookkeeping lost");
+    assert_eq!(backend.used(), 1, "the quota reserve is orphaned, not rolled back");
+    let (run_status,): (String,) =
+        sqlx::query_as("SELECT status FROM automation_runs WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("run row");
+    assert_eq!(run_status, "running");
+
+    // Recovery: the retry re-admits through the SAME derived quota identity
+    // and re-inserts through the SAME derived message idempotency key.
+    fi::disarm(&pool, "crash_book").await;
+    abandon_event_lease(&pool, &tenant, &event_key).await;
+    let recovered = engine.tick().await.expect("recovery tick");
+    assert_eq!(recovered.runs_started, 1, "the run resumes");
+    assert_eq!(recovered.runs_succeeded, 1, "{recovered:?}");
+
+    let messages = message_categories(&pool, &tenant).await;
+    assert_eq!(
+        messages.len(),
+        1,
+        "the idempotency key must reuse the committed message, never send again"
+    );
+    assert_eq!(
+        queue_categories(&pool, &tenant).await.len(),
+        1,
+        "the duplicate branch must not add a second queue row"
+    );
+    let actions = action_rows(&pool, &tenant).await;
+    assert_eq!(actions.len(), 1, "the action record was restored");
+    assert_eq!(actions[0].1, "succeeded");
+    assert_eq!(
+        actions[0].4["duplicate"], true,
+        "the recovery went through the derived idempotency key: {:?}",
+        actions[0].4
+    );
+    let runs = run_rows(&pool, &tenant, automation).await;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].0, "succeeded");
+    assert_eq!(
+        event_status(&pool, &tenant, &event_key).await.as_deref(),
+        Some("processed")
+    );
+    // One quota unit across crash + recovery: the second admission hit the
+    // same deterministic event id and was a duplicate.
+    assert_eq!(backend.used(), 1, "quota counted exactly once");
+    assert_eq!(
+        backend.reserves(),
+        2,
+        "both attempts called admission; the dedup key arbitrated"
+    );
 }

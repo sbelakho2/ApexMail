@@ -1025,7 +1025,13 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::ledger::test_support::MemoryLedger;
-    use crate::relay::{AcceptanceRecord, RecipientOutcome, RecipientResult};
+    use crate::relay::{
+        AcceptanceRecord, RecipientOutcome, RecipientResult, Relay, RelayConfig, RelayError,
+        SubmitRequest,
+    };
+    use crate::mx::test_support::StaticMxResolver;
+    use crate::test_smtp::{FakeSmtpConfig, FakeSmtpServer, ReplySpec};
+    use std::sync::Arc;
 
     /// A PRIVATE canonical database per test (the REAL migration chain via
     /// the production migrator). The suite previously shared one table with
@@ -1797,5 +1803,248 @@ mod tests {
         assert_eq!(stats.pending, 1);
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.delivering, 0);
+    }
+
+    // ── crash consistency: death at any seam of the relay pipeline ────────
+    //
+    // These tests run the REAL PgLedger against the REAL canonical schema
+    // with a live (fake) remote MX: each one kills the process at one seam
+    // of the accept path and drives the production recovery machinery
+    // (reclaim → claim_due → record_accepted, plus the idempotency keys),
+    // then asserts the invariant: at most one copy is ever transmitted and
+    // the ledger ends in exactly one terminal state.
+
+    /// A relay request for the fake MX harness (unique per test).
+    fn crash_request(send_unit: String, recipients: Vec<String>) -> SubmitRequest {
+        SubmitRequest {
+            send_unit,
+            tenant_id: Some("tenant-crash".to_string()),
+            queue_id: None,
+            envelope_from: Some("sender@apexmail.ee".to_string()),
+            recipients,
+            message: b"From: sender@apexmail.ee\r\nTo: user@example.com\r\nSubject: hi\r\n\r\nbody"
+                .to_vec(),
+            requested_source_ip: None,
+        }
+    }
+
+    async fn crash_harness(
+        pool: PgPool,
+        server_config: FakeSmtpConfig,
+    ) -> (Relay, Arc<PgLedger>, FakeSmtpServer) {
+        let server = FakeSmtpServer::start(server_config).await;
+        let ledger = Arc::new(PgLedger::new(pool));
+        let resolver = Arc::new(
+            StaticMxResolver::new().with_target("example.com", vec![server.addr()]),
+        );
+        let relay = Relay::new(ledger.clone(), resolver, RelayConfig::default());
+        (relay, ledger, server)
+    }
+
+    /// Window 1 — crash BETWEEN THE LEDGER CLAIM AND ANY SMTP TRAFFIC. The
+    /// row is 'delivering' under a lease a dead process will never renew: no
+    /// byte reached the wire. Recovery (reclaim_expired → claim_due →
+    /// deliver) transmits the message exactly once and pins the acceptance,
+    /// after which even a full resubmit cannot deliver again.
+    #[tokio::test]
+    async fn crashed_delivery_claim_is_reclaimed_and_delivered_exactly_once() {
+        let Some(pool) = pg_ledger_pool("crash_claim").await else {
+            return;
+        };
+        let unit = format!("crash:test:claim:{}", Uuid::new_v4());
+        let (relay, ledger, server) = crash_harness(pool.clone(), FakeSmtpConfig::default()).await;
+        let request = crash_request(unit.clone(), vec!["user@example.com".to_string()]);
+        let new = || NewSubmission {
+            send_unit: unit.clone(),
+            tenant_id: Some("tenant-crash".to_string()),
+            queue_id: None,
+            request_fingerprint: None,
+            envelope_from: Some("sender@apexmail.ee".to_string()),
+            recipients: vec!["user@example.com".to_string()],
+            message: request.message.clone(),
+            requested_source_ip: None,
+            max_attempts: 12,
+        };
+
+        // The worker claims, then dies before a single SMTP byte.
+        let now = Utc::now();
+        assert!(matches!(
+            ledger
+                .claim_submission(new(), now, Duration::from_secs(120))
+                .await
+                .expect("claim"),
+            ClaimOutcome::Claimed(_)
+        ));
+        assert_eq!(
+            server.messages().len(),
+            0,
+            "the crash happened before any transmission"
+        );
+
+        // While the lease is live, a resubmit is in-flight, not a delivery.
+        assert!(
+            matches!(
+                relay.submit(request.clone()).await,
+                Err(RelayError::InFlight { .. })
+            ),
+            "the dead attempt's live lease must protect the unit"
+        );
+        assert_eq!(server.messages().len(), 0);
+
+        // Recovery: the lease expires, the reclaim returns the row to
+        // pending, and the daemon's sweep delivers it exactly once.
+        let later = now + chrono::Duration::seconds(121);
+        let reclaimed = relay.reclaim_expired(later).await.expect("reclaim");
+        assert_eq!(reclaimed, 1, "the crashed attempt's lease is reclaimed");
+        let report = relay.process_due(later, 10).await.expect("daemon sweep");
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.accepted, 1, "{report:?}");
+        assert_eq!(
+            server.messages().len(),
+            1,
+            "exactly one copy reached the remote MX"
+        );
+
+        // The acceptance is pinned: even a full resubmit of the original
+        // request returns the stored evidence and never re-delivers.
+        let stored = relay.submit(request).await.expect("resubmit");
+        assert_eq!(stored.state, "accepted");
+        assert_eq!(server.messages().len(), 1);
+        let row = ledger.get(&unit).await.expect("get").expect("row");
+        assert_eq!(row.state, "accepted");
+        assert!(row.acceptance.is_some());
+    }
+
+    /// Window 2 — crash AFTER THE POST-DATA 250 AND ITS LEDGER COMMIT, before
+    /// the caller learns the result. The committed acceptance evidence is the
+    /// answer: any retry (worker resubmit, daemon re-run) returns the SAME
+    /// record and never transmits a second copy.
+    #[tokio::test]
+    async fn committed_acceptance_evidence_survives_the_loss_of_the_callers_result() {
+        let Some(pool) = pg_ledger_pool("crash_post250").await else {
+            return;
+        };
+        let unit = format!("crash:test:post250:{}", Uuid::new_v4());
+        let (relay, _ledger, server) = crash_harness(pool.clone(), FakeSmtpConfig::default()).await;
+        let request = crash_request(unit.clone(), vec!["user@example.com".to_string()]);
+
+        // The delivery + acceptance commit succeeds; the result is LOST in
+        // transit (process death before the caller can observe it).
+        let _accepted = relay.submit(request.clone()).await.expect("accepted");
+        assert_eq!(server.messages().len(), 1);
+
+        // Every retry learns it from the ledger, never from the wire.
+        for _ in 0..2 {
+            let replay = relay.submit(request.clone()).await.expect("replay");
+            assert_eq!(replay.state, "accepted");
+            assert_eq!(
+                replay.send_unit, unit,
+                "the SAME evidence row, not a fresh acceptance"
+            );
+        }
+        assert_eq!(
+            server.messages().len(),
+            1,
+            "a commit that outlived its caller must not produce a duplicate delivery"
+        );
+    }
+
+    /// Window 3 — a PARTIAL acceptance's deferred-retry child commits IN THE
+    /// SAME TRANSACTION as the parent's acceptance evidence; a crash-replay
+    /// of that acceptance (the caller re-running record_accepted after losing
+    /// its acknowledgment) cannot duplicate the child, and the daemon then
+    /// delivers exactly the deferred recipient exactly once.
+    #[tokio::test]
+    async fn deferred_retry_child_is_atomic_with_the_acceptance_and_crash_replays_cannot_duplicate_it(
+    ) {
+        let Some(pool) = pg_ledger_pool("crash_deferred_child").await else {
+            return;
+        };
+        let unit = format!("crash:test:deferred:{}", Uuid::new_v4());
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies(
+            "b@example.com",
+            vec![
+                ReplySpec::new(450, "4.2.1 busy"),
+                ReplySpec::new(250, "ok on retry"),
+            ],
+        );
+        let (relay, ledger, server) = crash_harness(pool.clone(), server_config).await;
+        let request = crash_request(
+            unit.clone(),
+            vec![
+                "a@example.com".to_string(),
+                "b@example.com".to_string(),
+            ],
+        );
+
+        let record = relay.submit(request.clone()).await.expect("partial acceptance");
+        assert_eq!(
+            record
+                .recipients
+                .iter()
+                .filter(|r| r.outcome == RecipientOutcome::Accepted)
+                .count(),
+            1,
+            "a@example.com accepted"
+        );
+        let plan = record
+            .deferred_retry
+            .as_ref()
+            .expect("the deferred subset must be scheduled with the acceptance");
+        assert_eq!(plan.recipients, vec!["b@example.com".to_string()]);
+
+        // The child exists, committed WITH the parent evidence.
+        let child = ledger
+            .get(&plan.send_unit)
+            .await
+            .expect("get child")
+            .expect("child row committed with the acceptance");
+        assert_eq!(child.state, "pending");
+        assert_eq!(child.recipients, vec!["b@example.com".to_string()]);
+
+        // Crash replay: the acceptance statement re-runs (a caller retrying
+        // after losing its ack). The child must NOT duplicate.
+        ledger
+            .record_accepted(&unit, &record)
+            .await
+            .expect("acceptance replay");
+        let children: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM outbound_relay_ledger WHERE send_unit = $1",
+        )
+        .bind(&plan.send_unit)
+        .fetch_one(&pool)
+        .await
+        .expect("child count");
+        assert_eq!(
+            children, 1,
+            "the deterministic child key + ON CONFLICT DO NOTHING absorbs the replay"
+        );
+
+        // The daemon delivers the deferred recipient exactly once.
+        let report = relay
+            .process_due(plan.next_attempt_at + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("backoff sweep");
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.accepted, 1);
+        let messages = server.messages();
+        assert_eq!(messages.len(), 2, "original + deferred retry, nothing more");
+        assert_eq!(
+            messages[0].recipients,
+            vec!["a@example.com".to_string()],
+            "the original delivery carried only the accepted recipient"
+        );
+        assert_eq!(
+            messages[1].recipients,
+            vec!["b@example.com".to_string()],
+            "the retry carried only the deferred recipient"
+        );
+
+        // The replayed submit still returns the stored evidence; neither copy
+        // is ever re-transmitted.
+        let replay = relay.submit(request).await.expect("final replay");
+        assert_eq!(replay.state, "accepted");
+        assert_eq!(messages.len(), 2);
     }
 }
