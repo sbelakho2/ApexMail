@@ -93,11 +93,14 @@ cargo audit $_ign >"$RUN_DIR/cargo-audit.txt" 2>&1) || _ca_rc=$?
     return "$CI_EXIT_FAIL"
 }
 
-# --- cargo vet (cargo-vet.yml — only when configured) ----------------------------------
+# --- cargo vet (supply-chain/config.toml — initialized 2026-09-28; REQUIRED) -----------
+# Audit finding: vet "simply skips when supply-chain/config.toml does not
+# exist", so third-party provenance vetting was optional by absence. The
+# config is now committed — its DISAPPEARANCE is a hard failure, not a skip.
 cargo_vet() {
     if [ ! -f "$WS/supply-chain/config.toml" ]; then
-        ci_info "cargo vet: supply-chain/config.toml not present — vet not configured (skipped, as upstream)"
-        return "$CI_EXIT_OK"
+        ci_err "supply-chain/config.toml missing — third-party provenance vetting is REQUIRED (restore the file; ci/stages/security.sh no longer skips)"
+        return "$CI_EXIT_FAIL"
     fi
     ci_have_tool cargo-vet || return "$CI_EXIT_OK"
     (cd "$WS" && ci_check "cargo vet --locked" cargo vet --locked)
