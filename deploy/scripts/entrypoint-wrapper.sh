@@ -85,6 +85,17 @@ export_from_file AWS_ACCESS_KEY_ID        || true
 export_from_file AWS_SECRET_ACCESS_KEY    || true
 export_from_file SMTP_USERNAME            || true
 export_from_file SMTP_PASSWORD            || true
+# ── HA service (crates/ha) — API keys; DB/Redis passwords ride the shared
+# DB_PASSWORD / REDIS_PASSWORD bridges above.
+export_from_file INTERNAL_API_KEY         || true
+export_from_file ADMIN_API_KEY            || true
+# ── Isolation service (crates/isolation) — the binary reads its own
+# ISOLATION_* env parts and exits 78 in production when the API key or the
+# tenant encryption key is missing, so these must bridge reliably.
+export_from_file ISOLATION_DB_PASSWORD      || true
+export_from_file ISOLATION_REDIS_PASSWORD   || true
+export_from_file ISOLATION_INTERNAL_API_KEY || true
+export_from_file TENANT_ENCRYPTION_KEY      || true
 
 # Percent-encode a value used in a URI user-info component. Docker secret
 # values are arbitrary and commonly contain characters such as `@` or `:`;
@@ -107,6 +118,34 @@ fi
 if [ -z "${CLICKHOUSE_PASSWORD:-}" ] && [ -n "${CLICKHOUSE_PASSWORD_FILE:-}" ] && [ -f "${CLICKHOUSE_PASSWORD_FILE}" ]; then
   CLICKHOUSE_PASSWORD="$(cat "${CLICKHOUSE_PASSWORD_FILE}")"
   export CLICKHOUSE_PASSWORD
+fi
+# Isolation service (crates/isolation): direct fallbacks for the same POSIX sh
+# edge cases as DB_PASSWORD above — the binary fail-fasts (exit 78) in
+# production when its API key or tenant encryption key is missing.
+if [ -z "${ISOLATION_DB_PASSWORD:-}" ] && [ -n "${ISOLATION_DB_PASSWORD_FILE:-}" ] && [ -f "${ISOLATION_DB_PASSWORD_FILE}" ]; then
+  ISOLATION_DB_PASSWORD="$(cat "${ISOLATION_DB_PASSWORD_FILE}")"
+  export ISOLATION_DB_PASSWORD
+fi
+if [ -z "${ISOLATION_REDIS_PASSWORD:-}" ] && [ -n "${ISOLATION_REDIS_PASSWORD_FILE:-}" ] && [ -f "${ISOLATION_REDIS_PASSWORD_FILE}" ]; then
+  ISOLATION_REDIS_PASSWORD="$(cat "${ISOLATION_REDIS_PASSWORD_FILE}")"
+  export ISOLATION_REDIS_PASSWORD
+fi
+if [ -z "${ISOLATION_INTERNAL_API_KEY:-}" ] && [ -n "${ISOLATION_INTERNAL_API_KEY_FILE:-}" ] && [ -f "${ISOLATION_INTERNAL_API_KEY_FILE}" ]; then
+  ISOLATION_INTERNAL_API_KEY="$(cat "${ISOLATION_INTERNAL_API_KEY_FILE}")"
+  export ISOLATION_INTERNAL_API_KEY
+fi
+if [ -z "${TENANT_ENCRYPTION_KEY:-}" ] && [ -n "${TENANT_ENCRYPTION_KEY_FILE:-}" ] && [ -f "${TENANT_ENCRYPTION_KEY_FILE}" ]; then
+  TENANT_ENCRYPTION_KEY="$(cat "${TENANT_ENCRYPTION_KEY_FILE}")"
+  export TENANT_ENCRYPTION_KEY
+fi
+# HA service (crates/ha): same direct fallbacks for its API keys.
+if [ -z "${INTERNAL_API_KEY:-}" ] && [ -n "${INTERNAL_API_KEY_FILE:-}" ] && [ -f "${INTERNAL_API_KEY_FILE}" ]; then
+  INTERNAL_API_KEY="$(cat "${INTERNAL_API_KEY_FILE}")"
+  export INTERNAL_API_KEY
+fi
+if [ -z "${ADMIN_API_KEY:-}" ] && [ -n "${ADMIN_API_KEY_FILE:-}" ] && [ -f "${ADMIN_API_KEY_FILE}" ]; then
+  ADMIN_API_KEY="$(cat "${ADMIN_API_KEY_FILE}")"
+  export ADMIN_API_KEY
 fi
 
 # ── Construct DATABASE_URL from DB_* parts if not already set ──────────────

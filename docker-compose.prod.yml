@@ -423,6 +423,14 @@ services:
       KIWI_DIFFICULTY_BITS: "${KIWI_DIFFICULTY_BITS:-20}"
       KIWI_ARGON2_DIFFICULTY_BITS: "${KIWI_ARGON2_DIFFICULTY_BITS:-8}"
       KIWI_CHALLENGE_TTL_SECS: "${KIWI_CHALLENGE_TTL_SECS:-120}"
+      # ── Account Takeover Protection (ato-protection crate, login flows) ──
+      # Default ON in production (the ato runtime's resolve_gate treats
+      # ENVIRONMENT=production as opt-in when the explicit var is unset);
+      # pinned here so the deployed posture is declared, not implicit.
+      # Medium-risk logins step up to MFA, high-risk logins are refused.
+      ATO_PROTECTION_ENABLED: "${ATO_PROTECTION_ENABLED:-true}"
+      ATO_MFA_THRESHOLD: "${ATO_MFA_THRESHOLD:-}"
+      ATO_BLOCK_THRESHOLD: "${ATO_BLOCK_THRESHOLD:-}"
       METRICS_PORT: 9090
     depends_on:
       postgres:
@@ -809,6 +817,157 @@ services:
         max_attempts: 5
 
   # ===========================================================================
+  # HA SERVICE (failover / health-check / backup / replication orchestrator)
+  # ===========================================================================
+  # crates/ha (ha-server, :4300). Internal-only. Runs the health-check,
+  # replication-lag and primary-claim-refresh crons against the main
+  # database; backup retention enforcement. Requires migration 194
+  # (ha_health_checks) — the binary aborts at startup without it, so the
+  # migrator MUST have run first (the pipeline guarantees this). The wrapper
+  # bridges DB_PASSWORD / REDIS_PASSWORD / INTERNAL_API_KEY / ADMIN_API_KEY
+  # from the Docker secrets; without the API keys the service generates
+  # EPHEMERAL runtime keys (warned in logs) — mount the secrets for a real
+  # deployment.
+  ha:
+    image: ghcr.io/sbelakho2/apexmail/ha:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "ha-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      NODE_ENV: production
+      HA_PORT: "4300"
+      # ── Database / Redis (URL parts assembled by the wrapper) ────────────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD: ""
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Service auth (blank env → secret file wins) ──────────────────────
+      INTERNAL_API_KEY: ""
+      INTERNAL_API_KEY_FILE: /run/secrets/ha_internal_api_key
+      ADMIN_API_KEY: ""
+      ADMIN_API_KEY_FILE: /run/secrets/ha_admin_api_key
+      # G.8: failback stays MANUAL in production (a lagging original primary
+      # must never be auto-promoted). Chaos engineering stays OFF.
+      FAILBACK_ENABLED: "false"
+      CHAOS_ENABLED: "false"
+    secrets:
+      - postgres_password
+      - redis_password
+      - ha_internal_api_key
+      - ha_admin_api_key
+    ports: !override []  # internal-only; dev compose publishes 127.0.0.1:4300
+    healthcheck:
+      # Real health endpoint (GET /health is unauthenticated in the router).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4300/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
+  # ISOLATION SERVICE (tenant isolation: quotas, per-tenant keys, RLS policy)
+  # ===========================================================================
+  # crates/isolation (isolation-server, :4500). Internal-only. Under
+  # NODE_ENV=production the binary REFUSES to start (exit 78) without
+  # TENANT_ENCRYPTION_KEY and ISOLATION_INTERNAL_API_KEY — both are mounted
+  # as required Docker secrets below. Reads its own ISOLATION_DB_* /
+  # ISOLATION_REDIS_* parts (bridged from secrets by the wrapper); the
+  # iso_* tables live in the MAIN application database.
+  isolation:
+    image: ghcr.io/sbelakho2/apexmail/isolation:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "isolation-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      NODE_ENV: production
+      ISOLATION_PORT: "4500"
+      # ── Database / Redis (parts bridged by the wrapper) ──────────────────
+      ISOLATION_DB_HOST: postgres
+      ISOLATION_DB_PORT: 5432
+      ISOLATION_DB_NAME: ${POSTGRES_DB:-apexmail}
+      ISOLATION_DB_USER: ${POSTGRES_USER:-apexmail}
+      ISOLATION_DB_PASSWORD: ""
+      ISOLATION_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      ISOLATION_REDIS_HOST: redis
+      ISOLATION_REDIS_PORT: 6379
+      ISOLATION_REDIS_DB: "3"
+      ISOLATION_REDIS_PASSWORD: ""
+      ISOLATION_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Auth / encryption (blank env → secret file wins; BOTH required) ──
+      ISOLATION_INTERNAL_API_KEY: ""
+      ISOLATION_INTERNAL_API_KEY_FILE: /run/secrets/isolation_internal_api_key
+      TENANT_ENCRYPTION_KEY: ""
+      TENANT_ENCRYPTION_KEY_FILE: /run/secrets/tenant_encryption_key
+      DATA_KEY_ROTATION_DAYS: ${DATA_KEY_ROTATION_DAYS:-90}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-365}
+      CORS_ORIGINS: ${ISOLATION_CORS_ORIGINS:-https://app.apexmail.ee}
+    secrets:
+      - postgres_password
+      - redis_password
+      - isolation_internal_api_key
+      - tenant_encryption_key
+    ports: !override []  # internal-only; dev compose publishes 127.0.0.1:4500
+    healthcheck:
+      # Real health endpoint (GET /health is exempt from bearer auth).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4500/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
   # MIGRATOR (one-shot database migration job — runs BEFORE `up`)
   # ===========================================================================
   # The deploy-time migration gate: applies the sqlx migration chain embedded
@@ -957,6 +1116,18 @@ services:
       # bounces+{message_id}=...@{VERP_DOMAIN} recipients. Kept in lockstep
       # with the worker's VERP_DOMAIN so generated Return-Paths parse here.
       VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
+      # ── Inbound content security (crates/mta servers/content_security.rs) ──
+      # Three engines on the inbound DATA path, each env-gated and DEFAULT
+      # OFF: spam/phishing scoring (SpamEngine, X-Spam-* verdict headers),
+      # static attachment inspection (SandboxEngine, X-Apex-Attachment-Scan
+      # headers), and SMTP intrusion detection (IdsEngine). Enable by setting
+      # the flags in the deployment .env — refusal/strip actions are separate
+      # opt-ins (MTA_SPAM_REJECT_ENABLED, MTA_ATTACHMENT_SCAN_MODE,
+      # MTA_IDS_REFUSE); a filter error always fails OPEN to tag-only.
+      MTA_SPAM_FILTER_ENABLED: "${MTA_SPAM_FILTER_ENABLED:-false}"
+      MTA_ATTACHMENT_SCAN_ENABLED: "${MTA_ATTACHMENT_SCAN_ENABLED:-false}"
+      MTA_IDS_ENABLED: "${MTA_IDS_ENABLED:-false}"
+      MTA_ATTACHMENT_SCAN_MODE: "${MTA_ATTACHMENT_SCAN_MODE:-flag}"
     secrets:
       - postgres_password
       - redis_password
@@ -1031,12 +1202,12 @@ services:
           memory: 512M
         reservations:
           memory: 64M
-    security_opt:
-      - no-new-privileges:true
-      - apparmor:docker-default
-    read_only: true
-    tmpfs:
-      - /tmp
+    # SECURITY posture note: security_opt / read_only / tmpfs are INHERITED
+    # from the base (dev) compose outbound-mta definition — redeclaring them
+    # here made the compose list-merge concatenate duplicates
+    # ("security_opt items at 0 and 2 are equal") and fail `compose config`.
+    # Posture is unchanged: no-new-privileges + apparmor:docker-default,
+    # read-only rootfs, /tmp tmpfs all come from the base file.
     secrets:
       - postgres_password
 
@@ -1267,6 +1438,14 @@ services:
       TRACKING_ENABLED: ${TRACKING_ENABLED:-true}
       TRACKING_SECRET_KEY: ""
       TRACKING_SECRET_KEY_FILE: /run/secrets/tracking_secret_key
+      # ── Outbound DLP gate (crates/worker-processors email/dlp.rs) ─────────
+      # Pre-send Data-Loss-Prevention scan on every prepared per-recipient
+      # copy BEFORE the durable acceptance reservation. DEFAULT OFF (dev
+      # deployments keep byte-identical behavior); set true in the deployment
+      # .env to enforce the global policy (Quarantine → deferred hold,
+      # Block → bounced refusal; engine error fails OPEN, detection fails
+      # CLOSED).
+      WORKER_DLP_ENABLED: "${WORKER_DLP_ENABLED:-false}"
       # ── VERP bounce routing (SMTP transport) ──────────────────────────────
       # Envelope Return-Path domain for bounces+{message_id}=... addresses.
       # MUST equal the MTA bounce server's VERP_DOMAIN so generated addresses
@@ -1804,3 +1983,15 @@ secrets:
   # HMAC key signing consent records/tokens.
   compliance_consent_signing_key:
     file: ${PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE:?PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE is required in production}
+  # ── HA service (crates/ha) API keys. Without them the service generates
+  # EPHEMERAL runtime keys and warns loudly; mount real ones in production.
+  ha_internal_api_key:
+    file: ${PROD_HA_INTERNAL_API_KEY_FILE:-/opt/apexmail/secrets/ha_internal_api_key.txt}
+  ha_admin_api_key:
+    file: ${PROD_HA_ADMIN_API_KEY_FILE:-/opt/apexmail/secrets/ha_admin_api_key.txt}
+  # ── Isolation service (crates/isolation). BOTH are REQUIRED: under
+  # NODE_ENV=production the binary exits 78 (EX_CONFIG) without them.
+  isolation_internal_api_key:
+    file: ${PROD_ISOLATION_INTERNAL_API_KEY_FILE:?PROD_ISOLATION_INTERNAL_API_KEY_FILE is required in production}
+  tenant_encryption_key:
+    file: ${PROD_TENANT_ENCRYPTION_KEY_FILE:?PROD_TENANT_ENCRYPTION_KEY_FILE is required in production}

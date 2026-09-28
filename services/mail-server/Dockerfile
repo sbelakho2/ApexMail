@@ -419,6 +419,60 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "ai-embeddings"]
 
 # =============================================================================
+# HA Service (failover/health/backup/replication orchestrator)
+# =============================================================================
+# crates/ha/src/bin/server.rs binds 0.0.0.0:$HA_PORT (default 4300) and serves
+# GET /health unauthenticated (process liveness); /api/v1/health is the
+# detailed, API-key-gated variant. Config comes from env only (HA_* , DB_*,
+# REDIS_*) — no CLI flags. Startup is loud-fail: it aborts when the HA tables
+# (ha_failover_events, ha_health_checks/migration 194) are missing, so the
+# container must run AFTER the migrator.
+FROM runtime-base AS ha
+
+# wget for the HTTP healthcheck (GET /health proves the axum router is
+# serving, not merely that the port is bound — same posture as pdf-renderer).
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/ha-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 4300
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["wget", "-qO-", "http://localhost:4300/health"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ha-server"]
+
+# =============================================================================
+# Isolation Service (tenant isolation: quotas, keys, per-tenant policy)
+# =============================================================================
+# crates/isolation/src/bin/server.rs binds 0.0.0.0:$ISOLATION_PORT (default
+# 4500; clap --port overrides) and serves GET /health unauthenticated. In
+# production (NODE_ENV=production) the binary REFUSES to start without
+# TENANT_ENCRYPTION_KEY and ISOLATION_INTERNAL_API_KEY (exit 78) — the prod
+# compose overlay mounts both as Docker secrets. Isolation reads its own
+# ISOLATION_DB_*/ISOLATION_REDIS_* env parts (not DATABASE_URL); the shared
+# entrypoint wrapper bridges those secret files.
+FROM runtime-base AS isolation
+
+# wget for the HTTP healthcheck on GET /health (same posture as ha).
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/isolation-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 4500
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["wget", "-qO-", "http://localhost:4500/health"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "isolation-server"]
+
+# =============================================================================
 # Migrator (one-shot database migration job — runs BEFORE `compose up`)
 # =============================================================================
 # Applies services/mail-server/migrations via sqlx::migrate!. Run as

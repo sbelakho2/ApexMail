@@ -164,6 +164,18 @@ validate_repo_gates() {
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
+        # Capability claims vs production wiring (docs/development/
+        # capability-registry.json — advertised == deployed, both directions).
+        # IN-FLIGHT WIRING WAVE: the default (CAPABILITY_GATE_STRICT=0) prints
+        # not-yet-landed items (env gate missing from the tree, README status
+        # lagging the registry) as WARN and exits 0. FLIP to 1 — or export
+        # CAPABILITY_GATE_STRICT=1 — once the in_flight_wiring items in the
+        # registry have landed and been re-triaged; structural failures
+        # (sub-advertised claims outside [roadmap], missing deploy surface for
+        # a claimed stage) fail in BOTH modes.
+        ci_check "capability claims vs production wiring" \
+            env CAPABILITY_GATE_STRICT="${CAPABILITY_GATE_STRICT:-0}" \
+            python3 tools/check_capability_claims.py
         # Generated-binary guard: coverage artifacts and retired training
         # outputs were accidentally committed once (~290 MiB of .profraw).
         # `.gitignore` prevents new ones; this proves nothing slipped back.
@@ -220,7 +232,7 @@ image_name_guard() {
     _canonical="api-server mta imap-server mailstore worker enterprise tracking-service
                 observability marketing status-server billing-service sales-autopilot
                 compliance analytics-worker pdf-renderer ai-service migrator
-                outbound-mta"
+                outbound-mta ha isolation"
     _third_party="nginx: certbot/certbot: prodrigestivill/postgres-backup-local:
                  postgres: redis: clickhouse/clickhouse-server:"
     _errs=0

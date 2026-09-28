@@ -104,6 +104,18 @@ Non-file variables also validated by the compose overlay (`${VAR:?}`):
 (`BILLING_COMPANY_IBAN`/`_BIC`/`_PHONE`) are OPTIONAL — invoice renderers
 omit the fields when unset; `BILLING_COMPANY_BANK` defaults to Wise.
 
+Per-workload internal credentials (P1 #6, REQUIRED in production — each
+service refuses to boot without its dedicated token; the universal
+`INTERNAL_SERVICE_TOKEN` is refused once the dedicated one is set):
+
+| Secret value var in `.env` | `PROD_*_FILE` var |
+|---|---|
+| `TEMPLATE_RENDERER_AUTH_TOKEN` | *(compose bridge not wired yet — plain `.env` value)* |
+| `PDF_RENDERER_AUTH_TOKEN` | *(compose bridge not wired yet — plain `.env` value)* |
+| `DEVEX_AUTH_TOKEN` | *(compose bridge not wired yet — plain `.env` value)* |
+| `AI_EMBEDDINGS_AUTH_TOKEN` | *(compose bridge not wired yet — plain `.env` value)* |
+
+
 ## Database migrations (deploy-time gate)
 
 Schema migrations (`services/mail-server/migrations`, sequential 001-122+)

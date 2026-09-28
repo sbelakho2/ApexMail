@@ -4,7 +4,7 @@
 
 ## Overview
 
-The `sales-autopilot` crate is the outreach engine behind ApexMail's own sales: account/contact intake, evidence-grounded enrichment and discovery, sequence orchestration, the central decision engine, durable action execution, reply intelligence, experiments, sender health, and the automations executor.
+The `sales-autopilot` crate is the outreach engine behind ApexMail's own sales: account/contact intake, evidence-grounded enrichment and discovery, sequence orchestration, the central decision engine, durable action execution, reply intelligence, experiments, and sender health. It is the owner's sales brain ONLY: the customer automation executor moved to `crates/worker-processors/src/automations.rs` (ticked by the worker binary), so this process and the customer automation fleet are separate trust domains — the Sales service is restricted to the system tenant and can be disabled without touching customer functionality.
 
 The server binary lives at `services/mail-server/crates/sales-autopilot/src/bin/server.rs` and listens on port `3010` by default (`SALES_PORT` / `SALES_AUTOPILOT_PORT`).
 
@@ -49,9 +49,11 @@ Inbound replies are classified into a canonical taxonomy and mapped to sequence 
 
 Thompson sampling over `sales_experiments` / `sales_experiment_arms` selects variants for real sends; outcomes are recorded through an idempotent outcome ledger and rewards are projected back onto the arms by the outcome projector loop.
 
-### Automations executor
+### Automations executor (moved)
 
-`automations.rs` executes the automation rules stored by the customer-facing API. Trigger events are produced canonically (migration 224's triggers on `contacts` and `inbound_messages`), claimed with leases, and evaluated against the stored `trigger_config` / `conditions`; supported actions are `send_email` (through `SendAdmissionService`, category `marketing`), `add_tag` / `remove_tag`, list add/remove, and `webhook` (enqueued for the existing webhook worker — no in-process HTTP, no SSRF surface). Runs and per-action outcomes are persisted (`automation_runs`, `automation_run_actions`), so "why did nothing happen?" is answerable from the database. Unsupported trigger/action kinds are recorded as unsupported rather than silently ignored: `delay` has no durable per-action timer, and schedule/webhook triggers have no stored contract or inbound producer.
+The customer automation executor lives in `crates/worker-processors/src/automations.rs` and is ticked by the worker binary (`WORKER_RUN_AUTOMATIONS`, `AUTOMATION_TICK_SECS`). It executes the automation rules stored by the customer-facing API. Trigger events are produced canonically (migration 224's triggers on `contacts` and `inbound_messages`), claimed with leases, and evaluated against the stored `trigger_config` / `conditions`; supported actions are `send_email` (through `SendAdmissionService`, category `marketing`), `add_tag` / `remove_tag`, list add/remove, and `webhook` (enqueued for the existing webhook worker — no in-process HTTP, no SSRF surface). Runs and per-action outcomes are persisted (`automation_runs`, `automation_run_actions`), so "why did nothing happen?" is answerable from the database. Unsupported trigger/action kinds are recorded as unsupported rather than silently ignored: `delay` has no durable per-action timer, and schedule/webhook triggers have no stored contract or inbound producer.
+
+Because it is CUSTOMER automation, it runs in the worker fleet — not here. `worker-processors` has no dependency on `sales-autopilot`, and this crate has no executor, so the two trust domains cannot bleed into each other.
 
 ### CRM, enrichment, discovery, calendar, inbox
 
@@ -95,12 +97,19 @@ Thompson sampling over `sales_experiments` / `sales_experiment_arms` selects var
 | `SALES_DISPATCH_BATCH_SIZE`, `SALES_DISPATCH_CONCURRENCY`, `SALES_DISPATCH_INTERVAL_SECS` | — | Sequence dispatcher pacing |
 | `SALES_CAMPAIGN_FROM_EMAIL`, `SALES_CAMPAIGN_FROM_NAME` | — | Campaign sender identity defaults |
 | `SALES_PUBLIC_BASE_URL`, `SALES_UNSUBSCRIBE_REDIRECT_URL` | — | Public URLs used in footers and unsubscribe links |
-| `SALES_ALLOWED_TENANTS` | — | Tenant allowlist (unset = all) |
-| `AUTOMATION_TICK_SECS` | `30` | Automation executor tick period |
+| `SALES_ALLOWED_TENANTS` | — | MUST be exactly `system` (the service serves the system tenant only; production refuses to start without it, and any other value refuses in every environment) |
 | `LEAD_SCORE_{ENGAGEMENT,COMPANY_SIZE,RECENCY}_WEIGHT` | compile-time defaults | Legacy lead-score weights (canonical scoring is the explainable `OpportunityScore`) |
 | `EMAIL_TRANSPORT_TYPE` | — | Transport selection for local runs |
 
 An unparseable configured value is an error (`SalesConfig::from_env`); the service does not silently fall back to a default for a value an operator set.
+
+## Tenant restriction
+
+The process is hard-restricted to the system tenant:
+
+- **Boot** (`config::require_system_tenant_scope`): production refuses to start unless `SALES_ALLOWED_TENANTS` is set; any set value other than exactly `system` refuses in every environment.
+- **Runtime** (router middleware): every authenticated request claiming `x-tenant-id` other than `system` is refused with 403. The control plane already addresses this service with `x-tenant-id: system`.
+- The only background work in the process (the durable sales action worker and the outcome projector) operates on the sales tables; customer automation execution is not part of this process (see above).
 
 ## Persistence Boundaries
 
@@ -111,16 +120,15 @@ In-memory state exists only in tests and in `crm.rs` for self-contained local fl
 ## Honest limitations
 
 - Dedicated-IP *provisioning* (ordering, PTR, reputation ramp) is a control-plane/compliance concern; this service selects and reports, it does not provision.
-- Schedule- and webhook-triggered automations, and the `delay` action, are reported as unsupported rather than half-implemented (see above).
-- The automations executor and the action worker run inside this service's process, so automation and sequence execution require `sales-autopilot` to be running.
+- Schedule- and webhook-triggered automations, and the `delay` action, are reported as unsupported rather than half-implemented (see the worker-processors module docs).
 
 ## Relevant Source Files
 
-- `src/bin/server.rs` — the service and its loops (action worker, outcome projector, automation executor)
+- `src/bin/server.rs` — the service and its loops (action worker, outcome projector)
 - `src/decision_engine.rs`, `src/legal_policy.rs` — the decision gateway and jurisdiction policy
 - `src/actions.rs`, `src/sequence_worker.rs`, `src/dispatcher.rs` — durable execution and the delivery path
 - `src/crm_pg.rs`, `src/schema.rs` — canonical persistence and the startup schema contract
-- `src/automations.rs` — the automations executor
 - `src/control.rs`, `src/control_read.rs`, `src/routes.rs` — the control surface and HTTP routing
 - `src/experiments.rs`, `src/outcome_projector.rs` — experiment arms and reward projection
 - `src/enrichment.rs`, `src/discovery.rs`, `src/calendar.rs`, `src/inbox.rs` — the supporting workflows
+- `../../worker-processors/src/automations.rs` — the customer automation executor (runs in the worker fleet)

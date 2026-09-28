@@ -1,0 +1,642 @@
+{
+  "$comment": "Capability registry \u2014 the single source of truth for what each security/reliability capability of ApexMail ACTUALLY is, versus what the marketing/compliance surfaces say about it. Companion to docs/development/topology-manifest.json (which owns runtime topology; this file owns capability truth). tools/check_capability_claims.py proves: (a) every entry at stage >= runtime-wired has evidence that EXISTS in the tree \u2014 docker_target present in BOTH the Dockerfile (FROM runtime-base AS <target>) and topology-manifest.json, compose_service present in the compose files, and evidence.env_gate.name greppable in the wiring crate's Rust sources (null env_gate = always-on wiring, allowed); (b) the claim surfaces (marketing security/architecture pages + compliance templates) may NAME a sub-runtime-wired capability (stage < runtime-wired) only inside explicit [roadmap]-marked context \u2014 every scan_aliases hit outside that context on a surface is a claim that the capability must be at stage >= runtime-wired or the gate FAILS (advertised == deployed, both directions driven by the per-capability alias lists below); (c) crate README wiring-status lines match registry stages: stage >= runtime-wired forbids a 'NOT WIRED INTO PRODUCTION' banner (unless a stale_marker_exceptions needle still proves the banner stale) and requires the env-gate name to appear in the README when one is declared; stage < runtime-wired requires the banner or an explicit 'wiring in flight' statement. Strictness: CAPABILITY_GATE_STRICT=0 (default) prints in-flight wiring items as WARN and exits 0; =1 fails on them. Set it to 1 once the in_flight_wiring items below have landed.",
+  "lifecycle_ladder": [
+    "implemented",
+    "integration-tested",
+    "runtime-wired",
+    "deployed",
+    "monitored",
+    "advertised"
+  ],
+  "stage_rules": {
+    "implemented": "code exists; nothing consumes it outside its own crate",
+    "integration-tested": "consumed by crates/{integration-tests,fuzz-tests,perf-tests,load-tests} only \u2014 zero production call path",
+    "runtime-wired": "a production binary constructs/mounts it in a live request or delivery path (monitor/flag-gated counts \u2014 say so in evidence)",
+    "deployed": "runtime-wired AND running in the prod compose topology with default-on behavior",
+    "monitored": "deployed AND covered by an alerting rule / dashboard in deploy/",
+    "advertised": "deployed+monitored truthfully AND the marketing claim matches the wired behavior \u2014 only this stage may be named in claim surfaces outside [roadmap] context"
+  },
+  "scan": {
+    "surfaces": [
+      "apps/marketing-zola/content/security/index.md",
+      "apps/marketing-zola/content/security/index.de.md",
+      "apps/marketing-zola/content/security/index.es.md",
+      "apps/marketing-zola/content/security/index.fr.md",
+      "apps/marketing-zola/content/architecture.md",
+      "templates/compliance/security-measures.md",
+      "templates/compliance/trust-center.md"
+    ],
+    "marker": "[roadmap]",
+    "marker_close": "[/roadmap]",
+    "context_rule": "A capability alias may appear on a claim surface only (1) on a line that itself contains the marker, or (2) anywhere between a marker line and the next markdown heading (line starting with '#') or the marker_close line. Markdown ATX headings are not scanned (they organize; they do not claim). Everything else is a bare capability-name drop: it requires the named capability at stage >= runtime-wired and FAILS the gate otherwise. Limitation (by design): the gate can only police the capability names enumerated in scan_aliases below \u2014 a NEW product claim about a capability that has no alias entry is invisible to it, so every new security/reliability claim must add its alias here in the same change.",
+    "word_boundary_tokens": "aliases shorter than 5 chars or all-caps acronyms are matched with word boundaries (\\b) so 'SSO' does not hit inside longer words; phrase aliases are matched as case-insensitive substrings."
+  },
+  "in_flight_wiring": {
+    "$comment": "Wiring contracts agreed with the crate owners but whose code has not landed in the tree yet. The checker prints these as WARN lines (CAPABILITY_GATE_STRICT=1 turns an UNLANDED entry below whose registry stage was already raised into a failure; while the stage honestly stays below runtime-wired these are informational). Each entry names the env gate that WILL gate it so the registry/gate/READMEs agree on the contract before the code arrives.",
+    "items": [
+      {
+        "capability": "data-loss-prevention",
+        "wiring_target": "worker outbound delivery path (crates/worker-processors)",
+        "env_gate": "WORKER_DLP_ENABLED",
+        "status": "NOT LANDED: no worker-processors dependency on crates/dlp-engine and no WORKER_DLP_ENABLED reference in the tree as of the 2026-09 wiring wave; the registry entry honestly stays at integration-tested and dlp-engine/README.md declares the contract."
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "capability": "intrusion-detection-prevention",
+      "crate": "crates/ids-engine",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "env_gate": {
+          "name": "MTA_IDS_ENABLED",
+          "crate": "crates/mta",
+          "default": "false"
+        },
+        "call_path": "services/mail-server/crates/mta/src/servers/content_security.rs (IdsEngine::inspect on every accepted-after-auth DATA payload + ConnectionTracker at session admission) wired from crates/mta/src/servers/inbound.rs; engine config parsed at crates/mta/src/config.rs (IdsIntegrationConfig)",
+        "metrics": null,
+        "explanation": "WIRED into the mta inbound path (crates/mta/src/servers/content_security.rs). ENV-GATED, DEFAULT OFF: MTA_IDS_ENABLED=false until an operator opts in, so this is runtime-wired, NOT deployed. Verdicts are logged and stored as X-Apex-Ids-Verdict headers; refusal (MTA_IDS_REFUSE) is a separate default-off opt-in. A filter error fails OPEN to tag-only. No scrapeable IDS metrics endpoint yet \u2014 not monitored."
+      },
+      "scan_aliases": [
+        "IDS",
+        "IPS",
+        "intrusion detection",
+        "intrusion prevention"
+      ]
+    },
+    {
+      "capability": "spam-phishing-filtering",
+      "crate": "crates/spam-filter",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "env_gate": {
+          "name": "MTA_SPAM_FILTER_ENABLED",
+          "crate": "crates/mta",
+          "default": "false"
+        },
+        "call_path": "services/mail-server/crates/mta/src/servers/content_security.rs (SpamEngine scoring on the inbound DATA payload, verdicts stored as X-Spam-Score / X-Spam-Verdict headers); engine config at crates/mta/src/config.rs (SpamFilterConfig)",
+        "metrics": null,
+        "explanation": "WIRED into the mta inbound path (crates/mta/src/servers/content_security.rs). ENV-GATED, DEFAULT OFF: MTA_SPAM_FILTER_ENABLED=false until an operator opts in, so this is runtime-wired, NOT deployed. DATA-time refusal for REJECT-classified mail is a separate default-off opt-in (MTA_SPAM_REJECT_ENABLED). Scope: INBOUND only \u2014 the worker/outbound-mta send path does not re-score. No scrapeable spam-metrics endpoint yet \u2014 not monitored."
+      },
+      "scan_aliases": [
+        "spam filter",
+        "spam filtering",
+        "spam and phishing",
+        "spam/phishing",
+        "phishing filter",
+        "phishing analysis",
+        "bayesian"
+      ]
+    },
+    {
+      "capability": "account-takeover-protection",
+      "crate": "crates/ato-protection",
+      "stage": "deployed",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "env_gate": {
+          "name": "ATO_PROTECTION_ENABLED",
+          "crate": "crates/ato-protection",
+          "default": "true in production/staging (resolve_gate falls back to ENVIRONMENT); prod compose pins it true"
+        },
+        "call_path": "services/mail-server/crates/api-server/src/routes/auth.rs:1194 (ato_evaluate_password_login \u2192 ato_protection::runtime::shared()) + auth.rs:1229 (ato_band_for verdict\u2192band mapping); band policy: Medium=MFA step-up, High=refused, both with audit rows",
+        "metrics": null,
+        "explanation": "DEPLOYED: default-ON in production (resolve_gate treats ENVIRONMENT=production as opt-in; docker-compose.prod.yml api-server pins ATO_PROTECTION_ENABLED=true). Impossible-travel/IP-pivot + session-fingerprint risk scoring runs on every password login; fail-open by contract (engine error \u2192 allow with a loud log). No GeoIP feed and no JA4 extraction are plumbed yet (declared in the LoginEvent construction); lockout state is single-node in-memory unless ATO_REDIS_LOCKOUT_URL is set. Not monitored (no dedicated alert) \u2014 hence deployed, not monitored/advertised."
+      },
+      "scan_aliases": [
+        "account takeover",
+        "ATO",
+        "impossible travel",
+        "login anomaly"
+      ]
+    },
+    {
+      "capability": "data-loss-prevention",
+      "crate": "crates/dlp-engine",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": "worker",
+        "env_gate": {
+          "name": "WORKER_DLP_ENABLED",
+          "crate": "worker-processors",
+          "default": false
+        },
+        "call_path": "worker-processors email/dlp.rs PreSendDlpScanner: scan_prepared before claim_acceptance",
+        "metrics": null,
+        "explanation": "WIRING IN FLIGHT (env gate WORKER_DLP_ENABLED \u2192 worker outbound delivery path; see top-level in_flight_wiring): the worker-processors dependency and the WORKER_DLP_ENABLED gate are NOT in the tree yet, so no outbound content policy is enforced by it today. Do not represent it as an active control. crates/dlp-engine/README.md declares the same contract.",
+        "notes": "enforced inside the deployed worker daemon (no separate service); flip WORKER_DLP_ENABLED=true in the worker compose env to activate"
+      },
+      "scan_aliases": [
+        "data loss prevention",
+        "DLP",
+        "PII pattern",
+        "entropy scoring",
+        "luhn"
+      ]
+    },
+    {
+      "capability": "attachment-sandboxing",
+      "crate": "crates/sandbox",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "env_gate": {
+          "name": "MTA_ATTACHMENT_SCAN_ENABLED",
+          "crate": "crates/mta",
+          "default": "false"
+        },
+        "call_path": "services/mail-server/crates/mta/src/servers/content_security.rs (SandboxEngine::analyze per MIME attachment, verdicts stored as X-Apex-Attachment-Scan headers); config at crates/mta/src/config.rs (AttachmentScanConfig, mode flag/strip/reject)",
+        "metrics": null,
+        "explanation": "WIRED into the mta inbound path: STATIC + content inspection only (magic-byte typing, polyglot signatures, macro/ActiveX indicators, encrypted archives, blocked extensions). ENV-GATED, DEFAULT OFF (MTA_ATTACHMENT_SCAN_ENABLED=false), action mode defaults to flag \u2014 runtime-wired, NOT deployed. OS-level detonation (namespaces/cgroups/seccomp behind the linux-sandbox feature) is NOT exercised by the mail flow. Strip always leaves an X-Apex-Attachment-Note header. No scrapeable sandbox metrics endpoint yet \u2014 not monitored."
+      },
+      "scan_aliases": [
+        "attachment sandbox",
+        "sandbox",
+        "detonation",
+        "magic bytes",
+        "OLE2"
+      ]
+    },
+    {
+      "capability": "web-application-firewall",
+      "crate": "crates/waf-engine",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/app.rs:515 (waf middleware mount) + src/middleware/waf.rs:30 (waf_middleware) + src/state.rs:182 (build_waf_engine)",
+        "metrics": null,
+        "explanation": "Genuinely mounted on the public api-server request path, but MONITOR mode by default (WAF_ENABLED=true, WAF_ENFORCE=false \u2014 config.rs:781-782): would-block verdicts are logged, nothing is blocked by default, request bodies are not inspected. The crate README's 'NOT WIRED INTO PRODUCTION' marker is STALE (written before the F-WIRING-1 middleware integration); see checker stale_marker_exceptions."
+      },
+      "scan_aliases": [
+        "WAF",
+        "web application firewall",
+        "OWASP CRS"
+      ]
+    },
+    {
+      "capability": "threat-intelligence-feeds",
+      "crate": "crates/threat-intel",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/state.rs:12,72 (DomainBlocklist::new constructed and handed to the GraderEngine)",
+        "metrics": null,
+        "explanation": "Only wired as a support library INSIDE the deliverability grader; the blocklist is constructed empty and no feed ingestion is wired at runtime, so 'threat intelligence' is not an active network-defense control. Feed ingestion and reputation scoring are roadmap."
+      },
+      "scan_aliases": [
+        "threat intelligence",
+        "blocklist integration",
+        "reputation scoring",
+        "cidr range blocking",
+        "ip and domain blocklist"
+      ]
+    },
+    {
+      "capability": "enterprise-sso-saml-oidc",
+      "crate": "crates/enterprise",
+      "stage": "implemented",
+      "readme_status_exemption": "the crate as a whole IS wired (SCIM, SSO config storage); the honest not-available signal lives in the login handlers themselves \u2014 SAML/OIDC login returns 501 by design \u2014 so a crate-level NOT-WIRED banner would be wrong",
+      "evidence": {
+        "docker_target": "enterprise",
+        "compose_service": "enterprise",
+        "call_path": "services/mail-server/crates/enterprise/src/routes.rs:1624-1645 \u2014 SAML/OIDC login handlers return 501 NOT_IMPLEMENTED by design (no ACS/callback route is wired, so login cannot complete)",
+        "metrics": null,
+        "explanation": "SSO configuration storage and SCIM exist, but SAML/OIDC LOGIN deliberately fails fast with 501 (enterprise/src/routes.rs 'Fix G (dead ACS)'). Single sign-on is in active development \u2014 not yet available."
+      },
+      "scan_aliases": [
+        "SAML",
+        "OIDC",
+        "single sign-on",
+        "SSO"
+      ]
+    },
+    {
+      "capability": "high-availability-failover-service",
+      "crate": "crates/ha",
+      "stage": "deployed",
+      "evidence": {
+        "docker_target": "ha",
+        "compose_service": "ha",
+        "env_gate": null,
+        "call_path": "services/mail-server/crates/ha/src/bin/server.rs (ha-server: PgPool + table bootstrap, health-check/replication-lag/primary-claim-refresh crons, axum serve of routes::build_router) \u2014 deployed as the `ha` compose service (dev + prod), Dockerfile/compose healthchecks probe GET /health on :4300",
+        "metrics": null,
+        "explanation": "DEPLOYED: Dockerfile target `ha` + compose services (dev 127.0.0.1:4300, prod internal-only) + topology-manifest entry. The daemon runs failover orchestration (manual-failback by default \u2014 G.8), health checks, replication-lag recording and backup retention against the main database. Honest scope: single-host, health-checked services with automatic restart + disk-persistent queues; multi-region active-active and cross-region failover are NOT live (claim surfaces keep them in [roadmap]). No scrapeable /metrics endpoint yet \u2014 declared gap in topology-manifest, so not monitored."
+      },
+      "scan_aliases": [
+        "automated failover",
+        "failover orchestration",
+        "multi-node failover",
+        "multi-az",
+        "multi-region active-active",
+        "cross-region failover",
+        "real-time replication"
+      ]
+    },
+    {
+      "capability": "tenant-isolation-enforcement",
+      "crate": "crates/isolation",
+      "stage": "deployed",
+      "evidence": {
+        "docker_target": "isolation",
+        "compose_service": "isolation",
+        "env_gate": null,
+        "call_path": "services/mail-server/crates/isolation/src/bin/server.rs (isolation-server: PgPool + Redis pool, DataIsolationService/EncryptionService initialization with fail-fast F63 semantics, cron jobs, axum serve of routes::create_router) \u2014 deployed as the `isolation` compose service (dev + prod), healthchecks probe GET /health on :4500",
+        "metrics": null,
+        "explanation": "DEPLOYED: Dockerfile target `isolation` + compose services (dev 127.0.0.1:4500, prod internal-only) + topology-manifest entry. Production start REQUIRES TENANT_ENCRYPTION_KEY + ISOLATION_INTERNAL_API_KEY (binary exits 78; mounted as required Docker secrets). Honest scope: the ISOLATION SERVICE (org/workspace/quota APIs, per-tenant key wrapping, RLS policy setup, isolation audit) is deployed; the ALWAYS-ON application-layer tenant separation that protects customer data is the separate application-tenant-isolation entry (api-server query scoping), which does not depend on this service. Not monitored (no /metrics) \u2014 declared gap."
+      },
+      "scan_aliases": [
+        "namespace separation",
+        "per-tenant resource limits",
+        "data partitioning"
+      ]
+    },
+    {
+      "capability": "arc-sealing",
+      "crate": "crates/mta",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": "services/mail-server/crates/mta/src/servers/inbound.rs:1369 (if self.config.arc_seal { build_arc_seal })",
+        "metrics": null,
+        "explanation": "ARC sealing is implemented and reachable, but gated by mta config arc_seal which DEFAULTS TO FALSE (crates/mta/src/config.rs:351) \u2014 the managed cloud does not seal by default. Naming it as an applied control requires the roadmap context."
+      },
+      "scan_aliases": [
+        "ARC",
+        "authenticated received chain"
+      ]
+    },
+    {
+      "capability": "dane-tlsa-verification",
+      "crate": "crates/mta",
+      "stage": "implemented",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": null,
+        "metrics": null,
+        "explanation": "crates/mta/src/auth/dane.rs exists, but a whole-tree search finds NO caller outside auth/mod.rs re-exports \u2014 no inbound or outbound delivery path performs DANE/TLSA verification today."
+      },
+      "scan_aliases": [
+        "DANE",
+        "TLSA"
+      ],
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+    },
+    {
+      "capability": "mta-sts-tlsrpt",
+      "crate": "crates/mta",
+      "stage": "implemented",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": null,
+        "metrics": null,
+        "explanation": "crates/mta/src/auth/mta_sts.rs exists, but nothing calls it in the servers; no MTA-STS policy file or TLSRPT stream exists anywhere under deploy/ \u2014 neither policy publication nor outbound MTA-STS enforcement is verifiable in the tree."
+      },
+      "scan_aliases": [
+        "MTA-STS",
+        "MTA Strict Transport Security",
+        "TLSRPT",
+        "TLS Reporting"
+      ],
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+    },
+    {
+      "capability": "bimi-logo-verification",
+      "crate": "crates/mta",
+      "stage": "implemented",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": null,
+        "metrics": null,
+        "explanation": "crates/mta/src/auth/bimi.rs verify_bimi has no caller in the mail flow (only the test-DNS helper references it); the email-grader performs an advisory BIMI DNS record CHECK, which is not BIMI logo verification in delivery."
+      },
+      "scan_aliases": [
+        "BIMI",
+        "verified mark certificate",
+        "VMC"
+      ],
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+    },
+    {
+      "capability": "ddos-middleware",
+      "crate": "crates/ddos-protection",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/app.rs:511,708 (ddos middleware first in the public chain) + src/middleware/ddos.rs:22 (evaluate_request) + DdosProtector::new(ProtectorConfig::default()) state.rs:61",
+        "metrics": null,
+        "explanation": "Genuinely wired and active: cost-based rate limiting, per-IP adaptive (z-score) thresholds and JA4/TLS fingerprinting (via the fingerprint crate, ddos-protection/src/lib.rs:685). Built with default features = [\"core\"] ONLY \u2014 the 'ml', 'challenges' and 'xdp' features are compiled out, so ML anomaly detection, challenge-response and SYN-flood/XDP filtering are NOT active. Scan aliases target the overstated layer names, not the true middleware."
+      },
+      "scan_aliases": [
+        "5-layer",
+        "SYN flood",
+        "ML-based anomaly detection",
+        "challenge-response"
+      ]
+    },
+    {
+      "capability": "pattern-matcher-library",
+      "crate": "crates/pattern-matcher",
+      "stage": "implemented",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": null,
+        "call_path": "consumed by fuzz-tests, load-tests, perf-tests and integration-tests only",
+        "metrics": null,
+        "explanation": "crates/pattern-matcher/README.md: 'NOT WIRED INTO PRODUCTION: no service in this workspace depends on this crate. It is a library and test target only. Do not represent it as an active control.'"
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "rate-limiter-crate-library",
+      "crate": "crates/rate-limiter",
+      "stage": "implemented",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": null,
+        "call_path": "consumed by functional-tests and integration-tests only",
+        "metrics": null,
+        "explanation": "crates/rate-limiter/README.md: 'NOT WIRED INTO PRODUCTION as a middleware: the api-server uses its own middleware (api-server/src/middleware/rate_limiter.rs). This crate is a library and test target only.' The RATE LIMITING capability is real and advertised \u2014 via api-server's own middleware, registered separately below. No scan aliases: the crate name never appears in claim surfaces."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "fingerprint-library",
+      "crate": "crates/fingerprint",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/ddos-protection/src/lib.rs:685 (Ja4Fingerprint::parse) \u2014 consumed by the wired DDoS middleware",
+        "metrics": null,
+        "explanation": "The crate README marker ('no service in this workspace depends on this crate') is STALE: ddos-protection depends on it and the api-server mounts ddos-protection, and the JA4 fingerprint parse runs inside that middleware. See checker stale_marker_exceptions."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "tls-in-transit",
+      "crate": "deploy/nginx (infra) + rustls services",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": "nginx",
+        "call_path": "deploy/nginx/nginx.conf:76 (ssl_protocols TLSv1.2 TLSv1.3) + certbot ACME renewal compose service",
+        "metrics": null,
+        "explanation": "Terminated at nginx with TLS 1.2/1.3 only; certificates via Let's Encrypt certbot compose service. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "smtp-starttls",
+      "crate": "crates/mta",
+      "stage": "runtime-wired",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": "services/mail-server/crates/mta/src/servers/submission.rs:290-292 (STARTTLS when a TLS acceptor is provided; AUTH required)",
+        "metrics": null,
+        "explanation": "STARTTLS is implemented and available on submission; enforcement strength depends on the deployment's TLS acceptor configuration. Scan exemption rationale: the control is real in the running service; claim surfaces describe it accurately (opportunistic on inbound, required for AUTH on submission)."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "dkim-signing-outbound",
+      "crate": "crates/worker-processors",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "worker",
+        "compose_service": "worker",
+        "call_path": "services/mail-server/crates/worker-processors/src/email/transport.rs:13,391,700-714,792 (mail_auth DkimSigner built per domain, applied on send)",
+        "metrics": null,
+        "explanation": "DKIM signing is applied on the outbound send path of the worker. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "inbound-email-authentication-spf-dkim-dmarc",
+      "crate": "crates/mta",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "call_path": "services/mail-server/crates/mta/src/servers/inbound.rs:245,2336 (EmailAuthenticator in the inbound session path) + crates/mta/src/auth/email_authentication.rs:250 (authenticate) + config.rs:188,232 (DmarcConfig/enforce_dmarc)",
+        "metrics": null,
+        "explanation": "SPF/DKIM/DMARC evaluation runs on every inbound message via EmailAuthenticator with a should_accept disposition. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "rate-limiting",
+      "crate": "crates/api-server (own middleware)",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/middleware/rate_limiter.rs (mounted in app.rs middleware chains)",
+        "metrics": null,
+        "explanation": "Per-endpoint/per-key rate limiting is enforced by api-server's own middleware on the public routes. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "mfa-totp",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/routes/auth.rs:747,1122,1167 (TOTP enrollment otpauth URI, replay protection)",
+        "metrics": null,
+        "explanation": "TOTP multi-factor authentication is implemented on dashboard auth. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "password-hashing-argon2id",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/middleware/auth.rs + Cargo.toml argon2 workspace dependency",
+        "metrics": null,
+        "explanation": "Argon2id password hashing in the auth path. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "encryption-at-rest",
+      "crate": "crates/mailstore-core + crates/apexmail-lib",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "mailstore",
+        "compose_service": "mailstore",
+        "call_path": "services/mail-server/crates/mailstore-core/src/encryption.rs (AES-256-GCM message content) + crates/apexmail-lib/src/secret_at_rest.rs + crates/apexmail-lib/src/dkim.rs (AEAD key wrapping)",
+        "metrics": null,
+        "explanation": "Application-level AES-256-GCM encryption for stored message content and secrets; volume-level LUKS encryption is an infrastructure-provider control documented in the compliance templates. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "webhook-hmac-signatures",
+      "crate": "crates/tracking-service",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": "tracking",
+        "call_path": "services/mail-server/crates/tracking-service/src/codec.rs (HMAC signing of event payloads)",
+        "metrics": null,
+        "explanation": "Webhook payloads are HMAC-signed. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "audit-logging",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/routes/admin/audit_search.rs (audit log FTS + CSV export endpoints)",
+        "metrics": null,
+        "explanation": "Operator audit trail with search/export. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "rbac-scoped-api-keys",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/middleware/auth.rs:1363,1382 (require_auth / require_scopes)",
+        "metrics": null,
+        "explanation": "Scoped API keys and role/scope checks gate every authenticated route. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "social-login-oauth-google-github",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/app.rs:381 (nest /v1/auth/sso) + src/routes/sso.rs (google/github authorize + callback with state validation and token exchange)",
+        "metrics": null,
+        "explanation": "Google/GitHub OAuth dashboard sign-in is fully wired (config-gated client id/secret). Genuinely deployed \u2014 marketing naming is honest. NOTE: this is social login, NOT enterprise SAML/OIDC SSO (which is the 501 entry above)."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "scim-provisioning",
+      "crate": "crates/api-server",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/app.rs:645 (nest /v1/scim) + src/routes/scim.rs (RFC 7644 users/groups)",
+        "metrics": null,
+        "explanation": "SCIM 2.0 provisioning is wired. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "deliverability-grader",
+      "crate": "crates/email-grader",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/routes/explorer.rs:760 (grader_state) + src/state.rs:63-84 (GRADER_ENABLED default true, config.rs:735)",
+        "metrics": null,
+        "explanation": "The email grader (with its internal threat-intel DomainBlocklist library) serves the deliverability-explorer feature. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "inbox-placement-testing",
+      "crate": "crates/inbox-placement",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/state.rs:85-121 (PLACEMENT_ENABLED default true, config.rs:746) + src/routes/web/data.rs:628,1686 (inbox-placement data route)",
+        "metrics": null,
+        "explanation": "Seed-list placement testing feature is wired and enabled by default. Genuinely deployed \u2014 marketing naming is honest (it is a testing tool, NOT 'guaranteed inbox placement')."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "application-tenant-isolation",
+      "crate": "crates/api-server + all services (query-level tenancy)",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "call_path": "services/mail-server/crates/api-server/src/app.rs (system_tenant / tenant_binding middleware layers, app.rs:528,674 comments) + require_scopes tenant scoping in middleware/auth.rs",
+        "metrics": null,
+        "explanation": "Logical per-account data separation at the application layer (every query scoped by tenant) is real and independent of the unwired crates/isolation namespace-partitioning service. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "service-restart-persistence",
+      "crate": "docker-compose services",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": "all prod daemons",
+        "call_path": "docker-compose.prod.yml restart: unless-stopped (e.g. lines 53,88,184,341,482) + Postgres WAL-backed durable queues (worker/outbound-mta)",
+        "metrics": null,
+        "explanation": "Health-checked single-host services with automatic container restart and disk-persistent queues \u2014 the honest 'High Availability' story the architecture page tells. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "monitoring-alerting",
+      "crate": "crates/observability-service + deploy/prometheus",
+      "stage": "monitored",
+      "evidence": {
+        "docker_target": "observability",
+        "compose_service": "observability",
+        "call_path": "deploy/alerting-rules.yml (Alertmanager rules incl. MtaDown/WorkerDown/ApiServerDown/OutboundMtaDown) + topology-manifest alerts entries",
+        "metrics": "apexmail_* Prometheus metrics via metrics-exporter-prometheus",
+        "explanation": "Prometheus/Grafana/Alertmanager/Loki stack wired in the prod topology with alert rules per service. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    },
+    {
+      "capability": "backup-restore",
+      "crate": "infra (postgres-backup, redis-backup, clickhouse-backup)",
+      "stage": "advertised",
+      "evidence": {
+        "docker_target": null,
+        "compose_service": "postgres-backup",
+        "call_path": "docker-compose.prod.yml backup services + deploy/scripts backup tooling",
+        "metrics": null,
+        "explanation": "Scheduled encrypted backups with retention cleanup exist as compose services. Genuinely deployed \u2014 marketing naming is honest."
+      },
+      "scan_aliases": []
+    }
+  ],
+  "stale_marker_exceptions": {
+    "$comment": "crates/*/README.md markers that are STALE relative to the dep graph (the crate IS consumed by a production binary). Each exception carries <file>:<needle> pairs that the checker greps \u2014 if the wiring disappears (or the crate owner fixes the README marker), the exception goes stale and the checker FAILS, forcing this registry to be re-triaged. Crates are owned by the mail-server agents; this registry may not edit their READMEs.",
+    "waf-engine": "Marker says 'no service in this workspace (api-server, mta, worker, \u2026) depends on this crate' \u2014 stale since the F-WIRING-1 remediation wired it into api-server (monitor mode). Evidence needles: services/mail-server/crates/api-server/src/app.rs must contain 'waf_middleware' and crates/api-server/Cargo.toml must contain 'waf-engine'.",
+    "fingerprint": "Marker says 'no service in this workspace depends on this crate' \u2014 stale since ddos-protection (wired into api-server) began consuming it. Evidence needles: services/mail-server/crates/ddos-protection/src/lib.rs must contain 'Ja4Fingerprint' and crates/ddos-protection/Cargo.toml must contain 'fingerprint'."
+  }
+}

@@ -614,6 +614,9 @@ services:
       METRICS_PORT: "9093"
       EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-ses}
       AWS_REGION: ${AWS_REGION:-eu-west-1}
+      # ── Customer automation executor (moved from sales-autopilot) ────────
+      WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
+      AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
     networks:
       - apexmail_backend
       - apexmail_data_internal
@@ -1022,7 +1025,10 @@ services:
       SALES_UNSUBSCRIBE_SECRET: ${SALES_UNSUBSCRIBE_SECRET:-dev-sales-unsubscribe-secret-change-me-0123456789}
       SALES_PUBLIC_BASE_URL: ${SALES_PUBLIC_BASE_URL:-http://localhost:3010}
       SALES_UNSUBSCRIBE_REDIRECT_URL: ${SALES_UNSUBSCRIBE_REDIRECT_URL:-}
-      SALES_ALLOWED_TENANTS: ${SALES_ALLOWED_TENANTS:-}
+      # The sales brain serves the SYSTEM tenant only; any other value makes
+      # the service refuse to start (config::require_system_tenant_scope).
+      # Customer automations run in the worker fleet, not here.
+      SALES_ALLOWED_TENANTS: ${SALES_ALLOWED_TENANTS:-system}
       SALES_DISPATCH_INTERVAL_SECS: ${SALES_DISPATCH_INTERVAL_SECS:-30}
       SALES_DISPATCH_BATCH_SIZE: ${SALES_DISPATCH_BATCH_SIZE:-100}
       SALES_DISPATCH_CONCURRENCY: ${SALES_DISPATCH_CONCURRENCY:-4}
@@ -1163,6 +1169,145 @@ services:
       - postgres_password
       - redis_password
       - clickhouse_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # HA SERVICE (failover / health-check / backup / replication orchestrator)
+  # ===========================================================================
+  # crates/ha — health-check + replication-lag crons, primary-claim refresh,
+  # backup retention. Reads DB_*/REDIS_* env parts (NOT DATABASE_URL); the
+  # wrapper bridges the secret files to DB_PASSWORD / REDIS_PASSWORD. Starts
+  # only after the migrator has applied migration 194 (ha_health_checks) —
+  # the binary aborts otherwise. GET /health is the unauthenticated liveness
+  # probe used by the healthcheck.
+  ha:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: ha
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "ha-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,ha=info}
+      HA_PORT: ${HA_PORT:-4300}
+      # ── Database / Redis (parts bridged from the Docker secrets) ──────────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # Failback defaults to MANUAL (G.8) — automatic failback can promote a
+      # lagging original primary; operators opt in explicitly.
+      FAILBACK_ENABLED: ${FAILBACK_ENABLED:-false}
+      # Chaos engineering stays OFF everywhere outside a deliberate drill.
+      CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+    healthcheck:
+      # Real health endpoint (GET /health), not just a TCP bind probe.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4300/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # ISOLATION SERVICE (tenant isolation: quotas, per-tenant keys, RLS policy)
+  # ===========================================================================
+  # crates/isolation — org/workspace/quota APIs, per-tenant encryption keys,
+  # rate limiting and the isolation audit trail. Reads its own
+  # ISOLATION_DB_* / ISOLATION_REDIS_* parts (NOT DATABASE_URL); the wrapper
+  # (see deploy/scripts/entrypoint-wrapper.sh) bridges those secret files.
+  # The iso_* / ha_* tables live in the MAIN application database (they are
+  # part of the canonical migration chain), so ISOLATION_DB_NAME follows
+  # POSTGRES_DB. GET /health is the unauthenticated liveness probe.
+  isolation:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: isolation
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "isolation-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,isolation=info}
+      ISOLATION_PORT: ${ISOLATION_PORT:-4500}
+      # ── Database / Redis (parts bridged from the Docker secrets) ──────────
+      ISOLATION_DB_HOST: postgres
+      ISOLATION_DB_PORT: 5432
+      ISOLATION_DB_NAME: ${POSTGRES_DB:-apexmail}
+      ISOLATION_DB_USER: ${POSTGRES_USER:-apexmail}
+      ISOLATION_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      ISOLATION_REDIS_HOST: redis
+      ISOLATION_REDIS_PORT: 6379
+      ISOLATION_REDIS_DB: "3"
+      ISOLATION_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Auth / encryption ─────────────────────────────────────────────────
+      # Development keeps the ephemeral generated key (development mode does
+      # not require these); PRODUCTION (docker-compose.prod.yml) mounts the
+      # isolation_internal_api_key / tenant_encryption_key Docker secrets —
+      # the binary exits 78 without them under NODE_ENV=production.
+      ISOLATION_INTERNAL_API_KEY: ${ISOLATION_INTERNAL_API_KEY:-dev-isolation-internal-api-key-change-me}
+      TENANT_ENCRYPTION_KEY: ${TENANT_ENCRYPTION_KEY:-dev-tenant-encryption-key-change-me-32b}
+      CORS_ORIGINS: ${ISOLATION_CORS_ORIGINS:-http://localhost:3000}
+    healthcheck:
+      # Real health endpoint (GET /health), not just a TCP bind probe.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4500/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
     logging: *default-logging
 
   # ===========================================================================

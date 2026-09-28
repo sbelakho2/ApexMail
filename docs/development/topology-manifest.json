@@ -175,6 +175,24 @@
       "notes": "canonical schema migration job; prod compose runs it before the services"
     },
     {
+      "name": "ha",
+      "class": "daemon",
+      "docker_target": "ha",
+      "compose_dev": "ha",
+      "compose_prod": "ha",
+      "alerts": [],
+      "notes": "HA failover/health-check/backup/replication orchestrator (crates/ha, ha-server :4300). DECLARED GAP: the binary exposes NO scrapeable /metrics endpoint (only the JSON GET /health liveness route), so no Prometheus alert can be declared yet — adding an alert requires a metrics exporter in the crate first. Dockerfile/compose healthchecks probe the real GET /health endpoint."
+    },
+    {
+      "name": "isolation",
+      "class": "daemon",
+      "docker_target": "isolation",
+      "compose_dev": "isolation",
+      "compose_prod": "isolation",
+      "alerts": [],
+      "notes": "Tenant isolation service (crates/isolation, isolation-server :4500): org/workspace/quota APIs, per-tenant encryption keys, rate limiting, isolation audit. DECLARED GAP: no scrapeable /metrics endpoint (JSON GET /health only) — no Prometheus alert can be declared yet. Production start REQUIRES the isolation_internal_api_key + tenant_encryption_key Docker secrets (binary exits 78 without them)."
+    },
+    {
       "name": "ai-embeddings",
       "class": "build-only",
       "docker_target": "ai-embeddings",
