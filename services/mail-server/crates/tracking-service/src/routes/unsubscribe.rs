@@ -116,7 +116,7 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, None) {
+    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
         Some(d) => d,
         None => {
             warn!("Unsubscribe POST: invalid or expired token");
@@ -222,7 +222,7 @@ pub async fn handle_unsub_get(
         return Html(render_error_page("Invalid or expired unsubscribe link")).into_response();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, None) {
+    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
         Some(d) => d,
         None => {
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
@@ -274,7 +274,7 @@ pub async fn handle_unsub_confirm_post(
         return Html(render_error_page("Invalid confirmation request.")).into_response();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, None) {
+    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
         Some(d) => d,
         None => {
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()

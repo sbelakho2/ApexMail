@@ -118,6 +118,10 @@ fn test_config() -> Config {
     Config {
         ai_service_base_url: String::new(),
         cp_auth: Default::default(),
+        pdf_renderer_auth_token: None,
+        template_renderer_auth_token: None,
+        devex_auth_token: None,
+        ai_embeddings_auth_token: None,
         public_rate_limit_enabled: false,
         port: 3000,
         host: "0.0.0.0".into(),

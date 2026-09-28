@@ -105,6 +105,7 @@ fn config(redis_url: &str, jwt_public_key_pem: &str) -> Config {
             redirect_status: 302,
             trusted_proxies: Vec::new(),
             max_redirect_url_len: 2048,
+            token_max_age_days: None,
         },
         rate_limit: RateLimitConfig {
             enabled: false,

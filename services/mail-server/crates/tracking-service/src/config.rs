@@ -72,6 +72,12 @@ pub struct TrackingConfig {
     /// length are rejected and the fallback is used instead.
     #[serde(default = "default_max_redirect_url_len")]
     pub max_redirect_url_len: usize,
+    /// Maximum age of unsubscribe/preference tokens, in DAYS. None = the
+    /// codec's built-in 90-day lifetime (stale signed URLs must have an
+    /// explicit lifetime — audit #14). Some(0) = no expiry (intended
+    /// indefinite semantics, opt-in).
+    #[serde(default)]
+    pub token_max_age_days: Option<u64>,
 }
 
 fn default_max_redirect_url_len() -> usize {
@@ -223,6 +229,13 @@ pub fn load() -> Result<Config> {
     let max_per_minute = var_or_u32("RATE_LIMIT_MAX_PER_MINUTE", 1000);
     let metrics_port = var_or_u16("METRICS_PORT", 9092);
     let max_redirect_url_len = var_or_usize("TRACKING_MAX_REDIRECT_URL_LEN", 2048);
+    // Audit #14: explicit token lifetime. Unset → codec default (90 days);
+    // 0 → intended-indefinite; absurd values clamp to 100 years.
+    let token_max_age_days = var_or("TRACKING_TOKEN_MAX_AGE_DAYS", "")
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|days| days.min(36_500));
 
     // #199:Runtime validation of config values
     if max_connections == 0 || max_connections > 10_000 {
@@ -279,6 +292,7 @@ pub fn load() -> Result<Config> {
             redirect_status,
             trusted_proxies,
             max_redirect_url_len,
+            token_max_age_days,
         },
         rate_limit: RateLimitConfig {
             enabled: var_or_bool("RATE_LIMIT_ENABLED", true),
@@ -494,6 +508,68 @@ mod tests {
             let err = with_env(&vars, load).expect_err(key);
             assert!(err.to_string().contains(needle), "{key}={value:?}: {err}");
         }
+    }
+
+    /// Audit #14: the explicit token lifetime parses from its env; unset
+    /// stays None (codec default 90 days); 0 = intended-indefinite; garbage
+    /// and absurd values degrade safely (None / clamped to 100 years).
+    #[test]
+    fn token_max_age_days_parses_overrides_and_degrades_safely() {
+        let secret = "01234567890123456789012345678901";
+        let base: Vec<(&str, Option<&str>)> = vec![
+            ("TRACKING_SECRET_KEY", Some(secret)),
+            ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+        ];
+        let cfg = with_env(&base, load).expect("baseline config");
+        assert_eq!(cfg.tracking.token_max_age_days, None, "unset = codec default");
+
+        let cfg = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some(secret)),
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+                ("TRACKING_TOKEN_MAX_AGE_DAYS", Some("30")),
+            ],
+            load,
+        )
+        .expect("override config");
+        assert_eq!(cfg.tracking.token_max_age_days, Some(30));
+
+        let cfg = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some(secret)),
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+                ("TRACKING_TOKEN_MAX_AGE_DAYS", Some("0")),
+            ],
+            load,
+        )
+        .expect("indefinite config");
+        assert_eq!(cfg.tracking.token_max_age_days, Some(0), "0 = intended-indefinite");
+
+        let cfg = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some(secret)),
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+                ("TRACKING_TOKEN_MAX_AGE_DAYS", Some("banana")),
+            ],
+            load,
+        )
+        .expect("garbage config");
+        assert_eq!(cfg.tracking.token_max_age_days, None, "garbage degrades to the codec default");
+
+        let cfg = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some(secret)),
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+                ("TRACKING_TOKEN_MAX_AGE_DAYS", Some("999999999")),
+            ],
+            load,
+        )
+        .expect("absurd config");
+        assert_eq!(
+            cfg.tracking.token_max_age_days,
+            Some(36_500),
+            "absurd values clamp to 100 years"
+        );
     }
 
     #[test]

@@ -501,7 +501,9 @@ fn parse_unsub_payload_v2(buf: &[u8]) -> Option<(String, String, String, u64)> {
 }
 
 /// Shared age gate for unsubscribe/preference tokens (v1 and v2 payloads):
-/// rejected once older than `max_age_days` (default 90).
+/// rejected once older than `max_age_days` (codec default 90 days; the
+/// operator overrides via TRACKING_TOKEN_MAX_AGE_DAYS — audit #14: stale
+/// signed URLs have an explicit lifetime, never indefinite-by-accident).
 fn unsubscribe_token_age_ok(timestamp_ms: u64, max_age_days: Option<u64>) -> bool {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -29,8 +29,11 @@ mod devex {
     use devex_service::routes::{build_router, AppState};
 
     fn app() -> axum::Router {
-        let mut state = AppState::from_config(DevExConfig::default()).expect("devex state");
-        state.service_token = "test-key".into();
+        // Batch fix: the per-workload credential migration replaced the raw
+        // service_token field with ServiceAuth — set the dedicated env before
+        // state construction (nextest isolates each test in its own process).
+        std::env::set_var("DEVEX_AUTH_TOKEN", "test-key");
+        let state = AppState::from_config(DevExConfig::default()).expect("devex state");
         build_router(state)
     }
 
