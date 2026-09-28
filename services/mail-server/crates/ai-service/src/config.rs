@@ -53,6 +53,13 @@ pub struct AiConfig {
     /// This is intentionally omitted from serialized status/config output.
     #[serde(default, skip_serializing)]
     pub database_url: String,
+    /// P1-SECURITY: dedicated credential for the AI-control routes (`/train`,
+    /// `/training/jobs/:job_id`, `/evaluate`, `/admin/reindex`). The universal
+    /// `INTERNAL_SERVICE_TOKEN` must never authorize model lifecycle changes.
+    /// REQUIRED in production (`APP_ENV` unset counts as production) — the
+    /// service refuses to boot without it. Omitted from serialized output.
+    #[serde(default, skip_serializing)]
+    pub ai_admin_token: String,
     /// AWS region used by the active SES custom MAIL FROM configuration.
     pub aws_region: String,
     /// Shared deployment transport selection. Only explicit `smtp` selects the
@@ -84,6 +91,7 @@ impl Default for AiConfig {
             training_runner: String::new(),
             training_working_dir: String::new(),
             database_url: String::new(),
+            ai_admin_token: String::new(),
             aws_region: "eu-central-1".into(),
             email_transport: String::new(),
         }
@@ -153,6 +161,7 @@ impl AiConfig {
             database_url: std::env::var("AI_DATABASE_URL")
                 .or_else(|_| std::env::var("DATABASE_URL"))
                 .unwrap_or(defaults.database_url),
+            ai_admin_token: std::env::var("AI_ADMIN_TOKEN").unwrap_or(defaults.ai_admin_token),
             aws_region: std::env::var("AWS_REGION").unwrap_or(defaults.aws_region),
             email_transport: std::env::var("EMAIL_TRANSPORT_TYPE")
                 .unwrap_or(defaults.email_transport),
@@ -213,8 +222,31 @@ impl AiConfig {
         if self.aws_region.trim().is_empty() {
             return Err("AWS_REGION must not be empty".into());
         }
+        // P1-SECURITY: the AI-control credential is mandatory wherever
+        // production traffic may be served. Same production detection as the
+        // other services (sales-autopilot): APP_ENV == "production", and an
+        // UNSET APP_ENV counts as production (fail closed). Without the
+        // credential the service refuses to boot rather than serving
+        // /train, /evaluate and /admin/reindex under the shared universal
+        // INTERNAL_SERVICE_TOKEN.
+        if is_production_mode() && self.ai_admin_token.trim().is_empty() {
+            return Err(
+                "AI_ADMIN_TOKEN must be set when APP_ENV is production (or unset): the \
+                 universal INTERNAL_SERVICE_TOKEN must not authorize AI-control routes"
+                    .into(),
+            );
+        }
         Ok(())
     }
+}
+
+/// Production detection following the workspace convention (see
+/// sales-autopilot): `APP_ENV == "production"` case-insensitively — and an
+/// UNSET `APP_ENV` is treated as production (fail closed).
+pub fn is_production_mode() -> bool {
+    std::env::var("APP_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(true)
 }
 
 fn env_bool(name: &str, default: bool) -> Result<bool, String> {
@@ -241,6 +273,7 @@ pub fn planner_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{EnvGuard, ENV_SERIAL};
 
     #[test]
     fn test_default_config() {
@@ -262,6 +295,7 @@ mod tests {
         assert_eq!(cfg.checkpoint_path, "./data/ai-service/checkpoints/");
         assert!(cfg.training_runner.is_empty());
         assert!(cfg.database_url.is_empty());
+        assert!(cfg.ai_admin_token.is_empty());
         assert_eq!(cfg.aws_region, "eu-central-1");
     }
 
@@ -290,6 +324,42 @@ mod tests {
             Ok(false)
         ));
         assert!(env_bool_value("maybe").is_err());
+    }
+
+    /// P1-SECURITY: production boot refuses without the dedicated AI-admin
+    /// credential — an unset APP_ENV counts as production (fail closed), and
+    /// a loaded production config carries the credential.
+    #[test]
+    fn production_boots_require_ai_admin_token() {
+        let _serial = ENV_SERIAL.blocking_lock();
+        // APP_ENV unset → production → refusal.
+        let _guard = EnvGuard::with(&[("APP_ENV", None), ("AI_ADMIN_TOKEN", None)]);
+        assert!(
+            AiConfig::from_env().is_err(),
+            "production without AI_ADMIN_TOKEN must refuse to boot"
+        );
+        // Explicit production likewise.
+        let _guard = EnvGuard::with(&[
+            ("APP_ENV", Some("production")),
+            ("AI_ADMIN_TOKEN", None),
+        ]);
+        assert!(AiConfig::from_env().is_err());
+        // With the credential set, production config loads and carries it.
+        let _guard = EnvGuard::with(&[
+            ("APP_ENV", Some("Production")),
+            ("AI_ADMIN_TOKEN", Some("admin-secret")),
+        ]);
+        let cfg = AiConfig::from_env().expect("production config with AI_ADMIN_TOKEN");
+        assert_eq!(cfg.ai_admin_token, "admin-secret");
+        // A non-production deployment still loads without the credential.
+        let _guard = EnvGuard::with(&[
+            ("APP_ENV", Some("development")),
+            ("AI_ADMIN_TOKEN", None),
+        ]);
+        assert!(AiConfig::from_env().is_ok());
+        // And the credential is never serialized into status/config output.
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("admin-secret"), "{json}");
     }
 
     fn env_bool_value(value: &str) -> Result<bool, String> {

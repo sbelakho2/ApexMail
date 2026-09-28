@@ -51,6 +51,11 @@ pub struct AppState {
     pub training_enabled: bool,
     pub request_timeout: Duration,
     pub service_token: String,
+    /// P1-SECURITY: the DEDICATED credential for AI-control routes
+    /// (`/train`, `/training/jobs/:job_id`, `/evaluate`, `/admin/reindex`).
+    /// The universal `INTERNAL_SERVICE_TOKEN` must never authorize model
+    /// lifecycle changes; production boot refuses without this credential.
+    pub ai_admin_token: String,
     /// Enforces `inference_rate_limit` per `inference_rate_limit_window_secs`
     /// for model-inference routes, keyed by the authenticated tenant identity.
     pub rate_governor: RateGovernor,
@@ -107,6 +112,10 @@ impl AppState {
             training_enabled,
             request_timeout,
             service_token,
+            // P1-SECURITY: the AI-control credential rides in the validated
+            // deployment config (refused at boot in production when unset —
+            // see `AiConfig::validate`).
+            ai_admin_token: config.ai_admin_token.clone(),
             rate_governor: RateGovernor::new(
                 config.inference_rate_limit,
                 Duration::from_secs(config.inference_rate_limit_window_secs),
@@ -364,8 +373,11 @@ const MAX_TENANT_RATE_KEY_LEN: usize = 64;
 
 /// Rate-limit bucket used when no tenant identity is forwarded at all — i.e.
 /// genuinely tenant-less internal calls from the authenticated control plane
-/// (batch jobs, health probes). A header that is PRESENT but invalid is
-/// rejected instead of landing here (see [`tenant_rate_key_from_headers`]).
+/// (batch jobs, health probes) hitting the INFERENCE route `/predict`, which
+/// touches no tenant data. A header that is PRESENT but invalid is rejected
+/// instead of landing here (see [`tenant_rate_key_from_headers`]). Tenant-
+/// SCOPED routes (`/chat`, `/admin/chat/history`) must never use this
+/// fallback — they require the header ([`required_tenant_identity`]).
 const CONTROL_PLANE_RATE_KEY: &str = "_control-plane";
 
 /// Resolve the inference rate-limit key for a request.
@@ -378,7 +390,7 @@ const CONTROL_PLANE_RATE_KEY: &str = "_control-plane";
 /// must at least be bounded: length and charset are validated (UUID/ULID
 /// shapes pass) so a caller cannot mint arbitrary or oversized rate-limit
 /// identities. A present-but-invalid header is a 400; an absent (or blank)
-/// header falls back to [`CONTROL_PLANE_RATE_KEY`].
+/// header falls back to [`CONTROL_PLANE_RATE_KEY`]. Used by `/predict` ONLY.
 fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static str> {
     // Absent header → the documented control-plane fallback. A PRESENT
     // header that cannot even be read as UTF-8 text is a rejection: treating
@@ -393,6 +405,42 @@ fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static 
     if raw.is_empty() {
         return Ok(CONTROL_PLANE_RATE_KEY.to_string());
     }
+    validate_tenant_identity(raw).map(str::to_string)
+}
+
+/// Why a tenant-scoped route refused to resolve a tenant identity.
+enum TenantIdentityError {
+    /// Header absent or blank — the caller asserted no tenant at all.
+    Missing,
+    /// Header present but not a valid bounded identity.
+    Invalid(&'static str),
+}
+
+/// Resolve the REQUIRED forwarded tenant identity for tenant-scoped routes
+/// (`/chat`, `/admin/chat/history`).
+///
+/// P1-SECURITY: these routes must NEVER fall back to the `_control-plane`
+/// default. The universal internal token authenticates many upstream callers
+/// with no per-caller identity, so a missing header resolves to NO identity:
+/// a caller that merely omits the header must not be able to put an
+/// arbitrary tenant in the request body and act as that tenant. The same
+/// bounded charset/length rules as [`tenant_rate_key_from_headers`] apply.
+fn required_tenant_identity(headers: &HeaderMap) -> Result<String, TenantIdentityError> {
+    let Some(value) = headers.get("x-apexmail-tenant-id") else {
+        return Err(TenantIdentityError::Missing);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| TenantIdentityError::Invalid("must be valid UTF-8 header text"))?
+        .trim();
+    if raw.is_empty() {
+        return Err(TenantIdentityError::Missing);
+    }
+    validate_tenant_identity(raw).map(str::to_string).map_err(TenantIdentityError::Invalid)
+}
+
+/// Shared charset/length validation for a trimmed tenant identity value.
+fn validate_tenant_identity(raw: &str) -> Result<&str, &'static str> {
     if raw.len() > MAX_TENANT_RATE_KEY_LEN {
         return Err("must be at most 64 characters");
     }
@@ -402,7 +450,7 @@ fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static 
     {
         return Err("only [A-Za-z0-9._:-] are allowed");
     }
-    Ok(raw.to_string())
+    Ok(raw)
 }
 
 async fn predict_handler(
@@ -526,29 +574,39 @@ async fn domain_dns_handler(
 
 /// POST /chat — called by the authenticated control plane (api-server) with
 /// the END USER's tenant/user identity. This service never authenticates the
-/// end user itself; the token-authenticated caller asserts identity, and the
-/// caller assembles the account context from its own tenant-scoped queries.
+/// end user itself; the token-authenticated caller asserts identity via the
+/// REQUIRED tenant header, and the caller assembles the account context from
+/// its own tenant-scoped queries.
 async fn chat_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<crate::chat::ChatRequest>,
 ) -> Response {
-    // Per-tenant rate limit, mirroring /predict. The caller forwards the
-    // end user's tenant via the header; a malformed header is rejected.
-    let tenant = match tenant_rate_key_from_headers(&headers) {
-        Ok(key) => key,
-        Err(reason) => {
+    // P1-SECURITY: the tenant header is REQUIRED. A missing header is a 401 —
+    // never the `_control-plane` bucket, which would let a holder of the
+    // universal internal token omit the header and put ANY tenant in the
+    // body. A malformed header is still a 400 before any rate bucket.
+    let tenant = match required_tenant_identity(&headers) {
+        Ok(tenant) => tenant,
+        Err(TenantIdentityError::Missing) => {
+            return error_response_json(
+                StatusCode::UNAUTHORIZED,
+                "x-apexmail-tenant-id is required",
+            );
+        }
+        Err(TenantIdentityError::Invalid(reason)) => {
             return error_response_json(
                 StatusCode::BAD_REQUEST,
                 &format!("invalid x-apexmail-tenant-id: {reason}"),
-            )
+            );
         }
     };
-    // The header is set by the trusted gateway AFTER it authorized that
-    // tenant; the body tenant is caller-supplied. When both are present
-    // they must agree — otherwise the request would bill/limit one tenant
-    // while executing (and potentially leaking) as another.
-    if tenant != CONTROL_PLANE_RATE_KEY && tenant != req.tenant_id {
+    // P1-SECURITY: EXACT body-vs-header tenant equality. The header is set by
+    // the trusted gateway AFTER it authorized that tenant; the body tenant is
+    // caller-supplied. Any difference is a cross-tenant attempt: reject with
+    // 403 and log it (a missing header can no longer reach this point, so
+    // equality is enforced on every request).
+    if tenant != req.tenant_id {
         tracing::warn!(
             header_tenant = %tenant,
             "chat request tenant mismatch between x-apexmail-tenant-id and body tenant_id"
@@ -564,11 +622,10 @@ async fn chat_handler(
     if req.message.trim().is_empty() {
         return error_response_json(StatusCode::BAD_REQUEST, "message must not be empty");
     }
-    if req.tenant_id.trim().is_empty() || req.user_id.trim().is_empty() {
-        return error_response_json(
-            StatusCode::BAD_REQUEST,
-            "tenant_id and user_id are required",
-        );
+    // The body tenant is guaranteed non-empty by the exact-equality check
+    // against the validated header, so only user_id needs a presence check.
+    if req.user_id.trim().is_empty() {
+        return error_response_json(StatusCode::BAD_REQUEST, "user_id is required");
     }
 
     match state.chat.chat(&req).await {
@@ -606,11 +663,25 @@ async fn reindex_handler(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+/// Body of POST /admin/chat/history. P1-SECURITY: the target tenant is NO
+/// LONGER accepted from the body at all — `deny_unknown_fields` rejects any
+/// `tenant_id` key — so the read is scoped exclusively to the REQUIRED
+/// forwarded tenant header.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatHistoryRequest {
+    pub limit: Option<i64>,
+}
+
 /// POST /admin/chat/history — a tenant's chat audit rows (newest first),
-/// tenant-scoped by REQUIREMENT (never defaults to the control-plane bucket).
+/// scoped to the REQUIRED `x-apexmail-tenant-id` header. P1-SECURITY: the
+/// old body-carried `tenant_id` was a cross-tenant confidentiality breach
+/// protected only by the universal internal token; the body can no longer
+/// select a tenant (and a missing header is a 401, never a default bucket).
 async fn chat_history_handler(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
+    headers: HeaderMap,
+    Json(body): Json<ChatHistoryRequest>,
 ) -> Response {
     let Some(pool) = &state.docs_pool else {
         return error_response_json(
@@ -618,18 +689,26 @@ async fn chat_history_handler(
             "docs database not configured",
         );
     };
-    let Some(tenant) = body.get("tenant_id").and_then(|v| v.as_str()) else {
-        return error_response_json(StatusCode::BAD_REQUEST, "tenant_id is required");
+    let tenant = match required_tenant_identity(&headers) {
+        Ok(tenant) => tenant,
+        Err(TenantIdentityError::Missing) => {
+            return error_response_json(
+                StatusCode::UNAUTHORIZED,
+                "x-apexmail-tenant-id is required",
+            );
+        }
+        Err(TenantIdentityError::Invalid(reason)) => {
+            return error_response_json(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid x-apexmail-tenant-id: {reason}"),
+            );
+        }
     };
-    let limit = body
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(50)
-        .clamp(1, 200);
+    let limit = body.limit.unwrap_or(50).clamp(1, 200);
     match sqlx::query_as::<_, (String, String, String, String, bool, chrono::DateTime<chrono::Utc>)>(
         "SELECT role, content, docs_version, user_id, escalated, created_at          FROM ai_chat_messages WHERE tenant_id = $1          ORDER BY created_at DESC LIMIT $2",
     )
-    .bind(tenant)
+    .bind(tenant.clone())
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -651,29 +730,61 @@ fn error_response_json(status: StatusCode, message: &str) -> Response {
 }
 
 /// Build the Axum [`Router`] with shared state.
+///
+/// P1-SECURITY: routes are split by credential domain. Deterministic and
+/// inference routes authenticate with the universal `INTERNAL_SERVICE_TOKEN`;
+/// the AI-control routes (`/train`, `/training/jobs/:job_id`, `/evaluate`,
+/// `/admin/reindex`) authenticate ONLY with the dedicated `AI_ADMIN_TOKEN` —
+/// the universal token must never authorize model lifecycle changes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let timeout = state.request_timeout;
-    Router::new()
-        .route("/health", get(health))
+    // Public: health only.
+    let public = Router::new().route("/health", get(health));
+    // Internal service domain: deterministic helpers, inference, chat, and
+    // the tenant-scoped chat-history read (tenant header required in-handler).
+    let service = Router::new()
         .route("/suggest", post(suggest_handler))
         .route("/optimize-time", post(optimize_time_handler))
         .route("/content/score", post(content_score_handler))
         .route("/models", get(list_models_handler))
         .route("/predict", post(predict_handler))
-        .route("/train", post(train_handler))
-        .route("/training/jobs/:job_id", get(training_job_handler))
-        .route("/evaluate", post(evaluation_handler))
         .route("/domains/dns-records", post(domain_dns_handler))
         .route("/chat", post(chat_handler))
-        .route("/admin/reindex", post(reindex_handler))
         .route("/admin/chat/history", post(chat_history_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_service_token,
-        ))
+        ));
+    // AI-control domain: model lifecycle management, dedicated credential.
+    let ai_admin = Router::new()
+        .route("/train", post(train_handler))
+        .route("/training/jobs/:job_id", get(training_job_handler))
+        .route("/evaluate", post(evaluation_handler))
+        .route("/admin/reindex", post(reindex_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_ai_admin_token,
+        ));
+    Router::new()
+        .merge(public)
+        .merge(service)
+        .merge(ai_admin)
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(TimeoutLayer::new(timeout))
         .with_state(state)
+}
+
+/// The caller-supplied credential: `x-api-key` or a Bearer token.
+fn provided_credential(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok().map(String::from))
+        .or_else(|| {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
+        })
 }
 
 async fn require_service_token(
@@ -688,21 +799,30 @@ async fn require_service_token(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let provided = request
-        .headers()
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok().map(String::from))
-        .or_else(|| {
-            request
-                .headers()
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|raw| raw.trim().strip_prefix("Bearer ").map(String::from))
-        });
+    if provided_credential(request.headers())
+        .is_some_and(|value| apexmail_lib::timing_safe_compare(&value, &state.service_token))
+    {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
 
-    if provided
-        .as_deref()
-        .is_some_and(|value| apexmail_lib::timing_safe_compare(value, &state.service_token))
+/// P1-SECURITY: AI-control routes authenticate with the dedicated
+/// `AI_ADMIN_TOKEN` credential — never the universal `INTERNAL_SERVICE_TOKEN`
+/// (a lateral-movement domain: anyone holding the shared internal token could
+/// otherwise start training jobs or rebuild the docs index). An empty
+/// configured credential fails closed: nobody is authorized.
+async fn require_ai_admin_token(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if state.ai_admin_token.is_empty() {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if provided_credential(request.headers())
+        .is_some_and(|value| apexmail_lib::timing_safe_compare(&value, &state.ai_admin_token))
     {
         Ok(next.run(request).await)
     } else {
@@ -722,6 +842,10 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    /// P1-SECURITY: the dedicated AI-control credential used by the test
+    /// apps — deliberately distinct from the universal "test-key".
+    const ADMIN_TOKEN: &str = "admin-key";
+
     async fn app() -> Router {
         let state = Arc::new(
             AppState::from_config(AiConfig::default(), "test-key".into())
@@ -731,11 +855,34 @@ mod tests {
         build_router(state)
     }
 
+    /// A config carrying the AI-admin credential (empty in `AiConfig::default`,
+    /// which fails closed on the AI-control routes).
+    fn admin_capable_config() -> AiConfig {
+        AiConfig {
+            ai_admin_token: ADMIN_TOKEN.into(),
+            ..AiConfig::default()
+        }
+    }
+
     fn authenticated_json_request(uri: &str, body: serde_json::Value) -> Request<Body> {
         Request::builder()
             .uri(uri)
             .method("POST")
             .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("serialize request"),
+            ))
+            .expect("build request")
+    }
+
+    /// AI-control request: authenticates with AI_ADMIN_TOKEN, NOT the
+    /// universal internal service token.
+    fn admin_json_request(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("x-api-key", ADMIN_TOKEN)
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::to_vec(&body).expect("serialize request"),
@@ -798,9 +945,11 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        let response = app()
-            .await
-            .oneshot(authenticated_json_request(
+        // P1-SECURITY: /train is an AI-control route — it needs the dedicated
+        // admin credential, and even with it a missing runner fails closed.
+        let app = app_with(admin_capable_config(), "test-key").await;
+        let response = app
+            .oneshot(admin_json_request(
                 "/train",
                 serde_json::json!({"model_id":"apexmail-assistant", "epochs":1}),
             ))
@@ -811,9 +960,10 @@ mod tests {
 
     #[tokio::test]
     async fn evaluation_uses_real_metrics() {
-        let response = app()
-            .await
-            .oneshot(authenticated_json_request(
+        // P1-SECURITY: /evaluate is an AI-control route (dedicated credential).
+        let app = app_with(admin_capable_config(), "test-key").await;
+        let response = app
+            .oneshot(admin_json_request(
                 "/evaluate",
                 serde_json::json!({"predictions":[true, false], "labels":[true, false]}),
             ))
@@ -887,7 +1037,9 @@ mod tests {
 
     /// The gateway-set tenant header and the body tenant must agree when
     /// both are present: without the cross-check, a caller could bill one
-    /// tenant's rate bucket while executing as another.
+    /// tenant's rate bucket while executing as another. P1-SECURITY: the
+    /// header is REQUIRED, so a request with NO header is refused outright
+    /// instead of falling back to the control-plane bucket.
     #[tokio::test]
     async fn chat_rejects_tenant_header_body_mismatch() {
         let app = app().await;
@@ -906,7 +1058,9 @@ mod tests {
         );
 
         // Matching identities proceed (escalation answer: no model runtime
-        // in tests) — and the absent header keeps the control-plane bucket.
+        // in tests) — and the ABSENT header is a 401, never a `_control-
+        // plane` default (P1-SECURITY fix: the old fallback let a holder of
+        // the universal token omit the header and act as any body tenant).
         let response = app
             .clone()
             .oneshot(authenticated_chat_request(
@@ -917,13 +1071,32 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = app
+            .clone()
             .oneshot(authenticated_chat_request(
                 None,
                 "99999999-9999-9999-9999-999999999999",
             ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing tenant header must be refused even with a valid service token"
+        );
+        // A present-but-BLANK header asserts no tenant either: same refusal.
+        let response = app
+            .clone()
+            .oneshot(authenticated_chat_request(
+                Some("   "),
+                "99999999-9999-9999-9999-999999999999",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a blank tenant header must not mint a control-plane identity"
+        );
     }
 
     #[test]
@@ -1185,11 +1358,26 @@ mod tests {
             StatusCode::OK
         );
 
+        // /train: only the configured model is trainable. P1-SECURITY: the
+        // route needs the dedicated AI-admin credential.
+        let admin_app = app_with(admin_capable_config(), "test-key").await;
+        assert_eq!(
+            status_of(
+                &admin_app,
+                admin_json_request(
+                    "/train",
+                    serde_json::json!({"model_id":"other-model","epochs":1})
+                )
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
         // /evaluate: mismatched vectors are rejected, not silently zipped.
         assert_eq!(
             status_of(
-                &app,
-                authenticated_json_request(
+                &admin_app,
+                admin_json_request(
                     "/evaluate",
                     serde_json::json!({"predictions":[true],"labels":[]})
                 )
@@ -1233,26 +1421,14 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
 
-        // /train: only the configured model is trainable.
+        // Job lookups for unknown ids are 404 (AI-control credential —
+        // P1-SECURITY: the universal token must not even enumerate jobs).
         assert_eq!(
             status_of(
-                &app,
-                authenticated_json_request(
-                    "/train",
-                    serde_json::json!({"model_id":"other-model","epochs":1})
-                )
-            )
-            .await,
-            StatusCode::NOT_FOUND
-        );
-
-        // Job lookups for unknown ids are 404.
-        assert_eq!(
-            status_of(
-                &app,
+                &admin_app,
                 Request::builder()
                     .uri("/training/jobs/no-such-job")
-                    .header("x-api-key", "test-key")
+                    .header("x-api-key", ADMIN_TOKEN)
                     .body(Body::empty())
                     .unwrap()
             )
@@ -1425,12 +1601,23 @@ mod tests {
     #[tokio::test]
     async fn chat_route_rejects_empty_identities_and_messages() {
         let app = app().await;
-        let chat = |body| authenticated_json_request("/chat", body);
+        // P1-SECURITY: every request carries the (now required) tenant header
+        // matching the body tenant; a blank body tenant can never match a
+        // validated header and lands on the exact-equality 403 instead of
+        // the old blank-field 400.
+        let chat = |body: serde_json::Value, tenant: &str| {
+            let mut request = authenticated_json_request("/chat", body);
+            request
+                .headers_mut()
+                .insert("x-apexmail-tenant-id", tenant.parse().unwrap());
+            request
+        };
         assert_eq!(
             status_of(
                 &app,
                 chat(
-                    serde_json::json!({"tenant_id":"t","user_id":"u","message":"   ","history":[]})
+                    serde_json::json!({"tenant_id":"t","user_id":"u","message":"   ","history":[]}),
+                    "t"
                 )
             )
             .await,
@@ -1440,16 +1627,21 @@ mod tests {
             status_of(
                 &app,
                 chat(
-                    serde_json::json!({"tenant_id":"  ","user_id":"u","message":"hi","history":[]})
+                    serde_json::json!({"tenant_id":"  ","user_id":"u","message":"hi","history":[]}),
+                    "t"
                 )
             )
             .await,
-            StatusCode::BAD_REQUEST
+            StatusCode::FORBIDDEN,
+            "P1-SECURITY: a blank body tenant mismatches the header tenant"
         );
         assert_eq!(
             status_of(
                 &app,
-                chat(serde_json::json!({"tenant_id":"t","user_id":"","message":"hi","history":[]}))
+                chat(
+                    serde_json::json!({"tenant_id":"t","user_id":"","message":"hi","history":[]}),
+                    "t"
+                )
             )
             .await,
             StatusCode::BAD_REQUEST
@@ -1457,7 +1649,8 @@ mod tests {
     }
 
     /// The chat rate limit is the same configured governor, enforced before
-    /// the message is even parsed.
+    /// the message is even parsed. P1-SECURITY: requests carry the required
+    /// tenant header (a missing one is a 401 before the governor).
     #[tokio::test]
     async fn chat_route_enforces_the_configured_rate_limit() {
         let config = AiConfig {
@@ -1467,9 +1660,16 @@ mod tests {
         let app = app_with(config, "test-key").await;
         let chat = |body| authenticated_json_request("/chat", body);
         let ok = serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"What does the Pro plan cost?","history":[]});
-        assert_eq!(status_of(&app, chat(ok.clone())).await, StatusCode::OK);
+        let with_tenant = |body| {
+            let mut request = chat(body);
+            request
+                .headers_mut()
+                .insert("x-apexmail-tenant-id", "t1".parse().unwrap());
+            request
+        };
+        assert_eq!(status_of(&app, with_tenant(ok.clone())).await, StatusCode::OK);
         assert_eq!(
-            status_of(&app, chat(ok)).await,
+            status_of(&app, with_tenant(ok)).await,
             StatusCode::TOO_MANY_REQUESTS
         );
     }
@@ -1488,13 +1688,14 @@ mod tests {
             ..AiConfig::default()
         };
         let app = app_with(config, "test-key").await;
-        let response = app
-            .oneshot(authenticated_json_request(
-                "/chat",
-                serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"What does the Pro plan cost?","history":[]}),
-            ))
-            .await
-            .unwrap();
+        let mut request = authenticated_json_request(
+            "/chat",
+            serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"What does the Pro plan cost?","history":[]}),
+        );
+        request
+            .headers_mut()
+            .insert("x-apexmail-tenant-id", "t1".parse().unwrap());
+        let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -1539,7 +1740,9 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(body["answer"].as_str().unwrap().contains("\u{20ac}65"));
-        assert_eq!(body["passed_verification"], true);
+        // P1-GROUNDING rename: policy flag name on the wire contract.
+        assert_eq!(body["passed_policy_verification"], true);
+        assert!(body.get("passed_verification").is_none());
 
         let rows: i64 =
             sqlx::query_scalar("SELECT count(*) FROM ai_chat_messages WHERE tenant_id = $1")
@@ -1549,7 +1752,22 @@ mod tests {
                 .unwrap();
         assert_eq!(rows, 2, "user and assistant audit rows persisted");
 
-        // ── /admin/chat/history reads them back, tenant-scoped ───────────
+        // A second tenant's audit rows exist and must never leak into the
+        // first tenant's history read.
+        let other_tenant = crate::test_support::unique("chat_r2");
+        sqlx::query(
+            "INSERT INTO ai_chat_messages (tenant_id, user_id, role, content, citations, escalated, docs_version) \
+             VALUES ($1,'intruder','assistant','other tenant secret','[]'::jsonb,false,'')",
+        )
+        .bind(&other_tenant)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // ── /admin/chat/history reads them back, scoped to the REQUIRED ──
+        // tenant header (P1-SECURITY: the body can no longer carry a
+        // tenant_id at all — the old body-carried tenant was a cross-tenant
+        // confidentiality breach behind the universal token).
         let app = app_with(
             AiConfig {
                 database_url: crate::test_support::test_db_url().unwrap_or_default(),
@@ -1558,11 +1776,20 @@ mod tests {
             "test-key",
         )
         .await;
+        let history_request = |tenant_header: Option<&str>, body: serde_json::Value| {
+            let mut request = authenticated_json_request("/admin/chat/history", body);
+            if let Some(tenant) = tenant_header {
+                request
+                    .headers_mut()
+                    .insert("x-apexmail-tenant-id", tenant.parse().unwrap());
+            }
+            request
+        };
         let response = app
             .clone()
-            .oneshot(authenticated_json_request(
-                "/admin/chat/history",
-                serde_json::json!({"tenant_id": tenant, "limit": 10000}),
+            .oneshot(history_request(
+                Some(&tenant),
+                serde_json::json!({"limit": 10000}),
             ))
             .await
             .unwrap();
@@ -1575,15 +1802,30 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages.iter().any(|m| m["role"] == "assistant"));
         assert!(messages.iter().all(|m| m["user_id"] == "u1"));
+        assert_eq!(history["tenant_id"], tenant.as_str());
 
-        // History without a tenant_id is a 400.
+        // History WITHOUT the tenant header is a 401 — P1-SECURITY: the old
+        // body-carried tenant_id (and its 400 for absence) is gone.
         assert_eq!(
             status_of(
                 &app,
-                authenticated_json_request("/admin/chat/history", serde_json::json!({"limit": 5}))
+                history_request(None, serde_json::json!({"limit": 5}))
             )
             .await,
-            StatusCode::BAD_REQUEST
+            StatusCode::UNAUTHORIZED
+        );
+        // A tenant_id in the body is an unknown field → 422: the body can no
+        // longer select the target tenant.
+        assert_eq!(
+            status_of(
+                &app,
+                history_request(
+                    Some(&tenant),
+                    serde_json::json!({"tenant_id": other_tenant, "limit": 5})
+                )
+            )
+            .await,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
 
         sqlx::query("DELETE FROM ai_chat_messages WHERE tenant_id = $1")
@@ -1591,28 +1833,149 @@ mod tests {
             .execute(&db)
             .await
             .ok();
+        sqlx::query("DELETE FROM ai_chat_messages WHERE tenant_id = $1")
+            .bind(&other_tenant)
+            .execute(&db)
+            .await
+            .ok();
     }
 
+    /// P1-SECURITY: the universal INTERNAL_SERVICE_TOKEN alone must NOT
+    /// authorize the AI-control routes; and with NO admin credential
+    /// configured they fail closed for everyone.
     #[tokio::test]
-    async fn admin_routes_fail_closed_without_a_docs_database() {
-        let app = app().await; // no database_url configured
+    async fn ai_control_routes_require_the_dedicated_admin_credential() {
+        // The universal service token is refused on every AI-control route.
+        let app = app_with(admin_capable_config(), "test-key").await;
+        for uri in ["/train", "/evaluate", "/admin/reindex"] {
+            assert_eq!(
+                status_of(&app, authenticated_json_request(uri, serde_json::json!({}))).await,
+                StatusCode::UNAUTHORIZED,
+                "{uri} must refuse the universal internal token"
+            );
+        }
         assert_eq!(
             status_of(
                 &app,
-                authenticated_json_request("/admin/reindex", serde_json::json!({}))
+                Request::builder()
+                    .uri("/training/jobs/any-job")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap()
             )
             .await,
-            StatusCode::SERVICE_UNAVAILABLE
+            StatusCode::UNAUTHORIZED,
+            "job lookups must refuse the universal internal token"
+        );
+        // The Bearer form of the universal token is equally refused.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/train")
+                    .method("POST")
+                    .header("authorization", "Bearer test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"model_id":"apexmail-assistant","epochs":1}))
+                            .unwrap()
+                    ))
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // The DEDICATED admin credential is accepted on the same routes.
+        assert_eq!(
+            status_of(
+                &app,
+                admin_json_request(
+                    "/train",
+                    serde_json::json!({"model_id":"apexmail-assistant","epochs":1})
+                )
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "admin token passes auth; the unconfigured runner then fails closed"
         );
         assert_eq!(
             status_of(
                 &app,
-                authenticated_json_request(
-                    "/admin/chat/history",
-                    serde_json::json!({"tenant_id":"t"})
+                admin_json_request(
+                    "/evaluate",
+                    serde_json::json!({"predictions":[true],"labels":[true]})
                 )
             )
             .await,
+            StatusCode::OK
+        );
+        // A WRONG admin credential is refused.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/evaluate")
+                    .method("POST")
+                    .header("x-api-key", "wrong-admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &serde_json::json!({"predictions":[true],"labels":[true]})
+                        )
+                        .unwrap()
+                    ))
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // An EMPTY configured admin credential fails closed even for the
+        // admin-shaped credential value itself.
+        let open = app_with(AiConfig::default(), "test-key").await;
+        assert_eq!(
+            status_of(
+                &open,
+                Request::builder()
+                    .uri("/evaluate")
+                    .method("POST")
+                    .header("x-api-key", ADMIN_TOKEN)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(
+                            &serde_json::json!({"predictions":[true],"labels":[true]})
+                        )
+                        .unwrap()
+                    ))
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_routes_fail_closed_without_a_docs_database() {
+        // P1-SECURITY: with the dedicated admin credential the reindex route
+        // reaches its docs-database guard.
+        let app = app_with(admin_capable_config(), "test-key").await;
+        assert_eq!(
+            status_of(
+                &app,
+                admin_json_request("/admin/reindex", serde_json::json!({}))
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // /admin/chat/history is tenant-scoped by the REQUIRED header.
+        let mut history_request =
+            authenticated_json_request("/admin/chat/history", serde_json::json!({}));
+        history_request
+            .headers_mut()
+            .insert("x-apexmail-tenant-id", "t".parse().unwrap());
+        assert_eq!(
+            status_of(&app, history_request).await,
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
@@ -1649,14 +2012,14 @@ mod tests {
         let app = app_with(
             AiConfig {
                 database_url: url.clone(),
-                ..AiConfig::default()
+                ..admin_capable_config()
             },
             "test-key",
         )
         .await;
 
         let response = app
-            .oneshot(authenticated_json_request(
+            .oneshot(admin_json_request(
                 "/admin/reindex",
                 serde_json::json!({}),
             ))
@@ -1675,7 +2038,7 @@ mod tests {
         let app = app_with(
             AiConfig {
                 database_url: url,
-                ..AiConfig::default()
+                ..admin_capable_config()
             },
             "test-key",
         )
@@ -1683,7 +2046,7 @@ mod tests {
         assert_eq!(
             status_of(
                 &app,
-                authenticated_json_request("/admin/reindex", serde_json::json!({}))
+                admin_json_request("/admin/reindex", serde_json::json!({}))
             )
             .await,
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1827,13 +2190,13 @@ mod tests {
         let config = AiConfig {
             training_runner: "/bin/echo".into(),
             checkpoint_path: scratch.display().to_string(),
-            ..AiConfig::default()
+            ..admin_capable_config()
         };
         let app = app_with(config, "test-key").await;
 
         let response = app
             .clone()
-            .oneshot(authenticated_json_request(
+            .oneshot(admin_json_request(
                 "/train",
                 serde_json::json!({"model_id":"apexmail-assistant","epochs":2}),
             ))
@@ -1857,13 +2220,14 @@ mod tests {
             "completion is not promotion"
         );
 
-        // The job is readable while it runs or after the runner exits.
+        // The job is readable while it runs or after the runner exits
+        // (AI-control credential — P1-SECURITY).
         assert_eq!(
             status_of(
                 &app,
                 Request::builder()
                     .uri(format!("/training/jobs/{job_id}"))
-                    .header("x-api-key", "test-key")
+                    .header("x-api-key", ADMIN_TOKEN)
                     .body(Body::empty())
                     .unwrap()
             )
@@ -1952,7 +2316,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// State can be built from the deployment environment.
+    /// State can be built from the deployment environment. P1-SECURITY: the
+    /// environment now also carries AI_ADMIN_TOKEN — production boots (the
+    /// default when APP_ENV is unset) refuse without it.
     #[tokio::test]
     async fn state_builds_from_environment() {
         let _serial = ENV_SERIAL.lock().await;
@@ -1962,10 +2328,12 @@ mod tests {
         let _guard = EnvGuard::with(&[
             ("AI_MODEL_ENABLED", None),
             ("INTERNAL_SERVICE_TOKEN", Some("env-token")),
+            ("AI_ADMIN_TOKEN", Some("env-admin-token")),
             ("AI_CHECKPOINT_PATH", Some(checkpoint.as_str())),
         ]);
         let state = default_app_state().await.expect("state from env");
         assert_eq!(state.service_token, "env-token");
+        assert_eq!(state.ai_admin_token, "env-admin-token");
         assert!(!state.model_enabled);
         std::fs::remove_dir_all(&scratch).ok();
     }

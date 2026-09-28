@@ -188,11 +188,16 @@ pub(crate) async fn chat_history(
     let mut request = state
         .http_client
         .post(format!("{ai_url}/admin/chat/history"))
-        .json(&serde_json::json!({ "tenant_id": auth.tenant_id, "limit": 50 }))
+        // P1-SECURITY: ai-service now scopes this read to the REQUIRED
+        // forwarded tenant header and rejects any body-carried tenant_id, so
+        // the target tenant travels only in the header here.
+        .json(&serde_json::json!({ "limit": 50 }))
         .timeout(std::time::Duration::from_secs(10));
     if let Some(token) = state.config.internal_service_token.as_deref() {
         request = request.header("x-api-key", token);
     }
+    // The authenticated tenant is the only read scope for the history route.
+    request = request.header("x-apexmail-tenant-id", &auth.tenant_id);
     let response = request.send().await.map_err(|e| {
         tracing::warn!(error = %e, "ai chat history: service unreachable");
         ApiError::Internal("assistant unavailable".into())
@@ -307,14 +312,20 @@ mod adversarial_tests {
 
     /// Minimal in-process ai-service twin: serves /chat and
     /// /admin/chat/history with canned payloads, recording requests.
+    /// `history_headers` captures the header blocks sent to the history route
+    /// so the proxy test can prove the tenant header is forwarded.
     async fn start_mock_ai() -> (
         String,
         std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         use axum::routing::post;
         let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let history_headers: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let state = seen.clone();
+        let history_state = history_headers.clone();
         let app = axum::Router::new()
             .route(
                 "/chat",
@@ -331,7 +342,13 @@ mod adversarial_tests {
             )
             .route(
                 "/admin/chat/history",
-                post(|| async {
+                post(move |headers: axum::http::HeaderMap| async move {
+                    let rendered = headers
+                        .iter()
+                        .map(|(k, v)| format!("{k}: {v:?}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    history_state.lock().unwrap().push(rendered);
                     axum::Json(serde_json::json!({
                         "conversations": [{"id": "c1", "messages": 3}]
                     }))
@@ -342,7 +359,7 @@ mod adversarial_tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        (base_url, seen)
+        (base_url, seen, history_headers)
     }
 
     fn ai_config(ai_url: &str) -> crate::config::Config {
@@ -428,7 +445,7 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("ai_chat_ok").await else {
             return;
         };
-        let (ai_url, seen) = start_mock_ai().await;
+        let (ai_url, seen, _history_headers) = start_mock_ai().await;
         let Some((env, tenant, _user)) = AdvEnv::session(pool.clone(), "owner").await else {
             return;
         };
@@ -485,7 +502,7 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("ai_chat_rate").await else {
             return;
         };
-        let (ai_url, _seen) = start_mock_ai().await;
+        let (ai_url, _seen, _history_headers) = start_mock_ai().await;
         let (env, _tenant) =
             AdvEnv::tenant_with_config(pool, &["ai:read"], ai_config(&ai_url)).await;
 
@@ -515,12 +532,24 @@ mod adversarial_tests {
         let Some(pool) = crate::test_db::canonical_pool("ai_chat_history").await else {
             return;
         };
-        let (ai_url, _seen) = start_mock_ai().await;
-        let (env, _tenant) =
+        let (ai_url, _seen, history_headers) = start_mock_ai().await;
+        let (env, tenant) =
             AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config(&ai_url)).await;
         let (status, body) = env.get("/v1/ai/chat/history").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body["conversations"].is_array());
+
+        // P1-SECURITY: the target tenant travels in the REQUIRED
+        // x-apexmail-tenant-id header (ai-service no longer accepts a body
+        // tenant), scoped to the AUTHENTICATED tenant.
+        let headers = history_headers.lock().unwrap();
+        assert_eq!(headers.len(), 1, "exactly one history call");
+        assert!(
+            headers[0].to_lowercase().contains("x-apexmail-tenant-id:")
+                && headers[0].contains(tenant.as_str()),
+            "history proxy must forward the authenticated tenant header: {}",
+            headers[0]
+        );
 
         // Unconfigured / unreachable service arms.
         let (unconfigured, _t) =

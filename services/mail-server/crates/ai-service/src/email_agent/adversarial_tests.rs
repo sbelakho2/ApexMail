@@ -183,6 +183,10 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn with_mock_llm(port: u16) -> Self {
+        // P1-SECURITY: AI_ADMIN_TOKEN is part of the env contract now —
+        // production boots (APP_ENV unset) refuse without it, and these tests
+        // rely on AiConfig::from_env() succeeding so the client points at the
+        // mock endpoint.
         Self::with(&[
             ("AI_MODEL_ENABLED", Some("true")),
             (
@@ -190,6 +194,7 @@ impl EnvGuard {
                 Some(&format!("http://127.0.0.1:{port}/v1")),
             ),
             ("AI_MODEL_NAME", Some("apexmail-assistant")),
+            ("AI_ADMIN_TOKEN", Some("email-agent-test-admin")),
             ("AI_EMAIL_AGENT_ENABLED", Some("true")),
             ("AI_EMAIL_REQUIRE_APPROVAL", Some("true")),
             ("AI_REPLY_FROM", Some("ai@apexmail.ee")),

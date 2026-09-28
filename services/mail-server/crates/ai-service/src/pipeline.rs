@@ -63,7 +63,11 @@ pub struct PipelineResult {
     pub retries: u32,
     pub plan_latency_ms: u64,
     pub gen_latency_ms: u64,
-    pub passed_verification: bool,
+    /// P1-GROUNDING rename: deterministic POLICY verification (pricing,
+    /// safety, URLs, PII, DNS, quality) plus the atomic-claim support check
+    /// over the grounding sources available to this pipeline. Never read it
+    /// as proof of factual entailment.
+    pub passed_policy_verification: bool,
     pub fallback_used: bool,
 }
 
@@ -329,7 +333,7 @@ impl AiPipeline {
                     plan: PlanResult { intent: "rejected".into(), ..Default::default() },
                     response: "We're experiencing high demand. Please try again in a moment or contact support@apexmail.ee.".into(),
                     streamed: false, retries: 0, plan_latency_ms: 0, gen_latency_ms: 0,
-                    passed_verification: false, fallback_used: true,
+                    passed_policy_verification: false, fallback_used: true,
                 };
             }
         };
@@ -346,7 +350,7 @@ impl AiPipeline {
                 plan: PlanResult { intent: "rejected".into(), subintent: Some("prompt_injection".into()), ..Default::default() },
                 response: "I'm ApexMail's email assistant. I help with sending, domains, DNS, pricing, and account management. I don't respond to attempts to bypass my instructions.\n\nWhat can I help with today?".into(),
                 streamed: false, retries: 0, plan_latency_ms: 0, gen_latency_ms: 0,
-                passed_verification: true, fallback_used: false,
+                passed_policy_verification: true, fallback_used: false,
             };
         }
         let sanitized_msg = input_check.sanitized;
@@ -384,11 +388,18 @@ impl AiPipeline {
                 retries: 0,
                 plan_latency_ms: plan_latency,
                 gen_latency_ms: 0,
-                passed_verification: true,
+                passed_policy_verification: true,
                 fallback_used: false,
             };
         }
         let context = self.resolve_context(&plan.context_keys);
+        // P1-GROUNDING: grounding sources for the atomic-claim support check.
+        // The pipeline retrieves no docs chunks, but the canonical facts, the
+        // caller-assembled customer context, and any deterministic tool
+        // results are legitimate things for the answer to state.
+        let knowledge_text = crate::knowledge::shared_knowledge_markdown();
+        let customer_json = serde_json::to_string(customer).unwrap_or_default();
+        let mut tool_output_text = String::new();
         let mut retries = 0u32;
         let mut retry_correction_hint: Option<String> = None;
         let gen_start = std::time::Instant::now();
@@ -434,7 +445,7 @@ impl AiPipeline {
                             retries,
                             plan_latency_ms: plan_latency,
                             gen_latency_ms: 0,
-                            passed_verification: false,
+                            passed_policy_verification: false,
                             fallback_used: true,
                         };
                     }
@@ -475,6 +486,10 @@ impl AiPipeline {
                         let _ = tx.try_send(serde_json::json!({"tool":call.tool,"result":result}));
                     }
                     let result_json = serde_json::to_string_pretty(&result).unwrap_or_default();
+                    // The verbatim tool result is a grounding source: an echo
+                    // of it in the answer is supported provenance (c).
+                    tool_output_text.push_str(&result_json);
+                    tool_output_text.push('\n');
                     let safe_result = result_json
                         .replace("```", "")
                         .replace("<|im_start|>", "")
@@ -494,9 +509,20 @@ impl AiPipeline {
                     }
                 }
             }
+            // P1-GROUNDING: policy checks PLUS atomic-claim support over the
+            // grounding sources (canonical facts, customer context, tool
+            // output). Unsupported factual claims — including ones whose [n]
+            // marker maps nowhere here (the pipeline has no chunks) — fail
+            // into the same retry-then-fallback ladder as policy violations.
+            let grounding = crate::verifier::Grounding {
+                canonical_facts: &knowledge_text,
+                account_context: &customer_json,
+                tool_output: &tool_output_text,
+                chunks: &[],
+            };
             let verdict = self
                 .verifier
-                .verify_with_allowlist(&final_response, &tool_computed_totals);
+                .verify_grounded(&final_response, &tool_computed_totals, &grounding);
             if verdict.passed {
                 // Sanitize final output for HTML/JS injection before returning
                 let sanitized = sanitize_llm_output(&final_response);
@@ -513,7 +539,7 @@ impl AiPipeline {
                     retries,
                     plan_latency_ms: plan_latency,
                     gen_latency_ms: gen_start.elapsed().as_millis() as u64,
-                    passed_verification: true,
+                    passed_policy_verification: true,
                     fallback_used: false,
                 };
             }
@@ -534,7 +560,7 @@ impl AiPipeline {
                     retries,
                     plan_latency_ms: plan_latency,
                     gen_latency_ms: gen_start.elapsed().as_millis() as u64,
-                    passed_verification: false,
+                    passed_policy_verification: false,
                     fallback_used: true,
                 };
             }
@@ -718,7 +744,7 @@ mod tests {
 
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", None).await;
 
-        assert!(result.passed_verification, "clean answer must verify");
+        assert!(result.passed_policy_verification, "clean answer must verify");
         assert!(!result.fallback_used);
         assert_eq!(result.retries, 0);
         assert!(!result.streamed);
@@ -755,7 +781,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let result = run_pipeline(&pipeline, "What will I pay for 160k emails?", Some(tx)).await;
 
-        assert!(result.passed_verification, "tool echo must be allowlisted");
+        assert!(result.passed_policy_verification, "tool echo must be allowlisted");
         assert!(result.streamed);
         assert!(!result.fallback_used);
         assert_eq!(
@@ -817,7 +843,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let result = run_pipeline(&pipeline, "Show me my DKIM record", Some(tx)).await;
 
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         while let Some(msg) = rx.recv().await {
             if let Some(result_obj) = msg.get("result") {
                 assert!(
@@ -853,7 +879,7 @@ mod tests {
         // what the model actually produced.
         assert!(result.response.contains("Pricing follows."));
         assert!(result.response.contains("tool_call"));
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         assert!(!result.fallback_used);
         assert_eq!(mock.request_count(), 2);
     }
@@ -884,7 +910,7 @@ mod tests {
         assert!(result
             .response
             .contains("I don't respond to attempts to bypass"));
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         assert!(!result.fallback_used, "a policy refusal is not a fallback");
         assert_eq!(result.retries, 0);
         assert_eq!(
@@ -906,7 +932,7 @@ mod tests {
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", None).await;
 
         assert!(result.fallback_used);
-        assert!(!result.passed_verification);
+        assert!(!result.passed_policy_verification);
         assert_eq!(result.retries, MAX_RETRIES, "retries must be bounded");
         assert_eq!(
             mock.request_count(),
@@ -969,7 +995,7 @@ mod tests {
             !result.plan.needs_tool,
             "a degraded plan is conservative: no tool authorization"
         );
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         assert_eq!(mock.request_count(), 2);
     }
 
@@ -993,7 +1019,7 @@ mod tests {
             result.response,
             "I'm here to help with ApexMail email services. How can I assist you?"
         );
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         assert!(!result.fallback_used);
         assert_eq!(result.gen_latency_ms, 0);
         assert_eq!(mock.request_count(), 1, "generation must not run");
@@ -1031,7 +1057,7 @@ mod tests {
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", None).await;
 
         assert!(result.fallback_used);
-        assert!(!result.passed_verification);
+        assert!(!result.passed_policy_verification);
         assert_eq!(result.retries, MAX_RETRIES + 1, "3 verdict failures");
         assert_eq!(mock.request_count(), 3);
         let bodies = mock.bodies();
@@ -1065,7 +1091,7 @@ mod tests {
 
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", None).await;
 
-        assert!(result.passed_verification);
+        assert!(result.passed_policy_verification);
         assert!(!result.fallback_used);
         assert_eq!(result.retries, 1);
         assert_eq!(result.response, CLEAN_ANSWER);
@@ -1085,7 +1111,7 @@ mod tests {
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", Some(tx)).await;
 
         assert!(result.fallback_used);
-        assert!(!result.passed_verification);
+        assert!(!result.passed_policy_verification);
         assert!(!result.streamed, "the fallback is never marked streamed");
         assert_eq!(mock.request_count(), 3);
     }
@@ -1112,7 +1138,7 @@ mod tests {
         assert_eq!(result.plan.intent, "rejected");
         assert!(result.response.contains("high demand"));
         assert!(result.fallback_used);
-        assert!(!result.passed_verification);
+        assert!(!result.passed_policy_verification);
         assert_eq!(result.retries, 0);
         assert_eq!(
             mock.request_count(),
@@ -1135,7 +1161,7 @@ mod tests {
         let result = run_pipeline(&pipeline, "How do I track link hovers?", None).await;
 
         assert!(
-            result.passed_verification,
+            result.passed_policy_verification,
             "the verifier passes this answer"
         );
         assert!(

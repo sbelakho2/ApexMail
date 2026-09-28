@@ -4,8 +4,17 @@
 //! and NEVER sends anything. This surface is the missing reader: operators
 //! list pending drafts, approve (which sends the reply through the
 //! platform's verified system sender — `queue_system_email`, attributed to
-//! the system tenant that owns the sending domain) or reject them. Every
-//! decision is audit-logged with full actor attribution.
+//! the system tenant that owns the sending domain) or reject them.
+//!
+//! Audit guarantee (external-audit P1): every decision's evidence is written
+//! INSIDE the transaction that applies the decision, and its failure aborts
+//! the decision — approve (claim + queued reply + audit row) and reject
+//! (claim + audit row) commit atomically or not at all. A decision can
+//! never take effect without its durable actor-attributed record, and
+//! evidence is never written after the effect has committed. The one
+//! effect-less path (a refused approval of an unroutable draft, whose claim
+//! rolls back) records its evidence in its own committed write before the
+//! error response.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -103,19 +112,27 @@ const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
     RETURNING tenant_id, from_email, subject, ai_response
 "#;
 
-/// Actor-attributed audit for AI-draft decisions (P1-4/P2-2): an approved
-/// AI reply is a platform-sent message to a customer — the operator who
-/// approved it (tenant + user) and the routed tenant must be on record.
-async fn log_draft_audit(
-    state: &AppState,
+/// Actor-attributed audit for AI-draft decisions (P1-4/P2-2 + external-audit
+/// P1): an approved AI reply is a platform-sent message to a customer — the
+/// operator who approved it (tenant + user) and the routed tenant must be on
+/// record. The entry is written INSIDE the caller's open transaction and its
+/// failure is PROPAGATED, not swallowed: the decision evidence commits
+/// atomically with the decision's effect, or the effect rolls back with the
+/// failed evidence write. This is the transaction-scoped
+/// [`crate::audit_log::insert_audit_log_in_tx_with_env`] variant — never the
+/// best-effort pool writer, which could leave an effect (a queued
+/// platform-sent reply, a consumed claim) with no durable decision record.
+async fn log_draft_audit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    is_production: bool,
     auth: &AuthUser,
     action: &str,
     draft_id: &str,
     metadata: serde_json::Value,
-) {
-    crate::audit_log::insert_audit_log_best_effort_with_env(
-        &state.db,
-        state.config.environment.is_production(),
+) -> Result<(), sqlx::Error> {
+    crate::audit_log::insert_audit_log_in_tx_with_env(
+        tx,
+        is_production,
         Some(auth.tenant_id.as_str()),
         auth.user_id.as_deref(),
         action,
@@ -124,8 +141,9 @@ async fn log_draft_audit(
         metadata,
         None,
         None,
+        chrono::Utc::now(),
     )
-    .await;
+    .await
 }
 
 async fn approve_draft(
@@ -137,10 +155,12 @@ async fn approve_draft(
     require_scopes(&auth, &["*"])?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
 
-    // The reply/outbox rows and the approval consumption commit together:
-    // the enqueue is persisted BEFORE the pending_approval flip becomes
-    // visible, so a crash or failed enqueue can never leave an
-    // approved-but-unanswered (consumed) draft behind (audit F11).
+    // The reply/outbox rows, the decision evidence, and the approval
+    // consumption commit together: the enqueue AND the audit row are
+    // persisted BEFORE the pending_approval flip becomes visible, so a
+    // crash or a failed enqueue/audit write can never leave an
+    // approved-but-unanswered (consumed) draft behind, nor a queued reply
+    // without its approval record (audit F11 + external-audit P1).
     let mut tx = state.db.begin().await?;
 
     // Claim the draft atomically: exactly one approve/reject wins.
@@ -167,7 +187,31 @@ async fn approve_draft(
 
     if tenant_id.is_empty() || from_email.is_empty() {
         // Cannot route the reply — the uncommitted claim rolls back with
-        // the transaction, so the draft stays pending and visible.
+        // the transaction, so the draft stays pending and visible. The
+        // refused attempt is still decision evidence: it is recorded in its
+        // own committed write BEFORE the error response. This is the one
+        // path where the evidence cannot share the business transaction
+        // (the claim must roll back and nothing commits), which is also why
+        // best-effort is correct here: the refusal consumes nothing, so a
+        // failed evidence write must not mask the operator-facing
+        // validation error.
+        let _ = tx.rollback().await;
+        crate::audit_log::insert_audit_log_best_effort_with_env(
+            &state.db,
+            state.config.environment.is_production(),
+            Some(auth.tenant_id.as_str()),
+            auth.user_id.as_deref(),
+            "control_plane.ai_draft.approval_refused",
+            "ai_draft",
+            Some(&id),
+            serde_json::json!({
+                "note": note,
+                "reason": "draft is missing tenant or sender; cannot route the reply",
+            }),
+            None,
+            None,
+        )
+        .await;
         return Err(ApiError::Validation(vec![
             "draft is missing tenant or sender; reject it instead".into(),
         ]));
@@ -202,8 +246,32 @@ async fn approve_draft(
         }
     };
 
+    // External-audit P1: the decision evidence is written INSIDE the same
+    // transaction, BEFORE the commit — approval claim, queued reply, and
+    // audit row commit atomically or not at all. A failed audit write rolls
+    // back the claim AND the queued reply, so platform-originated mail can
+    // never be durably queued without its durable operator-attributed
+    // approval record. (The evidence is never written after the commit:
+    // the previous post-commit best-effort write left a sent reply with no
+    // decision record whenever that write failed.)
+    log_draft_audit_in_tx(
+        &mut tx,
+        state.config.environment.is_production(),
+        &auth,
+        "control_plane.ai_draft.approved",
+        &id,
+        serde_json::json!({
+            "note": note.clone(),
+            "routedTenantId": tenant_id.clone(),
+            "recipient": from_email.clone(),
+            "queuedMessageId": message_uuid.to_string(),
+        }),
+    )
+    .await?;
+
     // Commit makes the consumption of the approval visible only now, with
-    // the reply already persisted in the same transaction.
+    // the reply and its audit evidence already persisted in the same
+    // transaction.
     tx.commit().await?;
 
     tracing::info!(
@@ -213,29 +281,22 @@ async fn approve_draft(
         note = %note,
         "AI reply draft APPROVED and queued"
     );
-    log_draft_audit(
-        &state,
-        &auth,
-        "control_plane.ai_draft.approved",
-        &id,
-        serde_json::json!({
-            "note": note,
-            "routedTenantId": tenant_id,
-            "recipient": from_email,
-            "queuedMessageId": message_uuid.to_string(),
-        }),
-    )
-    .await;
     Ok(Json(serde_json::json!({
         "approved": true,
         "queued_message_id": message_uuid.to_string(),
     })))
 }
 
-/// Reject a pending draft. Same canonical VARCHAR id binding (audit F11).
-const REJECT_DRAFT_SQL: &str =
-    "UPDATE inbound_messages SET pending_approval = false, processed_at = NOW() \
-     WHERE id = $1 AND pending_approval = true";
+/// Reject a pending draft, claiming it atomically and returning the routed
+/// tenant for the audit record. Same canonical VARCHAR id binding (audit
+/// F11).
+const REJECT_DRAFT_SQL: &str = r#"
+    UPDATE inbound_messages
+    SET pending_approval = false, processed_at = NOW()
+    WHERE id = $1
+      AND pending_approval = true
+    RETURNING tenant_id
+"#;
 
 async fn reject_draft(
     State(state): State<AppState>,
@@ -246,30 +307,48 @@ async fn reject_draft(
     require_scopes(&auth, &["*"])?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
 
-    let result = sqlx::query(REJECT_DRAFT_SQL)
+    // Same guarantee as approve (external-audit P1): the rejection claim and
+    // its actor-attributed evidence commit atomically — a failed audit
+    // write rolls the claim back, so a rejection either happens fully on
+    // record or not at all, leaving the draft pending and rejectable.
+    let mut tx = state.db.begin().await?;
+
+    let routed_tenant_id: Option<(Option<String>,)> = sqlx::query_as(REJECT_DRAFT_SQL)
         .bind(&id)
-        .execute(&state.db)
+        .fetch_optional(&mut *tx)
         .await?;
 
-    if result.rows_affected() == 0 {
+    let Some((routed_tenant_id,)) = routed_tenant_id else {
+        // Dropping the transaction rolls the claim back — nothing consumed.
+        // No decision happened here (the draft is unknown or was already
+        // handled, and the decision that consumed it is already on the
+        // audit record), so there is nothing to evidence.
         return Err(ApiError::NotFound(
             "draft not found or already handled".into(),
         ));
-    }
+    };
+
+    log_draft_audit_in_tx(
+        &mut tx,
+        state.config.environment.is_production(),
+        &auth,
+        "control_plane.ai_draft.rejected",
+        &id,
+        serde_json::json!({
+            "note": note.clone(),
+            "routedTenantId": routed_tenant_id,
+        }),
+    )
+    .await?;
+
+    tx.commit().await?;
+
     tracing::info!(
         operator = %auth.user_id.clone().unwrap_or_default(),
         draft_id = %id,
         note = %note,
         "AI reply draft REJECTED"
     );
-    log_draft_audit(
-        &state,
-        &auth,
-        "control_plane.ai_draft.rejected",
-        &id,
-        serde_json::json!({ "note": note }),
-    )
-    .await;
     Ok(Json(serde_json::json!({ "rejected": true })))
 }
 
@@ -720,6 +799,25 @@ mod approval_http_tests {
                 .await;
             assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
 
+            // External-audit P1: every decision left durable evidence in the
+            // SAME commit as its effect — exactly one approved row, one
+            // rejected row, and one refused-attempt row (the unroutable
+            // approval above); the 404 re-attempts wrote nothing.
+            for (action, expected) in [
+                ("control_plane.ai_draft.approved", 1_i64),
+                ("control_plane.ai_draft.rejected", 1_i64),
+                ("control_plane.ai_draft.approval_refused", 1_i64),
+            ] {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM audit_logs WHERE resource = 'ai_draft' AND action = $1",
+                )
+                .bind(action)
+                .fetch_one(&pool)
+                .await
+                .expect("audit evidence count");
+                assert_eq!(count, expected, "audit rows for {action}");
+            }
+
             // Customers are refused outright.
             let (customer, _t) = AdvEnv::tenant(pool.clone(), &["*"]).await;
             let (status, _body) = customer.get("/v1/admin/ai/drafts").await;
@@ -765,6 +863,259 @@ mod approval_http_tests {
                 .await
                 .expect("draft row");
         assert!(pending, "a failed enqueue must not consume the draft");
+        pool.close().await;
+    }
+
+    /// External-audit P1, fault-injected: when the audit INSERT fails, the
+    /// ENTIRE approval rolls back — the draft stays pending (claim not
+    /// consumed), no reply is queued, no evidence row exists, and the very
+    /// same draft is approvable again once the fault is disarmed. Decision
+    /// evidence and decision effect commit atomically or not at all.
+    ///
+    /// Sync test + current-thread runtime (like the end-to-end test) so the
+    /// process-global DKIM env guard is not held across an await point.
+    #[test]
+    fn approve_rolls_back_entirely_when_the_audit_write_fails() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_audit_rollback").await else {
+                return;
+            };
+            // The system sender IS seeded so the enqueue succeeds and the
+            // armed failure point is the audit write, not the queue insert.
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let id = draft_id();
+            seed_pending_draft(
+                &pool,
+                &id,
+                "ten_probe_0000000000000000",
+                "buyer@corp.example",
+            )
+            .await;
+
+            // The first write to `audit_logs` — the decision-evidence INSERT
+            // inside the approval transaction — fails.
+            crate::routes::fault::arm_write_fault(&pool, "audit_logs", "ai_draft_approve_audit", 0)
+                .await
+                .expect("arm audit fault");
+
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{body}"
+            );
+
+            // Nothing committed: the claim rolled back…
+            let state: (bool, bool) = sqlx::query_as(
+                "SELECT pending_approval, processed_at IS NOT NULL \
+                 FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("draft row");
+            assert_eq!(state, (true, false), "the claim must roll back");
+            // …no reply was queued…
+            let queued: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                    .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count queued system messages");
+            assert_eq!(
+                queued, 0,
+                "a failed audit write must not leave a queued reply"
+            );
+            // …and no evidence row exists.
+            let evidence: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE resource = 'ai_draft'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count audit rows");
+            assert_eq!(evidence, 0, "the failed evidence write must leave no row");
+
+            // The approval was NOT consumed: with the fault disarmed, the
+            // very same draft approves successfully.
+            sqlx::query("DROP TRIGGER IF EXISTS _fi_ai_draft_approve_audit ON audit_logs")
+                .execute(&pool)
+                .await
+                .expect("disarm audit fault");
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["approved"], true, "{body}");
+
+            pool.close().await;
+        });
+    }
+
+    /// External-audit P1, happy path: the approval's evidence lands in
+    /// `audit_logs` in the same commit as the queued reply — canonical
+    /// hash-chained shape, operator attribution (the machine admin's system
+    /// tenant; user id when the identity carries one), routed tenant,
+    /// recipient, note, and the queued message id.
+    ///
+    /// Sync test + current-thread runtime (like the end-to-end test) so the
+    /// process-global DKIM env guard is not held across an await point.
+    #[test]
+    fn approve_writes_operator_attribution_audit_with_the_reply() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_audit_commit").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let id = draft_id();
+            seed_pending_draft(
+                &pool,
+                &id,
+                "ten_probe_0000000000000000",
+                "buyer@corp.example",
+            )
+            .await;
+
+            let (status, body) = env
+                .post(
+                    &format!("/v1/admin/ai/drafts/{id}/approve"),
+                    r#"{"note":"ship it"}"#,
+                )
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            let queued_message_id = body["queued_message_id"]
+                .as_str()
+                .expect("queued message id in the response")
+                .to_string();
+
+            let row: (
+                String,
+                Option<String>,
+                String,
+                String,
+                serde_json::Value,
+                Option<String>,
+                Option<String>,
+            ) = sqlx::query_as(
+                "SELECT action, user_id, resource, tenant_id, details, hash, signature \
+                 FROM audit_logs WHERE resource = 'ai_draft' AND resource_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("approval evidence committed with the reply");
+            assert_eq!(row.0, "control_plane.ai_draft.approved");
+            assert_eq!(row.1, None, "the machine admin identity has no user id");
+            assert_eq!(row.2, "ai_draft");
+            assert_eq!(row.3, "system", "operator tenant attribution");
+            assert_eq!(row.4["routedTenantId"], "ten_probe_0000000000000000");
+            assert_eq!(row.4["recipient"], "buyer@corp.example");
+            assert_eq!(row.4["queuedMessageId"], queued_message_id.as_str());
+            assert_eq!(row.4["note"], "ship it");
+            // Canonical hash-chained shape: the evidence is tamper-evident.
+            assert!(row.5.is_some(), "chain hash present");
+            assert!(row.6.is_some(), "signature present");
+
+            pool.close().await;
+        });
+    }
+
+    /// Reject gets the same atomic treatment (external-audit P1): a failed
+    /// audit write rolls the rejection claim back — the draft stays pending
+    /// and the rejection is retryable; the retry then commits WITH its
+    /// actor-attributed evidence.
+    #[tokio::test]
+    async fn reject_rolls_back_when_the_audit_write_fails() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_draft_reject_audit").await else {
+            return;
+        };
+        // No system sender: rejection never enqueues, so the armed failure
+        // point can only be the audit write.
+        let env = AdvEnv::admin(pool.clone()).await;
+        let id = draft_id();
+        seed_pending_draft(
+            &pool,
+            &id,
+            "ten_probe_0000000000000000",
+            "buyer@corp.example",
+        )
+        .await;
+
+        crate::routes::fault::arm_write_fault(&pool, "audit_logs", "ai_draft_reject_audit", 0)
+            .await
+            .expect("arm audit fault");
+
+        let (status, body) = env
+            .post(&format!("/v1/admin/ai/drafts/{id}/reject"), "{}")
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{body}"
+        );
+
+        // The claim rolled back: the draft is still pending and rejectable.
+        let state: (bool, bool) = sqlx::query_as(
+            "SELECT pending_approval, processed_at IS NOT NULL \
+             FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("draft row");
+        assert_eq!(state, (true, false), "the rejection must roll back");
+
+        sqlx::query("DROP TRIGGER IF EXISTS _fi_ai_draft_reject_audit ON audit_logs")
+            .execute(&pool)
+            .await
+            .expect("disarm audit fault");
+        let (status, body) = env
+            .post(
+                &format!("/v1/admin/ai/drafts/{id}/reject"),
+                r#"{"note":"nope"}"#,
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["rejected"], true, "{body}");
+
+        // The retried rejection committed WITH its evidence.
+        let row: (String, String, serde_json::Value) = sqlx::query_as(
+            "SELECT action, tenant_id, details FROM audit_logs \
+             WHERE resource = 'ai_draft' AND resource_id = $1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .expect("rejection evidence committed with the claim");
+        assert_eq!(row.0, "control_plane.ai_draft.rejected");
+        assert_eq!(row.1, "system", "operator tenant attribution");
+        assert_eq!(row.2["routedTenantId"], "ten_probe_0000000000000000");
+        assert_eq!(row.2["note"], "nope");
+
         pool.close().await;
     }
 }

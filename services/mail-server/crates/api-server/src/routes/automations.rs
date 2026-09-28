@@ -4,7 +4,7 @@
 //!
 //! This module is CRUD only: it persists `automations` rows and their ordered
 //! `actions` JSON. The EXECUTOR now exists —
-//! `sales_autopilot::automations::AutomationExecutor` (migration 224 provides
+//! `worker_processors::automations::AutomationExecutor` (migration 224 provides
 //! the event inbox, run log and per-action log) claims due trigger events,
 //! evaluates `trigger_config`/`conditions` and executes `actions`. Every
 //! `send_email` action passes the ONE shared admission gate before
@@ -21,7 +21,7 @@
 //! and deliberately NOT preference-exempt. The executor's ONLY transactional
 //! automation sends are 1:1 replies to a message the recipient sent
 //! (`message.received`), which carry
-//! `sales_autopilot::automations::AUTOMATION_REPLY_CATEGORY` instead.
+//! `worker_processors::automations::AUTOMATION_REPLY_CATEGORY` instead.
 
 use super::helpers::{clamp_limit, decode_cursor, encode_cursor, has_more};
 use axum::extract::{Path, Query, State};
@@ -46,7 +46,7 @@ use crate::state::AppState;
 /// suppression still applies to it (admission checks the canonical
 /// suppression list for every category). The ONLY transactional automation
 /// sends are 1:1 replies to an inbound message (`message.received`), which
-/// `sales_autopilot::automations` admits under
+/// `worker_processors::automations` (the customer automation executor, run by the worker fleet) admits under
 /// `AUTOMATION_REPLY_CATEGORY`.
 pub const AUTOMATION_MESSAGE_CATEGORY: &str =
     apexmail_lib::email_headers::message_category::MARKETING;
@@ -489,7 +489,7 @@ mod tests {
     /// default. Contact-lifecycle automations are commercial mail: the
     /// category is `marketing` and gets NO opt-out exemption (the executor's
     /// only transactional automation sends are `message.received` replies,
-    /// admitted under `sales_autopilot::automations::AUTOMATION_REPLY_CATEGORY`).
+    /// admitted under `worker_processors::automations::AUTOMATION_REPLY_CATEGORY`).
     #[test]
     fn automation_send_category_is_explicitly_marketing() {
         use apexmail_lib::email_headers::message_category;

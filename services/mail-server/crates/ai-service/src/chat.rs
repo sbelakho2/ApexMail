@@ -5,9 +5,24 @@
 //! - The shared prefix (rules + canonical facts) is **byte-stable** across
 //!   tenants and requests so serving-stack prefix caching (vLLM APC / SGLang
 //!   RadixAttention) always hits — the CAG layer.
-//! - Everything factual is either in the canonical facts block, in a cited
-//!   retrieved passage, or computed by a deterministic tool. The model never
-//!   needs to recall a number from memory.
+//! - Grounding is ENFORCED, not merely prompted (P1-GROUNDING). After the
+//!   policy checks, the verifier splits the answer into atomic sentence-level
+//!   claims and rejects every factual claim — one containing numbers, pricing
+//!   amounts, named entities, or absolute quantifiers ("all/always/never/
+//!   72 hours") — that is not supported by (a) the canonical facts block,
+//!   (b) the caller-assembled account context, (c) deterministic tool output,
+//!   or (d) a cited retrieved passage whose content meaningfully overlaps the
+//!   claim. A `[n]` citation marker maps the claim to chunk n; the marker
+//!   alone never satisfies support. This is a LEXICAL-ENTAILMENT PROXY: it
+//!   proves token support, not semantic entailment — a claim rephrased with
+//!   synonyms of the source may be rejected (false positive), and subtle
+//!   meaning distortions within overlapping tokens can still pass (false
+//!   negative).
+//! - Unsupported claims follow the EXISTING escalation ladder: verification
+//!   fails, the model gets one corrective retry with the deterministic
+//!   diagnosis, and a still-unsupported answer escalates to human review.
+//!   Chat never silently strips offending sentences: stripping could drop
+//!   safety-relevant material while shipping the remainder unreviewed.
 //! - Failure is honest: when the model is unavailable or the verifier
 //!   rejects the answer twice, the caller gets an explicit escalation, never
 //!   an unverified guess.
@@ -86,7 +101,12 @@ pub struct ChatResponse {
     pub disclosure: &'static str,
     pub docs_version: String,
     pub model_enabled: bool,
-    pub passed_verification: bool,
+    /// P1-GROUNDING rename: this flag means the deterministic POLICY checks
+    /// (pricing, safety, URLs, PII, DNS, quality) passed — and, in grounded
+    /// chat, that every atomic factual claim traced to a grounding source.
+    /// It is a lexical proxy, never proof of factual entailment; consumers
+    /// must not read it as "factually grounded".
+    pub passed_policy_verification: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -273,7 +293,10 @@ passages don't cover it, say so and offer escalation):"
         );
 
         // 5. Generate, then verify deterministically; one retry carrying the
-        //    verifier's correction hint.
+        //    verifier's correction hint. Grounding sources for the
+        //    atomic-claim check (P1-GROUNDING): the canonical facts block,
+        //    the caller-assembled account context, and the retrieved chunks
+        //    (chat runs no tools, so tool output is empty).
         let system = Self::shared_prefix();
         let mut answer = self
             .client
@@ -284,13 +307,28 @@ passages don't cover it, say so and offer escalation):"
                 e
             })?;
 
-        let mut passed = self.verifier.verify(&answer).passed;
-        if !passed {
+        let knowledge_text = knowledge::shared_knowledge_markdown();
+        let account_text = if req.account_context.is_null() {
+            String::new()
+        } else {
+            serde_json::to_string(&req.account_context).unwrap_or_default()
+        };
+        let grounding = crate::verifier::Grounding {
+            canonical_facts: &knowledge_text,
+            account_context: &account_text,
+            tool_output: "",
+            chunks: &chunks,
+        };
+
+        let mut verdict = self.verifier.verify_grounded(&answer, &[], &grounding);
+        if !verdict.passed {
             // One corrective retry with the deterministic hint.
-            let hint = self.verifier.verify(&answer).correction_hint;
             let retry_block = format!(
                 "{user_block}\n\n## Verification feedback — correct your answer\n{}",
-                hint.as_deref().unwrap_or("The previous answer violated content rules; rewrite it grounded strictly in the passages and canonical facts.")
+                verdict
+                    .correction_hint
+                    .as_deref()
+                    .unwrap_or("The previous answer violated content rules; rewrite it grounded strictly in the passages and canonical facts.")
             );
             if let Ok(second) = self
                 .client
@@ -298,17 +336,20 @@ passages don't cover it, say so and offer escalation):"
                 .await
             {
                 answer = second;
-                passed = self.verifier.verify(&answer).passed;
+                verdict = self.verifier.verify_grounded(&answer, &[], &grounding);
             }
         }
 
-        if !passed {
-            // Honest escalation instead of an unverified answer.
+        if !verdict.passed {
+            // Honest escalation instead of an unverified answer. Unsupported
+            // factual claims land here too (P1-GROUNDING): the escalation
+            // ladder, not silent sentence-stripping, is the documented
+            // disposition.
             let answer = "I couldn't produce a verified answer for that. I've flagged it \
 for the support team, who will follow up — you can also reach them at \
 support@apexmail.ee."
                 .to_string();
-            return Ok(self.build_response(req, answer, chunks, true, passed, &docs_version));
+            return Ok(self.build_response(req, answer, chunks, true, false, &docs_version));
         }
 
         // 6. Keep only citations actually referenced in the answer.
@@ -331,7 +372,7 @@ support@apexmail.ee."
         answer: String,
         citations: Vec<RetrievedChunk>,
         escalated: bool,
-        passed_verification: bool,
+        passed_policy_verification: bool,
         docs_version: &str,
     ) -> (ChatResponse, ChatAuditRow) {
         let audit = ChatAuditRow {
@@ -350,7 +391,7 @@ support@apexmail.ee."
             disclosure: AI_DISCLOSURE,
             docs_version: audit.docs_version.clone(),
             model_enabled: self.model_enabled,
-            passed_verification,
+            passed_policy_verification,
         };
         (resp, audit)
     }
@@ -432,6 +473,28 @@ mod tests {
     fn disclosure_names_the_ai_and_the_human_route() {
         assert!(AI_DISCLOSURE.contains("AI-powered"));
         assert!(AI_DISCLOSURE.contains("support@apexmail.ee"));
+    }
+
+    /// P1-GROUNDING rename: the serialized contract exposes
+    /// `passed_policy_verification` and NOT the old `passed_verification` —
+    /// no consumer may infer factual grounding from a policy flag.
+    #[test]
+    fn serialization_uses_the_policy_verification_field_name() {
+        let resp = ChatResponse {
+            answer: "answer".into(),
+            citations: vec![],
+            escalated: false,
+            disclosure: AI_DISCLOSURE,
+            docs_version: "abc".into(),
+            model_enabled: true,
+            passed_policy_verification: true,
+        };
+        let json = serde_json::to_value(&resp).expect("serialize chat response");
+        assert_eq!(json["passed_policy_verification"], true);
+        assert!(
+            json.get("passed_verification").is_none(),
+            "the old policy-only name must be gone from the wire contract"
+        );
     }
 
     // ── history sanitization: history is attacker-controlled too ───────
@@ -579,7 +642,8 @@ mod tests {
             .expect("chat succeeds");
         assert_eq!(resp.answer, CHAT_ANSWER);
         assert!(!resp.escalated);
-        assert!(resp.passed_verification);
+        // P1-GROUNDING rename: policy flag, never a grounding guarantee.
+        assert!(resp.passed_policy_verification);
         assert!(resp.disclosure.contains("AI-powered"));
         assert_eq!(resp.citations.len(), 0, "no pool: no citations");
         assert_eq!(audit.tenant_id, "tenant-chat");
@@ -708,7 +772,7 @@ mod tests {
             .await
             .expect("chat itself succeeds");
         assert!(resp.escalated, "unverifiable answers must escalate");
-        assert!(!resp.passed_verification);
+        assert!(!resp.passed_policy_verification);
         assert!(resp.answer.contains("I couldn't produce a verified answer"));
         assert!(audit.escalated);
         assert_eq!(mock.request_count(), 2, "exactly one corrective retry");
@@ -734,7 +798,7 @@ mod tests {
             .expect("chat succeeds");
         assert_eq!(resp.answer, CHAT_ANSWER);
         assert!(!resp.escalated);
-        assert!(resp.passed_verification);
+        assert!(resp.passed_policy_verification);
         assert_eq!(mock.request_count(), 2);
     }
 
@@ -749,6 +813,77 @@ mod tests {
             .chat(&chat_request("What does the Pro plan cost?", vec![]))
             .await;
         assert!(matches!(result, Err(AiError::ModelUnavailable(_))));
+    }
+
+    /// P1-GROUNDING end-to-end: a `[1]` marker whose passage does not contain
+    /// the claim's numbers ("72 hours") is rejected — one corrective retry,
+    /// then the human-review escalation. When the indexed passage DOES carry
+    /// the numbers and content, the same claim shape passes with its citation
+    /// retained.
+    #[tokio::test]
+    async fn chat_rejects_cited_claims_the_passage_does_not_support() {
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            return;
+        };
+        let _serial = ENV_SERIAL.lock().await;
+        let Some(pool) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ai-chat-ground-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(&dir).unwrap();
+        // The corpus deliberately says nothing about "72 hours": a cited
+        // 72-hours claim has no passage that supports it.
+        std::fs::write(
+            dir.join("warmup.md"),
+            "# Warmup\n\nHow do I warm up my IP safely and gradually before campaigns.\n",
+        )
+        .unwrap();
+        let indexed = crate::retrieval::reindex(&pool, &dir).await.unwrap();
+        assert_eq!(indexed, 1);
+
+        let unsupported = "Soft bounces clear automatically within 72 hours [1].";
+        let supported = "You should warm up your IP gradually before campaigns [1].";
+        let mock = spawn_scripted_llm(vec![
+            LlmScript::Content(unsupported),
+            LlmScript::Content(unsupported),
+            LlmScript::Content(supported),
+        ])
+        .await;
+        let svc = enabled_service(&mock.endpoint(), Some(pool.clone()));
+
+        // Unsupported: the marker exists, the passage does not carry "72" —
+        // rejected after exactly one corrective retry, escalated.
+        let (resp, audit) = svc
+            .chat(&chat_request("How quickly do soft bounces clear?", vec![]))
+            .await
+            .expect("chat succeeds");
+        assert!(resp.escalated, "the fabricated 72-hours claim must escalate");
+        assert!(!resp.passed_policy_verification);
+        assert!(resp.answer.contains("I couldn't produce a verified answer"));
+        assert!(audit.escalated);
+        assert_eq!(mock.request_count(), 2, "one corrective retry, then escalation");
+
+        // Supported: the passage itself carries the warmup guidance, so the
+        // cited claim passes and keeps its citation.
+        let (resp, _) = svc
+            .chat(&chat_request("How do I warm up my IP?", vec![]))
+            .await
+            .expect("chat succeeds");
+        assert!(!resp.escalated, "passage-backed claim must pass: {}", resp.answer);
+        assert!(resp.passed_policy_verification);
+        assert_eq!(resp.citations.len(), 1, "the [1] citation is retained");
+        assert_eq!(resp.citations[0].path, "warmup.md");
+
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
