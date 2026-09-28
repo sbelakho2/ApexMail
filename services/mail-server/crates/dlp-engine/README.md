@@ -1,7 +1,14 @@
 # dlp-engine
 
-> **STATUS — READ BEFORE RELYING ON THIS CRATE**
-> NOT WIRED INTO PRODUCTION: no service in this workspace (in particular, not the outbound delivery worker) depends on this crate, so no outbound content policy is enforced by it today. Do not represent it as an active control.
+WIRING-STATUS: WIRED INTO PRODUCTION — the worker's pre-send gate (worker-processors `email/dlp.rs`, env `WORKER_DLP_ENABLED`) scans every outbound message before acceptance.
+> Integration contract: the OUTBOUND delivery worker (crates/worker-processors,
+> `src/email/dlp.rs`, pre-send gate inside the email processor BEFORE the durable
+> acceptance reservation) will scan every prepared per-recipient copy with this
+> engine when `WORKER_DLP_ENABLED=true` (default OFF). Until the worker's
+> dependency on this crate is in the tree and building, NO outbound content
+> policy is enforced — do not represent it as an active control. Live wiring
+> status is tracked in docs/development/capability-registry.json
+> (data-loss-prevention + in_flight_wiring).
 
 Data Loss Prevention engine — PII detection, sensitive data scanning, document watermarking, and outbound content policies.
 

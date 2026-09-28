@@ -103,6 +103,9 @@ pub struct EmailConfig {
     pub warmup: WarmupConfig,
     /// IP rate limiting configuration.
     pub ip_rate_limiting: IpRateLimitConfig,
+    /// WORKER PRE-SEND DLP gate configuration (`WORKER_DLP_ENABLED`,
+    /// default OFF — see [`DlpGateConfig`]).
+    pub dlp: DlpGateConfig,
 }
 
 impl Default for EmailConfig {
@@ -119,7 +122,51 @@ impl Default for EmailConfig {
             tracking: TrackingConfig::default(),
             warmup: WarmupConfig::default(),
             ip_rate_limiting: IpRateLimitConfig::default(),
+            dlp: DlpGateConfig::default(),
         }
+    }
+}
+
+/// WORKER PRE-SEND DLP gate configuration.
+///
+/// When enabled, every outbound copy is scanned by the `dlp-engine` in the
+/// email processor's dispatch (`process_job_inner`) BEFORE the durable
+/// acceptance reservation and any SMTP effect, with the severity mapping:
+/// low → allow+log, medium → hold (`deferred` + annotation + audit row),
+/// high → refuse (`bounced` + sender-visible copy + audit row). An engine
+/// error fails OPEN (deliver + loud log); a detection fails CLOSED per the
+/// mapping. See `crate::email::dlp` for the full contract.
+///
+/// The default is OFF so existing deployments keep byte-identical behavior
+/// on upgrade; compose/production set `WORKER_DLP_ENABLED` explicitly.
+/// Enforcement is global — no per-tenant override surface exists (that
+/// would be a new policy table/migration, out of this crate's scope).
+#[derive(Debug, Clone)]
+pub struct DlpGateConfig {
+    /// Gate switch (`WORKER_DLP_ENABLED`: `true`/`1` enables).
+    pub enabled: bool,
+}
+
+impl DlpGateConfig {
+    /// Env var gating the pre-send DLP scan (`WORKER_DLP_ENABLED`).
+    const ENABLED_ENV: &'static str = "WORKER_DLP_ENABLED";
+
+    /// Build from the environment. Absent / any value other than `true`
+    /// or `1` keeps the gate OFF (historical default).
+    pub fn from_env() -> Self {
+        let enabled = std::env::var(Self::ENABLED_ENV)
+            .map(|v| {
+                let v = v.trim();
+                v == "true" || v == "1"
+            })
+            .unwrap_or(false);
+        Self { enabled }
+    }
+}
+
+impl Default for DlpGateConfig {
+    fn default() -> Self {
+        Self::from_env()
     }
 }
 
@@ -412,6 +459,58 @@ impl EmailConfig {
             TransportType::Ses => self.ses.max_send_rate,
             TransportType::Smtp => self.smtp.rate_limit_per_second,
         }
+    }
+}
+
+#[cfg(test)]
+mod dlp_gate_tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    fn clear_dlp_env() {
+        std::env::remove_var("WORKER_DLP_ENABLED");
+    }
+
+    /// The pre-send DLP gate defaults OFF (dev deployments keep
+    /// byte-identical behavior on upgrade); only `true`/`1` enable it.
+    #[test]
+    fn dlp_gate_defaults_off_and_parses_the_env_switch() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_dlp_env();
+        assert!(!DlpGateConfig::from_env().enabled, "absent env must keep the gate OFF");
+
+        for (value, expected) in [
+            ("true", true),
+            ("1", true),
+            (" true ", true),
+            ("false", false),
+            ("yes", false),
+            ("0", false),
+            ("", false),
+        ] {
+            std::env::set_var("WORKER_DLP_ENABLED", value);
+            assert_eq!(
+                DlpGateConfig::from_env().enabled,
+                expected,
+                "WORKER_DLP_ENABLED={value:?}"
+            );
+        }
+
+        clear_dlp_env();
+    }
+
+    /// `Default` delegates to `from_env`, so `EmailConfig::default()`
+    /// construction sites (bin/worker.rs, suites) honor the same switch.
+    #[test]
+    fn dlp_gate_default_reads_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_dlp_env();
+        assert!(!EmailConfig::default().dlp.enabled);
+
+        std::env::set_var("WORKER_DLP_ENABLED", "true");
+        assert!(EmailConfig::default().dlp.enabled);
+
+        clear_dlp_env();
     }
 }
 

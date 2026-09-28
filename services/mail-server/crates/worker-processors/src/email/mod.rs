@@ -8,6 +8,7 @@
 //! - Per-IP rate limiting
 //! - Circuit breakers for SMTP endpoints
 
+mod dlp;
 mod outbound_mta;
 mod processor;
 mod tracking;
@@ -15,6 +16,7 @@ mod transport;
 mod transport_router;
 mod types;
 
+pub use dlp::{EngineDlpScanner, PreSendDlpScanner, PreSendVerdict};
 pub use outbound_mta::{OutboundMtaTransport, RelaySubmitter};
 pub use processor::EmailProcessor;
 pub use tracking::{add_tracking_pixel, encode_tracking_id, rewrite_links, TrackingPayload};

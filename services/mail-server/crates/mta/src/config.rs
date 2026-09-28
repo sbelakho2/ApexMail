@@ -114,8 +114,118 @@ pub struct InboundConfig {
     /// mailbox host adds signatures without a consumer.
     #[serde(default)]
     pub arc_seal: bool,
+    /// Spam/phishing filter wired onto the inbound DATA path
+    /// (`crates/spam-filter`). Verdicts are stored as message headers.
+    #[serde(default)]
+    pub spam_filter: SpamFilterConfig,
+    /// Attachment sandboxing wired onto the inbound DATA path
+    /// (`crates/sandbox`). Per-attachment verdicts are stored as message
+    /// headers.
+    #[serde(default)]
+    pub attachment_scan: AttachmentScanConfig,
+    /// SMTP-level intrusion detection (`crates/ids-engine`) wired into the
+    /// inbound connection/session layer and the DATA payload.
+    #[serde(default)]
+    pub ids: IdsIntegrationConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+}
+
+/// Spam-filter (crate `spam-filter`) integration on the inbound DATA path.
+///
+/// Both switches default OFF in development; the production compose is
+/// expected to set `MTA_SPAM_FILTER_ENABLED=true` (with
+/// `MTA_SPAM_REJECT_ENABLED` as the operator's explicit opt into DATA-time
+/// refusal). Every enabled run TAGS the stored message with
+/// `X-Spam-Score`/`X-Spam-Verdict` headers; a filter ERROR always fails
+/// OPEN to tag-only (`X-Spam-Verdict: UNKNOWN`) so a filter crash can never
+/// silently drop mail.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SpamFilterConfig {
+    /// Run the filter on every accepted-after-auth DATA payload
+    /// (`MTA_SPAM_FILTER_ENABLED`, default false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Refuse the message at DATA time (550 5.7.1) when the filter
+    /// classifies it REJECT (`MTA_SPAM_REJECT_ENABLED`, default false —
+    /// tag-only is the default action).
+    #[serde(default)]
+    pub reject_at_data: bool,
+    /// Composite score at/above which a message is classified REJECT
+    /// (`MTA_SPAM_REJECT_THRESHOLD`, default 10.0 — the spam-filter crate's
+    /// default reject threshold). Fed into the crate's `SpamConfig` so the
+    /// classification and the DATA-time action cannot drift apart.
+    #[serde(default = "default_spam_reject_threshold")]
+    pub reject_threshold: f64,
+}
+
+/// What the attachment scanner does with a flagged attachment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub enum AttachmentScanAction {
+    /// Record the verdict headers only (default).
+    #[default]
+    #[serde(rename = "flag")]
+    Flag,
+    /// Remove flagged attachments from the stored message and leave an
+    /// `X-Apex-Attachment-Note` header in their place.
+    #[serde(rename = "strip")]
+    Strip,
+    /// Refuse the whole message at DATA time (550 5.7.1) when any
+    /// attachment receives the sandbox's REJECT decision.
+    #[serde(rename = "reject")]
+    Reject,
+}
+
+impl std::fmt::Display for AttachmentScanAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachmentScanAction::Flag => write!(f, "flag"),
+            AttachmentScanAction::Strip => write!(f, "strip"),
+            AttachmentScanAction::Reject => write!(f, "reject"),
+        }
+    }
+}
+
+/// Attachment-sandbox (crate `sandbox`) integration on the inbound DATA
+/// path.
+///
+/// Default OFF in development; `MTA_ATTACHMENT_SCAN_ENABLED=true` in
+/// production with `MTA_ATTACHMENT_SCAN_MODE` choosing the action
+/// (`flag` default, `strip`, or `reject`). Every enabled run records one
+/// `X-Apex-Attachment-Scan` header per attachment. A scan ERROR fails OPEN
+/// (`decision=ERROR` recorded, attachment never stripped/refused).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AttachmentScanConfig {
+    /// Inspect every MIME attachment on the inbound DATA path
+    /// (`MTA_ATTACHMENT_SCAN_ENABLED`, default false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Action for flagged attachments (`MTA_ATTACHMENT_SCAN_MODE`, default
+    /// `flag`).
+    #[serde(default)]
+    pub action: AttachmentScanAction,
+}
+
+/// SMTP-level intrusion detection (crate `ids-engine`) integration.
+///
+/// The engine's SMTP protocol analyser and mail signatures are wired into:
+/// (a) the connection/session layer — every admitted session feeds the
+/// connection tracker (SYN → established → close) so SYN-flood anomalies
+/// are observable; and (b) the DATA payload — SMTP signatures and protocol
+/// anomalies are evaluated per message. Verdicts are stored as an
+/// `X-Apex-Ids-Verdict` header. Refusal is a separate explicit opt-in and
+/// defaults OFF so an over-eager anomaly can never take down mail flow by
+/// surprise.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct IdsIntegrationConfig {
+    /// Construct the engine and inspect sessions/DATA payloads
+    /// (`MTA_IDS_ENABLED`, default false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// ACT on Drop/Reject verdicts: 421 at connection admission and 550 at
+    /// DATA time (`MTA_IDS_REFUSE`, default false — log + record only).
+    #[serde(default)]
+    pub refuse: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -349,6 +459,9 @@ impl_default!(
         advertise_auth_port25: false,
         require_fcrdns: false,
         arc_seal: false,
+        spam_filter: SpamFilterConfig::default(),
+        attachment_scan: AttachmentScanConfig::default(),
+        ids: IdsIntegrationConfig::default(),
         tls: TlsConfig::default(),
     }
 );
@@ -553,6 +666,49 @@ fn default_max_msgs_per_ip_per_hour() -> u32 {
     2000
 }
 
+impl Default for SpamFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reject_at_data: false,
+            reject_threshold: default_spam_reject_threshold(),
+        }
+    }
+}
+
+impl Default for AttachmentScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            action: AttachmentScanAction::Flag,
+        }
+    }
+}
+
+fn default_spam_reject_threshold() -> f64 {
+    10.0
+}
+
+fn parse_attachment_scan_mode(raw: &str) -> anyhow::Result<AttachmentScanAction> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "flag" => Ok(AttachmentScanAction::Flag),
+        "strip" => Ok(AttachmentScanAction::Strip),
+        "reject" => Ok(AttachmentScanAction::Reject),
+        other => anyhow::bail!(
+            "MTA_ATTACHMENT_SCAN_MODE must be one of flag|strip|reject, got {other:?}"
+        ),
+    }
+}
+
+fn parse_f64_env(name: &str, default: f64) -> anyhow::Result<f64> {
+    match std::env::var(name) {
+        Ok(raw) => raw.trim().parse::<f64>().map_err(|_| {
+            anyhow::anyhow!("{name} must be a number, got {raw:?}")
+        }),
+        Err(_) => Ok(default),
+    }
+}
+
 impl MtaConfig {
     /// True when this configuration decides production-only fail-fast rules
     /// (`NODE_ENV=production`, with `prod` accepted as the common alias).
@@ -595,6 +751,25 @@ impl MtaConfig {
                 advertise_auth_port25: parse_bool_env("SMTP_ADVERTISE_AUTH_PORT25", false),
                 require_fcrdns: parse_bool_env("SMTP_REQUIRE_FCRDNS", false),
                 arc_seal: parse_bool_env("SMTP_ARC_SEAL", false),
+                spam_filter: SpamFilterConfig {
+                    enabled: parse_bool_env("MTA_SPAM_FILTER_ENABLED", false),
+                    reject_at_data: parse_bool_env("MTA_SPAM_REJECT_ENABLED", false),
+                    reject_threshold: parse_f64_env(
+                        "MTA_SPAM_REJECT_THRESHOLD",
+                        default_spam_reject_threshold(),
+                    )?,
+                },
+                attachment_scan: AttachmentScanConfig {
+                    enabled: parse_bool_env("MTA_ATTACHMENT_SCAN_ENABLED", false),
+                    action: match std::env::var("MTA_ATTACHMENT_SCAN_MODE") {
+                        Ok(raw) => parse_attachment_scan_mode(&raw)?,
+                        Err(_) => AttachmentScanAction::Flag,
+                    },
+                },
+                ids: IdsIntegrationConfig {
+                    enabled: parse_bool_env("MTA_IDS_ENABLED", false),
+                    refuse: parse_bool_env("MTA_IDS_REFUSE", false),
+                },
                 tls: TlsConfig {
                     enabled: parse_bool_env("TLS_ENABLED", false),
                     key_path: std::env::var("TLS_KEY_PATH").ok(),
@@ -834,6 +1009,17 @@ impl MtaConfig {
             errors.push("spf.spf_cache_max_entries must be > 0".into());
         }
 
+        // --- Spam filter validation ---
+        if !self.inbound.spam_filter.reject_threshold.is_finite()
+            || self.inbound.spam_filter.reject_threshold <= 0.0
+        {
+            errors.push(
+                "inbound.spam_filter.reject_threshold (MTA_SPAM_REJECT_THRESHOLD) must be a \
+                 finite number > 0"
+                    .into(),
+            );
+        }
+
         // --- TLS config coherence ---
         if self.inbound.tls.enabled {
             if self.inbound.tls.cert_path.is_none() {
@@ -1027,6 +1213,68 @@ mod tests {
     }
 
     #[test]
+    fn content_security_defaults_are_off_and_flag_only() {
+        // Spam filter, attachment sandbox, and IDS integration are all OFF
+        // by default (dev-safe); the attachment action defaults to flag
+        // (tag-only, never destructive).
+        let default = InboundConfig::default();
+        assert!(!default.spam_filter.enabled);
+        assert!(!default.spam_filter.reject_at_data);
+        assert!((default.spam_filter.reject_threshold - 10.0).abs() < f64::EPSILON);
+        assert!(!default.attachment_scan.enabled);
+        assert_eq!(default.attachment_scan.action, AttachmentScanAction::Flag);
+        assert!(!default.ids.enabled);
+        assert!(!default.ids.refuse);
+
+        // serde defaults agree with the struct defaults.
+        let from_json: InboundConfig = serde_json::from_str("{}").unwrap();
+        assert!(!from_json.spam_filter.enabled);
+        assert_eq!(from_json.attachment_scan.action, AttachmentScanAction::Flag);
+        assert!(!from_json.ids.enabled);
+
+        // Explicit operator opt-ins are honoured, and the action enum
+        // round-trips.
+        let opted_in: InboundConfig = serde_json::from_str(
+            r#"{"spam_filter": {"enabled": true, "reject_at_data": true, "reject_threshold": 7.5},
+                "attachment_scan": {"enabled": true, "action": "strip"},
+                "ids": {"enabled": true, "refuse": true}}"#,
+        )
+        .unwrap();
+        assert!(opted_in.spam_filter.enabled);
+        assert!(opted_in.spam_filter.reject_at_data);
+        assert!((opted_in.spam_filter.reject_threshold - 7.5).abs() < f64::EPSILON);
+        assert_eq!(opted_in.attachment_scan.action, AttachmentScanAction::Strip);
+        assert!(opted_in.ids.enabled);
+        assert!(opted_in.ids.refuse);
+
+        // An unknown scan mode must be refused, not silently defaulted.
+        let bad: Result<InboundConfig, _> =
+            serde_json::from_str(r#"{"attachment_scan": {"action": "nuke"}}"#);
+        assert!(bad.is_err(), "unknown attachment action must fail parsing");
+    }
+
+    #[test]
+    fn invalid_spam_threshold_is_refused_at_startup() {
+        let mut config = MtaConfig::default();
+        config.inbound.spam_filter.reject_threshold = 0.0;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("MTA_SPAM_REJECT_THRESHOLD"),
+            "zero threshold must be refused: {error}"
+        );
+
+        config.inbound.spam_filter.reject_threshold = f64::NAN;
+        assert!(config.validate().is_err(), "NaN threshold must be refused");
+
+        config.inbound.spam_filter.reject_threshold = 10.0;
+        assert!(
+            config.validate().is_ok(),
+            "a sane threshold validates: {:?}",
+            config.validate()
+        );
+    }
+
+    #[test]
     fn production_requires_verp_secret_with_bounce_enabled() {
         let mut config = MtaConfig {
             node_env: "production".into(),
@@ -1133,6 +1381,13 @@ mod adversarial_env_tests {
         "TLS_KEY_PATH",
         "DB_MAX_CONNECTIONS",
         "GRACEFUL_SHUTDOWN_TIMEOUT",
+        "MTA_SPAM_FILTER_ENABLED",
+        "MTA_SPAM_REJECT_ENABLED",
+        "MTA_SPAM_REJECT_THRESHOLD",
+        "MTA_ATTACHMENT_SCAN_ENABLED",
+        "MTA_ATTACHMENT_SCAN_MODE",
+        "MTA_IDS_ENABLED",
+        "MTA_IDS_REFUSE",
     ];
 
     #[test]
@@ -1196,6 +1451,47 @@ mod adversarial_env_tests {
         assert_eq!(config.graceful_shutdown_timeout, 42);
         assert_eq!(config.mailstore_addr, "http://mailstore.internal:50051");
         assert_eq!(config.database.max_connections, 7);
+
+        clear(MANAGED);
+    }
+
+    #[test]
+    fn content_security_env_surface_parses_and_refuses_bad_modes() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear(MANAGED);
+        set("MTA_SPAM_FILTER_ENABLED", "true");
+        set("MTA_SPAM_REJECT_ENABLED", "true");
+        set("MTA_SPAM_REJECT_THRESHOLD", "7.5");
+        set("MTA_ATTACHMENT_SCAN_ENABLED", "true");
+        set("MTA_ATTACHMENT_SCAN_MODE", "strip");
+        set("MTA_IDS_ENABLED", "true");
+        set("MTA_IDS_REFUSE", "true");
+
+        let config = MtaConfig::from_env().expect("valid content-security env surface");
+        assert!(config.inbound.spam_filter.enabled);
+        assert!(config.inbound.spam_filter.reject_at_data);
+        assert!((config.inbound.spam_filter.reject_threshold - 7.5).abs() < f64::EPSILON);
+        assert!(config.inbound.attachment_scan.enabled);
+        assert_eq!(config.inbound.attachment_scan.action, AttachmentScanAction::Strip);
+        assert!(config.inbound.ids.enabled);
+        assert!(config.inbound.ids.refuse);
+
+        // An unknown mode is a startup error naming the variable.
+        set("MTA_ATTACHMENT_SCAN_MODE", "detonate");
+        let error = MtaConfig::from_env().expect_err("bad mode must be refused");
+        assert!(
+            error.to_string().contains("MTA_ATTACHMENT_SCAN_MODE"),
+            "{error}"
+        );
+
+        // A non-numeric threshold is a startup error naming the variable.
+        set("MTA_ATTACHMENT_SCAN_MODE", "flag");
+        set("MTA_SPAM_REJECT_THRESHOLD", "ten");
+        let error = MtaConfig::from_env().expect_err("non-numeric threshold must be refused");
+        assert!(
+            error.to_string().contains("MTA_SPAM_REJECT_THRESHOLD"),
+            "{error}"
+        );
 
         clear(MANAGED);
     }

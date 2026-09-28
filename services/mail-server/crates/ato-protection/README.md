@@ -1,7 +1,14 @@
 # ato-protection
 
-> **STATUS — READ BEFORE RELYING ON THIS CRATE**
-> NOT WIRED INTO PRODUCTION: no service in this workspace depends on this crate. It is a library and test target only. Do not represent it as an active control.
+> **STATUS — WIRED INTO THE API-SERVER LOGIN FLOWS**
+> `crates/api-server` depends on this crate and evaluates every password login
+> through `ato_protection::runtime::shared()` (`crates/api-server/src/routes/auth.rs`,
+> `ato_evaluate_password_login`). Gate: `ATO_PROTECTION_ENABLED` — an explicit
+> value always wins; unset, the runtime defaults ON for ENVIRONMENT=production /
+> staging and OFF elsewhere (the production compose pins it `true`). Medium-risk
+> logins step up to MFA (when enrolled), high-risk logins are refused; both write
+> audit rows. The engine fails OPEN: a detector error allows the login with a
+> loud log.
 
 Account Takeover Protection — behavioral biometrics, impossible travel detection, session fingerprinting, and adaptive MFA.
 

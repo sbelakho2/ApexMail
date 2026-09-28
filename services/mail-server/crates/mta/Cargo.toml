@@ -14,6 +14,14 @@ path = "src/bin/mta.rs"
 mail-common = { path = "../mail-common" }
 mail-proto = { path = "../mail-proto" }
 apexmail-lib = { path = "../apexmail-lib" }
+# Inbound content security (wired into the inbound DATA path): spam/phishing
+# scoring, attachment sandboxing, and SMTP-level intrusion detection. The
+# marketing/compliance pages advertise these controls; these are the crates
+# that make the claims true. Workspace-internal crates only — no new vendor
+# graph beyond what these already pin.
+spam-filter = { path = "../spam-filter" }
+sandbox = { path = "../sandbox" }
+ids-engine = { path = "../ids-engine" }
 # Unified send admission (P0): SMTP submission reserves the same EmailsSent
 # quota / category / suppression gate as the REST send path.
 billing-service = { path = "../billing-service" }

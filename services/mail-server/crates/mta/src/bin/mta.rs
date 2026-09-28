@@ -874,6 +874,9 @@ mod run_tests {
                 advertise_auth_port25: false,
                 require_fcrdns: false,
                 arc_seal: false,
+                spam_filter: Default::default(),
+                attachment_scan: Default::default(),
+                ids: Default::default(),
                 tls: Default::default(),
             },
             bounce: BounceConfig {

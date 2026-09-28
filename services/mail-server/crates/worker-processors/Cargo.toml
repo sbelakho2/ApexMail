@@ -98,6 +98,10 @@ aws-sdk-sesv2.workspace = true
 # acceptance; its ledger shares the send_unit identity with the worker's
 # sales_delivery_acceptances — migration 212).
 outbound-mta = { path = "../outbound-mta" }
+# WORKER PRE-SEND DLP gate: the enforcement point that scans every prepared
+# outbound copy (subject, text, stripped HTML, decoded attachments) before
+# the acceptance reservation — see email/dlp.rs.
+dlp-engine = { path = "../dlp-engine" }
 
 [dev-dependencies]
 # `start_paused` for the supervisor backoff test (a real 5s+10s wait would

@@ -10,7 +10,7 @@ pub mod pool;
 pub use backpressure::{Backpressure, BackpressureConfig};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
 pub use config::{
-    AnalyticsConfig, DkimConfig, EmailConfig, IpRateLimitConfig, ProcessorConfig,
+    AnalyticsConfig, DkimConfig, DlpGateConfig, EmailConfig, IpRateLimitConfig, ProcessorConfig,
     ReplyHandlerConfig, SesConfig, SmtpConfig, TrackingConfig, TransportType, WarmupConfig,
     WebhookConfig,
 };

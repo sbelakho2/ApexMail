@@ -1,7 +1,13 @@
 # spam-filter
 
-> **STATUS — READ BEFORE RELYING ON THIS CRATE**
-> NOT WIRED INTO PRODUCTION: no delivery path (mta, worker-processors) depends on this crate. It is a library and test target only. Do not represent it as an active control.
+> **STATUS — WIRED INTO THE MTA INBOUND PATH**
+> Since the content-security integration (`crates/mta/src/servers/content_security.rs`,
+> gated by `MTA_SPAM_FILTER_ENABLED`), every inbound DATA payload is scored by
+> `SpamEngine` and the verdict is stored on the message as `X-Spam-Score` /
+> `X-Spam-Verdict` headers. DATA-time refusal for REJECT-classified mail is a
+> separate, default-off operator opt-in (`MTA_SPAM_REJECT_ENABLED`). The
+> worker-processors/outbound-mta path does NOT re-score; only the inbound
+> flow is wired.
 
 Multi-layer spam & phishing detection: Bayesian classifier, URL reputation, header analysis, content scoring.
 

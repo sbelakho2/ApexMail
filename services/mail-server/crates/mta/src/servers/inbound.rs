@@ -266,6 +266,17 @@ pub struct InboundServer {
     /// mailbox deliveries, so RCPT must not resolve them against
     /// `mail_accounts`.
     verp_domains: Vec<String>,
+    /// Spam/phishing scoring seam (`spam-filter` crate). Installed whenever
+    /// `MTA_SPAM_FILTER_ENABLED` is set; consulted only when the spam config
+    /// is enabled.
+    spam_analyzer: Arc<dyn super::content_security::SpamAnalyzer>,
+    /// Attachment sandbox (`sandbox` crate): static inspection of every MIME
+    /// attachment on the DATA path.
+    sandbox_engine: sandbox::engine::SandboxEngine,
+    /// SMTP-level intrusion detection (`ids-engine` crate): connection
+    /// tracking at session admission + signature/protocol-anomaly scan of the
+    /// DATA payload. `None` when `MTA_IDS_ENABLED` is unset/false.
+    ids: Option<super::content_security::IdsRuntime>,
 }
 
 impl InboundServer {
@@ -280,7 +291,7 @@ impl InboundServer {
     ) -> anyhow::Result<Self> {
         let auth_fail_tracker = AuthFailTracker::with_redis(redis.clone());
         let mailbox_directory = Arc::new(PgMailboxDirectory::new(pool.clone()));
-        Ok(Self {
+        let mut server = Self {
             config,
             rate_limit_config,
             pool,
@@ -301,7 +312,27 @@ impl InboundServer {
                 .map(|domain| domain.trim().trim_end_matches('.').to_string())
                 .filter(|domain| !domain.is_empty())
                 .collect(),
-        })
+            spam_analyzer: Arc::new(super::content_security::NullSpamAnalyzer),
+            sandbox_engine: sandbox::engine::SandboxEngine::new(),
+            ids: None,
+        };
+
+        // Inbound content security. The spam analyzer is installed when
+        // enabled (the reject threshold is shared with the crate's own
+        // classification); the sandbox engine is stateless static analysis;
+        // the IDS runtime compiles the signature set up-front so a broken
+        // signature is a STARTUP failure, never a per-message surprise.
+        if server.config.spam_filter.enabled {
+            server.spam_analyzer = Arc::new(super::content_security::LiveSpamAnalyzer::new(
+                server.config.spam_filter.reject_threshold,
+            ));
+        }
+        if server.config.ids.enabled {
+            server.ids = Some(super::content_security::IdsRuntime::new(
+                server.config.ids.clone(),
+            )?);
+        }
+        Ok(server)
     }
 
     /// True for a VERP reply address (`bounces+…@<configured VERP domain>`):
@@ -322,6 +353,34 @@ impl InboundServer {
 
     /// Start listening on both plain (STARTTLS) and implicit‑TLS ports.
     pub async fn start(self: Arc<Self>, tls: Option<TlsAcceptor>) -> anyhow::Result<()> {
+        // IDS session-tracker cleanup: without periodic cleanup the
+        // connection/half-open/port-scan maps only grow over the process
+        // lifetime (ids-engine's own cleanup loop targets the engine's
+        // internal tracker, which stays dormant — session lifecycle is
+        // tracked here). Tied to the shutdown signal.
+        if let Some(ids) = &self.ids {
+            let sessions = ids.sessions().clone();
+            let shutdown = self.shutdown.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(60));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            let removed = sessions.cleanup_all(
+                                Duration::from_secs(300),
+                                Duration::from_secs(60),
+                            );
+                            if removed > 0 {
+                                debug!(removed, "IDS session tracker cleanup");
+                            }
+                        }
+                        _ = shutdown.notified() => break,
+                    }
+                }
+            });
+        }
+
         let plain_addr = format!("{}:{}", self.config.host, self.config.port);
         let plain_listener = TcpListener::bind(&plain_addr).await?;
         info!(addr = %plain_addr, "Inbound SMTP server listening (STARTTLS)");
@@ -447,6 +506,29 @@ impl InboundServer {
             ip,
         };
 
+        // IDS session admission (ids-engine): feed the connection tracker
+        // (SYN → established) and, under MTA_IDS_REFUSE=true, refuse the
+        // session on a connection-layer anomaly (SYN flood / port scan /
+        // connection-table exhaustion). Default is detection-only: anomalies
+        // are logged and the session proceeds.
+        if let Some(ids) = &self.ids {
+            if let Some(refusal) = ids.admit_session(ip, self.config.port) {
+                let mut refused = BufStream::new(socket);
+                let _ = write_line_buf(&mut refused, refusal).await;
+                log_session_summary(
+                    "inbound",
+                    ip,
+                    "ids-refused",
+                    false,
+                    false,
+                    0,
+                    0,
+                    "ids_refused",
+                );
+                return;
+            }
+        }
+
         let mut ctx = SessionContext {
             id: Uuid::new_v4().to_string(),
             client_ip: ip,
@@ -491,6 +573,11 @@ impl InboundServer {
             );
             return;
         }
+        // IDS: the client received the greeting — the connection is
+        // established and leaves the half-open bucket.
+        if let Some(ids) = &self.ids {
+            ids.establish_session(ip, self.config.port);
+        }
         let starttls_requested = self
             .run_session_loop(&mut stream, &mut ctx, allow_starttls)
             .await;
@@ -522,6 +609,12 @@ impl InboundServer {
                     }
                 }
             }
+        }
+
+        // IDS: release the tracked connection (SYN flood half-open counting
+        // must reflect the session's actual lifetime).
+        if let Some(ids) = &self.ids {
+            ids.close_session(ip, self.config.port);
         }
 
         log_session_summary(
@@ -949,6 +1042,26 @@ impl InboundServer {
             ip,
         };
 
+        // IDS session admission (implicit-TLS listener): same contract as the
+        // plain listener, tracked against the secure port.
+        if let Some(ids) = &self.ids {
+            if let Some(refusal) = ids.admit_session(ip, self.config.secure_port) {
+                let mut refused = BufStream::new(tls_stream);
+                let _ = write_line_buf(&mut refused, refusal).await;
+                log_session_summary(
+                    "inbound465",
+                    ip,
+                    "ids-refused",
+                    true,
+                    false,
+                    0,
+                    0,
+                    "ids_refused",
+                );
+                return;
+            }
+        }
+
         let mut ctx = SessionContext {
             id: Uuid::new_v4().to_string(),
             client_ip: ip,
@@ -978,7 +1091,13 @@ impl InboundServer {
             debug!(error = %e, "Failed to send greeting");
             return;
         }
+        if let Some(ids) = &self.ids {
+            ids.establish_session(ip, self.config.secure_port);
+        }
         self.run_session_loop(&mut stream, &mut ctx, false).await; // #136:already on TLS
+        if let Some(ids) = &self.ids {
+            ids.close_session(ip, self.config.secure_port);
+        }
         log_session_summary(
             "inbound465",
             ip,
@@ -1364,20 +1483,24 @@ impl InboundServer {
             }
         }
 
-        // F-16 (partial): after DMARC evaluation, optionally seal the
-        // message with an ARC set signed by the managed domain's DKIM key.
-        let arc_headers = if self.config.arc_seal {
-            self.build_arc_seal(ctx, raw, &auth_results).await
-        } else {
-            None
-        };
+        // 2. Inbound content security — IDS payload scan (connection-level
+        //    admission already happened when the session started). The
+        //    verdict is recorded as a stored header; a Drop/Reject verdict
+        //    refuses the message ONLY under MTA_IDS_REFUSE=true.
+        let ids_scan = self.ids.as_ref().map(|runtime| {
+            super::content_security::ids_inspect_payload(runtime, ctx.client_ip, self.config.port, raw)
+        });
+        if ids_scan.as_ref().is_some_and(|scan| scan.refuse) {
+            metric_message("inbound", "ids_rejected");
+            return Err(anyhow::Error::new(IdsPolicyReject));
+        }
 
-        // 2. Detect VERP reply. Exact local-part prefix match: a substring
+        // 3. Detect VERP reply. Exact local-part prefix match: a substring
         //    match would also flag innocent addresses that merely contain
         //    "bounces+" anywhere (e.g. "user+bounces+tag@dom").
         let is_verp = ctx.rcpt_to.iter().any(|r| r.starts_with("bounces+"));
 
-        // 3. Resolve the tenant that owns the first recipient's domain
+        // 4. Resolve the tenant that owns the first recipient's domain
         //    (nullable: rows with an unknown/local-only recipient stay untagged).
         let tenant_id: Option<String> = match ctx.rcpt_to.iter().find_map(|r| recipient_domain(r)) {
             Some(domain) => sqlx::query_scalar(
@@ -1391,11 +1514,71 @@ impl InboundServer {
             None => None,
         };
 
-        // 4. Compose the stored message: the Received trace header for this
+        // 5. Spam/phishing scan (spam-filter crate). Verdict headers are
+        //    attached to the stored message; a REJECT classification refuses
+        //    the message at DATA time ONLY under MTA_SPAM_REJECT_ENABLED=true.
+        //    Every failure path fails OPEN to tag-only inside run_spam_scan.
+        let spam_outcome = super::content_security::run_spam_scan(
+            self.spam_analyzer.as_ref(),
+            &self.config.spam_filter,
+            raw,
+            Some(&super::content_security::auth_results_summary(&auth_results)),
+            tenant_id.as_deref(),
+        );
+        if let super::content_security::SpamScanOutcome::Reject { reason } = &spam_outcome {
+            metric_message("inbound", "spam_rejected");
+            warn!(id = %message_id, reason = %reason, "Spam filter DATA-time refusal");
+            return Err(anyhow::Error::new(SpamPolicyReject));
+        }
+
+        // 6. Attachment sandbox (sandbox crate): static inspection of every
+        //    MIME attachment. Per-attachment verdicts become
+        //    X-Apex-Attachment-Scan headers; the configured action can strip
+        //    flagged attachments (with an X-Apex-Attachment-Note) or refuse
+        //    the message on a REJECT verdict. Errors fail OPEN inside
+        //    run_attachment_scan.
+        let attach_outcome = super::content_security::run_attachment_scan(
+            &self.sandbox_engine,
+            &self.config.attachment_scan,
+            raw,
+        );
+        if attach_outcome.reject {
+            metric_message("inbound", "attachment_rejected");
+            warn!(id = %message_id, "Attachment filter DATA-time refusal (REJECT verdict)");
+            return Err(anyhow::Error::new(AttachmentPolicyReject));
+        }
+        // Scan/strip may have rewritten the message (attachments removed);
+        // everything from here on persists and seals the RESULTING bytes so
+        // the stored message, its size, and any ARC seal describe exactly
+        // what is delivered.
+        let scan_raw: &[u8] = attach_outcome.stripped_raw.as_deref().unwrap_or(raw);
+
+        // 7. Verdict headers, in a stable order: spam, attachments, IDS.
+        let mut verdict_headers: Vec<String> = Vec::new();
+        if let super::content_security::SpamScanOutcome::Tag { headers } = spam_outcome {
+            verdict_headers.extend(headers);
+        }
+        verdict_headers.extend(attach_outcome.headers);
+        if let Some(scan) = &ids_scan {
+            if let Some(header) = &scan.header {
+                verdict_headers.push(header.clone());
+            }
+        }
+
+        // F-16 (partial): after content security, optionally seal the
+        // message with an ARC set signed by the managed domain's DKIM key.
+        let arc_headers = if self.config.arc_seal {
+            self.build_arc_seal(ctx, scan_raw, &auth_results).await
+        } else {
+            None
+        };
+
+        // 8. Compose the stored message: the Received trace header for this
         //    hop (F-01), the Authentication-Results header, any ARC seal,
-        //    then the raw client bytes verbatim. helo passed
-        //    is_valid_helo_hostname and the addresses are server-generated,
-        //    so no prepended value can inject CRLF.
+        //    the content-security verdict headers, then the (possibly
+        //    stripped) client bytes. helo passed is_valid_helo_hostname and
+        //    the addresses are server-generated, so no prepended value can
+        //    inject CRLF.
         let received = build_received_header(
             helo,
             ctx.client_rdns.as_deref(),
@@ -1410,11 +1593,12 @@ impl InboundServer {
             &received,
             &auth_results.auth_results_header,
             arc_headers.as_deref(),
-            raw,
+            &verdict_headers,
+            scan_raw,
         );
         let sender = if mail_from == "<>" { "" } else { mail_from };
 
-        // 5. Resolve every non-VERP recipient against the mailbox registry
+        // 9. Resolve every non-VERP recipient against the mailbox registry
         //    once more (the same lookup RCPT performed). RCPT plus this
         //    check are what make the final 250 mean "a deliverable mailbox
         //    exists": a mailbox deleted between RCPT and DATA must fail the
@@ -1438,7 +1622,7 @@ impl InboundServer {
             }
         }
 
-        // 6. Persist the message AND one delivery job per accepted recipient
+        // 10. Persist the message AND one delivery job per accepted recipient
         //    in ONE transaction; the SMTP 250 is only written after this
         //    COMMIT, so an accepted message can never lose a recipient to a
         //    crash between the message row and its jobs. The worker
@@ -1470,7 +1654,7 @@ impl InboundServer {
         .bind(ctx.client_ip.to_string())
         .bind(helo)
         .bind(&stored_message)
-        .bind(raw.len() as i64)
+        .bind(scan_raw.len() as i64)
         .bind(&auth_results.auth_results_header)
         .bind(format!("{:?}", auth_results.spf.result).to_lowercase())
         .bind(format!("{:?}", disposition).to_lowercase())
@@ -1493,7 +1677,7 @@ impl InboundServer {
         }
         tx.commit().await?;
 
-        // 7. Queue webhook notification (best-effort, after the durable
+        // 11. Queue webhook notification (best-effort, after the durable
         //    commit — a webhook failure must never reject accepted mail).
         self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
             .await?;
@@ -1890,27 +2074,32 @@ impl InboundServer {
 
 /// Compose the stored/delivered message: the `Received:` trace header for
 /// this hop (F-01), the Authentication-Results header, an optional ARC seal
-/// set (F-16), and then the raw client bytes verbatim — each separated by
-/// exactly one CRLF.
+/// set (F-16), the content-security verdict headers (spam / attachment
+/// sandbox / IDS — empty when the controls are disabled), and then the raw
+/// client bytes verbatim — each separated by exactly one CRLF.
 ///
 /// The A-R header generated by `build_auth_results_header` folds its
 /// continuation lines with `<CRLF>\t` (never a bare LF), and it carries no
 /// trailing CRLF of its own — exactly one is appended here so the header
 /// cannot fuse with the message's first header line ("…dmarc=passFrom:
 /// a@b.com"). The same applies to the Received/ARC blocks (no trailing CRLF
-/// of their own). The raw message below is already CRLF-normalized line by
-/// line during DATA reception, so the whole stored blob uses CRLF endings
-/// exclusively.
+/// of their own) and to every verdict header, which are pre-built as
+/// `Name: value` strings with sanitized single-line values (see
+/// `content_security::sanitize_header_value`). The raw message below is
+/// already CRLF-normalized line by line during DATA reception, so the whole
+/// stored blob uses CRLF endings exclusively.
 fn build_stored_message(
     received: &str,
     auth_results_header: &str,
     arc_headers: Option<&str>,
+    verdict_headers: &[String],
     raw: &[u8],
 ) -> Vec<u8> {
     let mut final_message = Vec::with_capacity(
         received.len()
             + auth_results_header.len()
             + arc_headers.map_or(0, str::len)
+            + verdict_headers.iter().map(|header| header.len() + 2).sum::<usize>()
             + raw.len()
             + 8,
     );
@@ -1920,6 +2109,10 @@ fn build_stored_message(
     final_message.extend_from_slice(b"\r\n");
     if let Some(arc) = arc_headers {
         final_message.extend_from_slice(arc.as_bytes());
+        final_message.extend_from_slice(b"\r\n");
+    }
+    for header in verdict_headers {
+        final_message.extend_from_slice(header.as_bytes());
         final_message.extend_from_slice(b"\r\n");
     }
     final_message.extend_from_slice(raw);
@@ -2074,6 +2267,26 @@ async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
 #[error("Message rejected by policy")]
 pub(crate) struct PermanentReject;
 
+/// The spam filter classified the message REJECT and the operator enabled
+/// DATA-time refusal (`MTA_SPAM_REJECT_ENABLED=true`). Refused with
+/// `550 5.7.1` — a permanent policy refusal must not invite retries.
+#[derive(Debug, thiserror::Error)]
+#[error("Message rejected by spam filter")]
+pub(crate) struct SpamPolicyReject;
+
+/// The attachment sandbox produced a REJECT verdict and the operator set
+/// `MTA_ATTACHMENT_SCAN_MODE=reject`. Refused with `550 5.7.1`.
+#[derive(Debug, thiserror::Error)]
+#[error("Message rejected by attachment filter")]
+pub(crate) struct AttachmentPolicyReject;
+
+/// The IDS returned a Drop/Reject verdict on the DATA payload (or the
+/// session admission) and the operator enabled `MTA_IDS_REFUSE`.
+/// Refused with `550 5.7.1`.
+#[derive(Debug, thiserror::Error)]
+#[error("Message rejected by intrusion prevention")]
+pub(crate) struct IdsPolicyReject;
+
 /// A recipient definitively stopped existing between RCPT and end-of-DATA
 /// (or a race resolved to "no mailbox"). The message must be refused with
 /// `550 5.1.1` — never committed with a recipient that would be dropped.
@@ -2083,15 +2296,30 @@ pub(crate) struct NoSuchRecipient;
 
 /// M23: format the SMTP response for a DATA result. The client only ever sees
 /// a generic temporary-failure message; internal error details are logged
-/// server-side and never echoed to the remote peer. The two exceptions are
-/// typed markers: [`PermanentReject`] surfaces as `550 5.7.1`, and
-/// [`NoSuchRecipient`] as `550 5.1.1`.
+/// server-side and never echoed to the remote peer. The typed markers are the
+/// exceptions: [`PermanentReject`] surfaces as `550 5.7.1`,
+/// [`NoSuchRecipient`] as `550 5.1.1`, and the content-security rejections
+/// ([`SpamPolicyReject`], [`AttachmentPolicyReject`], [`IdsPolicyReject`])
+/// each answer `550 5.7.1` naming the refusing control so the sender's postmaster
+/// can tell WHY a policy refusal happened.
 fn format_data_response(result: &anyhow::Result<String>) -> String {
     match result {
         Ok(id) => format!("250 2.0.0 Ok id={id}\r\n"),
         Err(e) if e.downcast_ref::<PermanentReject>().is_some() => {
             warn!(error = %e, "Message rejected by policy; sending 550");
             "550 5.7.1 Message rejected by policy\r\n".into()
+        }
+        Err(e) if e.downcast_ref::<SpamPolicyReject>().is_some() => {
+            warn!(error = %e, "Message rejected by the spam filter; sending 550");
+            "550 5.7.1 Message rejected by spam filter\r\n".into()
+        }
+        Err(e) if e.downcast_ref::<AttachmentPolicyReject>().is_some() => {
+            warn!(error = %e, "Message rejected by the attachment filter; sending 550");
+            "550 5.7.1 Message rejected by attachment filter\r\n".into()
+        }
+        Err(e) if e.downcast_ref::<IdsPolicyReject>().is_some() => {
+            warn!(error = %e, "Message rejected by intrusion prevention; sending 550");
+            "550 5.7.1 Message rejected by intrusion prevention\r\n".into()
         }
         Err(e) if e.downcast_ref::<NoSuchRecipient>().is_some() => {
             warn!(error = %e, "Recipient no longer exists; sending 550 5.1.1");
@@ -2324,6 +2552,9 @@ mod tests {
             advertise_auth_port25: false,
             require_fcrdns: false,
             arc_seal: false,
+            spam_filter: Default::default(),
+            attachment_scan: Default::default(),
+            ids: Default::default(),
             tls: Default::default(),
         };
         let rate_limit = RateLimitConfig {
@@ -3392,7 +3623,7 @@ mod tests {
         let received = "Received: from c (unknown [10.0.0.1])\r\n\tby mx.test with ESMTP id t;";
         let header = "Authentication-Results: mx.test;\r\n\tspf=pass smtp.mailfrom=a.com";
         let raw = b"From: a@b.com\r\nSubject: hi\r\n\r\nbody\r\n";
-        let stored = build_stored_message(received, header, None, raw);
+        let stored = build_stored_message(received, header, None, &[], raw);
         // Received first, then exactly one CRLF before the A-R header.
         assert!(stored.starts_with(received.as_bytes()));
         assert_eq!(
@@ -3421,10 +3652,38 @@ mod tests {
         let header = "Authentication-Results: mx.test;\r\n\tspf=pass";
         let arc = "ARC-Authentication-Results: i=1;\r\n\tARC-Seal: i=1;";
         let raw = b"From: a@b.com\r\n\r\nbody";
-        let stored = build_stored_message(received, header, Some(arc), raw);
+        let stored = build_stored_message(received, header, Some(arc), &[], raw);
         let expected_prefix = format!("{received}\r\n{header}\r\n{arc}\r\n");
         assert!(stored.starts_with(expected_prefix.as_bytes()));
         assert_eq!(&stored[expected_prefix.len()..], raw);
+    }
+
+    #[test]
+    fn build_stored_message_appends_verdict_headers_in_order() {
+        // Content-security verdict headers sit between the ARC block (or A-R
+        // header) and the raw message, one CRLF each, in the order the
+        // scanners ran.
+        let received = "Received: from c (unknown [10.0.0.1])\r\n\tby mx.test with ESMTP id t;";
+        let header = "Authentication-Results: mx.test;\r\n\tspf=pass";
+        let verdicts = vec![
+            "X-Spam-Score: 6.42".to_string(),
+            "X-Spam-Verdict: SPAM".to_string(),
+            "X-Apex-Attachment-Scan: name=\"a.exe\"; decision=REJECT".to_string(),
+        ];
+        let raw = b"From: a@b.com\r\n\r\nbody";
+        let stored = build_stored_message(received, header, None, &verdicts, raw);
+        let expected_prefix = format!(
+            "{received}\r\n{header}\r\n{}\r\n{}\r\n{}\r\n",
+            verdicts[0], verdicts[1], verdicts[2]
+        );
+        assert!(stored.starts_with(expected_prefix.as_bytes()));
+        assert_eq!(&stored[expected_prefix.len()..], raw);
+        // No bare LF anywhere.
+        for (index, byte) in stored.iter().enumerate() {
+            if *byte == b'\n' {
+                assert!(index > 0 && stored[index - 1] == b'\r', "bare LF at {index}");
+            }
+        }
     }
 
     // ── drain/resync: no command smuggling from over-long lines ────────────
@@ -4267,6 +4526,9 @@ mod adversarial_session_tests {
             advertise_auth_port25: false,
             require_fcrdns: false,
             arc_seal: false,
+            spam_filter: Default::default(),
+            attachment_scan: Default::default(),
+            ids: Default::default(),
             tls: Default::default(),
         };
         let rate_limit = RateLimitConfig {
@@ -4571,6 +4833,599 @@ mod adversarial_session_tests {
         }
         assert!(saw_421, "MAX_SESSION_ERRORS must end the session");
         let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+    }
+}
+
+#[cfg(test)]
+mod content_security_session_tests {
+    //! End-to-end content-security tests: real messages through the real
+    //! inbound DATA path (loopback duplex session) with the spam filter,
+    //! attachment sandbox, and IDS enabled, verifying the verdict headers on
+    //! the STORED message and every configured action. DB-backed; the suite
+    //! soft-skips without TEST_DATABASE_URL exactly like the other session
+    //! tests.
+
+    use super::*;
+    use super::adversarial_session_tests::{
+        peer, read_smtp_response, unroutable_redis_pool, AcceptAllDirectory,
+    };
+    use crate::config::{AttachmentScanAction, SpamFilterConfig};
+    use base64::Engine as _;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+
+    /// The spam analyzer every fail-open test drives: the engine reports a
+    /// failure (None) instead of a verdict.
+    struct FailingSpamAnalyzer;
+
+    impl super::super::content_security::SpamAnalyzer for FailingSpamAnalyzer {
+        fn analyze(
+            &self,
+            _body: &str,
+            _headers: &[(String, String)],
+            _auth_results: Option<&str>,
+            _tenant_id: &str,
+        ) -> Option<spam_filter::SpamVerdict> {
+            None
+        }
+    }
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    async fn security_server(
+        pool: PgPool,
+        spam: SpamFilterConfig,
+        attach: crate::config::AttachmentScanConfig,
+        ids: crate::config::IdsIntegrationConfig,
+    ) -> Arc<InboundServer> {
+        security_server_with(pool, spam, attach, ids, false).await
+    }
+
+    /// `failing_spam` swaps the live spam engine for a failing one (the same
+    /// field-mutation seam the directory fakes use) to prove the fail-open
+    /// contract end to end.
+    async fn security_server_with(
+        pool: PgPool,
+        spam: SpamFilterConfig,
+        attach: crate::config::AttachmentScanConfig,
+        ids: crate::config::IdsIntegrationConfig,
+        failing_spam: bool,
+    ) -> Arc<InboundServer> {
+        let config = InboundConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 25,
+            secure_port: 465,
+            hostname: "inbound.test".into(),
+            max_message_size: 1024 * 1024,
+            max_recipients: 100,
+            auth_required: false,
+            advertise_auth_port25: false,
+            require_fcrdns: false,
+            arc_seal: false,
+            spam_filter: spam,
+            attachment_scan: attach,
+            ids,
+            tls: Default::default(),
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 100,
+            max_messages_per_connection: 100,
+            max_recipients_per_message: 100,
+        };
+        let authenticator = Arc::new(
+            crate::auth::EmailAuthenticator::new(
+                crate::config::EmailAuthConfig {
+                    require_spf: false,
+                    require_dkim: false,
+                    enforce_dmarc: false,
+                    allow_soft_fail: true,
+                    trusted_relays: Vec::new(),
+                    spf_cache_max_entries: 10_000,
+                },
+                "inbound.test".into(),
+            )
+            .await
+            .expect("authenticator construction"),
+        );
+        let mut server = InboundServer::new(
+            config,
+            rate_limit,
+            pool,
+            unroutable_redis_pool(),
+            authenticator,
+            "inbound.test".into(),
+            Vec::new(),
+        )
+        .expect("inbound server construction");
+        server.mailbox_directory = Arc::new(AcceptAllDirectory);
+        if failing_spam {
+            server.spam_analyzer = Arc::new(FailingSpamAnalyzer);
+        }
+        Arc::new(server)
+    }
+
+    /// Deliver one message over the loopback duplex and return the final
+    /// DATA reply (no assertion on it — reject tests rely on that).
+    async fn deliver(
+        server: Arc<InboundServer>,
+        helo: &str,
+        mail_from: &str,
+        rcpt: &str,
+        body: &[u8],
+    ) -> String {
+        let (client, server_side) = tokio::io::duplex(256 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        for cmd in [
+            format!("EHLO {helo}"),
+            format!("MAIL FROM:<{mail_from}>"),
+            format!("RCPT TO:<{rcpt}>"),
+            "DATA".to_string(),
+        ] {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client).await;
+            assert!(
+                resp.starts_with("2") || resp.starts_with("3"),
+                "{cmd} -> {resp:?}"
+            );
+        }
+        // Body, dot-stuffed, then the terminator. The split's trailing empty
+        // artifact (after the final newline) is skipped so the terminator is
+        // not preceded by a phantom empty line.
+        for (index, raw_line) in body.split(|&byte| byte == b'\n').enumerate() {
+            if index + 1 == body.split(|&byte| byte == b'\n').count() && raw_line.is_empty() {
+                continue;
+            }
+            let line: &[u8] = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            let mut out = Vec::new();
+            if line.first() == Some(&b'.') {
+                out.push(b'.');
+            }
+            out.extend_from_slice(line);
+            out.extend_from_slice(b"\r\n");
+            client.write_all(&out).await.unwrap();
+        }
+        client.write_all(b".\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let reply = read_smtp_response(&mut client).await;
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+        reply
+    }
+
+    async fn stored_messages(pool: &PgPool) -> Vec<Vec<u8>> {
+        sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_all(pool)
+            .await
+            .expect("query inbound_messages")
+    }
+
+    async fn stored_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(pool)
+            .await
+            .expect("count inbound_messages")
+    }
+
+    const SPAMMY_MAIL: &[u8] = b"From: scammer@evil.tk\r\n\
+         Reply-To: money@different.com\r\n\
+         Subject: winners\r\n\
+         \r\n\
+         Congratulations! You have won a million dollars! Click https://bit.ly/scam \
+         to claim your prize now. Urgent!\r\n";
+
+    async fn plain_security_server(pool: PgPool, spam: SpamFilterConfig) -> Arc<InboundServer> {
+        security_server(pool, spam, Default::default(), Default::default()).await
+    }
+
+    // ── disabled: byte-identical passthrough ────────────────────────────────
+
+    #[tokio::test]
+    async fn disabled_content_security_keeps_the_stored_message_untagged() {
+        let Some(pool) = test_pool("cs_disabled_passthrough").await else {
+            return;
+        };
+        let server = plain_security_server(pool.clone(), Default::default()).await;
+        let body = b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n";
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply}");
+
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        // The stored message carries exactly the pre-integration preamble:
+        // trace header + Authentication-Results, then the client bytes.
+        assert!(text.starts_with("Received: from invalid.invalid"), "{text:?}");
+        assert!(text.contains("Authentication-Results:"), "{text:?}");
+        for security_header in [
+            "X-Spam-Score:",
+            "X-Spam-Verdict:",
+            "X-Apex-Attachment-Scan:",
+            "X-Apex-Attachment-Note:",
+            "X-Apex-Ids-Verdict:",
+        ] {
+            assert!(!text.contains(security_header), "{security_header} leaked: {text:?}");
+        }
+        assert!(text.ends_with("hello\r\n"), "{text:?}");
+    }
+
+    // ── spam filter ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn spam_filter_tags_the_stored_message_with_verdict_headers() {
+        let Some(pool) = test_pool("cs_spam_tag").await else {
+            return;
+        };
+        let server = plain_security_server(
+            pool.clone(),
+            SpamFilterConfig {
+                enabled: true,
+                reject_at_data: false,
+                reject_threshold: 10.0,
+            },
+        )
+        .await;
+        let reply = deliver(
+            server.clone(),
+            "invalid.invalid",
+            "scammer@evil.tk",
+            "rcpt@invalid.invalid",
+            SPAMMY_MAIL,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "tag-only must accept: {reply}");
+
+        // Ordinary ham through the SAME enabled filter: accepted, tagged.
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("250"), "ham must pass an enabled filter: {reply}");
+
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 2);
+        for message in &stored {
+            let text = String::from_utf8_lossy(message);
+            assert!(text.contains("X-Spam-Score: "), "{text:?}");
+            assert!(text.contains("X-Spam-Verdict: "), "{text:?}");
+            // Tag-only never stores a REJECT verdict at the default threshold.
+            assert!(!text.contains("X-Spam-Verdict: REJECT"), "{text:?}");
+            // The trace header still leads the stored message.
+            assert!(text.starts_with("Received: from invalid.invalid"), "{text:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spam_reject_at_data_answers_550_and_persists_nothing() {
+        let Some(pool) = test_pool("cs_spam_reject").await else {
+            return;
+        };
+        let server = plain_security_server(
+            pool.clone(),
+            SpamFilterConfig {
+                enabled: true,
+                reject_at_data: true,
+                reject_threshold: 2.0,
+            },
+        )
+        .await;
+        let reply = deliver(
+            server.clone(),
+            "invalid.invalid",
+            "scammer@evil.tk",
+            "rcpt@invalid.invalid",
+            SPAMMY_MAIL,
+        )
+        .await;
+        assert!(
+            reply.starts_with("550 5.7.1 Message rejected by spam filter"),
+            "{reply}"
+        );
+        assert_eq!(stored_count(&pool).await, 0, "refused mail must not persist");
+        // (Ham acceptance under an ENABLED filter is covered by the tag test;
+        // a 2.0 threshold on a cold-start model legitimately refuses every
+        // message, so this configuration is only exercised against spam.)
+    }
+
+    #[tokio::test]
+    async fn spam_engine_failure_fails_open_and_is_recorded_as_unknown() {
+        let Some(pool) = test_pool("cs_spam_failopen").await else {
+            return;
+        };
+        let server = security_server_with(
+            pool.clone(),
+            SpamFilterConfig {
+                enabled: true,
+                reject_at_data: true,
+                reject_threshold: 2.0,
+            },
+            Default::default(),
+            Default::default(),
+            true,
+        )
+        .await;
+        // Even with DATA-time refusal enabled, a filter ERROR must fail OPEN
+        // to tag-only: the message is accepted and honestly marked.
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "scammer@evil.tk",
+            "rcpt@invalid.invalid",
+            SPAMMY_MAIL,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "fail-open must accept: {reply}");
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        assert!(text.contains("X-Spam-Verdict: UNKNOWN"), "{text:?}");
+        assert!(!text.contains("X-Spam-Score:"), "{text:?}");
+    }
+
+    // ── attachment sandbox ──────────────────────────────────────────────────
+
+    fn multipart_exe_body() -> Vec<u8> {
+        let pe = vec![0x4Du8, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pe);
+        format!(
+            "From: sender@invalid.invalid\r\n\
+             Subject: scan\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"SCANB\"\r\n\
+             \r\n\
+             --SCANB\r\n\
+             Content-Type: text/plain\r\n\
+             \r\n\
+             see attached\r\n\
+             --SCANB\r\n\
+             Content-Type: application/octet-stream; name=\"payload.exe\"\r\n\
+             Content-Disposition: attachment; filename=\"payload.exe\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {encoded}\r\n\
+             --SCANB--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn attachment_flag_mode_records_the_verdict_and_keeps_the_payload() {
+        let Some(pool) = test_pool("cs_attach_flag").await else {
+            return;
+        };
+        let server = security_server(
+            pool.clone(),
+            Default::default(),
+            crate::config::AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Flag,
+            },
+            Default::default(),
+        )
+        .await;
+        let body = multipart_exe_body();
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            &body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "flag mode must accept: {reply}");
+
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        assert!(
+            text.contains("X-Apex-Attachment-Scan: name=\"payload.exe\""),
+            "{text:?}"
+        );
+        assert!(text.contains("decision=REJECT"), "{text:?}");
+        assert!(text.contains("EXECUTABLE_PE"), "{text:?}");
+        // The payload itself is untouched in flag mode.
+        assert!(text.contains("TVqQ"), "flag mode keeps the bytes: {text:?}");
+        assert!(text.contains("see attached"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn attachment_strip_mode_removes_the_payload_and_records_the_note() {
+        let Some(pool) = test_pool("cs_attach_strip").await else {
+            return;
+        };
+        let server = security_server(
+            pool.clone(),
+            Default::default(),
+            crate::config::AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Strip,
+            },
+            Default::default(),
+        )
+        .await;
+        let body = multipart_exe_body();
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            &body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "strip mode accepts the message: {reply}");
+
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        assert!(!text.contains("TVqQ"), "executable bytes must be gone: {text:?}");
+        assert!(
+            text.contains("filename=\"REMOVED-payload.exe\""),
+            "the neutral replacement part must be present: {text:?}"
+        );
+        assert!(
+            text.contains("X-Apex-Attachment-Note: attachment \"payload.exe\" removed"),
+            "{text:?}"
+        );
+        assert!(text.contains("X-Apex-Attachment-Scan:"), "{text:?}");
+        // The clean part survives and the MIME structure is intact.
+        assert!(text.contains("see attached"), "{text:?}");
+        assert!(text.contains("--SCANB--"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn attachment_reject_mode_refuses_and_persists_nothing() {
+        let Some(pool) = test_pool("cs_attach_reject").await else {
+            return;
+        };
+        let server = security_server(
+            pool.clone(),
+            Default::default(),
+            crate::config::AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Reject,
+            },
+            Default::default(),
+        )
+        .await;
+        let reply = deliver(
+            server.clone(),
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            &multipart_exe_body(),
+        )
+        .await;
+        assert!(
+            reply.starts_with("550 5.7.1 Message rejected by attachment filter"),
+            "{reply}"
+        );
+        assert_eq!(stored_count(&pool).await, 0);
+
+        // A clean message under the same configuration is accepted.
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply}");
+        assert_eq!(stored_count(&pool).await, 1);
+    }
+
+    // ── ids ─────────────────────────────────────────────────────────────────
+
+    fn nop_sled_body() -> Vec<u8> {
+        let mut body = b"From: sender@invalid.invalid\r\nSubject: shellcode\r\n\r\n".to_vec();
+        body.extend_from_slice(&[0x90u8; 8]);
+        body.extend_from_slice(b"\r\nbye\r\n");
+        body
+    }
+
+    #[tokio::test]
+    async fn ids_records_the_verdict_header_and_keeps_detection_only_mail() {
+        let Some(pool) = test_pool("cs_ids_detect").await else {
+            return;
+        };
+        let server = security_server(
+            pool.clone(),
+            Default::default(),
+            Default::default(),
+            crate::config::IdsIntegrationConfig {
+                enabled: true,
+                refuse: false,
+            },
+        )
+        .await;
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            &nop_sled_body(),
+        )
+        .await;
+        assert!(
+            reply.starts_with("250"),
+            "detection-only must accept: {reply}"
+        );
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        assert!(
+            text.contains("X-Apex-Ids-Verdict: alert; alerts=2000002"),
+            "{text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ids_refuse_mode_rejects_hostile_payloads_at_data_time() {
+        let Some(pool) = test_pool("cs_ids_refuse").await else {
+            return;
+        };
+        let server = security_server(
+            pool.clone(),
+            Default::default(),
+            Default::default(),
+            crate::config::IdsIntegrationConfig {
+                enabled: true,
+                refuse: true,
+            },
+        )
+        .await;
+        let reply = deliver(
+            server.clone(),
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            &nop_sled_body(),
+        )
+        .await;
+        assert!(
+            reply.starts_with("550 5.7.1 Message rejected by intrusion prevention"),
+            "{reply}"
+        );
+        assert_eq!(stored_count(&pool).await, 0);
+
+        // Ordinary mail under the same configuration is untouched (no IDS
+        // header, accepted).
+        let reply = deliver(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply}");
+        let stored = stored_messages(&pool).await;
+        assert_eq!(stored.len(), 1);
+        let text = String::from_utf8_lossy(&stored[0]);
+        assert!(!text.contains("X-Apex-Ids-Verdict:"), "{text:?}");
     }
 }
 
@@ -5145,6 +6000,9 @@ mod inbound_edge_arms {
                 advertise_auth_port25: auth_required,
                 require_fcrdns: false,
                 arc_seal: false,
+                spam_filter: Default::default(),
+                attachment_scan: Default::default(),
+                ids: Default::default(),
                 tls: crate::config::TlsConfig {
                     enabled: tls_enabled,
                     ..Default::default()
@@ -5732,6 +6590,9 @@ mod inbound_edge_arms {
             advertise_auth_port25: false,
             require_fcrdns: false,
             arc_seal: false,
+            spam_filter: Default::default(),
+            attachment_scan: Default::default(),
+            ids: Default::default(),
             tls: Default::default(),
         };
         let rate_limit = RateLimitConfig {
@@ -5886,6 +6747,9 @@ mod dispatch_fcrdns_auth_tests {
             advertise_auth_port25: false,
             require_fcrdns,
             arc_seal,
+            spam_filter: Default::default(),
+            attachment_scan: Default::default(),
+            ids: Default::default(),
             tls: Default::default(),
         }
     }

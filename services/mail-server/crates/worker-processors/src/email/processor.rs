@@ -20,6 +20,7 @@ use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+use super::dlp::{EngineDlpScanner, PreSendDlpScanner, PreSendVerdict};
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{
     create_transport_from_config_with_db_and_redis, EmailTransport, HybridTransport,
@@ -33,6 +34,7 @@ use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
     ProcessorError, ProcessorResult, RedisPool, TransportType,
 };
+use dlp_engine::engine::DlpAction;
 
 /// Maximum suppression cache size.
 const SUPPRESSION_CACHE_MAX_SIZE: u64 = 10_000;
@@ -756,6 +758,68 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
         updated_at = NOW()
     WHERE id = $1::uuid
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
+"#;
+
+/// WORKER PRE-SEND DLP gate — HIGH severity (engine `Block`) refusal write,
+/// fenced on the lease token like every durable write. Mirrors the
+/// [`HARD_BOUNCE_UPDATE_SQL`] shape exactly — per-recipient removal from
+/// `metadata.pending_recipients`, terminal `bounced` only when the pending
+/// set empties — because the refusal IS the typed DSN this pipeline issues
+/// to the sender for content policy. Deliberately NO suppression insert and
+/// NO sales sender-health feedback here: a policy refusal proves nothing
+/// about the recipient's mailbox and is not a reputation bounce. `$4` is the
+/// `metadata.dlp` annotation (action, rule classes, risk, engine summary).
+const DLP_REFUSAL_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            jsonb_set(
+                CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+                '{pending_recipients}',
+                COALESCE(
+                    metadata->'pending_recipients',
+                    CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                         THEN to_jsonb(to_addresses) END,
+                    CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                         THEN to_jsonb(ARRAY["to"]) END,
+                    '[]'::jsonb
+                ) - $2::text
+            ),
+            '{dlp}', $4::jsonb
+        ),
+        status = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $2::text = '[]'::jsonb
+            THEN 'bounced' ELSE status END,
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $3::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $5::text
+"#;
+
+/// WORKER PRE-SEND DLP gate — MEDIUM severity (engine `Quarantine`) hold
+/// write, fenced on the lease token. `deferred` is the queue's honest
+/// hold-in-queue state: the poller claims only `pending`/expired-
+/// `processing` rows, so a deferred row stays visible, unsent, and
+/// un-retried until an operator resolves it. The hold applies to the whole
+/// MESSAGE (every per-recipient copy shares the held content), so
+/// `pending_recipients` is intentionally untouched. `$2` is the
+/// `metadata.dlp` annotation.
+const DLP_HOLD_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+            '{dlp}', $2::jsonb
+        ),
+        status = 'deferred',
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $3::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1515,6 +1579,10 @@ pub struct EmailProcessor {
     /// A missing backend for a requested route fails closed (never crosses the
     /// shared/dedicated boundary).
     transport: HybridTransport,
+    /// WORKER PRE-SEND DLP scanner (the `email::dlp` seam, mirroring the
+    /// transport seam). Engaged only when `config.dlp.enabled`; production
+    /// wires [`EngineDlpScanner`], tests inject doubles.
+    dlp_scanner: Arc<dyn PreSendDlpScanner>,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
     /// Level-triggered shutdown signal. `Notify::notify_waiters` is edge-
@@ -1591,6 +1659,7 @@ impl EmailProcessor {
             redis,
             config,
             transport,
+            dlp_scanner: Arc::new(EngineDlpScanner::new()),
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
             queue_metrics_last_emit_ms: AtomicI64::new(0),
@@ -1608,6 +1677,15 @@ impl EmailProcessor {
             error_cooldown_until: AtomicI64::new(0),
             backpressure,
         })
+    }
+
+    /// Swap the pre-send DLP scanner (chainable, additive to
+    /// [`EmailProcessor::with_transport`]). Production keeps the default
+    /// [`EngineDlpScanner`]; tests inject doubles — including an
+    /// always-failing one that proves the gate FAILS OPEN on engine errors.
+    pub fn with_dlp_scanner(mut self, scanner: Arc<dyn PreSendDlpScanner>) -> Self {
+        self.dlp_scanner = scanner;
+        self
     }
 
     /// Start the processor.
@@ -2458,6 +2536,79 @@ impl EmailProcessor {
         // needs the local signature; a shared SES send is signed by SES
         // BYODKIM).
         let email = self.prepare_email(job, &domain, &route)?;
+
+        // ── WORKER PRE-SEND DLP GATE (data-loss-prevention enforcement) ───
+        // The scan runs on the fully PREPARED copy (subject, text body,
+        // HTML stripped to text, decoded attachment contents + filenames)
+        // and is the LAST gate before the durable exactly-once reservation:
+        // every refusal/hold below lands BEFORE `claim_acceptance`, so no
+        // `reserved` acceptance row can be stranded and no SMTP effect can
+        // precede the verdict. Contract (see `email::dlp`):
+        //   * engine error  → FAIL OPEN (deliver + loud log + metric);
+        //   * Allow         → deliver, byte-identical;
+        //   * Audit (low)   → allow + loud log of the (redacted) findings;
+        //   * Quarantine (medium) → HOLD: deferred + annotation + audit row;
+        //   * Block (high)  → REFUSE: typed bounce + sender copy + audit row.
+        // Global switch (`WORKER_DLP_ENABLED`, default OFF) — no per-tenant
+        // override surface exists.
+        if self.config.dlp.enabled {
+            metrics::counter!("apexmail_dlp_presend_scans").increment(1);
+            match self.dlp_scanner.scan_prepared(&email) {
+                Err(engine_error) => {
+                    // FAIL OPEN: the scanner could not produce a verdict.
+                    // Legitimate mail is never hostage to a broken engine —
+                    // but the gap must be LOUD, never silent.
+                    metrics::counter!("apexmail_dlp_engine_unavailable_failopen").increment(1);
+                    error!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        recipient = %job.to,
+                        error = %engine_error,
+                        "DLP ENGINE UNAVAILABLE — FAILING OPEN: delivering without a pre-send verdict"
+                    );
+                }
+                Ok(verdict) => match verdict.action {
+                    DlpAction::Allow => {}
+                    DlpAction::Audit => {
+                        info!(
+                            job_id = %job.id,
+                            tenant_id = %job.tenant_id,
+                            recipient = %job.to,
+                            risk_score = verdict.risk_score,
+                            rule_classes = verdict.rule_classes.join(","),
+                            findings = %verdict.summary,
+                            "DLP low-severity findings — allowing with audit log (severity below hold threshold)"
+                        );
+                    }
+                    DlpAction::Quarantine => {
+                        metrics::counter!("apexmail_dlp_presend_held").increment(1);
+                        info!(
+                            job_id = %job.id,
+                            tenant_id = %job.tenant_id,
+                            recipient = %job.to,
+                            risk_score = verdict.risk_score,
+                            rule_classes = verdict.rule_classes.join(","),
+                            "DLP medium-severity detection — HOLDING message in queue (deferred, pending review)"
+                        );
+                        self.handle_dlp_hold(job, &verdict).await?;
+                        return Ok(());
+                    }
+                    DlpAction::Block => {
+                        metrics::counter!("apexmail_dlp_presend_refused").increment(1);
+                        warn!(
+                            job_id = %job.id,
+                            tenant_id = %job.tenant_id,
+                            recipient = %job.to,
+                            risk_score = verdict.risk_score,
+                            rule_classes = verdict.rule_classes.join(","),
+                            "DLP high-severity detection — REFUSING to send (typed bounce to the sender)"
+                        );
+                        self.handle_dlp_refusal(job, &verdict).await?;
+                        return Ok(());
+                    }
+                },
+            }
+        }
 
         // ── Durable exactly-once gate (sales_delivery_acceptances) ────────
         // Reserve the logical send unit. This is the LAST deferral point: a
@@ -3407,6 +3558,150 @@ impl EmailProcessor {
         Ok(())
     }
 
+    /// WORKER PRE-SEND DLP gate — MEDIUM severity (engine `Quarantine`) hold.
+    ///
+    /// The row moves to `deferred` (the queue's honest hold-in-queue state:
+    /// the poller never claims it, so the message stays visible, unsent and
+    /// un-retried pending operator review) with a `metadata.dlp` annotation
+    /// naming the rule classes. The row write and the `audit_logs` evidence
+    /// row commit in ONE transaction — a hold without evidence must not
+    /// exist (the same discipline as warmup graduation). No recipient event
+    /// is written: nothing happened to this recipient copy, and the queue
+    /// row + audit row are the operator-facing record.
+    async fn handle_dlp_hold(&self, job: &EmailJob, verdict: &PreSendVerdict) -> ProcessorResult<()> {
+        let copy = format!(
+            "Message held by outbound content policy (DLP quarantine): rule class(es) {}. \
+             Held in queue pending review; not delivered.",
+            verdict.rule_classes.join(", ")
+        );
+        let annotation = dlp_annotation(verdict, "held");
+        let mut tx = self.db.begin().await?;
+        let updated = sqlx::query(DLP_HOLD_UPDATE_SQL)
+            .bind(&copy)
+            .bind(&annotation)
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&mut *tx)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_dlp_hold fenced out — lease lost, hold write skipped"
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = record_dlp_audit(&mut tx, job, verdict, "dlp.outbound_hold", "held")
+            .await
+        {
+            error!(
+                job_id = %job.id,
+                error = %error,
+                "DLP hold audit write failed — rolling the hold back so it can be re-recorded WITH its evidence (never a silent hold)"
+            );
+            return Err(ProcessorError::Database(error));
+        }
+        tx.commit().await?;
+
+        // F25: the hold is a durable recipient transition (non-terminal) —
+        // reconcile the parent aggregate so it does not lag the queue row.
+        self.reconcile_parent_progress(job).await;
+
+        Ok(())
+    }
+
+    /// WORKER PRE-SEND DLP gate — HIGH severity (engine `Block`) refusal.
+    ///
+    /// The typed DSN to the sender, in this pipeline's terms: a terminal
+    /// per-recipient `bounced` queue row (the exact shape
+    /// [`EmailProcessor::handle_hard_bounce`] gives a transport 5xx) whose
+    /// `error_message` carries honest sender-visible copy naming the rule
+    /// classes, plus a `bounced` recipient event with NULL provider
+    /// provenance (nothing left the platform — the provider is unknown, not
+    /// guessed). The refusal row write and the `audit_logs` evidence row
+    /// commit in ONE transaction. Deliberately NOT done here: recipient
+    /// suppression (a content-policy refusal proves nothing about the
+    /// mailbox) and sales sender-health feedback (a self-inflicted policy
+    /// refusal is not a reputation bounce).
+    async fn handle_dlp_refusal(
+        &self,
+        job: &EmailJob,
+        verdict: &PreSendVerdict,
+    ) -> ProcessorResult<()> {
+        let copy = format!(
+            "Message refused by outbound content policy (DLP block): rule class(es) {}. \
+             No delivery was attempted.",
+            verdict.rule_classes.join(", ")
+        );
+        let annotation = dlp_annotation(verdict, "refused");
+        let mut tx = self.db.begin().await?;
+        let updated = sqlx::query(DLP_REFUSAL_UPDATE_SQL)
+            .bind(&copy)
+            .bind(&job.to)
+            .bind(&job.id)
+            .bind(&annotation)
+            .bind(lease_token_of(job))
+            .execute(&mut *tx)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_dlp_refusal fenced out — lease lost, refusal write skipped"
+            );
+            return Ok(());
+        }
+
+        if let Err(error) =
+            record_dlp_audit(&mut tx, job, verdict, "dlp.outbound_block", "refused").await
+        {
+            error!(
+                job_id = %job.id,
+                error = %error,
+                "DLP refusal audit write failed — rolling the refusal back so it can be re-recorded WITH its evidence (never a silent drop)"
+            );
+            return Err(ProcessorError::Database(error));
+        }
+        tx.commit().await?;
+
+        // F25: the refusal is a durable (terminal) recipient transition —
+        // reconcile the parent aggregate.
+        self.reconcile_parent_progress(job).await;
+
+        // Sender-visible DSN surface: the `bounced` recipient event.
+        // Best-effort AFTER the refusal stands — a lost analytics event must
+        // not un-refuse the message, and the audit row already names the
+        // rule class.
+        if let Err(error) = insert_recipient_event(
+            &self.db,
+            RecipientEvent {
+                tenant_id: &job.tenant_id,
+                message_id: &job.message_id,
+                domain_id: &job.domain_id,
+                campaign_id: job.campaign_id.as_deref(),
+                event_type: "bounced",
+                recipient: &job.to,
+                recipient_provider: None,
+                provider_source: None,
+            },
+        )
+        .await
+        {
+            metrics::counter!("email.dlp_refusal_event_write_failed").increment(1);
+            error!(
+                job_id = %job.id,
+                recipient = %job.to,
+                error = %error,
+                "DLP refusal 'bounced' event INSERT failed — the refusal stands (row is terminal); the DSN event is lost"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Handle soft bounce (retry later).
     async fn handle_soft_bounce(
         &self,
@@ -4100,6 +4395,88 @@ async fn insert_recipient_event(db: &PgPool, event: RecipientEvent<'_>) -> Resul
     .bind(recipient_provider)
     .bind(provider_source)
     .execute(db)
+    .await
+    .map(|_| ())
+}
+
+/// The `metadata.dlp` annotation stamped on a held/refused queue row:
+/// machine-readable enforcement evidence (what was found, by which engine,
+/// at which gate, when) — an operator's first read, never a silent state.
+fn dlp_annotation(verdict: &PreSendVerdict, disposition: &str) -> JsonValue {
+    serde_json::json!({
+        "action": disposition,
+        "rule_classes": verdict.rule_classes,
+        "risk_score": verdict.risk_score,
+        "findings": verdict.summary,
+        "gate": "worker_pre_send",
+        "engine": "dlp-engine",
+        "scanned_at": Utc::now().to_rfc3339(),
+    })
+}
+
+/// Append one DLP enforcement row to the canonical `audit_logs` hash chain
+/// (previous_hash → hash, the same discipline as
+/// `crate::common::graduation`). `details` names the RULE CLASS(es) of every
+/// finding so a refusal/hold is reviewable without re-running the engine.
+/// Runs INSIDE the caller's transaction: the enforcement write and its
+/// evidence commit together or not at all.
+async fn record_dlp_audit(
+    conn: &mut sqlx::PgConnection,
+    job: &EmailJob,
+    verdict: &PreSendVerdict,
+    action: &str,
+    outcome: &str,
+) -> Result<(), sqlx::Error> {
+    let previous_hash: Option<String> =
+        sqlx::query_scalar("SELECT hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
+            .fetch_optional(&mut *conn)
+            .await?
+            .flatten();
+    let details = serde_json::json!({
+        "disposition": outcome,
+        "rule_classes": verdict.rule_classes,
+        "risk_score": verdict.risk_score,
+        "findings": verdict.summary,
+        "recipient": job.to,
+        "message_id": job.message_id,
+        "send_unit": send_unit_of(job),
+        "gate": "worker_pre_send",
+        "engine": "dlp-engine",
+    })
+    .to_string();
+    let timestamp = Utc::now();
+    let mut hasher = sha2::Sha256::new();
+    use sha2::Digest as _;
+    hasher.update(job.tenant_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(action.as_bytes());
+    hasher.update(b"|");
+    hasher.update(job.id.as_bytes());
+    hasher.update(details.as_bytes());
+    hasher.update(timestamp.to_rfc3339().as_bytes());
+    if let Some(previous) = &previous_hash {
+        hasher.update(previous.as_bytes());
+    }
+    let hash = hasher.finalize();
+    let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs
+            (id, tenant_id, action, resource, resource_id, details,
+             outcome, timestamp, hash, previous_hash, signature)
+        VALUES (gen_random_uuid(), $1, $2, 'email_queue', $3, $4::jsonb, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&job.tenant_id)
+    .bind(action)
+    .bind(&job.id)
+    .bind(&details)
+    .bind(outcome)
+    .bind(timestamp)
+    .bind(&hash_hex)
+    .bind(&previous_hash)
+    .bind(format!("dlp:{hash_hex}"))
+    .execute(&mut *conn)
     .await
     .map(|_| ())
 }
@@ -12605,6 +12982,613 @@ mod orchestration_tests {
         assert_eq!(count, 0, "the pre-DATA gate runs before the ledger");
         pool.close().await;
         Ok(())
+    }
+
+    // ── 8. WORKER PRE-SEND DLP GATE (data-loss-prevention enforcement) ────
+    //
+    // The enforcement gate for the advertised DLP capability, on the REAL
+    // send path: every test below drives `process_job_inner` (the same
+    // dispatch the poll loop runs) against the canonical schema and a
+    // scripted transport, with the REAL `EngineDlpScanner` — determinism
+    // comes from fixed bodies whose engine risk scores are known constants
+    // (CC 8.0, SSN 9.0, phone 1.5; quarantine ≥ 5.0, block ≥ 10.0).
+
+    use crate::email::dlp::DlpGateError;
+
+    /// A scanner double whose engine is always unavailable — the fail-open
+    /// probe.
+    struct FailingDlpScanner;
+
+    #[async_trait::async_trait]
+    impl PreSendDlpScanner for FailingDlpScanner {
+        fn scan_prepared(&self, _email: &PreparedEmail) -> Result<PreSendVerdict, DlpGateError> {
+            Err(DlpGateError(
+                "injected engine outage (deterministic test double)".into(),
+            ))
+        }
+    }
+
+    /// A success double that RECORDS the prepared copy it was handed — the
+    /// byte-identity probe for the allow/clean paths.
+    struct CapturingTransport {
+        calls: AtomicUsize,
+        seen: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl CapturingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn seen(&self) -> Vec<(String, String, Option<String>)> {
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for CapturingTransport {
+        fn transport_name(&self) -> &str {
+            "dlp-capture"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((email.to.clone(), email.subject.clone(), email.text.clone()));
+            Ok(DeliveryReceipt {
+                transport: match route {
+                    DeliveryRoute::SesShared => TransportType::Ses,
+                    DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                },
+                transport_message_id: Some(format!("cap-{}", self.calls())),
+                actual_source_ip: route.dedicated_source_ip(),
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    fn dlp_enabled_config(concurrency: usize) -> EmailConfig {
+        let mut config = orch_config(concurrency, 20);
+        config.dlp.enabled = true;
+        config
+    }
+
+    /// Bodies with KNOWN engine risk. No quotes/code markers anywhere near
+    /// the matches, so no context modifier can shave the scores (context
+    /// modifiers only engage on quoted/code-wrapped matches).
+    const DLP_BLOCK_BODY: &str = "Payroll record: SSN 123-45-6789 and card 4111 1111 1111 1111.";
+    const DLP_HOLD_BODY: &str = "Card 4111 1111 1111 1111 on file.";
+    const DLP_AUDIT_BODY: &str = "Reach us on 555-123-4567 any time.";
+    const DLP_CLEAN_BODY: &str = "Hello, your monthly summary is ready. Regards, the team.";
+
+    async fn dlp_audit_row(
+        pool: &PgPool,
+        queue_id: uuid::Uuid,
+    ) -> Option<(String, String, JsonValue)> {
+        sqlx::query_as(
+            "SELECT action, outcome, details FROM audit_logs \
+             WHERE resource = 'email_queue' AND resource_id = $1 AND action LIKE 'dlp.%' \
+             ORDER BY timestamp DESC LIMIT 1",
+        )
+        .bind(queue_id.to_string())
+        .fetch_optional(pool)
+        .await
+        .expect("audit row read")
+    }
+
+    async fn queue_metadata(pool: &PgPool, queue_id: uuid::Uuid) -> JsonValue {
+        sqlx::query_scalar("SELECT metadata FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue metadata")
+    }
+
+    async fn queue_error_message(pool: &PgPool, queue_id: uuid::Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT error_message FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue error_message")
+    }
+
+    /// HIGH severity (SSN + card, risk 17 ≥ block 10): refused BEFORE any
+    /// transport or ledger effect, with a terminal typed-bounce row whose
+    /// error copy names the rule classes, an audit row in the same
+    /// transaction, and a `bounced` recipient event. No suppression, no
+    /// acceptance reservation, no send.
+    #[tokio::test]
+    async fn dlp_high_severity_refusal_bounces_without_sending(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_refusal").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-refusal").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            dlp_enabled_config(2),
+        )
+        .await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            text: Some(DLP_BLOCK_BODY.into()),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("refusal is a handled outcome");
+        assert_eq!(
+            transport.calls(),
+            0,
+            "a refused message never reaches the transport"
+        );
+
+        // The typed bounce: terminal row + honest sender-visible copy.
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "bounced");
+        let error_message = queue_error_message(&pool, fixture.queue_id)
+            .await
+            .unwrap_or_default();
+        assert!(
+            error_message.contains("refused by outbound content policy")
+                && error_message.contains("pii:ssn")
+                && error_message.contains("pii:credit_card"),
+            "the sender-visible copy must name the rule classes: {error_message}"
+        );
+        assert_eq!(
+            queue_metadata(&pool, fixture.queue_id)
+                .await
+                .get("dlp")
+                .and_then(|d| d.get("action"))
+                .and_then(|a| a.as_str()),
+            Some("refused"),
+            "the row must carry the machine-readable enforcement annotation"
+        );
+
+        // Audit row naming the rule class, committed with the refusal.
+        let (action, outcome, details) =
+            dlp_audit_row(&pool, fixture.queue_id).await.expect("audit row");
+        assert_eq!(action, "dlp.outbound_block");
+        assert_eq!(outcome, "refused");
+        let rule_classes: Vec<String> = details
+            .get("rule_classes")
+            .and_then(|v| v.as_array())
+            .expect("rule classes array")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(rule_classes.contains(&"pii:ssn".to_string()));
+        assert!(rule_classes.contains(&"pii:credit_card".to_string()));
+
+        // The DSN surface: a `bounced` recipient event, no provider guess.
+        let events: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE recipient_provider IS NULL) \
+             FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type = 'bounced'",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .fetch_one(&pool)
+        .await
+        .expect("events");
+        assert_eq!(events.0, 1, "exactly one bounced event (the DSN)");
+        assert_eq!(
+            events.1, 1,
+            "provider provenance stays NULL (nothing left the platform)"
+        );
+
+        // Honest ledger hygiene: the gate precedes the reservation, and a
+        // policy refusal suppresses nothing.
+        let acceptances: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_delivery_acceptances")
+                .fetch_one(&pool)
+                .await
+                .expect("ledger");
+        assert_eq!(
+            acceptances, 0,
+            "the refusal lands before the acceptance reservation"
+        );
+        let suppressed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("suppressions");
+        assert_eq!(
+            suppressed, 0,
+            "a content-policy refusal never suppresses the mailbox"
+        );
+
+        pool.close().await;
+        Ok(())
+    }
+
+    /// MEDIUM severity (a single Luhn-valid card, risk 8.0 ≥ quarantine 5.0):
+    /// held in queue as `deferred` (never re-claimed by the poller) with the
+    /// `metadata.dlp` annotation and the audit row. No transport, no ledger.
+    #[tokio::test]
+    async fn dlp_medium_severity_holds_the_message_in_queue(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_hold").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-hold").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            dlp_enabled_config(2),
+        )
+        .await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            text: Some(DLP_HOLD_BODY.into()),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("hold is a handled outcome");
+        assert_eq!(
+            transport.calls(),
+            0,
+            "a held message never reaches the transport"
+        );
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "deferred",
+            "the queue's honest hold state — visible, unsent, never auto-retried"
+        );
+        let error_message = queue_error_message(&pool, fixture.queue_id)
+            .await
+            .unwrap_or_default();
+        assert!(
+            error_message.contains("held by outbound content policy")
+                && error_message.contains("pii:credit_card"),
+            "the hold annotation must name the rule class: {error_message}"
+        );
+        assert_eq!(
+            queue_metadata(&pool, fixture.queue_id)
+                .await
+                .get("dlp")
+                .and_then(|d| d.get("action"))
+                .and_then(|a| a.as_str()),
+            Some("held"),
+        );
+
+        let (action, outcome, _) = dlp_audit_row(&pool, fixture.queue_id).await.expect("audit row");
+        assert_eq!(action, "dlp.outbound_hold");
+        assert_eq!(outcome, "held");
+
+        let acceptances: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_delivery_acceptances")
+                .fetch_one(&pool)
+                .await
+                .expect("ledger");
+        assert_eq!(acceptances, 0);
+        pool.close().await;
+        Ok(())
+    }
+
+    /// LOW severity and CLEAN deliver, byte-identical: the transport receives
+    /// the exact prepared copy, the row reaches `sent`, and NO dlp metadata
+    /// or audit row is written for an allowed send (audit is for
+    /// refusals/holds; low severity logs, it does not write evidence rows).
+    #[tokio::test]
+    async fn dlp_low_severity_and_clean_deliver_byte_identical(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_allow").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-allow").await;
+        let second_row = uuid::Uuid::new_v4();
+        insert_queue_row(
+            &pool,
+            &second_row,
+            &fixture.tenant_id,
+            fixture.domain_id,
+            &fixture.sender,
+            &fixture.recipient,
+        )
+        .await;
+        let transport = CapturingTransport::new();
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            dlp_enabled_config(2),
+        )
+        .await;
+
+        for (queue_id, body) in [
+            (fixture.queue_id, DLP_CLEAN_BODY),
+            (second_row, DLP_AUDIT_BODY),
+        ] {
+            let job = EmailJob {
+                id: queue_id.to_string(),
+                tenant_id: fixture.tenant_id.clone(),
+                domain_id: fixture.domain_id.to_string(),
+                from: fixture.sender.clone(),
+                to: fixture.recipient.clone(),
+                subject: "dlp-probe".into(),
+                text: Some(body.into()),
+                ..bare_orch_job()
+            };
+            processor
+                .process_job_inner(&job)
+                .await
+                .expect("delivery is the outcome");
+        }
+
+        assert_eq!(
+            transport.calls(),
+            2,
+            "clean AND low-severity copies are delivered"
+        );
+        for (recipient, subject, text) in transport.seen() {
+            assert_eq!(recipient, fixture.recipient);
+            assert_eq!(subject, "dlp-probe", "subject passes through untouched");
+            assert!(
+                text.as_deref() == Some(DLP_CLEAN_BODY) || text.as_deref() == Some(DLP_AUDIT_BODY),
+                "the delivered body is byte-identical to the prepared copy: {text:?}"
+            );
+        }
+        for queue_id in [fixture.queue_id, second_row] {
+            assert_eq!(queue_status(&pool, queue_id).await, "sent");
+            assert!(
+                queue_metadata(&pool, queue_id).await.get("dlp").is_none(),
+                "an allowed send carries no dlp annotation"
+            );
+            assert!(
+                dlp_audit_row(&pool, queue_id).await.is_none(),
+                "an allowed send writes no dlp audit row"
+            );
+        }
+        pool.close().await;
+        Ok(())
+    }
+
+    /// ENGINE ERROR fails OPEN: with the scanner unavailable, the message is
+    /// delivered untouched and the gap is loud (error-level log + metric in
+    /// the gate). No dlp annotation, no audit row, no hold, no refusal.
+    #[tokio::test]
+    async fn dlp_engine_error_fails_open_and_delivers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_failopen").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-failopen").await;
+        let transport = CapturingTransport::new();
+        let processor = EmailProcessor::with_transport(
+            pool.clone(),
+            orch_redis(),
+            dlp_enabled_config(2),
+            HybridTransport::new(Some(transport.clone() as Arc<dyn EmailTransport>), None),
+        )
+        .await
+        .expect("processor")
+        .with_dlp_scanner(Arc::new(FailingDlpScanner));
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            // Would be BLOCKED if the engine could produce a verdict.
+            text: Some(DLP_BLOCK_BODY.into()),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("fail-open delivers");
+        assert_eq!(transport.calls(), 1, "an engine error must not block delivery");
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        assert!(queue_metadata(&pool, fixture.queue_id).await.get("dlp").is_none());
+        assert!(dlp_audit_row(&pool, fixture.queue_id).await.is_none());
+        pool.close().await;
+        Ok(())
+    }
+
+    /// GATE DISABLED (the `WORKER_DLP_ENABLED` default): even a would-be
+    /// blocked body delivers byte-identically, with zero gate evidence.
+    /// Existing send behavior is unchanged when the switch is off.
+    #[tokio::test]
+    async fn dlp_disabled_keeps_byte_identical_delivery(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_disabled").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-disabled").await;
+        let transport = CapturingTransport::new();
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+        assert!(
+            !processor.config.dlp.enabled,
+            "the default config must leave the gate OFF"
+        );
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            text: Some(DLP_BLOCK_BODY.into()),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("delivery is the outcome");
+        assert_eq!(transport.calls(), 1);
+        let (_, _, text) = transport.seen().into_iter().next().expect("one captured send");
+        assert_eq!(text.as_deref(), Some(DLP_BLOCK_BODY), "byte-identical body");
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        assert!(queue_metadata(&pool, fixture.queue_id).await.get("dlp").is_none());
+        assert!(dlp_audit_row(&pool, fixture.queue_id).await.is_none());
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The DLP gate has EXACTLY ONE production enforcement point, sits
+    /// BEFORE the durable exactly-once reservation (no stranded `reserved`
+    /// rows, no post-SMTP-effect enforcement), is switched by the global
+    /// config, and its refusal/hold SQL hardwires the queue model's honest
+    /// statuses, fenced on the lease token. Modeled on
+    /// `warmup_and_acceptance_have_one_production_entry_point_each`: the
+    /// scan covers the production region only, so test code cannot mask a
+    /// second entry point.
+    #[test]
+    fn dlp_gate_is_the_single_presend_enforcement_point() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("processor source must not begin with a test module");
+
+        // One consultation of the scanner in the whole production region.
+        assert_eq!(
+            production.matches("self.dlp_scanner.scan_prepared(").count(),
+            1,
+            "the pre-send DLP gate must consult the scanner exactly once"
+        );
+        // …and it must sit BEFORE the acceptance reservation: enforcement can
+        // never follow an SMTP effect and can never strand a reserved row.
+        let gate_offset = production
+            .find("self.dlp_scanner.scan_prepared(")
+            .expect("gate present");
+        let claim_offset = production
+            .find("claim_acceptance(&self.db, job, &route)")
+            .expect("acceptance claim present");
+        assert!(
+            gate_offset < claim_offset,
+            "the DLP verdict must land before the exactly-once reservation"
+        );
+        // The gate is behind the global switch, never unconditional.
+        assert!(
+            production.contains("if self.config.dlp.enabled {"),
+            "the gate must be gated by WORKER_DLP_ENABLED (default OFF)"
+        );
+        // Fail-open is real: an engine error has its own loud arm + metric.
+        assert!(production.contains("apexmail_dlp_engine_unavailable_failopen"));
+
+        // Exactly one refusal handler, one hold handler, one audit writer —
+        // and each enforcement arm is invoked exactly once.
+        assert_eq!(production.matches("async fn handle_dlp_refusal(").count(), 1);
+        assert_eq!(
+            production
+                .matches("self.handle_dlp_refusal(job, &verdict)")
+                .count(),
+            1
+        );
+        assert_eq!(production.matches("async fn handle_dlp_hold(").count(), 1);
+        assert_eq!(
+            production.matches("self.handle_dlp_hold(job, &verdict)").count(),
+            1
+        );
+        assert_eq!(production.matches("async fn record_dlp_audit(").count(), 1);
+
+        // The action mapping hardwires the queue model's honest statuses:
+        // refusal → terminal `bounced` (the typed DSN), hold → `deferred`
+        // (never re-claimed by the poller); both fenced on the lease token.
+        let refusal_sql = production
+            .split("const DLP_REFUSAL_UPDATE_SQL")
+            .nth(1)
+            .expect("refusal SQL present")
+            .split("const DLP_HOLD_UPDATE_SQL")
+            .next()
+            .expect("hold SQL terminates the refusal block");
+        assert!(
+            refusal_sql.contains("THEN 'bounced' ELSE status END"),
+            "a DLP refusal must terminalize as the typed bounce"
+        );
+        assert!(
+            refusal_sql.contains("$5::text") && refusal_sql.contains("lease_token"),
+            "the refusal write is fenced on the lease token"
+        );
+        let hold_sql = production
+            .split("const DLP_HOLD_UPDATE_SQL")
+            .nth(1)
+            .expect("hold SQL present")
+            .split("// Durable exactly-once acceptance ledger")
+            .next()
+            .expect("the acceptance banner terminates the hold block");
+        assert!(
+            hold_sql.contains("status = 'deferred'"),
+            "a DLP hold must land in the queue's never-claimed hold state"
+        );
+        assert!(
+            hold_sql.contains("$4::text") && hold_sql.contains("lease_token"),
+            "the hold write is fenced on the lease token"
+        );
+
+        // The scanner seam module: exactly one production engine
+        // implementation, HTML stripped to text before scanning, attachment
+        // content through the engine's extractor, and the fail-open contract
+        // documented where the trait lives.
+        let dlp_source = include_str!("dlp.rs");
+        let dlp_production = dlp_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("dlp source must not begin with a test module");
+        assert_eq!(
+            dlp_production
+                .matches("impl PreSendDlpScanner for EngineDlpScanner")
+                .count(),
+            1,
+            "exactly one production scanner implementation"
+        );
+        assert_eq!(
+            dlp_production.matches("html_to_text(html)").count(),
+            1,
+            "the HTML body must be stripped to text exactly once inside the scan"
+        );
+        assert_eq!(
+            dlp_production.matches(".scan_attachment(").count(),
+            1,
+            "attachment content is scanned through the engine's extractor"
+        );
+        assert!(
+            dlp_production.contains("FAIL OPEN"),
+            "the fail-open contract must be documented at the seam"
+        );
     }
 
     /// A relay-style double for dedicated-route dispatches. Reports the
