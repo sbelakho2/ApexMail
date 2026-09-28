@@ -329,6 +329,125 @@ services:
       - postgres_password
       - redis_password
 
+  # ── HA Service ──────────────────────────────────────────────────────────
+  # Failover/health-check/backup/replication orchestrator (crates/ha).
+  # Reads DB_*/REDIS_* parts (not DATABASE_URL) — the entrypoint exports
+  # DB_PASSWORD / REDIS_PASSWORD from the mounted secrets directly.
+  ha:
+    build:
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
+      target: ha
+    ports:
+      - "127.0.0.1:4300:4300"
+    environment:
+      - RUST_LOG=info
+      - HA_PORT=4300
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=apexmail_mail
+      - DB_USER=apexmail
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - FAILBACK_ENABLED=false
+      - CHAOS_ENABLED=false
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export DB_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
+        exec /usr/bin/tini -- ha-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      # Real health endpoint: GET /health (unauthenticated liveness).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4300/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    secrets:
+      - postgres_password
+      - redis_password
+
+  # ── Isolation Service ───────────────────────────────────────────────────
+  # Tenant isolation service (crates/isolation). Reads its own
+  # ISOLATION_DB_* / ISOLATION_REDIS_* env parts; the iso_* tables live in
+  # the main apexmail_mail database (canonical migration chain).
+  isolation:
+    build:
+      context: ../..
+      dockerfile: services/mail-server/Dockerfile
+      target: isolation
+    ports:
+      - "127.0.0.1:4500:4500"
+    environment:
+      - RUST_LOG=info
+      - ISOLATION_PORT=4500
+      - ISOLATION_DB_HOST=postgres
+      - ISOLATION_DB_PORT=5432
+      - ISOLATION_DB_NAME=apexmail_mail
+      - ISOLATION_DB_USER=apexmail
+      - ISOLATION_REDIS_HOST=redis
+      - ISOLATION_REDIS_PORT=6379
+      - ISOLATION_REDIS_DB=3
+      - ISOLATION_INTERNAL_API_KEY=dev-isolation-internal-api-key-change-me
+      - TENANT_ENCRYPTION_KEY=dev-tenant-encryption-key-change-me-32b
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        export ISOLATION_DB_PASSWORD="$(cat /run/secrets/postgres_password)";
+        export ISOLATION_REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
+        exec /usr/bin/tini -- isolation-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - apexmail
+    restart: unless-stopped
+    healthcheck:
+      # Real health endpoint: GET /health (unauthenticated liveness).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4500/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    secrets:
+      - postgres_password
+      - redis_password
+
   # ── Observability Stack ─────────────────────────────────────────────────
 
   # Loki — log aggregation (Grafana OSS, ADR 0009)
