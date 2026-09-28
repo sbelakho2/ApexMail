@@ -21066,3 +21066,243 @@ mod residual_zero_tests {
         assert_eq!(invited, 0, "a severed invite must write nothing");
     }
 }
+
+// ─── Outage matrix (audit item 10): every nav page under dependency loss ────
+//
+// The browser contract under a database outage, swept across EVERY nav page
+// of BOTH surfaces (the loaders are Postgres-backed; Redis plays no role in
+// the data layer, which the Redis arm pins):
+//
+// │ PG down  │ any data page │ the page RENDERS (never a 500/panic), the
+// │          │               │ unavailable state is browser-visible, and
+// │          │               │ NO honest-empty copy is fabricated: an
+// │          │               │ outage is "unknown", not "zero"
+// │ Redis down│ any data page│ pages load normally (honest empty or real
+// │          │               │ data) — a Redis outage must NOT fabricate
+// │          │               │ an "unavailable" state either
+#[cfg(test)]
+mod outage_matrix_tests {
+    use super::*;
+    use crate::routes::web::data::coverage_support;
+
+    /// Every data-backed web (tenant-scoped) nav page.
+    const WEB_NAV: &[&str] = &[
+        "/dashboard",
+        "/campaigns",
+        "/contacts",
+        "/lists",
+        "/templates",
+        "/domains",
+        "/events",
+        "/analytics",
+        "/reports",
+        "/reports/deliverability",
+        "/inbox-placement",
+        "/settings/api-keys",
+        "/settings/webhooks",
+        "/settings/team",
+        "/settings/billing",
+        "/settings/dedicated-ips",
+    ];
+
+    /// Every data-backed control-plane nav page.
+    const CP_NAV: &[&str] = &[
+        "/",
+        "/cp",
+        "/cp/tenants",
+        "/operators",
+        "/cp/audit",
+        "/jobs",
+        "/infrastructure/nodes",
+        "/infrastructure/queues",
+        "/alerts",
+        "/domains",
+        "/billing/plans",
+        "/compliance",
+        "/compliance/gdpr",
+        "/discovery",
+        "/analytics",
+    ];
+
+    /// Pages whose outage state is carried by KPI cards instead of the empty
+    /// title (no table): /dashboard and /analytics on both surfaces.
+    fn is_kpi_page(path: &str) -> bool {
+        matches!(path, "/dashboard" | "/analytics")
+    }
+
+    /// The honest-empty copy each page shows when the data genuinely loaded
+    /// and is empty — an outage render must contain NONE of these.
+    fn honest_empty_title(path: &str) -> Option<&'static str> {
+        Some(match path {
+            "/campaigns" => "No campaigns yet",
+            "/contacts" => "No contacts yet",
+            "/lists" => "No lists yet",
+            "/templates" => "No templates yet",
+            "/domains" => "No domains yet",
+            "/events" => "No events yet",
+            "/reports" => "No reportable campaigns yet",
+            "/reports/deliverability" => "No delivery data yet",
+            "/inbox-placement" => "No placement tests yet",
+            "/settings/api-keys" => "No API keys yet",
+            "/settings/webhooks" => "No webhooks yet",
+            "/settings/team" => "No team members yet",
+            "/settings/billing" => "No invoices yet",
+            "/settings/dedicated-ips" => "No dedicated IPs yet",
+            _ => return None,
+        })
+    }
+
+    fn cp_honest_empty_title(path: &str) -> Option<&'static str> {
+        Some(match path {
+            "/cp/tenants" | "/tenants" => "No tenants yet",
+            "/operators" => "No operators yet",
+            "/cp/audit" | "/audit" => "No audit events yet",
+            "/jobs" => "No queued jobs",
+            "/infrastructure/nodes" => "No IP pool addresses registered",
+            "/infrastructure/queues" => "No queues reporting",
+            "/alerts" => "No alerts",
+            "/domains" => "No domains registered",
+            "/billing/plans" => "No plans in the catalog",
+            "/compliance" => "No compliance requests",
+            "/compliance/gdpr" => "No GDPR requests",
+            "/discovery" => "No discovery sources reporting",
+            _ => return None,
+        })
+    }
+
+    fn render(surface: &str, path: &str, data: &ui_foundation::axum_router::RouteData) -> String {
+        ui_foundation::axum_router::render_route_with_data(
+            surface,
+            path,
+            None,
+            None,
+            &[],
+            Some(data),
+        )
+        .unwrap_or_else(|| panic!("{surface}{path} must render"))
+    }
+
+    async fn assert_unavailable(
+        state: &AppState,
+        surface: &str,
+        path: &str,
+        honest_empty: Option<&str>,
+    ) {
+        let user = if surface == "web" {
+            coverage_support::user("outage-web-sweep")
+        } else {
+            coverage_support::user("system")
+        };
+        let data = load_page_data(state, surface, path, None, Some(&user)).await;
+        let list = data
+            .list
+            .as_ref()
+            .unwrap_or_else(|| panic!("{surface}{path} must carry list data"));
+
+        // Typed contract: the explicit unavailable state, never a fabricated
+        // empty list or a false zero.
+        let marked = list.empty_title == "Data unavailable"
+            || list.kpis.iter().any(|kpi| kpi.value == "unavailable");
+        assert!(
+            marked,
+            "{surface}{path} must fail closed to the explicit unavailable state, got {list:?}"
+        );
+        if let Some(table) = &list.table {
+            assert!(
+                table.rows.is_empty(),
+                "{surface}{path} must not fabricate rows on DB failure"
+            );
+        }
+        if is_kpi_page(path) {
+            assert!(
+                list.kpis.iter().all(|kpi| kpi.value == "unavailable"),
+                "{surface}{path} KPIs must all be unavailable, got {list:?}"
+            );
+        }
+
+        // Browser-visible contract: the SSR pass renders the unavailable
+        // copy, and the honest-empty copy is NOWHERE on the page.
+        let html = render(surface, path, &data);
+        let lowered = html.to_lowercase();
+        assert!(
+            lowered.contains("unavailable"),
+            "{surface}{path} must render the unavailable copy to the browser"
+        );
+        if let Some(empty_copy) = honest_empty {
+            assert!(
+                !html.contains(empty_copy),
+                "{surface}{path} renders honest-empty copy {empty_copy:?} during an outage — \
+                 an outage is unknown, not zero"
+            );
+        }
+        // Table pages carry the full uncertainty copy (…unknown, not zero…
+        // Reference: <correlation id>); KPI pages carry the "unavailable"
+        // values asserted above.
+        if list.empty_title == "Data unavailable" {
+            assert!(
+                lowered.contains("unknown, not zero"),
+                "{surface}{path} must tell the operator the figures are unknown, not zero"
+            );
+        }
+    }
+
+    /// PG down × every web nav page: the whole sweep renders the explicit
+    /// unavailable state, browser-visible, and never the honest-empty state.
+    #[tokio::test]
+    async fn pg_down_renders_the_unavailable_state_on_every_web_nav_page() {
+        let state = coverage_support::dead_state().await;
+        for path in WEB_NAV {
+            assert_unavailable(&state, "web", path, honest_empty_title(path)).await;
+        }
+    }
+
+    /// PG down × every control-plane nav page.
+    #[tokio::test]
+    async fn pg_down_renders_the_unavailable_state_on_every_cp_nav_page() {
+        let state = coverage_support::dead_state().await;
+        for path in CP_NAV {
+            assert_unavailable(&state, "control-plane", path, cp_honest_empty_title(path)).await;
+        }
+    }
+
+    /// Redis down × every web nav page: the data layer is Postgres-backed,
+    /// so a dead Redis must degrade NOTHING — pages render their honest
+    /// (empty) state, never the unavailable state, never a 500.
+    #[tokio::test]
+    async fn redis_down_degrades_no_web_nav_page() {
+        let Some(db) = coverage_support::pool("outage_redis_sweep").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run the outage matrix");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over_with_config_and_redis(
+            db,
+            crate::app::test_support::test_config(),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        let user = coverage_support::user("outage-redis-sweep");
+        for path in WEB_NAV {
+            let data = load_page_data(&state, "web", path, None, Some(&user)).await;
+            let list = data
+                .list
+                .as_ref()
+                .unwrap_or_else(|| panic!("web{path} must carry list data"));
+            let marked = list.empty_title == "Data unavailable"
+                || list.kpis.iter().any(|kpi| kpi.value == "unavailable");
+            assert!(
+                !marked,
+                "a Redis outage must NOT fabricate an unavailable state on web{path}: {list:?}"
+            );
+            // And the page renders honestly (empty-tenant honest copy or a
+            // loaded table).
+            let html = render("web", path, &data);
+            assert!(!html.is_empty(), "web{path} must render");
+            if let Some(empty_copy) = honest_empty_title(path) {
+                assert!(
+                    html.contains(empty_copy),
+                    "web{path} must show its honest empty state with Redis down: {html}"
+                );
+            }
+        }
+    }
+}
