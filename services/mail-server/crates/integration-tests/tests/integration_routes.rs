@@ -108,7 +108,7 @@ mod devex {
             .oneshot(
                 Request::get("/onboarding/checklist")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-test")
+                    .header("x-tenant-id", "system") // batch fix: sales-autopilot serves the system tenant only
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -420,7 +420,7 @@ mod sales {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-routes")
+                    .header("x-tenant-id", "system") // batch fix: sales-autopilot serves the system tenant only
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -446,7 +446,7 @@ mod sales {
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-routes")
+                    .header("x-tenant-id", "system") // batch fix: sales-autopilot serves the system tenant only
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -462,7 +462,7 @@ mod sales {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-routes")
+                    .header("x-tenant-id", "system") // batch fix: sales-autopilot serves the system tenant only
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -488,10 +488,18 @@ mod ai {
     use ai_service::routes::{build_router, default_app_state};
 
     async fn app() -> axum::Router {
+        // Batch fix: production-detection treats unset APP_ENV as production,
+        // and the boot refuses without the dedicated credential — set it via
+        // env BEFORE from_config runs (nextest isolates each test in its own
+        // process, so the mutation cannot race siblings).
+        std::env::set_var("AI_ADMIN_TOKEN", "test-ai-admin-key");
         let mut state = default_app_state().await.expect("default app state");
-        Arc::get_mut(&mut state)
-            .expect("exclusive app state")
-            .service_token = "test-key".into();
+        let exclusive = Arc::get_mut(&mut state).expect("exclusive app state");
+        exclusive.service_token = "test-key".into();
+        // Batch fix: AI-control routes require the dedicated credential (the
+        // universal internal token must not authorize them), and production
+        // boots refuse without it — the harness sets a test token.
+        exclusive.ai_admin_token = "test-ai-admin-key".into();
         build_router(state)
     }
 
