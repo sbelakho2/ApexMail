@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "ApexMail worker processors (analytics, email, reply-handler, webhook)"
+description = "ApexMail worker processors (analytics, email, reply-handler, webhook, automations)"
 
 [[bin]]
 name = "worker"
@@ -53,6 +53,10 @@ mail-common = { path = "../mail-common" }
 # F13: the shared unsubscribe-token codec — the outgoing pipeline generates
 # v2 tokens with the SAME codec the tracking-service verifies them with.
 tracking-service = { path = "../tracking-service" }
+# The customer automation executor (moved here from sales-autopilot so the
+# owner's sales brain and customer automation execution are separate trust
+# domains) sends ONLY through billing-service's one shared admission gate.
+billing-service = { path = "../billing-service" }
 # F67: the inbound reply processor hands accepted replies to the durable
 # reply-analytics model (analytics::reply_tracking, migration 159).
 analytics = { path = "../analytics" }

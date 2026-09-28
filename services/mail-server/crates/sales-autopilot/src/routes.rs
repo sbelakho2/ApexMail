@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::{
     calendar::CalendarService,
     campaigns::CampaignManager,
+    config,
     config::SalesConfig,
     control,
     crm::CrmBackend,
@@ -261,13 +262,14 @@ async fn require_service_token(
         .as_deref()
         .is_some_and(|p| apexmail_lib::timing_safe_compare(p, &state.service_token))
     {
-        // Fix I-3 (tenant scoping): this service uses a single shared
-        // internal token; the tenant is then taken from the (fully trusted)
-        // `x-tenant-id` header — the token holder can address any tenant by
-        // design. Authenticity of the tenant claim cannot be established at
-        // this layer, so the blast radius is reduced by an explicit
-        // deployment allowlist (`SALES_ALLOWED_TENANTS`). When unset, all
-        // tenants are allowed and a warning is logged once.
+        // System-tenant hard restriction: this service is the platform
+        // OWNER's sales brain. The single shared internal token authenticates
+        // the CALLER; the tenant claim in `x-tenant-id` is then hard-checked
+        // against the system tenant. Customer automation execution lives in
+        // `worker-processors`, so there is no customer surface left to serve
+        // — a non-system tenant claim cannot be honoured and is refused
+        // outright. Boot enforces the same restriction for the deployment
+        // configuration (`config::require_system_tenant_scope`).
         if let Some(tenant) = req
             .headers()
             .get("x-tenant-id")
@@ -275,18 +277,12 @@ async fn require_service_token(
             .map(str::trim)
             .filter(|v| !v.is_empty())
         {
-            static WARNED_UNSCOPED: std::sync::Once = std::sync::Once::new();
-            match &state.config.allowed_tenants {
-                Some(allowed) if !allowed.iter().any(|a| a == tenant) => {
-                    warn!(tenant_id = %tenant, "tenant rejected: not in SALES_ALLOWED_TENANTS");
-                    return Err(StatusCode::FORBIDDEN);
-                }
-                Some(_) => {}
-                None => WARNED_UNSCOPED.call_once(|| {
-                    warn!(
-                        "SALES_ALLOWED_TENANTS is not set — the shared service token can address every tenant"
-                    );
-                }),
+            if tenant != config::SYSTEM_TENANT_ID {
+                warn!(
+                    tenant_id = %tenant,
+                    "tenant rejected: sales-autopilot serves the system tenant only"
+                );
+                return Err(StatusCode::FORBIDDEN);
             }
         }
         Ok(next.run(req).await)
@@ -2057,6 +2053,20 @@ mod tests {
         Some(router(state))
     }
 
+    /// A per-run unique mailbox under the example zone.
+    ///
+    /// batch: system-tenant restriction — every API test now runs as the ONE
+    /// system tenant on the SHARED, reused canonical database, so the
+    /// per-tenant unique email index (`sales_leads`,
+    /// `sales_contact_points`) needs a run-unique local part where
+    /// `unique_test_tenant` used to provide isolation via a unique tenant id.
+    fn unique_email(local: &str) -> String {
+        format!(
+            "{local}-{}@acme.example",
+            &Uuid::new_v4().simple().to_string()[..10]
+        )
+    }
+
     // ── Fix I tests: honest failures + tenant scoping ────────────────────
 
     /// Async-test-safe app builder: a LAZY pool (never connects) so the
@@ -2112,7 +2122,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2148,7 +2158,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/inbox/{}/reply", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
@@ -2185,7 +2195,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/inbox/{}/reply", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
@@ -2214,7 +2224,7 @@ mod tests {
             .oneshot(
                 Request::post("/conversions")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2228,23 +2238,22 @@ mod tests {
         );
     }
 
-    /// Fix I-3: SALES_ALLOWED_TENANTS scopes the shared-token blast radius.
+    /// System-tenant hard restriction: the shared token can only ever act on
+    /// the system tenant. The middleware refuses any other tenant claim
+    /// outright, regardless of the deployment allowlist (which boot requires
+    /// to be exactly the system tenant — `config::require_system_tenant_scope`).
     #[tokio::test]
-    async fn test_allowed_tenants_scoping() {
-        let config = crate::config::SalesConfig {
-            allowed_tenants: Some(vec!["tenant-a".into()]),
-            ..Default::default()
-        };
-        let app = lazy_test_app_with_config(config);
+    async fn test_system_tenant_only_scoping() {
+        let app = lazy_test_app();
 
-        // Allowed tenant passes the middleware (then fails on the dead DB
+        // The system tenant passes the middleware (then fails on the dead DB
         // with 500 — proving it got PAST the scope check).
         let allowed = app
             .clone()
             .oneshot(
                 Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2252,7 +2261,7 @@ mod tests {
             .unwrap();
         assert_ne!(allowed.status(), StatusCode::FORBIDDEN);
 
-        // Tenant outside the allowlist is rejected outright.
+        // Any non-system tenant claim is rejected outright.
         let denied = app
             .oneshot(
                 Request::post(format!("/campaigns/{}/start", Uuid::new_v4()))
@@ -2296,12 +2305,14 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_create_and_list_leads").await else {
             return;
         };
-        // Unique tenant per run: `sales_leads` has a per-tenant unique email
-        // index, so a fixed name would fail on the second run against the
-        // reused canonical database.
-        let tenant = crate::test_db::unique_test_tenant("routes-leads");
+        // batch: system-tenant restriction — the router middleware refuses
+        // every tenant but `config::SYSTEM_TENANT_ID`, so the create/list
+        // pair runs as the system tenant; `unique_email` replaces the unique
+        // tenant id as the collision guard on the shared database.
+        let tenant = config::SYSTEM_TENANT_ID;
+        let email = unique_email("alice");
         let body = serde_json::json!({
-            "email": "alice@acme.com",
+            "email": email,
             "name": "Alice",
             "company": "Acme",
         });
@@ -2310,7 +2321,7 @@ mod tests {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2331,6 +2342,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
+
+        // batch: scoped cleanup — the system tenant is SHARED by every test
+        // in the suite, so cleanup must key on this test's unique email and
+        // never on tenant_id.
+        if let Some(db) =
+            crate::test_db::canonical_test_pool("routes::tests::test_create_and_list_leads::cleanup")
+                .await
+        {
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = $1 AND email = $2")
+                .bind(tenant)
+                .bind(&email)
+                .execute(&db)
+                .await;
+        }
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
@@ -2339,14 +2364,17 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_enrich_endpoint").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-enrich");
+        // batch: system-tenant restriction — the gate only admits
+        // `config::SYSTEM_TENANT_ID`; the fixed domains are safe because
+        // enrichment persistence upserts on (tenant_id, domain).
+        let tenant = config::SYSTEM_TENANT_ID;
         let body = serde_json::json!({ "email": "bob@beta.io" });
         let resp = app
             .clone()
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2389,7 +2417,11 @@ mod tests {
         else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-campaign");
+        // batch: system-tenant restriction — the whole lifecycle runs as
+        // `config::SYSTEM_TENANT_ID`; the seeded contact points get
+        // run-unique addresses because `sales_contact_points` is UNIQUE on
+        // (tenant_id, channel, normalized_value) and the tenant is now fixed.
+        let tenant = config::SYSTEM_TENANT_ID;
 
         // Campaign start activates only when at least one recipient can be
         // sent to, so seed canonical verified email points for the recipients
@@ -2402,7 +2434,9 @@ mod tests {
         else {
             return;
         };
-        for email in ["alice@acme.com", "bob@beta.io"] {
+        let recipient_emails = [unique_email("alice"), unique_email("bob")];
+        let mut contact_ids = Vec::new();
+        for email in recipient_emails.clone() {
             let contact_id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')",
@@ -2421,10 +2455,11 @@ mod tests {
             .bind(Uuid::new_v4())
             .bind(&tenant)
             .bind(contact_id)
-            .bind(email)
+            .bind(&email)
             .execute(&seed_pool)
             .await
             .expect("seed verified point");
+            contact_ids.push(contact_id);
         }
 
         let create_body = serde_json::json!({
@@ -2439,7 +2474,7 @@ mod tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -2457,14 +2492,14 @@ mod tests {
         let campaign_id = created["id"].as_str().unwrap();
 
         let recipients_body = serde_json::json!({
-            "emails": ["alice@acme.com", "bob@beta.io"]
+            "emails": recipient_emails
         });
         let recipients_resp = app
             .clone()
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/recipients"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&recipients_body).unwrap()))
                     .unwrap(),
@@ -2480,7 +2515,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/start"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2521,6 +2556,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paused["status"], "paused");
+
+        // batch: scoped cleanup — the system tenant is shared, so remove only
+        // this campaign's rows (by id) and this run's contact fixtures (by
+        // id), never by tenant_id.
+        let campaign_uuid = Uuid::parse_str(campaign_id).expect("campaign id is a uuid");
+        let _ = sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign_uuid)
+            .execute(&seed_pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+            .bind(campaign_uuid)
+            .execute(&seed_pool)
+            .await;
+        for contact_id in contact_ids {
+            let _ = sqlx::query("DELETE FROM sales_contact_points WHERE contact_id = $1")
+                .bind(contact_id)
+                .execute(&seed_pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_contacts WHERE id = $1")
+                .bind(contact_id)
+                .execute(&seed_pool)
+                .await;
+        }
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
@@ -2535,7 +2593,11 @@ mod tests {
         else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-campaign-owner");
+        // batch: system-tenant restriction — the campaign is created as the
+        // system tenant (the only one the gate admits); the foreign claim is
+        // kept as a `unique_test_tenant` string precisely because the gate
+        // must refuse it.
+        let tenant = config::SYSTEM_TENANT_ID;
         let other_tenant = crate::test_db::unique_test_tenant("routes-campaign-other");
         let create_body = serde_json::json!({
             "name": "Tenant scoped",
@@ -2549,7 +2611,7 @@ mod tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -2576,7 +2638,23 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(cross_tenant_resp.status(), StatusCode::NOT_FOUND);
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (the security property is enforced earlier than the old
+        // data-layer tenant-scoped 404).
+        assert_eq!(cross_tenant_resp.status(), StatusCode::FORBIDDEN);
+
+        // batch: scoped cleanup — only this run's campaign, never by
+        // tenant_id on the shared system tenant.
+        if let Some(db) = crate::test_db::canonical_test_pool(
+            "routes::tests::test_campaign_routes_reject_cross_tenant_mutation::cleanup",
+        )
+        .await
+        {
+            let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+                .bind(Uuid::parse_str(campaign_id).expect("campaign id is a uuid"))
+                .execute(&db)
+                .await;
+        }
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
@@ -2585,12 +2663,17 @@ mod tests {
         let Some(app) = test_app("routes::tests::test_list_leads_respects_pagination").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-pagination");
+        // batch: system-tenant restriction — the pagination run happens as
+        // the system tenant; `unique_email` keeps the three seeds colliding
+        // with neither concurrent tests nor previous runs (the shared
+        // database reuses the per-tenant unique email index).
+        let tenant = config::SYSTEM_TENANT_ID;
+        let emails: Vec<String> = (0..3).map(|index| unique_email(&format!("lead{index}"))).collect();
 
-        for index in 0..3 {
+        for email in &emails {
             let body = serde_json::json!({
-                "email": format!("lead{index}@acme.com"),
-                "name": format!("Lead {index}"),
+                "email": email,
+                "name": "Lead",
                 "company": "Acme"
             });
             let response = app
@@ -2598,7 +2681,7 @@ mod tests {
                 .oneshot(
                     Request::post("/leads")
                         .header("x-api-key", "test-key")
-                        .header("x-tenant-id", tenant.clone())
+                        .header("x-tenant-id", tenant)
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
@@ -2627,6 +2710,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(leads.len(), 1);
+
+        // batch: scoped cleanup — delete this run's three leads by their
+        // unique emails; tenant_id deletes would race concurrent tests on
+        // the shared system tenant.
+        if let Some(db) = crate::test_db::canonical_test_pool(
+            "routes::tests::test_list_leads_respects_pagination::cleanup",
+        )
+        .await
+        {
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = $1 AND email = ANY($2)")
+                .bind(tenant)
+                .bind(&emails)
+                .execute(&db)
+                .await;
+        }
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
@@ -2761,7 +2859,7 @@ mod tests {
             .oneshot(
                 Request::post("/discovery/jobs")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"sources":["provider_api"]}"#))
                     .unwrap(),
@@ -2775,7 +2873,7 @@ mod tests {
             .oneshot(
                 Request::get(format!("/discovery/jobs/{}", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2793,7 +2891,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/discovery/jobs/{}/run", Uuid::new_v4()))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2815,7 +2913,7 @@ mod tests {
             .oneshot(
                 Request::post("/discovery/jobs")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2844,7 +2942,7 @@ mod tests {
             .oneshot(
                 Request::post("/discovery/jobs")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -3086,7 +3184,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::get("/leads")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3099,7 +3197,7 @@ mod tests {
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "not-the-token")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3112,7 +3210,7 @@ mod tests {
             .oneshot(
                 Request::get("/leads")
                     .header(axum::http::header::AUTHORIZATION, "Bearer not-the-token")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3143,7 +3241,7 @@ mod tests {
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3161,7 +3259,11 @@ mod tests {
         let Some(app) = test_app("routes_lead_lifecycle").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-lead");
+        // batch: system-tenant restriction — the whole lifecycle runs as the
+        // system tenant; `other` stays a unique foreign claim because the
+        // gate must refuse it (header/payload mismatch and cross-tenant
+        // reads below).
+        let tenant = config::SYSTEM_TENANT_ID;
         let other = crate::test_db::unique_test_tenant("routes-lead-other");
         let email = format!(
             "alice-{}@acme.example",
@@ -3188,7 +3290,7 @@ mod tests {
             .unwrap()
         };
 
-        let resp = create(app.clone(), email.clone(), tenant.clone()).await;
+        let resp = create(app.clone(), email.clone(), tenant.to_string()).await;
         assert_eq!(resp.status(), StatusCode::OK, "create lead");
         let created = json_body(resp).await;
         let lead_id = created["id"].as_str().expect("a lead id").to_string();
@@ -3198,8 +3300,9 @@ mod tests {
         );
         assert_eq!(created["email"], email);
 
-        // A replay of the same address is a conflict, not a second lead.
-        let duplicate = create(app.clone(), email.clone(), tenant.clone()).await;
+        // A replay of the same address is a conflict, not a second lead
+        // (the per-tenant unique email index of the now-fixed system tenant).
+        let duplicate = create(app.clone(), email.clone(), tenant.to_string()).await;
         assert_eq!(duplicate.status(), StatusCode::CONFLICT);
 
         // Malformed JSON and a missing required field are rejections.
@@ -3208,7 +3311,7 @@ mod tests {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from("{not json"))
                     .unwrap(),
@@ -3221,7 +3324,7 @@ mod tests {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "email": "x@y.z" })).unwrap(),
@@ -3238,7 +3341,7 @@ mod tests {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
@@ -3261,7 +3364,7 @@ mod tests {
             .oneshot(
                 Request::get(format!("/leads/{lead_id}"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3279,13 +3382,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the data layer answered a tenant-scoped 404;
+        // the isolation property is now enforced at the router).
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
         let unknown = app
             .clone()
             .oneshot(
                 Request::get("/leads/lead_does_not_exist")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3309,7 +3415,7 @@ mod tests {
                 .oneshot(
                     Request::get(url)
                         .header("x-api-key", "test-key")
-                        .header("x-tenant-id", tenant.clone())
+                        .header("x-tenant-id", tenant)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -3329,7 +3435,7 @@ mod tests {
             .oneshot(
                 Request::get("/companies?limit=5&industry=saas")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3337,11 +3443,14 @@ mod tests {
             .unwrap();
         assert_eq!(companies.status(), StatusCode::OK);
 
-        // Cleanup.
+        // Cleanup: the system tenant is SHARED by every test in the suite, so
+        // delete only this run's lead (by its unique email), never by
+        // tenant_id. batch: system-tenant restriction.
         if let Some(db) = crate::test_db::canonical_test_pool("routes_lead_lifecycle_cleanup").await
         {
-            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = ANY($1)")
-                .bind(vec![tenant.clone(), other.clone()])
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = $1 AND email = $2")
+                .bind(tenant)
+                .bind(&email)
                 .execute(&db)
                 .await;
         }
@@ -3354,14 +3463,17 @@ mod tests {
         let Some(app) = test_app("routes_enrich_input").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-enrich");
+        // batch: system-tenant restriction — enrichment runs as the system
+        // tenant (the fixed domains are upsert-idempotent on
+        // (tenant_id, domain)).
+        let tenant = config::SYSTEM_TENANT_ID;
 
         let no_input = app
             .clone()
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({})).unwrap(),
@@ -3377,7 +3489,7 @@ mod tests {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "email": "not-an-email" }))
@@ -3394,7 +3506,7 @@ mod tests {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "domain": "acme.example" }))
@@ -3413,7 +3525,7 @@ mod tests {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "email": "bob@beta.example" }))
@@ -3442,19 +3554,37 @@ mod tests {
             .unwrap();
         assert_eq!(no_tenant.status(), StatusCode::BAD_REQUEST);
 
+        // batch: scoped cleanup — the system tenant is shared, so delete only
+        // the facts/evidence/projection produced for THIS test's domains (the
+        // sales_accounts rows are intentionally left: they are upsert targets
+        // that other tenants of the suite never read).
         if let Some(db) = crate::test_db::canonical_test_pool("routes_enrich_input_cleanup").await {
-            let _ = sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1")
-                .bind(&tenant)
-                .execute(&db)
-                .await;
-            let _ = sqlx::query("DELETE FROM sales_evidence WHERE tenant_id = $1")
-                .bind(&tenant)
-                .execute(&db)
-                .await;
-            let _ = sqlx::query("DELETE FROM sales_enrichment_facts WHERE tenant_id = $1")
-                .bind(&tenant)
-                .execute(&db)
-                .await;
+            let domains = ["acme.example", "beta.example"];
+            let account_ids: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM sales_accounts WHERE tenant_id = $1 AND domain = ANY($2)",
+            )
+            .bind(tenant)
+            .bind(&domains)
+            .fetch_all(&db)
+            .await
+            .unwrap_or_default();
+            if !account_ids.is_empty() {
+                let _ =
+                    sqlx::query("DELETE FROM sales_enrichment_facts WHERE subject_id = ANY($1)")
+                        .bind(&account_ids)
+                        .execute(&db)
+                        .await;
+                let _ = sqlx::query("DELETE FROM sales_evidence WHERE account_id = ANY($1)")
+                    .bind(&account_ids)
+                    .execute(&db)
+                    .await;
+            }
+            let _ =
+                sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1 AND domain = ANY($2)")
+                    .bind(tenant)
+                    .bind(&domains)
+                    .execute(&db)
+                    .await;
         }
     }
 
@@ -3466,12 +3596,15 @@ mod tests {
         let Some(app) = test_app("routes_conversions").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-conv");
+        // batch: system-tenant restriction — lead, campaign and conversion
+        // are all created as the system tenant; `other` stays a unique
+        // foreign claim for the gate refusal below.
+        let tenant = config::SYSTEM_TENANT_ID;
         let other = crate::test_db::unique_test_tenant("routes-conv-other");
         let auth = |builder: axum::http::request::Builder| {
             builder
                 .header("x-api-key", "test-key")
-                .header("x-tenant-id", tenant.clone())
+                .header("x-tenant-id", tenant)
                 .header("content-type", "application/json")
         };
 
@@ -3554,8 +3687,23 @@ mod tests {
         assert_eq!(created["revenue"], 1234.5);
         assert_eq!(created["campaign_id"], campaign_id.to_string());
 
+        // batch: system-tenant restriction — the system tenant is shared by
+        // the whole suite, so the unfiltered listing is only asserted to
+        // CONTAIN this conversion (concurrent tests may own others); the
+        // campaign/lead/limit-scoped listings stay exact.
+        let unfiltered_request = auth(Request::get("/conversions")).body(Body::empty()).unwrap();
+        let unfiltered = app.clone().oneshot(unfiltered_request).await.unwrap();
+        assert_eq!(unfiltered.status(), StatusCode::OK);
+        let unfiltered_rows = json_body(unfiltered).await;
+        assert!(
+            unfiltered_rows
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == created["id"]),
+            "the conversion must be listed unfiltered: {unfiltered_rows}"
+        );
         for url in [
-            "/conversions".to_string(),
             format!("/conversions?campaign_id={campaign_id}"),
             format!("/conversions?lead_id={lead_id}"),
             "/conversions?limit=1&offset=0".to_string(),
@@ -3567,7 +3715,9 @@ mod tests {
             assert_eq!(rows.as_array().unwrap().len(), 1, "{url}: {rows}");
         }
 
-        // Another tenant sees none of it.
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously another tenant simply saw an empty list at the
+        // data layer; the isolation property is enforced at the router now).
         let foreign = app
             .clone()
             .oneshot(
@@ -3579,20 +3729,24 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(foreign.status(), StatusCode::OK);
-        assert!(json_body(foreign).await.as_array().unwrap().is_empty());
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
 
+        // batch: scoped cleanup — the system tenant is shared, so delete by
+        // this test's ids/emails, never by tenant_id.
         if let Some(db) = crate::test_db::canonical_test_pool("routes_conversions_cleanup").await {
-            let _ = sqlx::query("DELETE FROM sales_conversions WHERE tenant_id = ANY($1)")
-                .bind(vec![tenant.clone(), other.clone()])
+            let _ = sqlx::query(
+                "DELETE FROM sales_conversions WHERE campaign_id = $1 OR lead_id = $2",
+            )
+            .bind(campaign_id)
+            .bind(lead_id)
+            .execute(&db)
+            .await;
+            let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+                .bind(campaign_id)
                 .execute(&db)
                 .await;
-            let _ = sqlx::query("DELETE FROM sales_campaigns WHERE tenant_id = ANY($1)")
-                .bind(vec![tenant.clone(), other.clone()])
-                .execute(&db)
-                .await;
-            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = ANY($1)")
-                .bind(vec![tenant.clone(), other.clone()])
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE id = $1")
+                .bind(lead_id.to_string())
                 .execute(&db)
                 .await;
         }
@@ -3621,7 +3775,7 @@ mod gate_and_validation_tests {
             .clone()
             .oneshot(
                 Request::get("/campaigns")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3635,7 +3789,7 @@ mod gate_and_validation_tests {
             .oneshot(
                 Request::get("/campaigns")
                     .header("x-api-key", "wrong-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3649,7 +3803,7 @@ mod gate_and_validation_tests {
             .oneshot(
                 Request::get("/campaigns")
                     .header("authorization", "Basic dXNlcjpwd2Q=")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3667,7 +3821,7 @@ mod gate_and_validation_tests {
             .oneshot(
                 Request::get("/campaigns")
                     .header("authorization", "Bearer test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3685,7 +3839,7 @@ mod gate_and_validation_tests {
             .oneshot(
                 Request::get("/campaigns")
                     .header("x-api-key", "")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", config::SYSTEM_TENANT_ID)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3725,7 +3879,9 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_validation_campaign").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-norcpt");
+        // batch: system-tenant restriction — the campaign draft is created as
+        // the system tenant (the only tenant the gate admits).
+        let tenant = config::SYSTEM_TENANT_ID;
         // A campaign draft first (create succeeds — recipients gate only the
         // send path).
         let create_body = serde_json::json!({
@@ -3738,7 +3894,7 @@ mod gate_and_validation_tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -3791,13 +3947,15 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_list_campaigns").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-listcmp");
+        // batch: system-tenant restriction — the listing runs as the system
+        // tenant.
+        let tenant = config::SYSTEM_TENANT_ID;
         let resp = app
             .clone()
             .oneshot(
                 Request::get("/campaigns?limit=5&offset=0")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3812,7 +3970,10 @@ mod gate_and_validation_tests {
         .unwrap();
         assert!(body.get("campaigns").is_some() || body.is_array(), "{body}");
 
-        // A DIFFERENT tenant sees a disjoint (empty) list.
+        // batch: system-tenant restriction — a DIFFERENT tenant claim is
+        // refused by the gate with 403 (previously it saw its own disjoint
+        // list at the data layer; the isolation property is enforced at the
+        // router now).
         let other = crate::test_db::unique_test_tenant("routes-listother");
         let resp = app
             .oneshot(
@@ -3824,7 +3985,7 @@ mod gate_and_validation_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -3832,7 +3993,10 @@ mod gate_and_validation_tests {
         let Some(app) = test_app("routes_discovery_404").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-disc404");
+        // batch: system-tenant restriction — the request must reach the
+        // handler (the gate only admits the system tenant), so the unknown
+        // job's client error below is the runner's contract, not the 403.
+        let tenant = config::SYSTEM_TENANT_ID;
         let resp = app
             .oneshot(
                 Request::get(format!("/discovery/jobs/{}", Uuid::new_v4()))
@@ -3931,8 +4095,23 @@ mod coverage_wave_routes {
         test_name: &str,
         config: crate::config::SalesConfig,
     ) -> Option<Router> {
+        canonical_app_with_redis_url(test_name, config, "redis://127.0.0.1:6379").await
+    }
+
+    /// Canonical-pool app with explicit `SalesConfig` AND Redis URL.
+    ///
+    /// The extra seam exists for the enrichment rate-limit proof: the
+    /// limiter keys on the tenant id, and every route test now shares the ONE
+    /// system tenant — pointing this harness at a dedicated logical Redis db
+    /// keeps the 30-request window exact against concurrent `/enrich` tests
+    /// on the default db.
+    async fn canonical_app_with_redis_url(
+        test_name: &str,
+        config: crate::config::SalesConfig,
+        redis_url: &str,
+    ) -> Option<Router> {
         let db = crate::test_db::canonical_test_pool(test_name).await?;
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+        let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");
         let state = AppState {
@@ -4196,12 +4375,36 @@ mod coverage_wave_routes {
     /// Redis Lua path (the in-memory fallback is covered elsewhere). Request
     /// 31 is a 429; the limiter counts BEFORE input validation, so the cheap
     /// bad-email body proves the window without 31 persisted enrichments.
+    ///
+    /// batch: system-tenant restriction — every `/enrich` caller shares the
+    /// ONE system tenant, so the limiter key would be shared with concurrent
+    /// enrich tests; this proof therefore runs on a dedicated logical Redis
+    /// db (db 1), keeping the exact 30/31 window deterministic.
     #[tokio::test]
     async fn enrichment_rate_limit_429s_the_thirty_first_request_via_redis() {
-        let Some(app) = test_app("routes_wave_rate_limit").await else {
+        const ISOLATED_REDIS_URL: &str = "redis://127.0.0.1:6379/1";
+        let config = crate::config::SalesConfig::default();
+        let Some(app) =
+            canonical_app_with_redis_url("routes_wave_rate_limit", config, ISOLATED_REDIS_URL).await
+        else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-ratelimit");
+        // Determinism hygiene: back-to-back suite runs must start from an
+        // empty 60-second window on the shared logical db.
+        let purge_pool = deadpool_redis::Config::from_url(ISOLATED_REDIS_URL)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("isolated redis pool");
+        let mut purge_conn = purge_pool
+            .get()
+            .await
+            .expect("connect to the isolated redis db");
+        let _: i64 = deadpool_redis::redis::cmd("DEL")
+            .arg(format!("{RATE_LIMITER_REDIS_PREFIX}{}", config::SYSTEM_TENANT_ID))
+            .query_async(&mut purge_conn)
+            .await
+            .expect("purge the rate-limit window");
+
+        let tenant = config::SYSTEM_TENANT_ID;
         let mut saw_429_early = false;
         for index in 0..31u32 {
             let resp = app
@@ -4209,7 +4412,7 @@ mod coverage_wave_routes {
                 .oneshot(
                     Request::post("/enrich")
                         .header("x-api-key", "test-key")
-                        .header("x-tenant-id", tenant.clone())
+                        .header("x-tenant-id", tenant)
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::to_vec(&serde_json::json!({ "email": "bad" })).unwrap(),
@@ -4237,7 +4440,9 @@ mod coverage_wave_routes {
         }
         assert!(saw_429_early, "the 31st request must be the 429");
 
-        // A DIFFERENT tenant has its own window: not rate-limited.
+        // batch: system-tenant restriction — the per-tenant window can no
+        // longer be probed with a second tenant through the router: the gate
+        // refuses any non-system tenant with 403 before the limiter runs.
         let other = crate::test_db::unique_test_tenant("routes-ratelimit-b");
         let resp = app
             .oneshot(
@@ -4252,10 +4457,10 @@ mod coverage_wave_routes {
             )
             .await
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             resp.status(),
-            StatusCode::TOO_MANY_REQUESTS,
-            "the window is per tenant"
+            StatusCode::FORBIDDEN,
+            "the gate refuses foreign tenants before the rate limiter"
         );
     }
 
@@ -4263,6 +4468,12 @@ mod coverage_wave_routes {
 
     /// GET /inbox filters by category (the unknown category lands in
     /// `other`), is tenant-scoped, and paginates with clamping.
+    ///
+    /// batch: system-tenant restriction — the listing runs as the system
+    /// tenant on the SHARED database, so the fixture clears its own fixed
+    /// senders first (determinism across runs) and asserts with
+    /// concurrency-tolerant shapes where sibling tests may add system-tenant
+    /// rows; the foreign claim is gate-refused with 403.
     #[tokio::test]
     async fn inbox_listing_is_category_filtered_tenant_scoped_and_paged() {
         let Some(db) = crate::test_db::canonical_test_pool("routes_wave_inbox_db").await else {
@@ -4271,8 +4482,21 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_inbox").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-inbox");
-        let other = crate::test_db::unique_test_tenant("routes-inbox-other");
+        let tenant = config::SYSTEM_TENANT_ID;
+        let senders = [
+            "lead1@example.com",
+            "spam1@example.com",
+            "optout1@example.com",
+            "misc1@example.com",
+        ];
+        // Clear this fixture's rows from previous runs (the canonical
+        // database is reused); never delete the shared tenant's other rows.
+        sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)")
+            .bind(tenant)
+            .bind(&senders)
+            .execute(&db)
+            .await
+            .expect("clear stale fixture inbox messages");
         for (sender, category) in [
             ("lead1@example.com", "lead"),
             ("spam1@example.com", "spam"),
@@ -4284,22 +4508,13 @@ mod coverage_wave_routes {
                  VALUES ($1, $2, $3, 'seeded', $4)",
             )
             .bind(Uuid::new_v4())
-            .bind(&tenant)
+            .bind(tenant)
             .bind(sender)
             .bind(category)
             .execute(&db)
             .await
             .expect("seed inbox message");
         }
-        sqlx::query(
-            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
-             VALUES ($1, $2, 'foreign@example.com', 'seeded', 'lead')",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&other)
-        .execute(&db)
-        .await
-        .expect("seed foreign inbox message");
 
         let get = |url: &'static str, tenant: String| {
             let app = app.clone();
@@ -4316,39 +4531,65 @@ mod coverage_wave_routes {
             }
         };
 
-        let all = json_body(get("/inbox", tenant.clone()).await).await;
-        assert_eq!(all.as_array().unwrap().len(), 4, "{all}");
+        // Sibling tests (inbox replies) may add system-tenant rows while this
+        // runs, so the unfiltered shape is asserted to contain THIS fixture's
+        // four senders — all under the system tenant.
+        let all = json_body(get("/inbox", tenant.to_string()).await).await;
+        let all_rows = all.as_array().unwrap();
+        assert!(all_rows.len() >= 4, "{all}");
+        for sender in senders {
+            assert!(
+                all_rows.iter().any(|row| row["from"] == sender),
+                "fixture sender {sender} must be listed: {all}"
+            );
+        }
+        assert!(
+            all_rows.iter().all(|row| row["tenant_id"] == tenant),
+            "every row belongs to the calling tenant: {all}"
+        );
 
-        let spam = json_body(get("/inbox?category=spam", tenant.clone()).await).await;
+        let spam = json_body(get("/inbox?category=spam", tenant.to_string()).await).await;
         assert_eq!(spam.as_array().unwrap().len(), 1, "{spam}");
         assert_eq!(spam[0]["category"], "spam");
 
-        let optout = json_body(get("/inbox?category=unsubscribe", tenant.clone()).await).await;
+        let optout = json_body(get("/inbox?category=unsubscribe", tenant.to_string()).await).await;
         assert_eq!(optout.as_array().unwrap().len(), 1, "{optout}");
 
         // An unknown category string maps to the `other` bucket, not an error
-        // and not "everything".
-        let nonsense = json_body(get("/inbox?category=telepathy", tenant.clone()).await).await;
-        assert_eq!(nonsense.as_array().unwrap().len(), 1, "{nonsense}");
-        assert_eq!(nonsense[0]["category"], "other");
+        // and not "everything". (Reply tests may add system-tenant `other`
+        // rows concurrently, so assert the bucketing, not an exact count.)
+        let nonsense = json_body(get("/inbox?category=telepathy", tenant.to_string()).await).await;
+        let nonsense_rows = nonsense.as_array().unwrap();
+        assert!(!nonsense_rows.is_empty(), "{nonsense}");
+        assert!(
+            nonsense_rows
+                .iter()
+                .all(|row| row["category"] == "other"),
+            "unknown categories land in `other`: {nonsense}"
+        );
+        assert!(
+            nonsense_rows.iter().any(|row| row["from"] == "misc1@example.com"),
+            "{nonsense}"
+        );
 
         // Hostile pagination clamps instead of erroring.
-        let paged = json_body(get("/inbox?limit=2&offset=0", tenant.clone()).await).await;
+        let paged = json_body(get("/inbox?limit=2&offset=0", tenant.to_string()).await).await;
         assert_eq!(paged.as_array().unwrap().len(), 2, "{paged}");
-        let clamped = json_body(get("/inbox?limit=-5&offset=99999", tenant.clone()).await).await;
+        let clamped = json_body(get("/inbox?limit=-5&offset=99999", tenant.to_string()).await).await;
         assert!(clamped.as_array().unwrap().is_empty(), "{clamped}");
 
-        // The foreign tenant sees only its own message.
-        let foreign = json_body(get("/inbox", other.clone()).await).await;
-        assert_eq!(foreign.as_array().unwrap().len(), 1, "{foreign}");
-        assert_eq!(foreign[0]["tenant_id"], other);
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the foreign tenant simply saw its own
+        // data-layer-isolated list).
+        let other = crate::test_db::unique_test_tenant("routes-inbox-other");
+        let foreign = get("/inbox", other).await;
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
 
-        for t in [&tenant, &other] {
-            let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1")
-                .bind(t)
-                .execute(&db)
-                .await;
-        }
+        let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)")
+            .bind(tenant)
+            .bind(&senders)
+            .execute(&db)
+            .await;
     }
 
     // ── Inbox reply through the real dispatcher ──────────────────────────
@@ -4364,11 +4605,20 @@ mod coverage_wave_routes {
         let Some(app) = canonical_app_with_dispatcher("routes_wave_reply").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-reply");
-        seed_platform_tenant(&db, &tenant).await;
+        // batch: system-tenant restriction — the fixture and the reply both
+        // run as the system tenant on the shared database, so every write and
+        // cleanup below is keyed by ids/emails, never by tenant_id alone.
+        let tenant = config::SYSTEM_TENANT_ID;
+        seed_platform_tenant(&db, tenant).await;
         // The reply's legacy sender is the deployment-wide
         // `SALES_CAMPAIGN_FROM_EMAIL`; its domain must be verified+DKIM-ready
-        // for the fixture tenant or the enqueue honestly refuses.
+        // for the fixture tenant or the enqueue honestly refuses. The name is
+        // globally unique in `domains`, so clear any stale row first (the
+        // canonical database is reused across runs).
+        sqlx::query("DELETE FROM domains WHERE name = 'routes-wave.example'")
+            .execute(&db)
+            .await
+            .expect("clear stale fixture sender domain");
         sqlx::query(
             "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
              ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
@@ -4376,7 +4626,7 @@ mod coverage_wave_routes {
                      'wave-selector', 'wave-public', 'dkim:v1:wave-test')",
         )
         .bind(Uuid::new_v4())
-        .bind(&tenant)
+        .bind(tenant)
         .execute(&db)
         .await
         .expect("seed verified sender domain");
@@ -4387,14 +4637,14 @@ mod coverage_wave_routes {
              VALUES ($1, $2, $3, 'Re: demo', 'positive')",
         )
         .bind(inbox_id)
-        .bind(&tenant)
+        .bind(tenant)
         .bind(&sender)
         .execute(&db)
         .await
         .expect("seed inbox message");
 
         let post_reply = |app: Router, body: serde_json::Value| {
-            let tenant = tenant.clone();
+            let tenant = tenant;
             async move {
                 app.oneshot(
                     Request::post(format!("/inbox/{inbox_id}/reply"))
@@ -4427,6 +4677,8 @@ mod coverage_wave_routes {
         let message_id = body["messageId"].as_str().expect("messageId").to_string();
 
         // The platform rows exist and the flag committed with the enqueue.
+        // (batch: scoped counts — the platform tables are shared under the
+        // system tenant, so count only THIS inbox message's reply.)
         let replied: bool =
             sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
                 .bind(inbox_id)
@@ -4434,12 +4686,13 @@ mod coverage_wave_routes {
                 .await
                 .unwrap();
         assert!(replied, "the flag commits atomically with the enqueue");
-        let queued: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM email_queue WHERE metadata->>'inbox_message_id' = $1",
+        )
+        .bind(inbox_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(queued, 1);
 
         // A replay does NOT send a second reply.
@@ -4454,15 +4707,17 @@ mod coverage_wave_routes {
             message_id,
             "the replay reports the original message"
         );
-        let messages: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        let messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE metadata->>'inbox_message_id' = $1",
+        )
+        .bind(inbox_id.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(messages, 1, "exactly one reply per inbox message");
 
-        // Cross-tenant: another tenant cannot reply to (or even see) it.
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the data layer answered a tenant-scoped 404).
         let foreign = app
             .oneshot(
                 Request::post(format!("/inbox/{inbox_id}/reply"))
@@ -4476,17 +4731,25 @@ mod coverage_wave_routes {
             )
             .await
             .unwrap();
-        assert_eq!(foreign.status(), StatusCode::NOT_FOUND, "tenant-scoped");
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN, "gate-refused");
 
-        for statement in [
-            "DELETE FROM email_queue WHERE tenant_id = $1",
-            "DELETE FROM messages WHERE tenant_id = $1",
-            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
-            "DELETE FROM domains WHERE tenant_id = $1",
-            "DELETE FROM tenants WHERE id = $1",
-        ] {
-            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
-        }
+        // batch: scoped cleanup — delete only this fixture's rows; the shared
+        // system tenants row (and the other tests' rows) must survive.
+        let _ = sqlx::query("DELETE FROM email_queue WHERE message_id = $1")
+            .bind(message_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM messages WHERE metadata->>'inbox_message_id' = $1")
+            .bind(inbox_id.to_string())
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
+            .bind(inbox_id)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM domains WHERE name = 'routes-wave.example'")
+            .execute(&db)
+            .await;
     }
 
     /// The reply route's honest refusals: a platform-suppressed correspondent
@@ -4502,8 +4765,11 @@ mod coverage_wave_routes {
         let Some(app) = canonical_app_with_dispatcher("routes_wave_reply_bad").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-reply-bad");
-        seed_platform_tenant(&db, &tenant).await;
+        // batch: system-tenant restriction — the fixture runs as the system
+        // tenant on the shared database; writes and cleanups are keyed by
+        // ids/emails, never by tenant_id alone.
+        let tenant = config::SYSTEM_TENANT_ID;
+        seed_platform_tenant(&db, tenant).await;
 
         let suppressed_inbox = Uuid::new_v4();
         let invalid_inbox = Uuid::new_v4();
@@ -4513,7 +4779,7 @@ mod coverage_wave_routes {
                  VALUES ($1, $2, $3, 'hi', 'other')",
             )
             .bind(id)
-            .bind(&tenant)
+            .bind(tenant)
             .bind(sender)
             .execute(&db)
             .await
@@ -4521,12 +4787,13 @@ mod coverage_wave_routes {
         }
         // Platform-level hard bounce for the suppressed correspondent. The
         // reply is 1:1 correspondence, so only THIS list blocks it.
+        let suppression_id = apexmail_lib::id::generate_id("sup", 22);
         sqlx::query(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
              VALUES ($1, $2, 'bounced@example.com', 'hard_bounce', 'platform', NOW())",
         )
-        .bind(apexmail_lib::id::generate_id("sup", 22))
-        .bind(&tenant)
+        .bind(&suppression_id)
+        .bind(tenant)
         .execute(&db)
         .await
         .expect("platform-suppress the correspondent");
@@ -4551,7 +4818,7 @@ mod coverage_wave_routes {
         let resp = reply(
             suppressed_inbox,
             serde_json::json!({ "body": "hello?" }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -4567,19 +4834,22 @@ mod coverage_wave_routes {
                 .await
                 .unwrap();
         assert!(!replied, "a refused reply leaves the message unanswered");
-        let messages: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        // batch: scoped count — the messages table is shared under the system
+        // tenant, so assert on THIS inbox message's (non-)reply only.
+        let messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE metadata->>'inbox_message_id' = $1",
+        )
+        .bind(suppressed_inbox.to_string())
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(messages, 0, "no message for a suppressed correspondent");
 
         // (b) A sender that is not a valid email is refused before any quota.
         let resp = reply(
             invalid_inbox,
             serde_json::json!({ "body": "hello?" }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -4596,7 +4866,7 @@ mod coverage_wave_routes {
         let resp = reply(
             Uuid::new_v4(),
             serde_json::json!({ "body": "hello?" }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -4606,7 +4876,7 @@ mod coverage_wave_routes {
         let resp = reply(
             suppressed_inbox,
             serde_json::json!({ "body": oversized }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -4619,13 +4889,18 @@ mod coverage_wave_routes {
             "{body}"
         );
 
-        for statement in [
-            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
-            "DELETE FROM suppressions WHERE tenant_id = $1",
-            "DELETE FROM tenants WHERE id = $1",
-        ] {
-            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        // batch: scoped cleanup — only this fixture's rows; the shared system
+        // tenants row (and the other tests' rows) must survive.
+        for id in [suppressed_inbox, invalid_inbox] {
+            let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
+                .bind(id)
+                .execute(&db)
+                .await;
         }
+        let _ = sqlx::query("DELETE FROM suppressions WHERE id = $1")
+            .bind(&suppression_id)
+            .execute(&db)
+            .await;
     }
 
     // ── Calendar surface ─────────────────────────────────────────────────
@@ -4642,9 +4917,21 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_calendar").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-cal");
+        // batch: system-tenant restriction — the booking runs as the system
+        // tenant on the shared database. The title and the start time are
+        // run-unique because `create_event` refuses OVERLAPPING events for
+        // the tenant regardless of title/status, and the canonical database
+        // is reused across runs.
+        let tenant = config::SYSTEM_TENANT_ID;
         let other = crate::test_db::unique_test_tenant("routes-cal-other");
-        let start = next_weekday_at(chrono::Weekday::Mon, 14, 10, 0);
+        let title = format!(
+            "Discovery call-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let start = next_weekday_at(chrono::Weekday::Mon, 14, 9, 0)
+            + chrono::Duration::minutes(
+                1 + (Uuid::new_v4().as_u128() % 360) as i64, // 09:01–15:01, end ≤ 15:31
+            );
         let end = start + chrono::Duration::minutes(30);
 
         let post_event = |body: serde_json::Value, tenant: String| {
@@ -4665,18 +4952,18 @@ mod coverage_wave_routes {
 
         let created = post_event(
             serde_json::json!({
-                "title": "Discovery call",
+                "title": title,
                 "attendees": ["prospect@example.com"],
                 "start_at": start.to_rfc3339(),
                 "end_at": end.to_rfc3339(),
             }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(created.status(), StatusCode::OK, "valid event books");
         let event = json_body(created).await;
         let event_id = event["id"].as_str().expect("event id").to_string();
-        assert_eq!(event["title"], "Discovery call");
+        assert_eq!(event["title"], title);
         assert!(
             event["meeting_link"].as_str().unwrap_or_default().len() > 0,
             "a conferencing link is generated: {event}"
@@ -4689,7 +4976,7 @@ mod coverage_wave_routes {
                 "start_at": start.to_rfc3339(),
                 "end_at": start.to_rfc3339(),
             }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -4705,7 +4992,7 @@ mod coverage_wave_routes {
                 "start_at": (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339(),
                 "end_at": chrono::Utc::now().to_rfc3339(),
             }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -4718,7 +5005,7 @@ mod coverage_wave_routes {
                 "start_at": late.to_rfc3339(),
                 "end_at": (late + chrono::Duration::minutes(30)).to_rfc3339(),
             }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "outside hours");
@@ -4731,14 +5018,14 @@ mod coverage_wave_routes {
                 "end_at": end.to_rfc3339(),
                 "tenant_id": other,
             }),
-            tenant.clone(),
+            tenant.to_string(),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        // Listing: owner sees one event (the default window is now..+7d, so
-        // query an explicit range covering the fixture), hostile pagination
-        // clamps, the foreign tenant sees nothing.
+        // Listing: owner sees this run's event (the default window is
+        // now..+7d, so query an explicit range covering the fixture), hostile
+        // pagination clamps.
         let window = format!(
             "from={}&to={}",
             (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339_opts(
@@ -4753,7 +5040,7 @@ mod coverage_wave_routes {
             .oneshot(
                 Request::get(format!("/calendar?{window}"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4761,13 +5048,22 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(listed.status(), StatusCode::OK);
         let events = json_body(listed).await;
-        assert_eq!(events.as_array().unwrap().len(), 1, "{events}");
+        // batch: system-tenant restriction — the system tenant is shared, so
+        // scope the listing assertion to THIS run's uniquely titled event
+        // instead of the whole window's array.
+        let own_events = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["title"] == title)
+            .count();
+        assert_eq!(own_events, 1, "{events}");
         let paged = json_body(
             app.clone()
                 .oneshot(
                     Request::get(format!("/calendar?{window}&limit=-3&offset=5"))
                         .header("x-api-key", "test-key")
-                        .header("x-tenant-id", tenant.clone())
+                        .header("x-tenant-id", tenant)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -4776,23 +5072,25 @@ mod coverage_wave_routes {
         )
         .await;
         assert!(paged.as_array().unwrap().is_empty(), "{paged}");
-        let foreign = json_body(
-            app.clone()
-                .oneshot(
-                    Request::get("/calendar")
-                        .header("x-api-key", "test-key")
-                        .header("x-tenant-id", other.clone())
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap(),
-        )
-        .await;
-        assert!(foreign.as_array().unwrap().is_empty(), "{foreign}");
 
-        // Cancellation is tenant-scoped: the owner can cancel, the foreign
-        // tenant and an unknown id are 404s.
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the foreign tenant saw an empty data-layer
+        // list; the isolation property is enforced at the router now).
+        let foreign = app
+            .clone()
+            .oneshot(
+                Request::get("/calendar")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", &other)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+
+        // Cancellation is tenant-scoped: the owner can cancel; the foreign
+        // tenant is gate-refused and an unknown id is a 404.
         let cancel = |id: Uuid, tenant: String| {
             let app = app.clone();
             async move {
@@ -4807,24 +5105,34 @@ mod coverage_wave_routes {
                 .unwrap()
             }
         };
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously a data-layer tenant-scoped 404).
         let foreign_cancel = cancel(event_id.parse().unwrap(), other.clone()).await;
-        assert_eq!(foreign_cancel.status(), StatusCode::NOT_FOUND);
-        let unknown_cancel = cancel(Uuid::new_v4(), tenant.clone()).await;
+        assert_eq!(foreign_cancel.status(), StatusCode::FORBIDDEN);
+        let unknown_cancel = cancel(Uuid::new_v4(), tenant.to_string()).await;
         assert_eq!(unknown_cancel.status(), StatusCode::NOT_FOUND);
-        let own_cancel = cancel(event_id.parse().unwrap(), tenant.clone()).await;
+        let own_cancel = cancel(event_id.parse().unwrap(), tenant.to_string()).await;
         assert_eq!(own_cancel.status(), StatusCode::OK);
         let body = json_body(own_cancel).await;
         assert_eq!(body["cancelled"], true);
         assert_eq!(body["id"], event_id);
 
-        for t in [&tenant, &other] {
-            for statement in [
-                "DELETE FROM sales_calendar_events WHERE tenant_id = $1",
-                "DELETE FROM sales_meetings WHERE tenant_id = $1",
-            ] {
-                let _ = sqlx::query(statement).bind(t).execute(&db).await;
-            }
-        }
+        // batch: scoped cleanup — the system tenant is shared, so delete only
+        // this run's event (by unique title / id), never by tenant_id.
+        let _ = sqlx::query("DELETE FROM sales_calendar_events WHERE id = $1")
+            .bind(event_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_meetings WHERE id = $1")
+            .bind(event_id.parse::<Uuid>().unwrap())
+            .execute(&db)
+            .await;
+        let _ =
+            sqlx::query("DELETE FROM sales_calendar_events WHERE tenant_id = $1 AND title = $2")
+                .bind(tenant)
+                .bind(&title)
+                .execute(&db)
+                .await;
     }
 
     /// Slot discovery: garbage dates and timezones are 400s, legacy UTC mode
@@ -4835,13 +5143,16 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_slots").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-slots");
+        // batch: system-tenant restriction — slot discovery runs as the
+        // system tenant (slot computation reads no cross-test data on the
+        // queried weekday).
+        let tenant = config::SYSTEM_TENANT_ID;
         let monday = next_weekday_at(chrono::Weekday::Mon, 21, 12, 0);
         let sunday = next_weekday_at(chrono::Weekday::Sun, 21, 12, 0);
 
         let get_slots = |query: String| {
             let app = app.clone();
-            let tenant = tenant.clone();
+            let tenant = tenant;
             async move {
                 app.oneshot(
                     Request::get(format!("/calendar/slots?{query}"))
@@ -4936,15 +5247,23 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_disc").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-disc");
+        // batch: system-tenant restriction — the job runs as the system
+        // tenant on the shared database; the seeded account gets a run-unique
+        // domain (enrichment tests create other system-tenant accounts
+        // concurrently) and every count/cleanup below is scoped to it.
+        let tenant = config::SYSTEM_TENANT_ID;
         let other = crate::test_db::unique_test_tenant("routes-disc-other");
+        let account_domain = format!(
+            "disc-{}.example",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
         sqlx::query(
             "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
              VALUES ($1, $2, 'Acme Disc Co', $3)",
         )
         .bind(Uuid::new_v4())
-        .bind(&tenant)
-        .bind(format!("disc-{}.example", &tenant[..12]))
+        .bind(tenant)
+        .bind(&account_domain)
         .execute(&db)
         .await
         .expect("seed account");
@@ -4959,7 +5278,7 @@ mod coverage_wave_routes {
         let create = app
             .clone()
             .oneshot(
-                auth(Request::post("/discovery/jobs"), tenant.clone())
+                auth(Request::post("/discovery/jobs"), tenant.to_string())
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
                             "sources": ["first_party"],
@@ -4977,11 +5296,11 @@ mod coverage_wave_routes {
         assert_eq!(job["status"], "queued", "{job}");
 
         // The tenant-scoped status endpoint shows the queued job; the foreign
-        // tenant gets nothing.
+        // tenant is gate-refused.
         let status = app
             .clone()
             .oneshot(
-                auth(Request::get(format!("/discovery/jobs/{job_id}")), tenant.clone())
+                auth(Request::get(format!("/discovery/jobs/{job_id}")), tenant.to_string())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -4989,6 +5308,8 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(status.status(), StatusCode::OK);
         assert_eq!(json_body(status).await["status"], "queued");
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the data layer answered a tenant-scoped miss).
         let foreign = app
             .clone()
             .oneshot(
@@ -4998,10 +5319,10 @@ mod coverage_wave_routes {
             )
             .await
             .unwrap();
-        assert!(
-            foreign.status().is_client_error(),
-            "a foreign tenant cannot read the job: {}",
-            foreign.status()
+        assert_eq!(
+            foreign.status(),
+            StatusCode::FORBIDDEN,
+            "a foreign tenant cannot read the job"
         );
 
         // One bounded batch completes the first-party job and surfaces the
@@ -5012,7 +5333,7 @@ mod coverage_wave_routes {
         let run = app
             .clone()
             .oneshot(
-                auth(Request::post(format!("/discovery/jobs/{job_id}/run")), tenant.clone())
+                auth(Request::post(format!("/discovery/jobs/{job_id}/run")), tenant.to_string())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -5029,12 +5350,16 @@ mod coverage_wave_routes {
             ran["imported"], 0,
             "a first-party candidate must not be re-imported over the live account: {ran}"
         );
-        let accounts: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sales_accounts WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&db)
-                .await
-                .unwrap();
+        // batch: scoped count — the system tenant is shared, so assert on
+        // THIS run's uniquely-domained account only.
+        let accounts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_accounts WHERE tenant_id = $1 AND domain = $2",
+        )
+        .bind(tenant)
+        .bind(&account_domain)
+        .fetch_one(&db)
+        .await
+        .unwrap();
         assert_eq!(accounts, 1, "discovery must not duplicate the account");
 
         // A terminal job refuses a second run.
@@ -5042,7 +5367,7 @@ mod coverage_wave_routes {
             .oneshot(
                 auth(
                     Request::post(format!("/discovery/jobs/{job_id}/run")),
-                    tenant.clone(),
+                    tenant.to_string(),
                 )
                 .body(Body::empty())
                 .unwrap(),
@@ -5055,14 +5380,21 @@ mod coverage_wave_routes {
             rerun.status()
         );
 
+        // batch: scoped cleanup — only this suite writes discovery rows under
+        // the system tenant; the seeded account is removed by its run-unique
+        // domain (never by tenant_id).
         for statement in [
             "DELETE FROM sales_discovery_candidates WHERE tenant_id = $1",
             "DELETE FROM sales_source_runs WHERE tenant_id = $1",
             "DELETE FROM sales_discovery_jobs WHERE tenant_id = $1",
-            "DELETE FROM sales_accounts WHERE tenant_id = $1",
         ] {
-            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+            let _ = sqlx::query(statement).bind(tenant).execute(&db).await;
         }
+        let _ = sqlx::query("DELETE FROM sales_accounts WHERE tenant_id = $1 AND domain = $2")
+            .bind(tenant)
+            .bind(&account_domain)
+            .execute(&db)
+            .await;
     }
 
     /// An unknown source name is refused with a 400 that NAMES it: the old
@@ -5073,7 +5405,10 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_disc_unknown").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-disc-typo");
+        // batch: system-tenant restriction — the request must reach the
+        // handler (the gate only admits the system tenant) so the 400 below
+        // is the source-name validation, not the gate.
+        let tenant = config::SYSTEM_TENANT_ID;
         let resp = app
             .oneshot(
                 Request::post("/discovery/jobs")
@@ -5114,14 +5449,23 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_companies").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-companies");
+        // batch: system-tenant restriction — the fixture runs as the system
+        // tenant on the shared database, so the row gets a run-unique domain
+        // (enrichment tests create other system-tenant rows concurrently)
+        // and every assertion is scoped to it.
+        let tenant = config::SYSTEM_TENANT_ID;
         let other = crate::test_db::unique_test_tenant("routes-companies-o");
+        let domain = format!(
+            "wildcard-{}.example",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
         sqlx::query(
             "INSERT INTO enriched_companies (id, tenant_id, domain, company_name, industry, confidence_score) \
-             VALUES ($1, $2, 'wildcard.example', 'Wildcard Co', 'saas', 0.9)",
+             VALUES ($1, $2, $3, 'Wildcard Co', 'saas', 0.9)",
         )
         .bind(Uuid::new_v4())
-        .bind(&tenant)
+        .bind(tenant)
+        .bind(&domain)
         .execute(&db)
         .await
         .expect("seed enriched company");
@@ -5140,31 +5484,47 @@ mod coverage_wave_routes {
                 .unwrap()
             }
         };
+        // batch: scoped assertion — filter every listing to THIS run's
+        // uniquely-domained row instead of counting the shared tenant's
+        // whole result set.
+        let ours = |resp: serde_json::Value| {
+            resp.as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["domain"] == domain)
+                .count()
+        };
 
-        let plain = json_body(get(String::new(), tenant.clone()).await).await;
-        assert_eq!(plain.as_array().unwrap().len(), 1, "{plain}");
+        let plain = json_body(get(String::new(), tenant.to_string()).await).await;
+        assert_eq!(ours(plain.clone()), 1, "{plain}");
         assert_eq!(plain[0]["industry"], "saas");
 
         // A bare `%` filter would match every industry unescaped.
-        let percent = json_body(get("industry=%25".to_string(), tenant.clone()).await).await;
-        assert!(
-            percent.as_array().unwrap().is_empty(),
+        let percent = json_body(get("industry=%25".to_string(), tenant.to_string()).await).await;
+        assert_eq!(
+            ours(percent.clone()),
+            0,
             "a % filter must match the literal %, not everything: {percent}"
         );
-        let underscore = json_body(get("industry=_".to_string(), tenant.clone()).await).await;
-        assert!(
-            underscore.as_array().unwrap().is_empty(),
-            "a _ filter must match the literal _, not any character"
+        let underscore = json_body(get("industry=_".to_string(), tenant.to_string()).await).await;
+        assert_eq!(
+            ours(underscore.clone()),
+            0,
+            "a _ filter must match the literal _, not any character: {underscore}"
         );
         // A real substring still matches.
-        let substring = json_body(get("industry=sa".to_string(), tenant.clone()).await).await;
-        assert_eq!(substring.as_array().unwrap().len(), 1, "{substring}");
-        // Tenant isolation holds on every variant.
-        let foreign = json_body(get(String::new(), other).await).await;
-        assert!(foreign.as_array().unwrap().is_empty(), "{foreign}");
+        let substring = json_body(get("industry=sa".to_string(), tenant.to_string()).await).await;
+        assert_eq!(ours(substring.clone()), 1, "{substring}");
 
-        let _ = sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1")
-            .bind(&tenant)
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 (previously the foreign tenant saw an empty data-layer
+        // list).
+        let foreign = get(String::new(), other.clone()).await;
+        assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+
+        let _ = sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1 AND domain = $2")
+            .bind(tenant)
+            .bind(&domain)
             .execute(&db)
             .await;
     }
@@ -5188,12 +5548,19 @@ mod coverage_wave_routes {
         assert_eq!(body["database"], "down", "{body}");
     }
 
-    /// The tenant header contract: a whitespace-only header is a 400, and a
-    /// VALID header with surrounding whitespace is trimmed (not rejected, not
-    /// taken literally).
+    /// The tenant header contract after the system-tenant restriction
+    /// (batch): a whitespace-only header passes the auth gate (the gate only
+    /// filters non-blank claims) and is rejected by the handler's `TenantId`
+    /// extractor with 400; a padded NON-system tenant is trimmed and then
+    /// gate-refused with 403; a padded SYSTEM tenant is trimmed and admitted
+    /// past auth (failing on the dead lazy database — proving the padding
+    /// did not leak into the tenant id).
     #[tokio::test]
     async fn tenant_header_whitespace_is_trimmed_and_blank_is_rejected() {
         let app = lazy_test_app();
+        // batch: system-tenant restriction — the middleware no longer filters
+        // the blank header out; the 400 now comes from the handler layer
+        // (`TenantId` extractor: trim → empty → BAD_REQUEST).
         let blank = app
             .clone()
             .oneshot(
@@ -5207,7 +5574,11 @@ mod coverage_wave_routes {
             .unwrap();
         assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
 
-        let padded = app
+        // batch: system-tenant restriction — "  tenant-a  " trims to
+        // `tenant-a`, which the gate refuses with 403 before any handler runs
+        // (previously it fell through to the dead-database 500).
+        let padded_foreign = app
+            .clone()
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "test-key")
@@ -5217,12 +5588,30 @@ mod coverage_wave_routes {
             )
             .await
             .unwrap();
-        // Trimmed to `tenant-a`, past auth, fails on the dead lazy database —
-        // a 400 would mean the padding leaked into the tenant id.
+        assert_eq!(
+            padded_foreign.status(),
+            StatusCode::FORBIDDEN,
+            "a padded foreign tenant must be trimmed and then gate-refused"
+        );
+
+        // Trimming is what lets the padded SYSTEM tenant through the gate:
+        // taken literally, "  system  " would be a 403 like the foreign
+        // claim above. Past auth it fails on the dead lazy database — a 4xx
+        // would mean the padding leaked into the tenant id.
+        let padded_system = app
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "  system  ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert!(
-            padded.status().is_server_error(),
-            "padded tenant id must be trimmed, got {}",
-            padded.status()
+            padded_system.status().is_server_error(),
+            "padded system tenant must be trimmed and admitted, got {}",
+            padded_system.status()
         );
     }
 
@@ -5240,13 +5629,16 @@ mod coverage_wave_routes {
         let Some(app) = test_app("routes_wave_start").await else {
             return;
         };
-        let tenant = crate::test_db::unique_test_tenant("routes-start");
+        // batch: system-tenant restriction — the start flow runs as the
+        // system tenant; the campaign/recipients cleanup at the end is
+        // already scoped by campaign id, so the shared tenant stays intact.
+        let tenant = config::SYSTEM_TENANT_ID;
         let create = app
             .clone()
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
@@ -5271,7 +5663,7 @@ mod coverage_wave_routes {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/recipients"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({
@@ -5290,7 +5682,7 @@ mod coverage_wave_routes {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/start"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", tenant.clone())
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )

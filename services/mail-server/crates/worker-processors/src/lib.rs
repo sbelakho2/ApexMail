@@ -2,11 +2,16 @@
 //!
 //! This crate provides high-performance Rust implementations of the worker processors
 //! that handle background tasks:analytics aggregation, email sending, reply classification,
-//! and webhook delivery.
+//! webhook delivery, and customer automation execution.
 //!
 //! ## Modules
 //!
 //! - [`analytics`] — Event aggregation and real-time stats (Redis counters + Postgres rollups)
+//! - [`automations`] — Customer automation executor (migration 224): claims due
+//!   trigger events, evaluates rules, executes the action ladder through the
+//!   shared `SendAdmissionService`. Moved here from `sales-autopilot` so the
+//!   owner's sales brain and customer automation execution are separate trust
+//!   domains; this crate has NO dependency on `sales-autopilot`.
 //! - [`email`] — Email sending pipeline (SMTP/SES, DKIM, tracking, warmup)
 //! - [`reply_handler`] — Pattern-based reply classification with Aho-Corasick
 //! - [`webhook`] — Webhook delivery with SSRF protection and circuit breakers
@@ -14,6 +19,7 @@
 
 #![deny(unsafe_code)]
 pub mod analytics;
+pub mod automations;
 pub mod common;
 pub mod email;
 pub mod reply_handler;
@@ -21,6 +27,7 @@ pub mod webhook;
 
 // Re-export main processor types
 pub use analytics::AnalyticsProcessor;
+pub use automations::AutomationExecutor;
 pub use common::{ProcessorConfig, ProcessorError, ProcessorResult};
 pub use email::EmailProcessor;
 pub use reply_handler::{classify, ReplyClassification, ReplyHandler};

@@ -1,12 +1,26 @@
 //! Automation execution engine (`/v1/automations` rules actually run here).
 //!
+//! # Why this module lives in `worker-processors`
+//!
+//! This is CUSTOMER automation: the rules customers configure under
+//! `/v1/automations` are executed here, against customer tenants, using the
+//! shared billing/send-admission machinery. The owner's sales brain
+//! (`crates/sales-autopilot`) is a separate trust domain — externally
+//! owner-only and restricted to the system tenant — so executing customer
+//! automations in that process would couple the two: the Sales service could
+//! not be isolated to the system tenant, and turning the private sales
+//! subsystem off would take customer automations down with it. The executor
+//! therefore moved here, next to the other queue consumers (email, webhook,
+//! reply handler), and the worker binary ticks it. This crate has NO
+//! dependency on `sales-autopilot`; the sales brain keeps no executor.
+//!
 //! # Why this module exists
 //!
 //! `crates/api-server/src/routes/automations.rs` is CRUD only: it persists
-//! `automations.trigger_config`, `.conditions` and `.actions`. Until this
-//! module there was NO executor anywhere in the workspace, so the audit item
-//! "unify SendAdmissionService for REST + SMTP submission + Sales +
-//! automations" documented the automation arm as a contract with no caller.
+//! `automations.trigger_config`, `.conditions` and `.actions`. Until the
+//! executor existed there was NO consumer anywhere in the workspace, so the
+//! audit item "unify SendAdmissionService for REST + SMTP submission + Sales
+//! + automations" documented the automation arm as a contract with no caller.
 //!
 //! This engine is the caller. Its tick:
 //!
@@ -81,8 +95,25 @@ use billing_service::send_admission::{
     AdmissionMeter, SendAdmissionError, SendAdmissionRequest, SendAdmissionService,
 };
 
-use crate::dispatcher::{fetch_template, TemplateContent};
-use crate::types::SalesError;
+// ---------------------------------------------------------------------------
+// Error
+// ---------------------------------------------------------------------------
+
+/// Errors surfaced by the automation executor.
+///
+/// The module previously used sales-autopilot's `SalesError`; the executor is
+/// customer-facing infrastructure now, and its paths can only produce these
+/// two conditions. `InvalidInput` preserves the exact semantics the send path
+/// relies on: an unknown template id maps to the `template_not_found` skip,
+/// never a retry.
+#[derive(Debug, thiserror::Error)]
+pub enum AutomationError {
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    #[error("database error: {0}")]
+    Database(String),
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -832,7 +863,7 @@ impl AutomationExecutor {
         contact_id: Option<Uuid>,
         recipient_email: Option<&str>,
         payload: Value,
-    ) -> Result<bool, SalesError> {
+    ) -> Result<bool, AutomationError> {
         let inserted = sqlx::query(
             "INSERT INTO automation_trigger_events \
              (tenant_id, event_type, event_key, contact_id, recipient_email, payload) \
@@ -847,14 +878,14 @@ impl AutomationExecutor {
         .bind(&payload)
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(inserted.rows_affected() == 1)
     }
 
     /// One scheduler tick: claim a bounded batch of due events, execute the
     /// matching rules of each event's tenant, settle the events, prune a
     /// bounded slice of settled inbox rows.
-    pub async fn tick(&self) -> Result<TickReport, SalesError> {
+    pub async fn tick(&self) -> Result<TickReport, AutomationError> {
         let due = self.claim_due_events().await?;
         let mut report = TickReport {
             events_claimed: due.len() as u64,
@@ -885,7 +916,7 @@ impl AutomationExecutor {
 
     // -- Claiming ----------------------------------------------------------
 
-    async fn claim_due_events(&self) -> Result<Vec<DueEvent>, SalesError> {
+    async fn claim_due_events(&self) -> Result<Vec<DueEvent>, AutomationError> {
         sqlx::query_as::<_, DueEvent>(
             "UPDATE automation_trigger_events AS e \
              SET status = 'processing', \
@@ -909,12 +940,12 @@ impl AutomationExecutor {
         .bind(EVENT_LEASE_SECS)
         .fetch_all(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))
+        .map_err(|error| AutomationError::Database(error.to_string()))
     }
 
     // -- Event processing --------------------------------------------------
 
-    async fn process_event(&self, event: &DueEvent) -> Result<TickReport, SalesError> {
+    async fn process_event(&self, event: &DueEvent) -> Result<TickReport, AutomationError> {
         let mut report = TickReport::default();
 
         let Some(kind) = AutomationEventKind::parse(&event.event_type) else {
@@ -1032,7 +1063,7 @@ impl AutomationExecutor {
         &self,
         event: &DueEvent,
         kind: AutomationEventKind,
-    ) -> Result<Option<EventContext>, SalesError> {
+    ) -> Result<Option<EventContext>, AutomationError> {
         let mut ctx = EventContext {
             from_email: event.recipient_email.clone().or_else(|| {
                 event
@@ -1083,7 +1114,7 @@ impl AutomationExecutor {
         .bind(&event.tenant_id)
         .fetch_optional(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
 
         let Some((id, email, name, status, tags)) = row else {
             return Ok(None);
@@ -1112,7 +1143,7 @@ impl AutomationExecutor {
         &self,
         tenant_id: &str,
         cursor: Option<(DateTime<Utc>, Uuid)>,
-    ) -> Result<Vec<RuleRow>, SalesError> {
+    ) -> Result<Vec<RuleRow>, AutomationError> {
         match cursor {
             Some((created_at, id)) => sqlx::query_as::<_, RuleRow>(
                 "SELECT id, name, trigger_config, conditions, actions, created_at \
@@ -1127,7 +1158,7 @@ impl AutomationExecutor {
             .bind(RULES_PAGE_SIZE)
             .fetch_all(&self.db)
             .await
-            .map_err(|error| SalesError::Database(error.to_string())),
+            .map_err(|error| AutomationError::Database(error.to_string())),
             None => sqlx::query_as::<_, RuleRow>(
                 "SELECT id, name, trigger_config, conditions, actions, created_at \
                  FROM automations \
@@ -1138,7 +1169,7 @@ impl AutomationExecutor {
             .bind(RULES_PAGE_SIZE)
             .fetch_all(&self.db)
             .await
-            .map_err(|error| SalesError::Database(error.to_string())),
+            .map_err(|error| AutomationError::Database(error.to_string())),
         }
     }
 
@@ -1153,7 +1184,7 @@ impl AutomationExecutor {
         event: &DueEvent,
         kind: AutomationEventKind,
         trigger_kind: &str,
-    ) -> Result<Option<RunState>, SalesError> {
+    ) -> Result<Option<RunState>, AutomationError> {
         let inserted: Option<RunState> = sqlx::query_as(
             "INSERT INTO automation_runs \
              (automation_id, automation_name, tenant_id, trigger_kind, trigger_event_type, \
@@ -1171,7 +1202,7 @@ impl AutomationExecutor {
         .bind(event.id)
         .fetch_optional(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
 
         if let Some(state) = inserted {
             return Ok(Some(state));
@@ -1186,7 +1217,7 @@ impl AutomationExecutor {
         .bind(&event.event_key)
         .fetch_optional(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
 
         match existing {
             Some(state)
@@ -1201,7 +1232,7 @@ impl AutomationExecutor {
                 .bind(&event.tenant_id)
                 .execute(&self.db)
                 .await
-                .map_err(|error| SalesError::Database(error.to_string()))?;
+                .map_err(|error| AutomationError::Database(error.to_string()))?;
                 Ok(Some(state))
             }
             _ => Ok(None),
@@ -1216,7 +1247,7 @@ impl AutomationExecutor {
         event: &DueEvent,
         kind: AutomationEventKind,
         ctx: &EventContext,
-    ) -> Result<(TickReport, Option<String>), SalesError> {
+    ) -> Result<(TickReport, Option<String>), AutomationError> {
         let mut report = TickReport::default();
         let trigger_kind = rule
             .trigger_config
@@ -1263,7 +1294,7 @@ impl AutomationExecutor {
         .bind(&event.tenant_id)
         .fetch_all(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?
+        .map_err(|error| AutomationError::Database(error.to_string()))?
         .into_iter()
         .map(|row| (row.action_index, row))
         .collect();
@@ -1380,7 +1411,7 @@ impl AutomationExecutor {
         kind: AutomationEventKind,
         skip_reason: &str,
         detail: &str,
-    ) -> Result<(), SalesError> {
+    ) -> Result<(), AutomationError> {
         let trigger_kind = rule
             .trigger_config
             .as_ref()
@@ -1404,7 +1435,7 @@ impl AutomationExecutor {
         .bind(format!("{skip_reason}: {detail}"))
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(())
     }
 
@@ -1416,7 +1447,7 @@ impl AutomationExecutor {
         event: &DueEvent,
         kind: &str,
         reason: &str,
-    ) -> Result<(), SalesError> {
+    ) -> Result<(), AutomationError> {
         let key = format!("trigger.unsupported:{kind}");
         let inserted = sqlx::query(
             "INSERT INTO automation_runs \
@@ -1434,7 +1465,7 @@ impl AutomationExecutor {
         .bind(format!("unsupported trigger kind: {reason}"))
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         if inserted.rows_affected() > 0 {
             tracing::warn!(
                 tenant_id = %event.tenant_id,
@@ -1455,7 +1486,7 @@ impl AutomationExecutor {
         retryable: bool,
         skip_reason: Option<&str>,
         error: Option<&str>,
-    ) -> Result<(), SalesError> {
+    ) -> Result<(), AutomationError> {
         sqlx::query(
             "UPDATE automation_runs SET status = $2, retryable = $3, skip_reason = $4, \
              error = $5, finished_at = CASE WHEN $3 THEN NULL ELSE NOW() END, updated_at = NOW() \
@@ -1469,7 +1500,7 @@ impl AutomationExecutor {
         .bind(tenant_id)
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(())
     }
 
@@ -1480,7 +1511,7 @@ impl AutomationExecutor {
         index: i32,
         action: &Value,
         record: &ActionRecord,
-    ) -> Result<(), SalesError> {
+    ) -> Result<(), AutomationError> {
         let action_type = action_type(action).unwrap_or("<missing>");
         sqlx::query(
             "INSERT INTO automation_run_actions \
@@ -1510,7 +1541,7 @@ impl AutomationExecutor {
         .bind(&record.detail)
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(())
     }
 
@@ -1630,7 +1661,7 @@ impl AutomationExecutor {
 
         let template = match fetch_template(&self.db, &event.tenant_id, template_id).await {
             Ok(template) => template,
-            Err(SalesError::InvalidInput(_)) => return ActionRecord::skipped("template_not_found"),
+            Err(AutomationError::InvalidInput(_)) => return ActionRecord::skipped("template_not_found"),
             Err(error) => return ActionRecord::failed_retryable(error.to_string()),
         };
         let rendered = render_template(&template, ctx);
@@ -2037,7 +2068,7 @@ impl AutomationExecutor {
 
     // -- Event settlement --------------------------------------------------
 
-    async fn defer_event(&self, event: &DueEvent, reason: &str) -> Result<(), SalesError> {
+    async fn defer_event(&self, event: &DueEvent, reason: &str) -> Result<(), AutomationError> {
         if event.attempts < event.max_attempts {
             sqlx::query(
                 "UPDATE automation_trigger_events SET status = 'pending', \
@@ -2050,7 +2081,7 @@ impl AutomationExecutor {
             .bind(format!("retryable execution failure: {reason}"))
             .execute(&self.db)
             .await
-            .map_err(|error| SalesError::Database(error.to_string()))?;
+            .map_err(|error| AutomationError::Database(error.to_string()))?;
         } else {
             sqlx::query(
                 "UPDATE automation_trigger_events SET status = 'failed', locked_until = NULL, \
@@ -2061,12 +2092,12 @@ impl AutomationExecutor {
             .bind(format!("retry budget exhausted: {reason}"))
             .execute(&self.db)
             .await
-            .map_err(|error| SalesError::Database(error.to_string()))?;
+            .map_err(|error| AutomationError::Database(error.to_string()))?;
         }
         Ok(())
     }
 
-    async fn settle_event(&self, event: &DueEvent, outcome: &TickReport) -> Result<(), SalesError> {
+    async fn settle_event(&self, event: &DueEvent, outcome: &TickReport) -> Result<(), AutomationError> {
         if outcome.events_deferred > 0 {
             // defer_event already rescheduled (or failed) the row.
             return Ok(());
@@ -2085,11 +2116,11 @@ impl AutomationExecutor {
         .bind(status)
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(())
     }
 
-    async fn prune_settled_events(&self) -> Result<u64, SalesError> {
+    async fn prune_settled_events(&self) -> Result<u64, AutomationError> {
         let deleted = sqlx::query(
             "DELETE FROM automation_trigger_events WHERE id IN ( \
                  SELECT id FROM automation_trigger_events \
@@ -2102,7 +2133,7 @@ impl AutomationExecutor {
         .bind(PRUNE_BATCH)
         .execute(&self.db)
         .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| AutomationError::Database(error.to_string()))?;
         Ok(deleted.rows_affected())
     }
 }
@@ -2110,6 +2141,50 @@ impl AutomationExecutor {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Raw template content fetched from the platform `templates` table.
+///
+/// A local copy of sales-autopilot `dispatcher::TemplateContent`: importing
+/// the sales crate here would re-couple the customer executor to the owner's
+/// sales brain, which is exactly the trust-domain split this move removes.
+#[derive(Debug, Clone)]
+pub struct TemplateContent {
+    pub subject: String,
+    pub html_body: Option<String>,
+    pub text_body: Option<String>,
+}
+
+/// Fetch a template by id or slug for a tenant (canonical templates shape:
+/// VARCHAR(26) ids, versioned subject/html_body/text_body). Same SQL, and
+/// therefore the same `template_not_found` behavior, as the sales dispatcher's
+/// `fetch_template`.
+pub async fn fetch_template(
+    db: &PgPool,
+    tenant_id: &str,
+    template_id: &str,
+) -> Result<TemplateContent, AutomationError> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT subject, html_body, text_body FROM templates \
+         WHERE tenant_id = $1 AND (id = $2 OR slug = $2) \
+         ORDER BY version DESC LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(template_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| AutomationError::Database(e.to_string()))?;
+
+    match row {
+        Some((subject, html_body, text_body)) => Ok(TemplateContent {
+            subject,
+            html_body,
+            text_body,
+        }),
+        None => Err(AutomationError::InvalidInput(format!(
+            "campaign template '{template_id}' not found for tenant"
+        ))),
+    }
+}
 
 fn action_type(action: &Value) -> Option<&str> {
     action
@@ -2892,14 +2967,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     async fn fresh_pool(test_name: &str, suffix: &str) -> Option<PgPool> {
-        match migrator::test_support::fresh_canonical_pool(test_name, suffix).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        // The crate-wide provisioning gate: `TEST_DATABASE_URL` unset/blank
+        // soft-skips; a configured-but-broken server panics (audit F01).
+        crate::test_support::canonical_pool(test_name, suffix).await
     }
 
+    /// A unique per-run tenant id, capped at 26 chars (`VARCHAR(26)` tenant
+    /// columns), so per-test fresh databases still exercise distinct tenant
+    /// rows without colliding on slug-unique constraints.
     fn fresh_tenant(label: &str) -> String {
-        crate::test_db::unique_test_tenant(label)
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let prefix: String = label.chars().take(13).collect();
+        format!("{prefix}-{}", &suffix[..12])
     }
 
     #[derive(Debug)]

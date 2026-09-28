@@ -87,6 +87,7 @@ struct WorkerSettings {
     run_email: bool,
     run_reply_handler: bool,
     run_webhook: bool,
+    run_automations: bool,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -116,7 +117,25 @@ fn load_worker_settings() -> WorkerSettings {
         run_email: env_flag("WORKER_RUN_EMAIL"),
         run_reply_handler: env_flag("WORKER_RUN_REPLY_HANDLER"),
         run_webhook: env_flag("WORKER_RUN_WEBHOOK"),
+        run_automations: env_flag("WORKER_RUN_AUTOMATIONS"),
     }
+}
+
+/// Default automation-executor tick period (seconds); `AUTOMATION_TICK_SECS`
+/// overrides. A tick is cheap when there is no due work (one bounded claim
+/// query + one bounded prune).
+const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
+
+/// Tick period for the customer automation executor (`AUTOMATION_TICK_SECS`),
+/// clamped to at least one second; a present-but-invalid value falls back to
+/// the default (the executor is background work — a hostile cadence must not
+/// stop the worker from starting).
+fn automation_tick_secs() -> u64 {
+    env::var("AUTOMATION_TICK_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(AUTOMATION_TICK_SECS_DEFAULT)
+        .max(1)
 }
 
 /// Capabilities advertised on the worker heartbeat: the infrastructure
@@ -134,6 +153,9 @@ fn capability_list(settings: &WorkerSettings) -> Vec<String> {
     }
     if settings.run_webhook {
         capabilities.push("webhook".to_string());
+    }
+    if settings.run_automations {
+        capabilities.push("automations".to_string());
     }
     capabilities
 }
@@ -307,6 +329,12 @@ struct WorkerProcesses {
     email: Option<Arc<EmailProcessor>>,
     reply: Option<Arc<ReplyHandler>>,
     webhook: Option<Arc<WebhookProcessor>>,
+    /// The customer automation executor's tick task. Unlike the processors
+    /// above it is a self-contained loop (no `stop()` handshake): shutdown
+    /// aborts it at its next await point, which is safe because every claim
+    /// it holds is leased and every write exactly-once (migration 224), so an
+    /// aborted tick is recovered by a later one, never double-executed.
+    automations: Option<tokio::task::JoinHandle<()>>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
@@ -362,6 +390,7 @@ async fn run_worker(
     let mut email_processor: Option<Arc<EmailProcessor>> = None;
     let mut reply_processor: Option<Arc<ReplyHandler>> = None;
     let mut webhook_processor: Option<Arc<WebhookProcessor>> = None;
+    let mut automations_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start analytics processor
     if settings.run_analytics {
@@ -455,6 +484,62 @@ async fn run_worker(
         }
     }
 
+    // ── Customer automation executor (moved from sales-autopilot) ─────
+    // The consumer of `automation_trigger_events` (migration 224): each tick
+    // claims a bounded batch of due trigger events with FOR UPDATE SKIP
+    // LOCKED, evaluates the tenant's enabled rules and executes their action
+    // ladder; every send passes `SendAdmissionService` — the ONE admission
+    // gate. This is CUSTOMER automation: it runs in the worker fleet, not in
+    // the owner-only sales-autopilot process, so the two trust domains stay
+    // separable (the sales brain can be disabled without touching customer
+    // automations and vice versa).
+    if settings.run_automations {
+        let admission = Arc::new(
+            billing_service::send_admission::PostgresAdmissionBackend::new(
+                db.clone(),
+                redis.clone(),
+            ),
+        );
+        let executor = Arc::new(worker_processors::automations::AutomationExecutor::new(
+            db.clone(),
+            billing_service::send_admission::SendAdmissionService::new(admission),
+            unique_worker_id(),
+        ));
+        let interval_secs = automation_tick_secs();
+        info!(
+            interval_secs,
+            batch = worker_processors::automations::DEFAULT_BATCH_SIZE,
+            "Automation executor started"
+        );
+        automations_task = Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match executor.tick().await {
+                    Ok(report) if report.events_claimed > 0 => {
+                        info!(
+                            events_claimed = report.events_claimed,
+                            events_processed = report.events_processed,
+                            events_deferred = report.events_deferred,
+                            runs_succeeded = report.runs_succeeded,
+                            runs_skipped = report.runs_skipped,
+                            runs_failed = report.runs_failed,
+                            actions_enqueued = report.actions_enqueued,
+                            "automation executor tick"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        // The next tick retries; claim leases make a crash
+                        // mid-tick a recoverable state.
+                        error!(error = %err, "automation executor tick failed");
+                    }
+                }
+            }
+        }));
+    }
+
     info!("All processors running. Press Ctrl+C to stop.");
 
     Ok(WorkerProcesses {
@@ -463,6 +548,7 @@ async fn run_worker(
         email: email_processor,
         reply: reply_processor,
         webhook: webhook_processor,
+        automations: automations_task,
         heartbeat,
     })
 }
@@ -507,6 +593,12 @@ fn health_port() -> u16 {
 /// Stop every processor, then join their tasks with a bounded wait. A
 /// shutdown that exceeds `timeout` logs and returns (the process exits).
 async fn shutdown_worker(processes: WorkerProcesses, shutdown_timeout: Duration) {
+    // The automation tick has no stop() handshake: abort it (safe — leased
+    // claims and exactly-once identities make an interrupted tick recoverable)
+    // before joining the supervised processors.
+    if let Some(handle) = &processes.automations {
+        handle.abort();
+    }
     if let Some(processor) = &processes.analytics {
         if let Err(e) = processor.stop().await {
             warn!(error = %e, "Failed to stop analytics processor");
@@ -545,6 +637,17 @@ async fn shutdown_worker(processes: WorkerProcesses, shutdown_timeout: Duration)
 
     // Stop beating; the control plane sees the lease go stale on its own.
     processes.heartbeat.abort();
+}
+
+/// A worker identity that is unique per process across replicas.
+///
+/// The PID alone is not a valid replica identity — separate containers
+/// routinely share the same PID number — so the hostname and a random suffix
+/// are included. The automation executor's lease token is what actually
+/// fences writes; this string only makes the owner column diagnosable.
+fn unique_worker_id() -> String {
+    let host = env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into());
+    format!("{}:{}:{}", host, std::process::id(), uuid::Uuid::new_v4())
 }
 
 #[tokio::main]
@@ -728,6 +831,8 @@ mod tests {
                 ("WORKER_RUN_EMAIL", Some("0")),
                 ("WORKER_RUN_REPLY_HANDLER", Some("1")),
                 ("WORKER_RUN_WEBHOOK", Some("true")),
+                ("WORKER_RUN_AUTOMATIONS", Some("false")),
+                ("AUTOMATION_TICK_SECS", Some("7")),
             ],
             || {
                 let s = load_worker_settings();
@@ -741,6 +846,12 @@ mod tests {
                 assert!(!s.run_email, "0 disables");
                 assert!(s.run_reply_handler, "1 enables");
                 assert!(s.run_webhook, "true enables");
+                assert!(!s.run_automations, "false disables the automation tick");
+                assert_eq!(
+                    automation_tick_secs(),
+                    7,
+                    "AUTOMATION_TICK_SECS overrides the default period"
+                );
             },
         );
         with_env(
@@ -748,6 +859,7 @@ mod tests {
                 ("WORKER_CONCURRENCY", Some("32")),
                 ("WORKER_POLL_INTERVAL", Some("2")),
                 ("WORKER_RUN_ANALYTICS", Some("garbage")),
+                ("AUTOMATION_TICK_SECS", Some("0")),
             ],
             || {
                 let s = load_worker_settings();
@@ -755,9 +867,42 @@ mod tests {
                 assert_eq!(s.poll_interval, Duration::from_secs(2));
                 // Any explicit value other than true/1 DISABLES the processor.
                 assert!(!s.run_analytics, "unknown flag value disables");
-                assert!(s.run_email && s.run_reply_handler && s.run_webhook);
+                assert!(
+                    s.run_email && s.run_reply_handler && s.run_webhook && s.run_automations,
+                    "every processor defaults to enabled"
+                );
+                assert_eq!(
+                    automation_tick_secs(),
+                    1,
+                    "a zero/negative tick period is clamped to one second"
+                );
             },
         );
+        // Sequential, NOT nested: with_env holds ENV_LOCK for its body, so a
+        // nested with_env re-locks the same std Mutex on the same thread and
+        // deadlocks deterministically (the hang was visible as a 3600 s
+        // nextest timeout).
+        with_env(&[("AUTOMATION_TICK_SECS", None)], || {
+            assert_eq!(
+                automation_tick_secs(),
+                AUTOMATION_TICK_SECS_DEFAULT,
+                "unset cadence falls back to the default"
+            );
+        });
+        with_env(&[("AUTOMATION_TICK_SECS", Some(" 45 "))], || {
+            assert_eq!(
+                automation_tick_secs(),
+                45,
+                "whitespace around the value is tolerated"
+            );
+        });
+        with_env(&[("AUTOMATION_TICK_SECS", Some("soon"))], || {
+            assert_eq!(
+                automation_tick_secs(),
+                AUTOMATION_TICK_SECS_DEFAULT,
+                "an invalid cadence falls back to the default"
+            );
+        });
     }
 
     #[test]
@@ -769,6 +914,7 @@ mod tests {
             run_email: false,
             run_reply_handler: false,
             run_webhook: false,
+            run_automations: false,
         };
         assert_eq!(capability_list(&base), ["postgres", "redis"]);
         let all = WorkerSettings {
@@ -776,6 +922,7 @@ mod tests {
             run_email: true,
             run_reply_handler: true,
             run_webhook: true,
+            run_automations: true,
             ..base
         };
         assert_eq!(
@@ -786,9 +933,27 @@ mod tests {
                 "analytics",
                 "email",
                 "reply-handler",
-                "webhook"
+                "webhook",
+                "automations"
             ]
         );
+    }
+
+    #[test]
+    fn unique_worker_id_is_host_pid_and_random() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOSTNAME", "worker-host-9");
+        let id = unique_worker_id();
+        assert!(id.starts_with("worker-host-9:"), "{id}");
+        let parts: Vec<&str> = id.split(':').collect();
+        assert_eq!(parts.len(), 3, "host:pid:uuid — {id}");
+        assert!(parts[1].parse::<u32>().is_ok(), "pid component — {id}");
+        assert!(
+            uuid::Uuid::parse_str(parts[2]).is_ok(),
+            "random uuid component — {id}"
+        );
+        assert_ne!(id, unique_worker_id(), "ids are unique per call");
+        std::env::remove_var("HOSTNAME");
     }
 
     #[test]
@@ -1103,6 +1268,7 @@ mod tests {
             run_email: true,
             run_reply_handler: true,
             run_webhook: true,
+            run_automations: true,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
             .await
@@ -1111,6 +1277,10 @@ mod tests {
         assert!(processes.email.is_some(), "email started");
         assert!(processes.reply.is_some(), "reply handler started");
         assert!(processes.webhook.is_some(), "webhook started");
+        assert!(
+            processes.automations.is_some(),
+            "the customer automation executor started"
+        );
         assert_eq!(processes.handles.len(), 4, "one supervised task each");
 
         shutdown_worker(processes, Duration::from_secs(10)).await;
@@ -1146,6 +1316,7 @@ mod tests {
             run_email: false,
             run_reply_handler: true,
             run_webhook: false,
+            run_automations: false,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
             .await
@@ -1154,6 +1325,10 @@ mod tests {
         assert!(processes.email.is_none());
         assert!(processes.reply.is_some());
         assert!(processes.webhook.is_none());
+        assert!(
+            processes.automations.is_none(),
+            "the automation tick honours its disable flag"
+        );
         assert_eq!(processes.handles.len(), 1);
         shutdown_worker(processes, Duration::from_secs(10)).await;
 

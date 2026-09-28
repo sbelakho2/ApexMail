@@ -81,8 +81,7 @@ async fn run_(
     service_token: String,
     shutdown_rx: tokio::sync::watch::Receiver<()>,
 ) -> anyhow::Result<()> {
-    if let Err(reason) =
-        sales_autopilot::config::require_tenant_allowlist_in_production(&cfg, is_production)
+    if let Err(reason) = sales_autopilot::config::require_system_tenant_scope(&cfg, is_production)
     {
         anyhow::bail!("refusing to start: {reason}");
     }
@@ -166,10 +165,6 @@ async fn run_(
     // action worker needs its own handle to the same dispatcher and pool.
     let dispatcher_for_worker = dispatcher.clone();
     let worker_db = db.clone();
-    // The automation executor needs the SAME admission backend (db + redis)
-    // the REST/SMTP/sales send paths use; `redis` is moved into AppState
-    // below, so keep a handle here.
-    let worker_redis = redis.clone();
 
     // The campaign manager is a compatibility planner only: `start_campaign`
     // adapts legacy campaign recipients into canonical contacts/sequence
@@ -311,73 +306,14 @@ async fn run_(
         });
     }
 
-    // ── Customer automation executor ──────────────────────────────────
-    // The missing consumer of `automations.actions` (audit implementation-
-    // order item 3). This host already owns the process's background work
-    // (durable action worker + feedback projector) and is the crate that has
-    // the executor, the pooled database and the shared
-    // `PostgresAdmissionBackend`, so the tick is registered here with the same
-    // shutdown watch as every other background job.
-    //
-    // Each tick claims a bounded batch of due trigger events with
-    // FOR UPDATE SKIP LOCKED (migration 224), evaluates the tenant's enabled
-    // rules and executes their actions; every send passes
-    // `SendAdmissionService` — the ONE admission gate.
-    {
-        let admission = Arc::new(
-            billing_service::send_admission::PostgresAdmissionBackend::new(
-                worker_db.clone(),
-                worker_redis,
-            ),
-        );
-        let executor = Arc::new(sales_autopilot::automations::AutomationExecutor::new(
-            worker_db.clone(),
-            billing_service::send_admission::SendAdmissionService::new(admission),
-            unique_worker_id(),
-        ));
-        let interval_secs = std::env::var("AUTOMATION_TICK_SECS")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(AUTOMATION_TICK_SECS_DEFAULT)
-            .max(1);
-        tracing::info!(
-            interval_secs,
-            batch = sales_autopilot::automations::DEFAULT_BATCH_SIZE,
-            "automation executor started"
-        );
-        let mut automation_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        match executor.tick().await {
-                            Ok(report) if report.events_claimed > 0 => {
-                                tracing::info!(
-                                    events_claimed = report.events_claimed,
-                                    events_processed = report.events_processed,
-                                    events_deferred = report.events_deferred,
-                                    runs_succeeded = report.runs_succeeded,
-                                    runs_skipped = report.runs_skipped,
-                                    runs_failed = report.runs_failed,
-                                    actions_enqueued = report.actions_enqueued,
-                                    "automation executor tick"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                // The next tick retries; claim leases make a
-                                // crash mid-tick a recoverable state.
-                                tracing::error!(error = %error, "automation executor tick failed");
-                            }
-                        }
-                    }
-                    _ = automation_shutdown.changed() => break,
-                }
-            }
-        });
-    }
+    // ── Customer automation executor: REMOVED from this process ───────
+    // Customer automation execution is CUSTOMER-facing work; it lives in the
+    // worker fleet (`worker-processors::automations`, ticked by the worker
+    // binary). This process is the owner's sales brain ONLY: keeping the
+    // executor here would couple the two trust domains — the Sales service
+    // could not be isolated to the system tenant, and disabling the private
+    // sales subsystem would take customer automations down with it. Do not
+    // re-add an automation tick here.
 
     let mut server_shutdown = shutdown_rx.clone();
     let shutdown = async move {
@@ -402,11 +338,6 @@ const ACTION_WORKER_CONCURRENCY: i64 = 8;
 
 /// Maximum feedback-projection batches in flight simultaneously.
 const OUTCOME_PROJECTOR_CONCURRENCY: i64 = 4;
-
-/// Default automation-executor tick period (seconds); `AUTOMATION_TICK_SECS`
-/// overrides. A tick is cheap when there is no due work (one bounded claim
-/// query + one bounded prune).
-const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
 
 /// Create the shutdown broadcast and wire SIGINT/SIGTERM to it. Returns
 /// the receiving side every job (and the axum server) subscribes to.
@@ -595,6 +526,32 @@ mod run_tests {
         );
     }
 
+    /// System-tenant hard restriction: an allowlist naming ANY other tenant
+    /// is a boot failure even outside production — the sales brain has no
+    /// customer surface left to serve, so a broader list could never be
+    /// honoured.
+    #[tokio::test]
+    async fn run_refuses_a_non_system_tenant_allowlist() {
+        let cfg = SalesConfig {
+            allowed_tenants: Some(vec!["tenant-a".into()]),
+            ..test_config(free_port())
+        };
+        let result = run_(
+            cfg,
+            false,
+            "postgres://127.0.0.1:1/none".into(),
+            "tok".into(),
+            tokio::sync::watch::channel(()).1,
+        )
+        .await;
+        let error = result.expect_err("a non-system allowlist must refuse to start");
+        assert!(error.to_string().contains("refusing to start"), "{error}");
+        assert!(
+            error.to_string().contains("exactly the system tenant"),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     async fn run_fails_fast_without_a_reachable_database() {
         let result = run_(
@@ -632,17 +589,17 @@ mod run_tests {
     }
 
     #[tokio::test]
-    async fn run_allows_production_with_an_explicit_tenant_allowlist() {
+    async fn run_allows_production_with_the_system_tenant_allowlist() {
         let Some(db_url) = fresh_db_url("allowed").await else {
             return;
         };
         let cfg = SalesConfig {
-            allowed_tenants: Some(vec!["tenant-a".into(), "tenant-b".into()]),
+            allowed_tenants: Some(vec![sales_autopilot::config::SYSTEM_TENANT_ID.into()]),
             ..test_config(free_port())
         };
         let (tx, rx) = tokio::sync::watch::channel(());
         let task = tokio::spawn(run_(cfg, true, db_url, "tok".into(), rx));
-        // The allowlist check passes immediately; shutdown straight away.
+        // The system-tenant gate passes immediately; shutdown straight away.
         let _ = tx.send(());
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), task)
             .await

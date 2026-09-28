@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// The ONLY tenant sales-autopilot serves. The service is the platform
+/// owner's sales brain; customer automation execution lives in
+/// `worker-processors`, so every tenant-scoped operation in this process must
+/// resolve to the system tenant (the same literal the control plane sends and
+/// the control-read model scopes by). Enforced at boot
+/// ([`require_system_tenant_scope`]) and per request (the router middleware).
+pub const SYSTEM_TENANT_ID: &str = "system";
+
 /// Sales Autopilot configuration.
 /// This service runs as a **separate process** from the customer-facing API
 /// (control-plane port 3010). It stores the platform *owner's* sales leads,
@@ -38,12 +46,15 @@ pub struct SalesConfig {
     #[serde(default)]
     pub lead_scoring: LeadScoringWeights,
 
-    /// Fix I-3: optional tenant allowlist (`SALES_ALLOWED_TENANTS`, comma
-    /// separated). The service authenticates callers with a single shared
-    /// internal token and then trusts the `x-tenant-id` header — the token
-    /// holder can address any tenant by design. Scoping the deployment to an
-    /// explicit tenant list reduces that blast radius. `None` = all tenants
-    /// allowed (a warning is logged in that case).
+    /// System-tenant restriction (`SALES_ALLOWED_TENANTS`, comma separated).
+    /// The service authenticates callers with a single shared internal token
+    /// and then reads the `x-tenant-id` header — so the deployment MUST pin
+    /// the only tenant this owner-only service may act on. Since the customer
+    /// automation executor moved to `worker-processors`, that tenant is
+    /// exactly [`SYSTEM_TENANT_ID`]: any other value is a boot failure, and
+    /// the router middleware refuses requests naming any other tenant.
+    /// `None` = unset (a warning-free only in non-production; production
+    /// refuses to start without the explicit system-tenant pin).
     #[serde(default)]
     pub allowed_tenants: Option<Vec<String>>,
 
@@ -193,20 +204,41 @@ impl Default for SalesConfig {
     }
 }
 
-/// Fail closed: an unset SALES_ALLOWED_TENANTS previously allowed the shared
-/// service token to address EVERY tenant. In production the allowlist is
-/// mandatory; only explicitly-declared non-production modes may opt out.
-pub fn require_tenant_allowlist_in_production(
+/// System-tenant hard restriction: sales-autopilot is the platform OWNER's
+/// sales brain. With the customer automation executor living in
+/// `worker-processors`, there is no customer surface left in this process, so
+/// every tenant-scoped operation must resolve to the system tenant.
+///
+/// * A set `SALES_ALLOWED_TENANTS` must contain EXACTLY the system tenant —
+///   in EVERY environment (a broader list could never be honoured; keeping
+///   one would be a lie about the blast radius). Anything else is a boot
+///   failure.
+/// * Fail closed: in production the variable is REQUIRED. An unset allowlist
+///   previously allowed the shared service token to address EVERY tenant;
+///   only explicitly-declared non-production modes may boot without the pin.
+pub fn require_system_tenant_scope(
     config: &SalesConfig,
     is_production: bool,
 ) -> Result<(), String> {
-    if is_production && config.allowed_tenants.as_ref().is_none_or(|t| t.is_empty()) {
-        return Err(
-            "SALES_ALLOWED_TENANTS must list the tenants this service may address              (comma-separated). The internal token is shared; without an allowlist              any token holder can act on every tenant."
-                .to_string(),
-        );
+    match &config.allowed_tenants {
+        Some(tenants) => {
+            if tenants.len() == 1 && tenants[0] == SYSTEM_TENANT_ID {
+                Ok(())
+            } else {
+                Err(format!(
+                    "SALES_ALLOWED_TENANTS must contain exactly the system tenant \
+                     ('{SYSTEM_TENANT_ID}') — sales-autopilot serves no other tenant. Got: {tenants:?}"
+                ))
+            }
+        }
+        None if is_production => Err(format!(
+            "SALES_ALLOWED_TENANTS must list exactly the system tenant \
+             ('{SYSTEM_TENANT_ID}'). The internal token is shared; without the pin any \
+             token holder could act on every tenant, and this service no longer serves \
+             any tenant but the system tenant."
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 impl SalesConfig {
@@ -782,20 +814,36 @@ mod from_env_tests {
     }
 
     #[test]
-    fn tenant_allowlist_gate_is_exact() {
+    fn system_tenant_scope_gate_is_exact() {
         let mut cfg = SalesConfig::default();
-        // Production without an allowlist (and with an EMPTY list) refuses.
-        assert!(require_tenant_allowlist_in_production(&cfg, true).is_err());
+        // Production without the pin refuses.
+        assert!(require_system_tenant_scope(&cfg, true).is_err());
+        // An EMPTY list is as dangerous as none: refuse in production, and in
+        // non-production too (an explicitly empty allowlist is a mistake —
+        // the service could serve nobody).
         cfg.allowed_tenants = Some(Vec::new());
+        assert!(require_system_tenant_scope(&cfg, true).is_err());
         assert!(
-            require_tenant_allowlist_in_production(&cfg, true).is_err(),
-            "an empty allowlist is as dangerous as none"
+            require_system_tenant_scope(&cfg, false).is_err(),
+            "an explicitly empty allowlist is a configuration error everywhere"
         );
-        cfg.allowed_tenants = Some(vec!["t".into()]);
-        assert!(require_tenant_allowlist_in_production(&cfg, true).is_ok());
-        // Non-production may opt out.
+        // The exact system tenant is accepted in both modes.
+        cfg.allowed_tenants = Some(vec![SYSTEM_TENANT_ID.into()]);
+        assert!(require_system_tenant_scope(&cfg, true).is_ok());
+        assert!(require_system_tenant_scope(&cfg, false).is_ok());
+        // ANY broader or different list is refused — even in non-production:
+        // the service physically cannot serve other tenants, so a broader
+        // allowlist could never be honoured.
+        cfg.allowed_tenants = Some(vec!["tenant-a".into()]);
+        assert!(require_system_tenant_scope(&cfg, false).is_err());
+        cfg.allowed_tenants = Some(vec![SYSTEM_TENANT_ID.into(), "tenant-b".into()]);
+        assert!(
+            require_system_tenant_scope(&cfg, false).is_err(),
+            "system plus anything else is still a broader list"
+        );
+        // Non-production may boot without the pin (tests, local runs).
         cfg.allowed_tenants = None;
-        assert!(require_tenant_allowlist_in_production(&cfg, false).is_ok());
+        assert!(require_system_tenant_scope(&cfg, false).is_ok());
     }
 
     #[test]

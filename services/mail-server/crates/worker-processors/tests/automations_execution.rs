@@ -1,5 +1,9 @@
 //! DB-backed tests for the automation executor (migration 224 +
-//! `sales_autopilot::automations`).
+//! `worker_processors::automations`).
+//!
+//! These tests live in `worker-processors` — which has NO dependency on the
+//! sales-autopilot crate — so a green run here proves customer automation
+//! execution works standalone, without the owner's sales-brain process.
 //!
 //! Every test provisions its own canonical database through the production
 //! migrator ([`migrator::test_support::fresh_canonical_pool`]): a soft skip is
@@ -21,7 +25,7 @@ use uuid::Uuid;
 
 use billing_service::send_admission::{SendAdmissionBackend, SendAdmissionService};
 use billing_service::usage::{QuotaRecordResult, UsageError};
-use sales_autopilot::automations::{
+use worker_processors::automations::{
     AutomationExecutor, AUTOMATION_MARKETING_CATEGORY, AUTOMATION_REPLY_CATEGORY,
 };
 

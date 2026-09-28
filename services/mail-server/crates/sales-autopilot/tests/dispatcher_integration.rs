@@ -1924,9 +1924,37 @@ mod reply_http {
         inbox::InboxManager,
     };
 
-    async fn reply_fixture(test_name: &str) -> Option<(axum::Router, PgPool, String, Uuid)> {
+    /// batch: system-tenant restriction — the router gate admits the system
+    /// tenant ONLY, so the reply fixtures seed under the SHARED system tenant
+    /// and keep their isolation through per-fixture unique correspondents and
+    /// sender domains (never through tenant ids). Cleanup is scoped to this
+    /// fixture's rows ([`cleanup_reply_fixture`]) — never `cleanup_tenant` on
+    /// the shared tenant.
+    struct ReplyFixture {
+        app: axum::Router,
+        db: PgPool,
+        tenant_id: String,
+        inbox_id: Uuid,
+        correspondent: String,
+        domain: String,
+    }
+
+    async fn reply_fixture(test_name: &str) -> Option<ReplyFixture> {
         let db = common::test_pool(test_name).await?;
-        let tenant_id = common::insert_test_tenant(&db, test_name).await;
+        let tenant_id = sales_autopilot::config::SYSTEM_TENANT_ID.to_string();
+        // The platform `tenants` row is the FK target for the platform-side
+        // writes (domains, suppressions, messages); it is shared, so insert
+        // if absent and never delete it.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, 'Sales System Tenant', 'sales-system-tenant', 'free', 'active') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant_id)
+        .execute(&db)
+        .await
+        .unwrap();
+
         let domain = common::unique_test_domain();
         common::insert_verified_domain(&db, &tenant_id, &domain).await;
 
@@ -1965,19 +1993,62 @@ mod reply_http {
             )),
         };
 
-        // One inbound message from a lead.
+        // One inbound message from a per-fixture unique correspondent (the
+        // shared system tenant makes the fixed address a cross-fixture
+        // suppression-collision hazard).
         let inbox_id = Uuid::new_v4();
+        let correspondent = format!(
+            "prospect-{}@example.com",
+            &inbox_id.simple().to_string()[..8]
+        );
         sqlx::query(
             "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category, replied) \
-             VALUES ($1, $2, 'prospect@example.com', 'Pricing question', 'lead', false)",
+             VALUES ($1, $2, $3, 'Pricing question', 'lead', false)",
         )
         .bind(inbox_id)
         .bind(&tenant_id)
+        .bind(&correspondent)
         .execute(&db)
         .await
         .unwrap();
 
-        Some((routes::router(state), db, tenant_id, inbox_id))
+        Some(ReplyFixture {
+            app: routes::router(state),
+            db,
+            tenant_id,
+            inbox_id,
+            correspondent,
+            domain,
+        })
+    }
+
+    /// batch: scoped cleanup — removes ONLY this fixture's rows from the
+    /// shared system tenant (by inbox id, reply idempotency key and the
+    /// per-fixture unique sender domain).
+    async fn cleanup_reply_fixture(db: &PgPool, inbox_id: Uuid, domain: &str) {
+        for (statement, bind) in [
+            (
+                "DELETE FROM email_queue WHERE metadata->>'inbox_message_id' = $1",
+                inbox_id.to_string(),
+            ),
+            (
+                "DELETE FROM messages WHERE idempotency_key = $1",
+                format!("sareply:{inbox_id}"),
+            ),
+            ("DELETE FROM domains WHERE name = $1", domain.to_string()),
+        ] {
+            sqlx::query(statement)
+                .bind(bind)
+                .execute(db)
+                .await
+                .unwrap_or_else(|error| panic!("reply fixture cleanup failed: {error}"));
+        }
+        // `sales_inbox_messages.id` is UUID — bind the typed id, not text.
+        sqlx::query("DELETE FROM sales_inbox_messages WHERE id = $1")
+            .bind(inbox_id)
+            .execute(db)
+            .await
+            .unwrap_or_else(|error| panic!("reply fixture cleanup failed: {error}"));
     }
 
     fn reply_request(inbox_id: Uuid, tenant: &str, body: &str) -> Request<Body> {
@@ -2006,15 +2077,16 @@ mod reply_http {
     /// platform pipeline; the replied flag flips atomically.
     #[tokio::test]
     async fn reply_composes_and_enqueues_through_email_queue() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_happy").await else {
+        let Some(fx) = reply_fixture("reply_happy").await else {
             return;
         };
 
-        let resp = app
+        let resp = fx
+            .app
             .clone()
             .oneshot(reply_request(
-                inbox_id,
-                &tenant_id,
+                fx.inbox_id,
+                &fx.tenant_id,
                 "Thanks for reaching out!\n\n<script>alert('xss')</script> & regards",
             ))
             .await
@@ -2028,13 +2100,13 @@ mod reply_http {
         .unwrap();
         assert_eq!(body["queued"], true);
         assert_eq!(body["replied"], true);
-        assert_eq!(body["to"], "prospect@example.com");
+        assert_eq!(body["to"], fx.correspondent);
         let message_id: Uuid = body["messageId"].as_str().unwrap().parse().unwrap();
 
         // One queue row: to = the correspondent, subject = Re: …
-        let rows = reply_queue_rows(&db, inbox_id).await;
+        let rows = reply_queue_rows(&fx.db, fx.inbox_id).await;
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "prospect@example.com");
+        assert_eq!(rows[0].0, fx.correspondent);
         assert_eq!(rows[0].1, "Re: Pricing question");
         // The hostile body text is HTML-ESCAPED in the composed part.
         assert!(
@@ -2048,8 +2120,8 @@ mod reply_http {
         // Plain-text part keeps the raw body.
         let text: (String,) =
             sqlx::query_as("SELECT text FROM email_queue WHERE metadata->>'inbox_message_id' = $1")
-                .bind(inbox_id.to_string())
-                .fetch_one(&db)
+                .bind(fx.inbox_id.to_string())
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
         assert!(text.0.contains("<script>alert('xss')</script>"));
@@ -2058,41 +2130,43 @@ mod reply_http {
         let (key,): (String,) =
             sqlx::query_as("SELECT idempotency_key FROM messages WHERE id = $1")
                 .bind(message_id)
-                .fetch_one(&db)
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
-        assert_eq!(key, format!("sareply:{inbox_id}"));
+        assert_eq!(key, format!("sareply:{}", fx.inbox_id));
 
         // replied flag stamped.
         let replied: (bool,) =
             sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
-                .bind(inbox_id)
-                .fetch_one(&db)
+                .bind(fx.inbox_id)
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
         assert!(replied.0);
 
-        common::cleanup_tenant(&db, &tenant_id).await;
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 
     /// Double-click / retry: the second POST is an idempotent no-op —
     /// exactly one queue row, one messages row, no double send.
     #[tokio::test]
     async fn reply_double_post_is_idempotent_no_double_send() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_double").await else {
+        let Some(fx) = reply_fixture("reply_double").await else {
             return;
         };
 
-        let first = app
+        let first = fx
+            .app
             .clone()
-            .oneshot(reply_request(inbox_id, &tenant_id, "first reply"))
+            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "first reply"))
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::ACCEPTED);
 
-        let second = app
+        let second = fx
+            .app
             .clone()
-            .oneshot(reply_request(inbox_id, &tenant_id, "accidental second"))
+            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "accidental second"))
             .await
             .unwrap();
         assert_eq!(
@@ -2112,117 +2186,134 @@ mod reply_http {
         );
         assert_eq!(body["queued"], false);
 
-        assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 1);
+        assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 1);
         let messages: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM messages WHERE idempotency_key = $1")
-                .bind(format!("sareply:{inbox_id}"))
-                .fetch_one(&db)
+                .bind(format!("sareply:{}", fx.inbox_id))
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
         assert_eq!(messages.0, 1, "still exactly one messages row");
 
-        common::cleanup_tenant(&db, &tenant_id).await;
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 
     /// A correspondent who hard-bounced (platform suppressions) never gets
     /// the reply — and the message stays visibly unanswered.
     #[tokio::test]
     async fn reply_to_suppressed_correspondent_refused() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_suppressed").await else {
+        let Some(fx) = reply_fixture("reply_suppressed").await else {
             return;
         };
+        let suppression_id = apexmail_lib::id::generate_id("sup", 22);
         sqlx::query(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
-             VALUES ($1, $2, 'prospect@example.com', 'hard_bounce', 'worker', NOW())",
+             VALUES ($1, $2, $3, 'hard_bounce', 'worker', NOW())",
         )
-        .bind(apexmail_lib::id::generate_id("sup", 22))
-        .bind(&tenant_id)
-        .execute(&db)
+        .bind(&suppression_id)
+        .bind(&fx.tenant_id)
+        .bind(&fx.correspondent)
+        .execute(&fx.db)
         .await
         .unwrap();
 
-        let resp = app
+        let resp = fx
+            .app
             .clone()
-            .oneshot(reply_request(inbox_id, &tenant_id, "bouncing reply"))
+            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "bouncing reply"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
+        assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 0);
         let replied: (bool,) =
             sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
-                .bind(inbox_id)
-                .fetch_one(&db)
+                .bind(fx.inbox_id)
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
         assert!(!replied.0, "failed reply must not flip the replied flag");
 
-        common::cleanup_tenant(&db, &tenant_id).await;
-    }
-
-    /// Cross-tenant isolation: another tenant's reply to this message is a
-    /// 404 and enqueues nothing.
-    #[tokio::test]
-    async fn reply_cross_tenant_is_404() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_cross_tenant").await else {
-            return;
-        };
-        // NOTE: sales-autopilot's token model lets the caller address any
-        // tenant (SALES_ALLOWED_TENANTS scopes this in production); the
-        // handler itself must still scope the lookup to the caller tenant.
-        let other_tenant = common::insert_test_tenant(&db, "reply-other").await;
-        let resp = app
-            .clone()
-            .oneshot(reply_request(inbox_id, &other_tenant, "sneaky reply"))
+        // batch: scoped cleanup — this fixture's suppression row only.
+        sqlx::query("DELETE FROM suppressions WHERE id = $1")
+            .bind(&suppression_id)
+            .execute(&fx.db)
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
+    }
 
-        common::cleanup_tenant(&db, &other_tenant).await;
-        common::cleanup_tenant(&db, &tenant_id).await;
+    /// Cross-tenant isolation: another tenant's reply to this message is
+    /// refused and enqueues nothing.
+    #[tokio::test]
+    async fn reply_cross_tenant_is_404() {
+        let Some(fx) = reply_fixture("reply_cross_tenant").await else {
+            return;
+        };
+        // batch: system-tenant restriction — the gate refuses foreign tenants
+        // with 403 BEFORE the handler's tenant-scoped lookup (which answered
+        // a data-layer 404 before the system-tenant restriction existed).
+        let other_tenant = common::insert_test_tenant(&fx.db, "reply-other").await;
+        let resp = fx
+            .app
+            .clone()
+            .oneshot(reply_request(fx.inbox_id, &other_tenant, "sneaky reply"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 0);
+
+        common::cleanup_tenant(&fx.db, &other_tenant).await;
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 
     /// Unknown message id → 404, nothing enqueued.
     #[tokio::test]
     async fn reply_to_missing_message_is_404() {
-        let Some((app, db, tenant_id, _)) = reply_fixture("reply_missing").await else {
+        let Some(fx) = reply_fixture("reply_missing").await else {
             return;
         };
-        let resp = app
+        let resp = fx
+            .app
             .clone()
-            .oneshot(reply_request(Uuid::new_v4(), &tenant_id, "hello?"))
+            .oneshot(reply_request(Uuid::new_v4(), &fx.tenant_id, "hello?"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // batch: scoped count — the shared system tenant carries concurrent
+        // fixtures' replies, so assert on THIS fixture's message only.
         let queue: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM email_queue              WHERE metadata->>'kind' = 'inbox-reply' AND tenant_id = $1",
+            "SELECT COUNT(*) FROM email_queue \
+             WHERE metadata->>'inbox_message_id' = $1",
         )
-        .bind(&tenant_id)
-        .fetch_one(&db)
+        .bind(fx.inbox_id.to_string())
+        .fetch_one(&fx.db)
         .await
         .unwrap();
         assert_eq!(queue.0, 0);
 
-        common::cleanup_tenant(&db, &tenant_id).await;
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 
     /// Unverified sender domain: the pipeline gate refuses the reply
     /// (mirrors the REST send path's domain gate).
     #[tokio::test]
     async fn reply_refused_when_sender_domain_not_ready() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_no_domain").await else {
+        let Some(fx) = reply_fixture("reply_no_domain").await else {
             return;
         };
-        sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
-            .bind(&tenant_id)
-            .execute(&db)
+        // batch: scoped removal — delete ONLY this fixture's domain; the
+        // shared system tenant carries every concurrent fixture's domain.
+        sqlx::query("DELETE FROM domains WHERE name = $1")
+            .bind(&fx.domain)
+            .execute(&fx.db)
             .await
             .unwrap();
 
-        let resp = app
+        let resp = fx
+            .app
             .clone()
-            .oneshot(reply_request(inbox_id, &tenant_id, "cannot send this"))
+            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "cannot send this"))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -2236,41 +2327,42 @@ mod reply_http {
             body["error"].as_str().unwrap().contains("sender domain"),
             "error names the sender-domain problem: {body}"
         );
-        assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
+        assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 0);
         let replied: (bool,) =
             sqlx::query_as("SELECT replied FROM sales_inbox_messages WHERE id = $1")
-                .bind(inbox_id)
-                .fetch_one(&db)
+                .bind(fx.inbox_id)
+                .fetch_one(&fx.db)
                 .await
                 .unwrap();
         assert!(!replied.0);
 
-        common::cleanup_tenant(&db, &tenant_id).await;
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 
     /// A campaign opt-out (sales_unsubscribes only) deliberately does NOT
     /// block a 1:1 reply — documented decision in enqueue_reply.
     #[tokio::test]
     async fn campaign_optout_does_not_block_personal_reply() {
-        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_campaign_optout").await
-        else {
+        let Some(fx) = reply_fixture("reply_campaign_optout").await else {
             return;
         };
         // The correspondent opted out of CAMPAIGNS (crate-local list only,
         // NOT the platform suppressions table).
         sqlx::query(
-            "INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, 'prospect@example.com')",
+            "INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)",
         )
-        .bind(&tenant_id)
-        .execute(&db)
+        .bind(&fx.tenant_id)
+        .bind(&fx.correspondent)
+        .execute(&fx.db)
         .await
         .unwrap();
 
-        let resp = app
+        let resp = fx
+            .app
             .clone()
             .oneshot(reply_request(
-                inbox_id,
-                &tenant_id,
+                fx.inbox_id,
+                &fx.tenant_id,
                 "still answering your question",
             ))
             .await
@@ -2280,8 +2372,15 @@ mod reply_http {
             StatusCode::ACCEPTED,
             "campaign opt-out must not block a 1:1 reply"
         );
-        assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 1);
+        assert_eq!(reply_queue_rows(&fx.db, fx.inbox_id).await.len(), 1);
 
-        common::cleanup_tenant(&db, &tenant_id).await;
+        // batch: scoped cleanup — this fixture's opt-out row only.
+        sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
+            .bind(&fx.tenant_id)
+            .bind(&fx.correspondent)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+        cleanup_reply_fixture(&fx.db, fx.inbox_id, &fx.domain).await;
     }
 }
