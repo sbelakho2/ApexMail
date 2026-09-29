@@ -31,6 +31,27 @@ fn ui_icon(name: &str, class_name: &str) -> String {
 pub(crate) const WEB_ROOT_HTML_CLASSES: &str = "__variable_712c26 __variable_60443c";
 pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px] leading-[1.55]";
 
+/// Deferred-feature 8: the console favicon. A single inline SVG (the ApexMail
+/// wordmark's "A" chevron on the brand color) served BOTH as a data: URL in
+/// every root layout's `<link rel="icon">` and as the `/favicon.ico` route's
+/// body — no new dependency, no extra asset pipeline, and browser tab chrome
+/// stops 404-ing on every console page.
+pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#4f46e5\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
+
+/// The favicon as an HTML `href` value: percent-encoded `data:image/svg+xml`
+/// (no base64 — keeps the encoded form byte-stable across renders).
+pub fn favicon_data_url() -> String {
+    let mut out = String::from("data:image/svg+xml,");
+    for byte in FAVICON_SVG.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'(' | b')'
+            | b'*' | b'!' | b'\'' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Pixel-identical reproduction of the web root layout contract, now with a
 /// per-page document title ("{Page} — ApexMail"; batch-2 titles fix).
 ///
@@ -49,6 +70,7 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
 <html lang=\"en\" class=\"{html_classes}\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
+{favicon_link}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
     <body class=\"{body_classes} min-h-screen bg-background\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}\
@@ -57,7 +79,16 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
         html_classes = WEB_ROOT_HTML_CLASSES,
         body_classes = WEB_ROOT_BODY_CLASSES,
         title = html_escape(title),
+        favicon_link = favicon_link_html(),
         child_html = child_html,
+    )
+}
+
+/// The `<link rel="icon">` every root layout emits (deferred-feature 8).
+fn favicon_link_html() -> String {
+    format!(
+        "<link rel=\"icon\" type=\"image/svg+xml\" href=\"{}\">",
+        favicon_data_url()
     )
 }
 
@@ -81,11 +112,13 @@ pub fn control_plane_root_layout_with_title(child_html: &str, title: &str) -> St
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
+{favicon_link}\
 <link rel=\"stylesheet\" href=\"/assets/globals.css\">\
 </head>\
 <body class=\"antialiased bg-background text-surface-950\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}</body>\
 </html>",
         title = html_escape(title),
+        favicon_link = favicon_link_html(),
         child_html = child_html,
     )
 }
@@ -576,7 +609,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
         "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
         <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
         {recipients}\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data. A stored scheduled time never fires on its own: scheduled campaigns wait for a manual Start.</p></div>\
         </section>",
         actions = actions,
         recipients = recipients_form.map(|form| format!(
@@ -704,6 +737,19 @@ fn cp_row_actions(
                 buttons.push(action_button(
                     "Resume",
                     &format!("/web/admin/tenants/{}/resume", row.id),
+                    false,
+                ));
+            }
+            // Deferred-feature 6: the START surface for impersonation. The
+            // POST mints the token server-side through the same machinery the
+            // JSON route verifies (single-use jti, audit rows, fail-closed
+            // Redis); the handler enforces the owner role, so a rendered
+            // button a non-owner can still click only ever buys them the
+            // honest refusal flash.
+            if status == "active" {
+                buttons.push(action_button(
+                    "Impersonate",
+                    &format!("/web/admin/tenants/{}/impersonate", row.id),
                     false,
                 ));
             }
@@ -958,6 +1004,17 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             return_to = urlencode_path(&data.base_path),
                         ));
                         }
+                        // Deferred-feature 3: an edit-only affordance for
+                        // rows with an editor but no detail page (contacts) —
+                        // rendered independently of `detail_path_prefix` so
+                        // no dead "View" link ships alongside it.
+                        if let Some(prefix) = &data.edit_path_prefix {
+                            actions.push(format!(
+                            "<a href=\"{prefix}{id}/edit\" class=\"inline-flex items-center justify-center rounded-sm border border-input bg-background px-3 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Edit</a>",
+                            prefix = html_escape(prefix),
+                            id = html_escape(&row.id),
+                        ));
+                        }
                         if let Some((_, action_html)) = row_action {
                             actions.push(action_html.clone());
                         }
@@ -1091,7 +1148,7 @@ fn render_campaign_editor_page(
     let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label);
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
+        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft. Scheduling stores the time only — nothing sends automatically, and the campaign still waits for you to press Start.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         draft_badge = draft_badge,
@@ -2912,8 +2969,23 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
-            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
+            // Deferred-feature 2: the dead-end is gone — the page offers a
+            // resend affordance. The endpoint answers with the SAME neutral
+            // response whether or not the address belongs to an unverified
+            // account (anti-enumeration), and the dual IP+email limiter
+            // bounds how often a link can be re-queued.
+            format!(
+                "<div class=\"space-y-4\">\
+<form class=\"space-y-3\" action=\"/web/auth/resend-verification\" method=\"POST\">\
+<label class=\"apex-klabel\" for=\"resend-email\">Email address</label>\
+<input id=\"resend-email\" name=\"email\" type=\"email\" required value=\"{email_value}\" autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-medium focus-visible:outline-none transition-all\" />\
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99]\"><span>Send a fresh verification link</span></button>\
+<p class=\"text-xs text-surface-500 leading-relaxed\">If this address needs verification, a new link arrives shortly. Limited to a few emails per quarter hour.</p>\
+</form>\
+<div class=\"grid grid-cols-2 gap-3\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create a new account</span></a></div></div>",
+                email_value = html_escape(email_value),
+            ),
+            "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Still stuck? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
             "Verify your email",
@@ -3164,7 +3236,7 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft. A scheduled time is stored with the campaign but nothing sends automatically — the campaign waits for you to press Start.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
@@ -3289,6 +3361,58 @@ pub fn web_contacts_page() -> String {
         ),
         table = table.render_html(),
         pagination = pagination,
+    )
+}
+
+/// Contact edit page with server-loaded values (deferred-feature 3): the
+/// form carries the contact's hidden id and the read-only address, so
+/// `POST /web/contacts/update` updates the row in place instead of creating
+/// a duplicate. Mirrors the campaign/list editors.
+pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEditData) -> String {
+    let breadcrumbs = render_page_breadcrumbs("Contacts");
+    let status_options = [
+        ("subscribed", "Subscribed", contact.status == "subscribed"),
+        (
+            "unsubscribed",
+            "Unsubscribed",
+            contact.status == "unsubscribed",
+        ),
+        ("bounced", "Bounced", contact.status == "bounced"),
+    ];
+    let options = status_options
+        .iter()
+        .map(|(value, label, selected)| {
+            if *selected {
+                format!(
+                    "<option value=\"{}\" selected>{}</option>",
+                    html_escape(value),
+                    html_escape(label)
+                )
+            } else {
+                format!(
+                    "<option value=\"{}\">{}</option>",
+                    html_escape(value),
+                    html_escape(label)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<div class=\"w-full max-w-3xl space-y-6\">{breadcrumbs}\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Contact</h1><p class=\"text-sm text-muted-foreground\">Saving updates this contact in place.</p></div><a href=\"/contacts\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to contacts</a></div>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/contacts/update\">\
+<input type=\"hidden\" name=\"id\" value=\"{id}\" />\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full rounded-sm border border-input bg-muted/40 px-3 text-[14px] text-surface-500\" /><p class=\"text-xs text-muted-foreground\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{options}</select></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Contact</button></div>\
+</form></div>",
+        breadcrumbs = breadcrumbs,
+        id = html_escape(&contact.id),
+        email = html_escape(&contact.email),
+        name = html_escape(&contact.name),
+        options = options,
     )
 }
 
@@ -3991,8 +4115,43 @@ pub fn web_settings_page() -> String {
 <a href=\"/settings/billing\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Billing</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage your subscription and payments</p></a>\
 <a href=\"/settings/dedicated-ips\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Dedicated IPs</h3><p class=\"text-sm text-muted-foreground mt-1\">Manage dedicated sending IPs</p></a>\
 <a href=\"/settings/webhooks\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Webhooks</h3><p class=\"text-sm text-muted-foreground mt-1\">Configure event webhooks</p></a>\
+<a href=\"/settings/suppressions\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Suppressions</h3><p class=\"text-sm text-muted-foreground mt-1\">Addresses withheld from sending</p></a>\
 <a href=\"/settings/profile\" class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium hover:border-primary transition-colors\"><h3 class=\"font-bold\">Profile</h3><p class=\"text-sm text-muted-foreground mt-1\">Your account settings</p></a>\
 </nav></section></div>".to_string()
+}
+
+/// Suppressions settings page (deferred-feature 4) — the static fallback the
+/// render pipeline shows without server data. The data-backed page renders
+/// through the same generic list machinery as every other settings list;
+/// this fallback is the honest empty state, never demo rows. The list is
+/// READ-ONLY: compliance flows (bounces, complaints, unsubscribes) own the
+/// writes.
+pub fn web_settings_suppressions_page() -> String {
+    let table = Table {
+        caption: Some("Suppressions"),
+        columns: vec![
+            TableColumn {
+                label: "Email",
+                align: "left",
+            },
+            TableColumn {
+                label: "Reason",
+                align: "left",
+            },
+            TableColumn {
+                label: "Added",
+                align: "left",
+            },
+        ],
+        rows: vec![],
+    };
+    format!(
+        "<div class=\"space-y-6\">\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Suppressions</h1><p class=\"text-sm text-muted-foreground\">Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.</p></div></div>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><p class=\"text-sm font-bold text-foreground\">Read-only by design</p><p class=\"mt-1 text-xs text-muted-foreground\">Compliance flows own suppression writes; this page reports what is withheld and why. Suppressed addresses are excluded from every send.</p></section>\
+{table}</div>",
+        table = table.render_html(),
+    )
 }
 
 /// API keys settings page.
@@ -5542,6 +5701,25 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
     } else {
         "/dashboard"
     };
+    // Deferred-feature 1: the recovery-code path rides the same
+    // /web/auth/mfa/verify endpoint (single-use consumption, shared lockout)
+    // through a no-JS <details> disclosure below the authenticator form.
+    let recovery_form = format!(
+        "<details class=\"mt-4 rounded-[8px_8px_7px_7px] border border-surface-200 bg-surface-50 px-4 py-3\">\
+<summary class=\"cursor-pointer text-sm font-bold text-primary\">Use a recovery code instead</summary>\
+<form class=\"mt-3 space-y-3\" action=\"/web/auth/mfa/verify\" method=\"POST\">\
+{csrf}\
+<input type=\"hidden\" name=\"email\" value=\"{email}\" />\
+<input type=\"hidden\" name=\"return_to\" value=\"{return_to}\" />\
+<label class=\"apex-klabel\" for=\"recoveryCode\">Recovery code</label>\
+<input id=\"recoveryCode\" name=\"recovery_code\" type=\"text\" required autocomplete=\"off\" placeholder=\"xxxx-xxxx\" aria-describedby=\"recovery-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono tracking-wide focus-visible:outline-none transition-all\" />\
+<p id=\"recovery-code-hint\" class=\"text-xs text-surface-500\">Each code from your enrollment sheet works once and then stops working.</p>\
+<button type=\"submit\" class=\"w-full border border-surface-300 bg-card text-surface-950 text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Verify recovery code</span></button>\
+</form></details>",
+        csrf = csrf,
+        email = html_escape(email),
+        return_to = html_escape(safe_return_to),
+    );
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/web/auth/mfa/verify\" method=\"POST\">\
 {csrf}\
@@ -5554,22 +5732,24 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"mfaCode\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
 <input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none transition-all\" />\
-<p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
+<p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below.</p>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
+{recovery_form}\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>\
 </form>",
         csrf = csrf,
         email = html_escape(email),
         return_to = html_escape(safe_return_to),
         arrow = web_auth_arrow_icon(),
+        recovery_form = recovery_form,
     );
 
     web_auth_shell(
         "Two-factor verification",
         "Enter the code from your authenticator app",
         &form_html,
-        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Lost your device? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a> for account recovery.</p></div>",
+        "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Lost your device and your codes? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a> for account recovery.</p></div>",
     )
 }
 
@@ -7702,5 +7882,143 @@ mod tests {
             out.contains("kept"),
             "unterminated tag swallowed text: {out}"
         );
+    }
+}
+
+#[cfg(test)]
+mod deferred_feature_view_tests {
+    use super::*;
+
+    // ── Feature 1: MFA challenge recovery-code path ────────────────
+
+    #[test]
+    fn mfa_challenge_offers_the_recovery_code_path() {
+        let page = web_login_mfa_challenge_page("tok-123", "ops@example.test", "/dashboard");
+        // The disclosure names the affordance and posts the recovery field to
+        // the SAME hardened endpoint (single-use + shared lockout).
+        assert!(page.contains("Use a recovery code instead"));
+        assert!(page.contains("name=\"recovery_code\""));
+        assert_eq!(page.matches("action=\"/web/auth/mfa/verify\"").count(), 2);
+        // Both forms carry the hidden email + CSRF.
+        assert_eq!(page.matches("name=\"email\" value=\"ops@example.test\"").count(), 2);
+        assert_eq!(page.matches("name=\"_csrf\"").count(), 2);
+        // The single-use contract is stated, not implied.
+        assert!(page.contains("works once and then stops working"));
+    }
+
+    // ── Feature 2: verify-email resend affordance ──────────────────
+
+    #[test]
+    fn verify_email_error_page_offers_resend() {
+        let page = web_verify_email_page_with_state(None, None, Some("error"), None);
+        assert!(page.contains("action=\"/web/auth/resend-verification\""));
+        assert!(page.contains("Send a fresh verification link"));
+        // The address the flow knows is prefilled; anti-enumeration copy is
+        // on the page ("if this address needs verification").
+        let with_email = web_verify_email_page_with_state(
+            None,
+            Some("owner@example.test"),
+            Some("error"),
+            None,
+        );
+        assert!(with_email.contains("value=\"owner@example.test\""));
+        assert!(with_email.contains("needs verification"));
+    }
+
+    #[test]
+    fn verify_email_success_page_has_no_resend_form() {
+        let page = web_verify_email_page_with_state(None, None, Some("success"), None);
+        assert!(!page.contains("resend-verification"));
+    }
+
+    // ── Feature 3: contact editor + list affordances ───────────────
+
+    #[test]
+    fn contact_edit_page_carries_the_hidden_id_and_readonly_email() {
+        let page = web_contact_edit_page_with_values(&crate::view_data::ContactEditData {
+            id: "c-123".into(),
+            email: "alice@example.com".into(),
+            name: "Alice".into(),
+            status: "subscribed".into(),
+        });
+        assert!(page.contains("action=\"/web/contacts/update\""));
+        assert!(page.contains("name=\"id\" value=\"c-123\""));
+        // The address is identity, not an editable field.
+        assert!(page.contains("value=\"alice@example.com\" readonly disabled"));
+        assert!(page.contains("name=\"name\""));
+        assert!(page.contains("name=\"status\""));
+        assert!(page.contains("selected>Subscribed</option>"));
+    }
+
+    #[test]
+    fn data_list_page_renders_edit_only_rows_from_edit_path_prefix() {
+        let mut data = crate::view_data::ListPageData {
+            title: "Contacts".into(),
+            base_path: "/contacts".into(),
+            edit_path_prefix: Some("/contacts/".into()),
+            delete_intent: Some("delete-contact".into()),
+            ..Default::default()
+        };
+        data.table = Some(crate::view_data::TableData {
+            columns: vec!["Email".into()],
+            rows: vec![crate::view_data::DataRowData {
+                id: "row-1".into(),
+                cells: vec![crate::view_data::DataCell::text("a@b.c")],
+            }],
+        });
+        let html = data_list_page(&data, "contact");
+        // Edit link with the suffix, independent of any detail prefix.
+        assert!(html.contains("href=\"/contacts/row-1/edit\""));
+        // The delete affordance rides the signed confirm page.
+        assert!(html.contains("name=\"intent\" value=\"delete-contact\""));
+        // No fabricated detail link: contacts have no detail page.
+        assert!(!html.contains("href=\"/contacts/row-1\" class"));
+    }
+
+    // ── Feature 4: suppressions page ───────────────────────────────
+
+    #[test]
+    fn suppressions_fallback_is_an_honest_read_only_empty_state() {
+        let page = web_settings_suppressions_page();
+        assert!(page.contains("<h1"));
+        assert!(page.contains("Suppressions"));
+        assert!(page.contains("Read-only by design"));
+        assert!(page.contains("Compliance flows own suppression writes"));
+        // The empty table renders — never demo rows.
+        assert!(page.contains("apex-table"));
+        assert!(!page.contains("example.com"));
+    }
+
+    #[test]
+    fn settings_hub_links_the_suppressions_page() {
+        let hub = web_settings_page();
+        assert!(hub.contains("href=\"/settings/suppressions\""));
+    }
+
+    // ── Feature 7: scheduled-campaign manual-start truth ───────────
+
+    #[test]
+    fn campaign_editors_state_the_manual_start_truth() {
+        let with_values = web_campaign_edit_page_with_values(
+            &crate::view_data::CampaignEditData::default(),
+        );
+        assert!(with_values.contains("the campaign waits for you to press Start"));
+        let new_page = web_campaigns_new_page();
+        assert!(new_page.contains("still waits for you to press Start"));
+    }
+
+    // ── Feature 8: favicon ─────────────────────────────────────────
+
+    #[test]
+    fn both_root_layouts_embed_the_favicon_data_url() {
+        let data_url = favicon_data_url();
+        assert!(data_url.starts_with("data:image/svg+xml,"));
+        let expected = format!(
+            "<link rel=\"icon\" type=\"image/svg+xml\" href=\"{data_url}\">"
+        );
+        assert!(web_root_layout("<p>x</p>", "T").contains(&expected));
+        assert!(control_plane_root_layout_with_title("<p>x</p>", "T").contains(&expected));
+        // Percent-encoding is stable (deterministic goldens).
+        assert_eq!(favicon_data_url(), data_url);
     }
 }

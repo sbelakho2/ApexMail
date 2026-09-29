@@ -174,11 +174,13 @@ mod tests {
         // Batch-2 list-detail fix: /lists/{id} and /lists/{id}/edit serve
         // real pages (data-backed when a session renders them), so the
         // baseline manifest now carries their canonical patterns.
-        assert_eq!(declared_route_count("web"), Some(35));
+        // Deferred-feature 4: /settings/suppressions joins the web manifest
+        // (data-backed list page, nav entry under Settings) — web 35 → 36.
+        assert_eq!(declared_route_count("web"), Some(36));
         assert_eq!(declared_route_count("control-plane"), Some(30));
         assert_eq!(declared_route_count("marketing"), Some(18));
         assert_eq!(declared_route_count("marketing-zola"), Some(36));
-        assert_eq!(total_route_count(), 119);
+        assert_eq!(total_route_count(), 120);
     }
 
     #[test]

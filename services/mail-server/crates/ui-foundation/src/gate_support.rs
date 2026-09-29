@@ -201,6 +201,9 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/auth/signup",
     "/web/auth/forgot-password",
     "/web/auth/reset-password",
+    // Deferred-feature 2: the verify-email expired/invalid page's resend
+    // affordance (anti-enumeration, dual IP+email rate limit).
+    "/web/auth/resend-verification",
     "/web/auth/logout",
     // Control-plane operator login.
     "/web/cp/login",
@@ -218,6 +221,9 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     "/web/billing/checkout",
     "/web/billing/portal",
     "/web/contacts",
+    // Deferred-feature 3: the contact editor's PRG twin (single-contact
+    // name/status edit).
+    "/web/contacts/update",
     "/web/contacts/delete-bulk",
     "/web/contacts/import",
     "/web/lists",
@@ -245,6 +251,9 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     // `discovery/run` + `outreach/launch` handlers remain.
     "/web/admin/tenants",
     "/web/admin/operators",
+    // Deferred-feature 6: START impersonation from the tenants list — the
+    // owner-only, system-gated twin of the JSON start-impersonation route.
+    "/web/admin/tenants/:id/impersonate",
     "/web/admin/sales/discovery/run",
     "/web/admin/sales/outreach/launch",
     // Reachable only by a direct CSRF-protected POST (no page renders a form

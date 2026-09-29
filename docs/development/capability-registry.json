@@ -203,14 +203,13 @@
     {
       "capability": "enterprise-sso-saml-oidc",
       "crate": "crates/enterprise",
-      "stage": "implemented",
-      "readme_status_exemption": "the crate as a whole IS wired (SCIM, SSO config storage); the honest not-available signal lives in the login handlers themselves \u2014 SAML/OIDC login returns 501 by design \u2014 so a crate-level NOT-WIRED banner would be wrong",
+      "stage": "advertised",
       "evidence": {
         "docker_target": "enterprise",
         "compose_service": "enterprise",
-        "call_path": "services/mail-server/crates/enterprise/src/routes.rs:1624-1645 \u2014 SAML/OIDC login handlers return 501 NOT_IMPLEMENTED by design (no ACS/callback route is wired, so login cannot complete)",
+        "call_path": "services/mail-server/crates/enterprise/src/routes.rs \u2014 GET /sso/login/saml/:domain, POST /sso/acs/:domain (plus the domain-less /sso/acs ACS), GET /sso/login/oidc/:domain, GET /sso/callback/oidc/:domain (plus the domain-less /sso/callback/oidc) wired to src/sso.rs: initiate_saml_login, parse_and_validate_saml_response (signature/issuer/audience/validity-window/replay), handle_saml_callback, initiate_oidc_login (state + PKCE), complete_oidc_callback (discovery, code+PKCE exchange, JWKS id_token validation), handle_oidc_callback, validate_session, cleanup_expired_sessions",
         "metrics": null,
-        "explanation": "SSO configuration storage and SCIM exist, but SAML/OIDC LOGIN deliberately fails fast with 501 (enterprise/src/routes.rs 'Fix G (dead ACS)'). Single sign-on is in active development \u2014 not yet available."
+        "explanation": "Enterprise SAML 2.0 and OIDC single sign-on is fully wired end-to-end: the login initiations redirect to the tenant IdP, the ACS validates the XML-DSig-signed assertion against the configured certificate (success status, issuer, audience, validity window, per-tenant replay guard) and the OIDC callback exchanges the authorization code with the persisted PKCE verifier and validates the id_token (RS256-only, issuer/audience/expiry) against the IdP's JWKS before issuing a server-side session. Covered by router-level end-to-end tests (routes::tests::saml_sso_completes_end_to_end_through_the_router, routes::tests::oidc_sso_completes_end_to_end_through_the_router) and the signed-assertion and OIDC-state coverage in src/sso.rs. Entitlements gate: sso_enabled is true on the scale and enterprise plans (billing-service/src/plans.rs) and enforced via FeatureKey::Sso."
       },
       "scan_aliases": [
         "SAML",

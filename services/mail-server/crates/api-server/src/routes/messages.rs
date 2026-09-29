@@ -298,9 +298,12 @@ fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
 }
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
-/// encodings, unparsable timestamps, or ids that cannot name a row id
-/// (empty, over 64 bytes, control characters) are client errors (400) —
-/// they used to surface as database 500s.
+/// encodings, unparsable timestamps, or ids that cannot name a row are
+/// client errors (400) — they used to surface as database 500s.
+/// The row id is decoded as a UUID because messages.id is a UUID column and
+/// the cursor tuple comparison binds it against that column
+/// (`id < $k::uuid`) — a well-formed-but-non-UUID id used to pass this
+/// shape check and blow up as a cast error at the database.
 fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
     let Some(decoded) = decode_cursor(encoded) else {
         return Err(ApiError::BadRequest(
@@ -322,6 +325,9 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
             "invalid cursor: malformed row id".into(),
         ));
     }
+    Uuid::parse_str(id).map_err(|_| {
+        ApiError::BadRequest("invalid cursor: malformed row id (must be a UUID)".into())
+    })?;
     Ok((timestamp, id.to_string()))
 }
 
@@ -5294,6 +5300,25 @@ Bcc: victim@example.com"@example.com"#
                 "id {bad_id:?} must be rejected"
             );
         }
+        // Wrong-TYPE row ids: messages.id is a UUID column and the keyset
+        // predicate casts the bound value to uuid — a well-shaped but
+        // non-UUID id (SQL metacharacters included) must be refused at the
+        // boundary, not surfaced as a database cast error (500).
+        for bad_id in [
+            "not-a-uuid",
+            "x'; DROP TABLE messages; --",
+            "11111111-1111-1111-1111-11111111111z",
+        ] {
+            let cursor = encode_cursor(&format!("2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}{bad_id}"));
+            assert!(
+                matches!(
+                    decode_keyset_cursor(&cursor),
+                    Err(ApiError::BadRequest(message))
+                        if message.contains("malformed row id (must be a UUID)")
+                ),
+                "id {bad_id:?} must be rejected as a wrong-type row id"
+            );
+        }
         // A well-formed cursor round-trips.
         let ts = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
@@ -6125,6 +6150,184 @@ Bcc: victim@example.com"@example.com"#
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+        fixture.cleanup().await;
+    }
+
+    /// Keyset-pagination adversarial properties for the messages list:
+    /// cursor sweeps == offset sweeps with zero skips/duplicates when EVERY
+    /// row shares one `created_at` (the bulk-insert shape where a
+    /// timestamp-only cursor is lossy), tenant scoping under cursor
+    /// continuation, and wrong-type cursors rejected at the boundary.
+    #[tokio::test]
+    async fn list_messages_cursor_sweep_matches_offset_and_stays_tenant_scoped() {
+        let Some(fixture) = msg_fixture("adv_msg_cursor_sweep").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_read;
+
+        // SIX rows in ONE statement → identical created_at values; the
+        // ordering is decided entirely by the (created_at, id) tie-break.
+        // Plus neighbour-tenant rows that must never leak into the walk.
+        const SWEEP_SQL: &str = "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             SELECT gen_random_uuid(), $1, 'sender@example.com', '[\"to@example.com\"]'::jsonb, 'sweep', 'queued', NOW(), NOW()
+             FROM generate_series(0, $2 - 1) AS g";
+        sqlx::query(SWEEP_SQL)
+            .bind(&fixture.tenant)
+            .bind(6i64)
+            .execute(&fixture.pool)
+            .await
+            .expect("seed sweep rows");
+        sqlx::query(SWEEP_SQL)
+            .bind(&fixture.other_tenant)
+            .bind(2i64)
+            .execute(&fixture.pool)
+            .await
+            .expect("seed foreign rows");
+
+        let expected: Vec<String> =
+            sqlx::query_scalar(
+                "SELECT id::text FROM messages WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC",
+            )
+            .bind(&fixture.tenant)
+            .fetch_all(&fixture.pool)
+            .await
+            .expect("expected order");
+        assert_eq!(expected.len(), 6);
+
+        // Cursor sweep at limit=1 (and page size 2, a boundary inside the
+        // tied timestamp).
+        let sweep = |page: usize| {
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                let mut seen: Vec<String> = Vec::new();
+                let mut uri = format!("/?limit={page}");
+                loop {
+                    let (status, _, body) =
+                        msg_call(&app, &key, Method::GET, &uri, None, &[]).await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    let page_rows = body["data"].as_array().expect("data array");
+                    if page_rows.is_empty() {
+                        break;
+                    }
+                    for item in page_rows {
+                        seen.push(item["id"].as_str().expect("id string").to_string());
+                    }
+                    if body["meta"]["hasMore"].as_bool().expect("hasMore flag") {
+                        let cursor =
+                            body["meta"]["nextCursor"].as_str().expect("next cursor");
+                        uri = format!("/?limit={page}&cursor={cursor}");
+                    } else {
+                        break;
+                    }
+                }
+                seen
+            }
+        };
+        let by_cursor = sweep(1).await;
+        assert_eq!(
+            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor.len(),
+            "a cursor sweep must never repeat a row"
+        );
+        assert_eq!(by_cursor, expected, "one-by-one cursor sweep vs DB order");
+        assert_eq!(sweep(2).await, expected);
+
+        // Deep-offset equivalence: legacy offset sweep at limit=1 and 2.
+        let offset_sweep = |page: usize| {
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                let mut seen: Vec<String> = Vec::new();
+                let mut offset = 0usize;
+                loop {
+                    let (status, _, body) = msg_call(
+                        &app,
+                        &key,
+                        Method::GET,
+                        &format!("/?limit={page}&offset={offset}"),
+                        None,
+                        &[],
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    let page_rows = body["data"].as_array().expect("data array");
+                    if page_rows.is_empty() {
+                        break;
+                    }
+                    for item in page_rows {
+                        seen.push(item["id"].as_str().expect("id string").to_string());
+                    }
+                    offset += page;
+                }
+                seen
+            }
+        };
+        assert_eq!(offset_sweep(1).await, expected);
+        assert_eq!(offset_sweep(2).await, expected);
+
+        // Cursor wins over offset: page 1's cursor plus a deep offset still
+        // yields page 2 of the cursor position.
+        let (status, _, body) = msg_call(&app, key, Method::GET, "/?limit=1", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let minted = body["meta"]["nextCursor"].as_str().unwrap().to_string();
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            &format!("/?limit=1&offset=99&cursor={minted}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Vec<&str> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(page, vec![expected[1].as_str()], "cursor must beat offset");
+
+        // Tenant scoping under cursor continuation: no neighbour row ever
+        // appears anywhere in the walked pages.
+        let foreign: Vec<String> =
+            sqlx::query_scalar("SELECT id::text FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.other_tenant)
+                .fetch_all(&fixture.pool)
+                .await
+                .expect("foreign ids");
+        assert_eq!(foreign.len(), 2);
+        for id in &foreign {
+            assert!(!by_cursor.contains(id), "neighbour row {id} leaked");
+        }
+
+        // A wrong-TYPE cursor (valid encoding, non-UUID id half) is a 400
+        // — it used to pass the shape check and surface as a database
+        // cast error (500) from the `id < $k::uuid` predicate.
+        for bad_id in ["not-a-uuid", "x'; DROP TABLE messages; --"] {
+            let cursor = encode_cursor(&format!("2026-01-01T00:00:00Z\n{bad_id}"));
+            let (status, _, body) = msg_call(
+                &app,
+                key,
+                Method::GET,
+                &format!("/?limit=1&cursor={cursor}"),
+                None,
+                &[],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "cursor id {bad_id:?}: {body}"
+            );
+            assert!(
+                body.to_string().contains("invalid cursor"),
+                "cursor id {bad_id:?}: {body}"
+            );
+        }
 
         fixture.cleanup().await;
     }

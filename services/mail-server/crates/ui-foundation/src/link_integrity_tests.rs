@@ -89,6 +89,12 @@ fn target_resolves(surface: &str, target: &str, manifest: &std::collections::Has
     {
         return true; // external (apexmail.ee family and plausibly-external)
     }
+    if path_only.starts_with("data:") {
+        // Deferred-feature 8: the favicon rides an inline `data:image/svg+xml`
+        // URL in every root layout's <link rel="icon"> — self-contained by
+        // construction, never a navigation.
+        return true;
+    }
     if path_only.starts_with("/assets/") {
         return true; // static assets
     }

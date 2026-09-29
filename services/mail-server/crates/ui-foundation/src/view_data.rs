@@ -166,6 +166,11 @@ pub struct ListPageData {
     /// signed-confirm delete intent (`delete-campaign`).
     pub detail_path_prefix: Option<String>,
     pub delete_intent: Option<String>,
+    /// Edit link prefix rendering `{prefix}{id}/edit` per row WITHOUT a
+    /// detail link (deferred-feature 3): contacts have an editor but no
+    /// detail page, so `detail_path_prefix` would fabricate a dead "View"
+    /// affordance.
+    pub edit_path_prefix: Option<String>,
     /// Detail link label (defaults to "View").
     pub detail_label: String,
     /// Edit link suffix appended to `{detail_path_prefix}{id}` when set.
@@ -220,6 +225,20 @@ pub struct ListEditData {
     pub description: String,
     /// Optional created timestamp (empty when unknown).
     pub created_at: String,
+}
+
+/// Prefilled contact editor state for `/contacts/{id}/edit` (deferred-feature
+/// 3, loaded server-side from the contacts row). The view emits the hidden
+/// `id` plus the read-only email so `POST /web/contacts/update` updates the
+/// row in place.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContactEditData {
+    pub id: String,
+    /// The contact's address — the row's identity, rendered read-only.
+    pub email: String,
+    pub name: String,
+    /// One of `subscribed` / `unsubscribed` / `bounced`.
+    pub status: String,
 }
 
 /// Server-loaded list detail state for `/lists/{id}`: the real list name
@@ -556,5 +575,30 @@ mod tests {
         assert_eq!(map.secrets().len(), 1);
         assert!(!map.is_empty());
         assert_eq!(map.form_id, "webhook-create");
+    }
+}
+
+#[cfg(test)]
+mod deferred_view_data_tests {
+    use super::*;
+
+    #[test]
+    fn edit_path_prefix_defaults_to_none_and_list_page_defaults_stay_honest() {
+        let data = ListPageData::default();
+        assert!(data.edit_path_prefix.is_none());
+        assert!(data.delete_intent.is_none());
+        assert!(data.detail_path_prefix.is_none());
+    }
+
+    #[test]
+    fn contact_edit_data_carries_the_editor_fields() {
+        let contact = ContactEditData {
+            id: "c1".into(),
+            email: "a@b.c".into(),
+            name: "A".into(),
+            status: "bounced".into(),
+        };
+        assert_eq!(contact.status, "bounced");
+        assert_eq!(contact.email, "a@b.c");
     }
 }

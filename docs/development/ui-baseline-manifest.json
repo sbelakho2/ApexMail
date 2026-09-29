@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 35,
+      "routeCount": 36,
       "routes": [
         {
           "path": "/",
@@ -211,6 +211,12 @@
         {
           "path": "/settings/webhooks",
           "name": "Webhooks",
+          "category": "dashboard",
+          "authRequired": true
+        },
+        {
+          "path": "/settings/suppressions",
+          "name": "Suppressions",
           "category": "dashboard",
           "authRequired": true
         },

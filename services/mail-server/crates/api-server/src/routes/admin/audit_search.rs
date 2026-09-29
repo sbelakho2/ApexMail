@@ -17,12 +17,85 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
+use crate::routes::helpers::{decode_cursor, encode_cursor};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/search", get(audit_search))
         .route("/export", post(audit_export))
+}
+
+// ─── Keyset cursor helpers ─────────────────────────────────────
+//
+// The search cursor encodes the `(rank, timestamp, id)` triple of the last
+// row of the previous page — the exact leading tuple of the ORDER BY. The
+// rank component matters for the FTS path (ranked relevance ordering); on
+// the non-FTS path every row's rank is the constant 0.0, so the triple
+// degenerates to the plain (timestamp, id) keyset. The tie-break
+// `... = $r AND (timestamp = $t AND id < $id)` makes the ordering total.
+
+/// Separator inside the hex-encoded cursor payload (RFC3339, f64 text and
+/// audit ids never contain it).
+const KEYSET_CURSOR_SEP: char = '\n';
+
+/// Encode a `(rank, timestamp, id)` keyset cursor as an opaque hex string.
+///
+/// The timestamp MUST be rendered with `to_rfc3339()` and the rank with
+/// `f64`'s shortest round-trip `Display` — `parse::<f64>()` reads back the
+/// exact same value.
+fn encode_search_cursor(rank: f64, timestamp: &DateTime<Utc>, id: &str) -> String {
+    encode_cursor(&format!(
+        "{rank}{KEYSET_CURSOR_SEP}{}{KEYSET_CURSOR_SEP}{id}",
+        timestamp.to_rfc3339()
+    ))
+}
+
+/// Decode and validate a `(rank, timestamp, id)` keyset cursor. Malformed
+/// encodings, unparsable numbers/timestamps, NaN ranks, or ids that cannot
+/// name an audit row are client errors (400) — an unvalidated cursor could
+/// otherwise surface as a database error.
+fn decode_search_cursor(encoded: &str) -> Result<(f64, DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let mut parts = decoded.split(KEYSET_CURSOR_SEP);
+    let parse_error = |field: &str| {
+        ApiError::BadRequest(format!("invalid cursor: malformed {field}"))
+    };
+    let rank: f64 = parts
+        .next()
+        .and_then(|rank| rank.parse::<f64>().ok())
+        .ok_or_else(|| parse_error("rank"))?;
+    if rank.is_nan() {
+        return Err(parse_error("rank"));
+    }
+    let timestamp = parts
+        .next()
+        .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+        .ok_or_else(|| parse_error("timestamp"))?
+        .with_timezone(&Utc);
+    let id = parts.next().ok_or_else(|| parse_error("row id"))?;
+    // The writers produce identifier-shaped ids (UUID text and short
+    // prefixed forms): bounded and restricted to ASCII identifier
+    // characters — SQL metacharacters are refused at the boundary even
+    // though every use binds the value as a parameter.
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(parse_error("row id"));
+    }
+    if parts.next().is_some() {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: unexpected trailing payload".into(),
+        ));
+    }
+    Ok((rank, timestamp, id.to_string()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +110,11 @@ pub struct AuditSearchQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// Opaque keyset cursor (hex `(rank, timestamp, id)` triple) returned
+    /// in the previous page's `nextCursor`. When present it wins over
+    /// `offset`.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 fn default_search_limit() -> i64 {
@@ -66,6 +144,11 @@ pub struct AuditSearchResponse {
     pub total: i64,
     pub limit: i64,
     pub offset: i64,
+    /// Whether a further page exists beyond this one.
+    pub has_more: bool,
+    /// Opaque keyset cursor for the next page, present whenever this page
+    /// returned at least one row.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +224,13 @@ struct AuditSearchPlan {
     window_end: DateTime<Utc>,
     limit: i64,
     offset: i64,
+    /// Decoded keyset cursor. When present it wins over `offset`: the SQL
+    /// carries a `(rank, timestamp, id)` strictly-less tuple predicate and
+    /// no OFFSET clause.
+    keyset: Option<(f64, DateTime<Utc>, String)>,
+    /// Whether the FTS arm rendered the SQL (the keyset bind shape differs:
+    /// the FTS predicate also takes the decoded rank).
+    fts: bool,
 }
 
 fn build_search_plan(
@@ -150,6 +240,12 @@ fn build_search_plan(
     let has_fts = params.q.as_ref().is_some_and(|q| !q.trim().is_empty());
     let (window_start, window_end) =
         resolve_search_window(params.from.as_deref(), params.to.as_deref(), now)?;
+    // A cursor wins over offset. Both halves are validated BEFORE binding —
+    // a bogus cursor must be a client 400, never a database cast error.
+    let keyset = match params.cursor.as_deref() {
+        Some(encoded) => Some(decode_search_cursor(encoded)?),
+        None => None,
+    };
 
     let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
     let mut filter_idx = 3u32;
@@ -171,42 +267,85 @@ fn build_search_plan(
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
-    let (search_sql, search_binds) = if has_fts {
+    // Both orderings are the total (rank, timestamp, id) DESC tuple: the FTS
+    // path ranks by relevance, the non-FTS path gives every row the constant
+    // rank 0.0 — so the id tie-break is what keeps rows that share a
+    // timestamp from being skipped or duplicated across page boundaries.
+    let (search_sql, search_binds, has_fts_plan) = if has_fts {
         let q = params.q.as_deref().unwrap_or("").trim().to_string();
         let tsquery_param = filter_idx;
-        let limit_param = filter_idx + 1;
         let mut binds = filter_binds.clone();
         binds.push(q);
-        (
+        // The rank expression is spelled out everywhere it is referenced —
+        // the keyset predicate cannot use the output alias, and every
+        // re-reference reuses the SAME tsquery bind parameter.
+        let rank_expr =
+            format!("ts_rank(fts_vector, plainto_tsquery('english', ${tsquery_param}))::double precision");
+        let paging = if keyset.is_some() {
+            // Keyset path: strictly-less tuple comparison over the same
+            // (rank, timestamp, id) tuple the ORDER BY uses. The VALUE side
+            // of every comparison is a bound parameter; the tsquery
+            // placeholder is re-referenced, never re-bound.
+            let rank_param = filter_idx + 1;
+            let ts_param = filter_idx + 2;
+            let id_param = filter_idx + 3;
+            let limit_param = filter_idx + 4;
             format!(
-                "SELECT id, timestamp, action, resource, resource_id,
-                        user_id, tenant_id, ip_address, details,
-                        ts_rank(fts_vector, plainto_tsquery('english', ${tsquery_param}))::double precision as rank,
-                        ts_headline('english', coalesce(details::text, ''), plainto_tsquery('english', ${tsquery_param}), 'MaxWords=50, MinWords=10, ShortWord=3') as headline
-                 FROM audit_logs
-                 {where_clause}
-                   AND fts_vector @@ plainto_tsquery('english', ${tsquery_param})
-                 ORDER BY rank DESC, timestamp DESC
-                 LIMIT ${limit_param} OFFSET ${}",
-                limit_param + 1
-            ),
-            binds,
-        )
+                "       AND ({rank_expr} < ${rank_param}
+                    OR ({rank_expr} = ${rank_param}
+                        AND (timestamp < ${ts_param}
+                             OR (timestamp = ${ts_param} AND id < ${id_param}))))
+                 ORDER BY rank DESC, timestamp DESC, id DESC
+                 LIMIT ${limit_param}"
+            )
+        } else {
+            format!(
+                "       ORDER BY rank DESC, timestamp DESC, id DESC
+                 LIMIT ${} OFFSET ${}",
+                filter_idx + 1,
+                filter_idx + 2
+            )
+        };
+        let sql = format!(
+            "SELECT id, timestamp, action, resource, resource_id,
+                    user_id, tenant_id, ip_address, details,
+                    {rank_expr} as rank,
+                    ts_headline('english', coalesce(details::text, ''), plainto_tsquery('english', ${tsquery_param}), 'MaxWords=50, MinWords=10, ShortWord=3') as headline
+             FROM audit_logs
+             {where_clause}
+               AND fts_vector @@ plainto_tsquery('english', ${tsquery_param})
+            {paging}"
+        );
+        (sql, binds, true)
     } else {
-        (
+        let ts_param = filter_idx;
+        let id_param = filter_idx + 1;
+        let paging = if keyset.is_some() {
+            // Non-FTS rank is the constant 0.0 for every row, so the tuple
+            // keyset degenerates to the plain (timestamp, id) comparison.
             format!(
-                "SELECT id, timestamp, action, resource, resource_id,
-                        user_id, tenant_id, ip_address, details,
-                        0.0::double precision as rank,
-                        '' as headline
-                 FROM audit_logs
-                 {where_clause}
-                 ORDER BY timestamp DESC, id DESC
-                 LIMIT ${filter_idx} OFFSET ${}",
-                filter_idx + 1
-            ),
-            filter_binds.clone(),
-        )
+                "       AND (timestamp < ${ts_param}
+                    OR (timestamp = ${ts_param} AND id < ${id_param}))
+                 ORDER BY rank DESC, timestamp DESC, id DESC
+                 LIMIT ${}",
+                filter_idx + 2
+            )
+        } else {
+            format!(
+                "       ORDER BY rank DESC, timestamp DESC, id DESC
+                 LIMIT ${ts_param} OFFSET ${id_param}"
+            )
+        };
+        let sql = format!(
+            "SELECT id, timestamp, action, resource, resource_id,
+                    user_id, tenant_id, ip_address, details,
+                    0.0::double precision as rank,
+                    '' as headline
+             FROM audit_logs
+             {where_clause}
+            {paging}"
+        );
+        (sql, filter_binds.clone(), false)
     };
 
     // The count query repeats the filter binds; with FTS active the
@@ -240,6 +379,8 @@ fn build_search_plan(
         window_end,
         limit,
         offset,
+        keyset,
+        fts: has_fts_plan,
     })
 }
 
@@ -254,17 +395,21 @@ async fn audit_search(
     let plan = build_search_plan(&params, Utc::now())?;
 
     // Run count and search concurrently. Both executors bind from the SAME
-    // plan — the search row query appends LIMIT/OFFSET as the final pair.
-    let (count_result, search_result) = tokio::try_join!(
+    // plan — the search row query appends either the keyset tuple + LIMIT
+    // or the LIMIT/OFFSET pair as its final binds.
+    let (count_result, search_page) = tokio::try_join!(
         execute_count(&state.db, &plan),
         execute_search(&state.db, &plan),
     )?;
+    let (results, has_more, next_cursor) = search_page;
 
     Ok(Json(AuditSearchResponse {
-        results: search_result,
+        results,
         total: count_result,
         limit: plan.limit,
         offset: plan.offset,
+        has_more,
+        next_cursor,
     }))
 }
 
@@ -280,39 +425,70 @@ async fn execute_count(db: &sqlx::PgPool, plan: &AuditSearchPlan) -> Result<i64,
     Ok(query.fetch_one(db).await?)
 }
 
+/// One fetched search row before DTO mapping.
+type SearchRow = (
+    String,
+    chrono::DateTime<chrono::Utc>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+    f64,
+    String,
+);
+
+/// Execute the search row query and resolve the keyset continuation:
+/// fetches `limit + 1` rows, truncates to `limit` and reports `(rows,
+/// has_more, next_cursor)` — the cursor minted from the last KEPT row's
+/// `(rank, timestamp, id)` tuple.
 #[allow(clippy::type_complexity)]
 async fn execute_search(
     db: &sqlx::PgPool,
     plan: &AuditSearchPlan,
-) -> Result<Vec<AuditSearchResult>, ApiError> {
-    let mut query = sqlx::query_as::<
-        _,
-        (
-            String,
-            chrono::DateTime<chrono::Utc>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<serde_json::Value>,
-            f64,
-            String,
-        ),
-    >(&plan.search_sql)
-    .bind(plan.window_start)
-    .bind(plan.window_end);
+) -> Result<(Vec<AuditSearchResult>, bool, Option<String>), ApiError> {
+    let fetch_limit = plan.limit + 1; // one extra row to detect has_more
+
+    let mut query = sqlx::query_as::<_, SearchRow>(&plan.search_sql)
+        .bind(plan.window_start)
+        .bind(plan.window_end);
 
     for bind in &plan.search_binds {
         query = query.bind(bind);
     }
-    query = query.bind(plan.limit).bind(plan.offset);
+    if let Some((rank, ref ts, ref id)) = plan.keyset {
+        // Keyset binds follow the filters + q; the FTS arm additionally
+        // takes the decoded rank. LIMIT is always the final bind.
+        if plan.fts {
+            query = query.bind(rank);
+        }
+        query = query.bind(ts).bind(id).bind(fetch_limit);
+    } else {
+        query = query.bind(fetch_limit).bind(plan.offset);
+    }
 
-    let rows = query.fetch_all(db).await?;
+    let rows: Vec<SearchRow> = query.fetch_all(db).await?;
+
+    let more = rows.len() as i64 > plan.limit;
+    let kept = if more {
+        plan.limit as usize
+    } else {
+        rows.len()
+    };
+    // The next cursor is the (rank, timestamp, id) tuple of the last KEPT
+    // row — the exact position this page stopped at.
+    let next_cursor = if kept > 0 {
+        let (id, ts, .., rank, _) = &rows[kept - 1];
+        Some(encode_search_cursor(*rank, ts, id))
+    } else {
+        None
+    };
 
     let results = rows
         .into_iter()
+        .take(kept)
         .map(
             |(
                 id,
@@ -346,7 +522,7 @@ async fn execute_search(
         )
         .collect();
 
-    Ok(results)
+    Ok((results, more, next_cursor))
 }
 
 // ─── CSV Export ────────────────────────────────────────────
@@ -689,6 +865,7 @@ mod tests {
             to: None,
             limit: 10,
             offset: 0,
+            cursor: None,
         };
         let plan = build_search_plan(&params, Utc::now()).expect("search plan");
         // tenant + action + q binds must match each query's placeholders
@@ -708,10 +885,12 @@ mod tests {
             .await
             .expect("count query must execute (no parameter mismatch)");
         assert_eq!(count, 3);
-        let results = execute_search(&pool, &plan)
+        let (results, more, cursor) = execute_search(&pool, &plan)
             .await
             .expect("search query must execute (no parameter mismatch)");
         assert_eq!(results.len(), 3);
+        assert!(!more, "3 rows under limit 10 is a final page");
+        assert!(cursor.is_some(), "a non-empty page mints a cursor");
     }
 
     /// Streamed export records are self-contained CSV lines: quoting of
@@ -757,6 +936,7 @@ mod tests {
             to: Some(now.to_rfc3339()),
             limit: 10,
             offset: 0,
+            cursor: None,
         };
         assert!(
             matches!(
@@ -776,6 +956,7 @@ mod tests {
                     to: Some(now.to_rfc3339()),
                     limit: 10,
                     offset: 0,
+                    cursor: None,
                 },
                 now,
             )
@@ -783,12 +964,86 @@ mod tests {
             "an 89-day window must be accepted"
         );
     }
+
+    /// The keyset cursor decoder's refusal arms + a round trip through the
+    /// encoder (shortest-round-trip f64 rank, RFC3339 timestamp, TEXT id).
+    #[test]
+    fn search_cursor_decode_rejects_every_malformed_shape() {
+        // Not even hex.
+        assert!(matches!(
+            decode_search_cursor("zz"),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed encoding")
+        ));
+        // Wrong part count: a single-part payload has no rank separator, so
+        // the FIRST field (rank) is what fails to parse.
+        assert!(matches!(
+            decode_search_cursor(&encode_cursor("no-separator-here")),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed rank")
+        ));
+        assert!(matches!(
+            decode_search_cursor(&encode_cursor("1.5\n2026-01-01T00:00:00Z\nid\nextra")),
+            Err(ApiError::BadRequest(message))
+                if message.contains("trailing payload")
+        ));
+        // Non-numeric / NaN rank.
+        let bad_rank = encode_cursor(&format!(
+            "not-a-number{KEYSET_CURSOR_SEP}2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}row-id"
+        ));
+        assert!(matches!(
+            decode_search_cursor(&bad_rank),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed rank")
+        ));
+        let nan_rank = encode_cursor(&format!(
+            "NaN{KEYSET_CURSOR_SEP}2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}row-id"
+        ));
+        assert!(matches!(
+            decode_search_cursor(&nan_rank),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed rank")
+        ));
+        // Bad timestamp.
+        let bad_ts = encode_cursor(&format!(
+            "1.5{KEYSET_CURSOR_SEP}not-a-time{KEYSET_CURSOR_SEP}row-id"
+        ));
+        assert!(matches!(
+            decode_search_cursor(&bad_ts),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed timestamp")
+        ));
+        // Malformed row ids: empty, over 128 bytes, control characters,
+        // SQL metacharacters.
+        for bad_id in [
+            "",
+            &"i".repeat(129),
+            "bad\u{7}id",
+            "x'; DROP TABLE audit_logs; --",
+        ] {
+            let cursor = encode_cursor(&format!(
+                "1.5{KEYSET_CURSOR_SEP}2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}{bad_id}"
+            ));
+            assert!(
+                matches!(
+                    decode_search_cursor(&cursor),
+                    Err(ApiError::BadRequest(message)) if message.contains("malformed row id")
+                ),
+                "id {bad_id:?} must be rejected"
+            );
+        }
+        // A well-formed cursor round-trips bit-exact through the f64 text.
+        let ts = Utc::now();
+        let rank = 0.06079271525000001f64;
+        let (decoded_rank, decoded_ts, decoded_id) =
+            decode_search_cursor(&encode_search_cursor(rank, &ts, "row-1"))
+                .expect("valid cursor");
+        assert_eq!(decoded_rank, rank);
+        assert_eq!(decoded_ts, ts);
+        assert_eq!(decoded_id, "row-1");
+    }
 }
 
 #[cfg(test)]
 mod adversarial_tests {
     use axum::http::StatusCode;
 
+    use super::encode_cursor;
     use crate::app::test_support::adv::AdvEnv;
 
     async fn seed_audit_row(
@@ -1008,7 +1263,210 @@ mod adversarial_tests {
 
         let (customer, _tenant) = AdvEnv::tenant(pool, &["*"]).await;
         let (status, _body) = customer.get("/v1/admin/audit/search").await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(matches!(status, StatusCode::FORBIDDEN));
+    }
+
+    const SEARCH_PROBE_SQL: &str = "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
+         details, ip_address, user_agent, outcome, timestamp, hash, signature, fts_vector)
+         SELECT 'cur-' || lpad(g::text, 2, '0') || '-' || substr(gen_random_uuid()::text, 1, 8),
+                $1, 'usr_srch', 'probe.search', 'probe_resource', 'res-1',
+                $3::jsonb, '198.51.100.9', 'probe-agent', 'success',
+                NOW(), 'seed-hash', 'seed-signature',
+                to_tsvector('english', $3::text)
+         FROM generate_series(0, $2 - 1) AS g";
+
+    /// Page through an FTS-ranked result set one row at a time following
+    /// `nextCursor`: the cursor sweep must reproduce the offset sweep
+    /// exactly (zero skips/duplicates) even though every seeded row shares
+    /// ONE timestamp AND one identical rank — the fully-tied ordering shape
+    /// where the id tie-break is the only total component. The tenantId
+    /// filter rides every continuation page and `total` stays the full
+    /// window count.
+    #[tokio::test]
+    async fn search_cursor_sweep_matches_offset_and_stays_scoped() {
+        let Some(pool) = crate::test_db::canonical_pool("asearch_cursor_sweep").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = format!("srch{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+        let other = format!("srch{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+
+        // SIX matching rows for `tenant` in ONE statement — identical
+        // timestamps AND identical fts ranks; plus one matching row of the
+        // neighbour tenant and one non-matching row of `tenant`.
+        sqlx::query(SEARCH_PROBE_SQL)
+            .bind(&tenant)
+            .bind(6i64)
+            .bind("{\"note\": \"billing invoice adjustment\"}")
+            .execute(&pool)
+            .await
+            .expect("seed probe rows");
+        sqlx::query(SEARCH_PROBE_SQL)
+            .bind(&other)
+            .bind(1i64)
+            .bind("{\"note\": \"billing invoice adjustment\"}")
+            .execute(&pool)
+            .await
+            .expect("seed foreign row");
+        sqlx::query(SEARCH_PROBE_SQL)
+            .bind(&tenant)
+            .bind(1i64)
+            .bind("{\"note\": \"nothing relevant here\"}")
+            .execute(&pool)
+            .await
+            .expect("seed non-matching row");
+
+        let expected_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM audit_logs WHERE tenant_id = $1
+               AND fts_vector @@ plainto_tsquery('english', 'billing')
+             ORDER BY ts_rank(fts_vector, plainto_tsquery('english', 'billing'))::double precision DESC,
+                      timestamp DESC, id DESC",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("expected search order");
+        assert_eq!(expected_ids.len(), 6, "six matching rows for the tenant");
+
+        // ── FTS path: cursor walk at limit=1 ────────────────────────
+        let mut by_cursor: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut total_on_cursor_pages: Option<i64> = None;
+        loop {
+            let mut uri = format!("/v1/admin/audit/search?tenantId={tenant}&q=billing&limit=1");
+            if let Some(ref cursor) = cursor {
+                uri.push_str(&format!("&cursor={cursor}"));
+            }
+            let (status, body) = env.get(&uri).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let results = body["results"].as_array().expect("results array");
+            if results.is_empty() {
+                assert_eq!(body["hasMore"], false);
+                break;
+            }
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["tenantId"], tenant, "tenant filter scopes");
+            by_cursor.push(results[0]["id"].as_str().unwrap().to_string());
+            total_on_cursor_pages = Some(body["total"].as_i64().unwrap());
+            // has-more mirrors exactly whether a further row exists.
+            assert_eq!(
+                body["hasMore"],
+                by_cursor.len() < expected_ids.len(),
+                "hasMore flipped early or late on page {}",
+                by_cursor.len()
+            );
+            cursor = Some(
+                body["nextCursor"]
+                    .as_str()
+                    .expect("hasMore implies nextCursor")
+                    .to_string(),
+            );
+        }
+        assert_eq!(
+            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor.len(),
+            "a cursor sweep must never repeat a row"
+        );
+        assert_eq!(
+            by_cursor, expected_ids,
+            "cursor walk vs the same ORDER BY over the table"
+        );
+        assert_eq!(
+            total_on_cursor_pages,
+            Some(6),
+            "total stays the full window count on cursor pages"
+        );
+
+        // ── Legacy offset sweep (backward compat): same rows, same order ──
+        let mut by_offset: Vec<String> = Vec::new();
+        let mut offset = 0i64;
+        loop {
+            let (status, body) = env
+                .get(&format!(
+                    "/v1/admin/audit/search?tenantId={tenant}&q=billing&limit=1&offset={offset}"
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let results = body["results"].as_array().expect("results array");
+            if results.is_empty() {
+                break;
+            }
+            by_offset.push(results[0]["id"].as_str().unwrap().to_string());
+            offset += 1;
+        }
+        assert_eq!(by_offset, expected_ids, "offset walk vs DB order");
+        assert_eq!(by_offset, by_cursor, "cursor page K == offset page K");
+
+        // ── Non-FTS path: the rank is the constant 0.0, keyset degenerates
+        //    to the (timestamp, id) pair; the action filter narrows to the
+        //    seven probe rows.
+        let (status, body) = env
+            .get(&format!("/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=1"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+        assert!(body["nextCursor"].is_string(), "non-empty page mints a cursor");
+        assert_eq!(body["hasMore"], true);
+        assert_eq!(
+            body["results"][0]["rank"], 0.0,
+            "the non-FTS path pins rank 0.0"
+        );
+        // Following the non-FTS cursor yields the SECOND row — the keyset
+        // continues the same ordering the offset path uses.
+        let minted = body["nextCursor"].as_str().unwrap().to_string();
+        let (status, body) = env
+            .get(&format!(
+                "/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=1&cursor={minted}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["hasMore"], true);
+        assert_ne!(
+            body["results"][0]["id"], "",
+            "continuation returns a row"
+        );
+
+        // A cursor minted on the FINAL page (the full listing) honestly
+        // continues to an empty page.
+        let (status, body) = env
+            .get(&format!("/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=100"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(7));
+        assert_eq!(body["hasMore"], false);
+        let final_cursor = body["nextCursor"].as_str().unwrap().to_string();
+        let (status, body) = env
+            .get(&format!(
+                "/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=1&cursor={final_cursor}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(0));
+        assert_eq!(body["hasMore"], false);
+
+        // ── Hostile cursors are client errors, never database 500s. ──
+        for bad in [
+            "zz",
+            encode_cursor("no-separator-here").as_str(),
+            encode_cursor(&format!("1.5\nnot-a-time\nrow-id")).as_str(),
+            encode_cursor(&format!("NaN\n2026-01-01T00:00:00Z\nrow-id")).as_str(),
+            encode_cursor(&format!(
+                "1.5\n2026-01-01T00:00:00Z\nx'; DROP TABLE audit_logs; --"
+            ))
+            .as_str(),
+        ] {
+            let (status, body) = env
+                .get(&format!("/v1/admin/audit/search?cursor={bad}"))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "cursor {bad:?}: {body}");
+            assert!(
+                body.to_string().contains("invalid cursor"),
+                "cursor {bad:?}: {body}"
+            );
+        }
+
+        pool.close().await;
     }
 }
 
@@ -1160,6 +1618,7 @@ mod coverage_residual_tests {
                 to: None,
                 limit: 10,
                 offset: 0,
+                cursor: None,
             }),
         )
         .await;

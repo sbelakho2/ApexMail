@@ -551,6 +551,9 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
         ("API Keys", "/settings/api-keys", "key"),
         ("Webhooks", "/settings/webhooks", "zap"),
         ("Dedicated IPs", "/settings/dedicated-ips", "server"),
+        // Deferred-feature 4: the suppression list joins the Configure group
+        // (read-only — compliance flows own the writes).
+        ("Suppressions", "/settings/suppressions", "ban"),
     ];
     let account_items = [
         ("Billing", "/settings/billing", "credit-card"),
@@ -1270,5 +1273,23 @@ mod tests {
         assert_eq!(avatar_initials("Sabela Khoua"), "SK");
         assert_eq!(avatar_initials("ops@apexmail.ee"), "O");
         assert_eq!(avatar_initials(""), "AM");
+    }
+}
+
+#[cfg(test)]
+mod deferred_shell_tests {
+    use super::*;
+
+    #[test]
+    fn web_sidebar_lists_suppressions_under_configure() {
+        let sidebar = render_web_sidebar("/dashboard", "tok");
+        assert!(
+            sidebar.contains("href=\"/settings/suppressions\""),
+            "the suppressions page must be reachable from the primary nav"
+        );
+        assert!(sidebar.contains("Suppressions"));
+        // The active-state highlighting matches the path prefix.
+        let active = render_web_sidebar("/settings/suppressions", "tok");
+        assert!(active.contains("aria-current=\"page\""));
     }
 }

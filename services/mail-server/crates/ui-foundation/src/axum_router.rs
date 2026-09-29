@@ -1846,6 +1846,11 @@ fn render_web(
         "/settings/webhooks" => data_backed_inner("/settings/webhooks", data)
             .unwrap_or_else(leptos_views::web_settings_webhooks_page),
         "/settings/profile" => leptos_views::web_settings_profile_page(),
+        // Deferred-feature 4: the suppressions list — data-backed like the
+        // other settings lists; the static fallback is the honest empty
+        // state (the api-server loader owns the real rows).
+        "/settings/suppressions" => data_backed_inner("/settings/suppressions", data)
+            .unwrap_or_else(leptos_views::web_settings_suppressions_page),
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
             match data.and_then(|d| d.campaign_edit.as_ref()) {
                 Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),

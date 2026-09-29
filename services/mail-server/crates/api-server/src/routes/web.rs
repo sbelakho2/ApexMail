@@ -75,6 +75,13 @@ pub fn public_router(state: AppState) -> Router<AppState> {
         .route("/web/auth/signup", post(form_signup))
         .route("/web/auth/forgot-password", post(form_forgot_password))
         .route("/web/auth/reset-password", post(form_reset_password))
+        // Deferred-feature 2: the verify-email expired/invalid page's resend
+        // affordance (anti-enumeration; same dual IP+email limiter family as
+        // the JSON forgot-password route).
+        .route(
+            "/web/auth/resend-verification",
+            post(form_resend_verification),
+        )
         .route("/web/auth/logout", post(form_logout))
         // Control-plane operator login (the CP login form posts here).
         .route("/web/cp/login", post(form_cp_login))
@@ -304,6 +311,9 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/billing/checkout", post(form_billing_checkout))
         .route("/web/billing/portal", post(form_billing_portal))
         .route("/web/contacts", post(form_contact_create))
+        // Deferred-feature 3: single-contact edit (name/status) — the PRG
+        // twin the contacts list page's Edit links post to.
+        .route("/web/contacts/update", post(form_contact_update))
         .route("/web/contacts/delete-bulk", post(form_contacts_delete_bulk))
         .route("/web/contacts/export.csv", get(form_contacts_export))
         .route("/web/contacts/import", post(form_contacts_import))
@@ -352,6 +362,13 @@ pub fn detail_router() -> Router<AppState> {
         // Batch-2 list-detail fix: /lists/{id} renders the real list (name,
         // subscriber counts, working Edit/Delete with the real id).
         .route("/lists/:id", get(web_list_detail))
+        // Deferred-feature 3: /contacts/{id}/edit renders the real contact
+        // (name/status editor posting to /web/contacts/update).
+        .route("/contacts/:id/edit", get(web_contact_edit))
+        // Deferred-feature 8: the favicon ships as the inline data: URL every
+        // root layout embeds (`<link rel="icon">`) — no route is needed for
+        // it, and /favicon.ico is already served by the marketing asset
+        // router (app.rs), so browsers without the link still resolve one.
 }
 
 /// Control-plane form routes (`/web/admin/*`). These mutate platform
@@ -363,6 +380,14 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/web/admin/tenants", post(form_admin_tenant_create))
         .route("/web/admin/operators", post(form_admin_operator_create))
+        // Deferred-feature 6: START impersonation from the control-plane UI —
+        // the tenants list's per-row action. Owner-only, system-gated, and
+        // wired through the SAME machinery as POST /v1/auth/impersonate
+        // (signed token, single-use jti, audit rows, fail-closed Redis).
+        .route(
+            "/web/admin/tenants/:id/impersonate",
+            post(form_admin_tenant_impersonate),
+        )
         // Batch-2 stub removal: the bare `/web/admin/sales/discovery` and
         // `/web/admin/sales/outreach` twins only flashed a pointer at the
         // API — they served no mutation, so the routed-but-useless forms
@@ -821,6 +846,60 @@ async fn clear_mfa_verify_failures(state: &AppState, user_id: &str) {
     if let Ok(mut conn) = state.redis.get().await {
         let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &key).await;
     }
+}
+
+/// Deferred-feature 1 (MFA recovery-code login): verify a recovery code
+/// against the SAME store the JSON login consumes (`users.mfa_recovery_hashes`,
+/// auth.rs `verify_and_consume_recovery_code`) and consume it single-use —
+/// the matched hash is removed in one guarded UPDATE that still expects the
+/// full original hash set, so a concurrent consumption (another tab spent the
+/// code between this read and this write) matches zero rows and fails closed.
+/// A DB fault also fails closed; the caller records a verification failure
+/// either way, so wrong codes count toward the shared lockout.
+async fn verify_and_consume_recovery_code(
+    db: &sqlx::PgPool,
+    user_id: &str,
+    tenant_id: &str,
+    code: &str,
+    stored_hashes_json: Option<&serde_json::Value>,
+) -> bool {
+    let Some(stored_hashes) = stored_hashes_json.and_then(|json| json.as_array()) else {
+        return false;
+    };
+    if stored_hashes.is_empty() {
+        return false;
+    }
+    let hashes: Vec<String> = stored_hashes
+        .iter()
+        .filter_map(|value| value.as_str().map(String::from))
+        .collect();
+    let Some(matched_index) = hashes
+        .iter()
+        .position(|hash| apexmail_lib::mfa::verify_recovery_code(code, hash))
+    else {
+        return false;
+    };
+    let remaining: Vec<&str> = hashes
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != matched_index)
+        .map(|(_, hash)| hash.as_str())
+        .collect();
+    let Ok(remaining_json) = serde_json::to_value(&remaining) else {
+        return false;
+    };
+    sqlx::query(
+        "UPDATE users SET mfa_recovery_hashes = $1, updated_at = NOW()
+         WHERE id = $2::uuid AND tenant_id = $3 AND mfa_recovery_hashes = $4",
+    )
+    .bind(&remaining_json)
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(stored_hashes_json)
+    .execute(db)
+    .await
+    .map(|result| result.rows_affected() == 1)
+    .unwrap_or(false)
 }
 
 /// Revoke every live session for the user (same Redis key the auth
@@ -2266,6 +2345,11 @@ async fn form_mfa_verify(
 ) -> Response {
     let email = field(&form, "email").trim().to_string();
     let code = field(&form, "code").trim().to_string();
+    // Deferred-feature 1: the challenge page's "Use a recovery code instead"
+    // disclosure posts this field. Either a TOTP `code` OR a `recovery_code`
+    // completes the challenge; both ride the same CSRF/challenge/lockout
+    // chain and the same single-use store the JSON API consumes.
+    let recovery_code = field(&form, "recovery_code").trim().to_string();
     let return_to = safe_return_to(&form, "/dashboard");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/login", &state.config);
@@ -2309,7 +2393,10 @@ async fn form_mfa_verify(
             &state.config,
         );
     }
-    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+    // The 6-digit shape check applies only to the authenticator path: a
+    // recovery code has its own longer format and is validated against its
+    // own store below.
+    if recovery_code.is_empty() && (code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit())) {
         return redirect_error(
             "Enter the 6-digit code from your authenticator app.",
             &format!(
@@ -2323,33 +2410,55 @@ async fn form_mfa_verify(
     // users.id is UUID (canonical migration 052): the session user id is a
     // String, so cast the bind — an uncast text bind is an operator error
     // (uuid = text does not exist), not a match.
-    let secret =
-        sqlx::query_scalar::<_, Option<String>>("SELECT mfa_secret FROM users WHERE id = $1::uuid")
-            .bind(&user.id)
-            .fetch_one(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .filter(|stored| !stored.is_empty());
-    let totp_valid = match secret {
-        Some(encrypted) => {
-            // Secrets are encrypted at rest with the user id as AAD
-            // (CRIT-10); decrypt then verify the TOTP code.
-            let aad = format!("user_id={}", user.id).into_bytes();
-            match apexmail_lib::secret_at_rest::decrypt_at_rest(&encrypted, &aad) {
-                Ok(secret) => {
-                    // Hardened verifier (F3): the shared lockout state +
-                    // single-use replay guard the JSON surface uses, so a
-                    // console MFA code is bounded and never replayable.
-                    crate::routes::auth::verify_totp_code_guarded(&state.redis, &secret, &code)
-                        .await
+    let (secret, recovery_hashes): (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT mfa_secret, mfa_recovery_hashes FROM users WHERE id = $1::uuid",
+    )
+    .bind(&user.id)
+    .fetch_one(&state.db)
+    .await
+    .map(|(secret, hashes): (Option<String>, Option<serde_json::Value>)| {
+        (secret.filter(|stored| !stored.is_empty()), hashes)
+    })
+    .unwrap_or((None, None));
+    let mut totp_valid = false;
+    if recovery_code.is_empty() {
+        totp_valid = match secret {
+            Some(encrypted) => {
+                // Secrets are encrypted at rest with the user id as AAD
+                // (CRIT-10); decrypt then verify the TOTP code.
+                let aad = format!("user_id={}", user.id).into_bytes();
+                match apexmail_lib::secret_at_rest::decrypt_at_rest(&encrypted, &aad) {
+                    Ok(secret) => {
+                        // Hardened verifier (F3): the shared lockout state +
+                        // single-use replay guard the JSON surface uses, so a
+                        // console MFA code is bounded and never replayable.
+                        crate::routes::auth::verify_totp_code_guarded(&state.redis, &secret, &code)
+                            .await
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
             }
-        }
-        None => false,
+            None => false,
+        };
+    }
+    // Deferred-feature 1: fall back to the recovery-code store (the SAME
+    // `users.mfa_recovery_hashes` column the JSON login consumes) when the
+    // authenticator path did not already succeed. Consumption is single-use:
+    // a matched code is removed from the stored set in the same guarded
+    // UPDATE, so presenting it again fails and counts toward lockout.
+    let recovery_valid = if !totp_valid && !recovery_code.is_empty() {
+        verify_and_consume_recovery_code(
+            &state.db,
+            &user.id,
+            &user.tenant_id,
+            &recovery_code,
+            recovery_hashes.as_ref(),
+        )
+        .await
+    } else {
+        false
     };
-    if !totp_valid {
+    if !totp_valid && !recovery_valid {
         record_mfa_verify_failure(&state, &user.id).await;
         return redirect_error(
             "That code did not match. Check your authenticator and try again.",
@@ -2720,6 +2829,198 @@ async fn form_forgot_password(
         "/forgot-password",
         &state.config,
     )
+}
+
+/// Rate-limit budget for the SSR resend-verification form — the same
+/// dual (IP + hashed email) shape and 15-minute window the JSON
+/// forgot-password route uses (F-11): 5 requests per IP, 3 per address.
+const RESEND_VERIFICATION_WINDOW_SECS: u64 = 15 * 60;
+const RESEND_VERIFICATION_MAX_PER_IP: i64 = 5;
+const RESEND_VERIFICATION_MAX_PER_EMAIL: i64 = 3;
+
+/// Deferred-feature 2: POST /web/auth/resend-verification — the
+/// expired/invalid verify-email page's resend affordance.
+///
+/// Anti-enumeration contract: the response is byte-identical whether or not
+/// the address belongs to a real, unverified account. The limiter counters
+/// tick for UNKNOWN addresses too (increment happens before the lookup, like
+/// the JSON forgot-password flow), so probing addresses cannot distinguish
+/// "queued a fresh link" from "no such account" by watching the rate limit.
+async fn form_resend_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let neutral_flash = "If that address needs verification, a fresh link is on the way.";
+    let email = field(&form, "email").trim().to_lowercase();
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/verify-email", &state.config);
+    }
+    if !valid_email(&email) {
+        // Same neutral redirect for malformed input — an error naming the
+        // field would still confirm nothing, but the neutral path keeps the
+        // contract one-shaped.
+        return redirect_success(neutral_flash, "/verify-email", &state.config);
+    }
+
+    // Dual rate limit (IP + hashed email), failing closed on Redis loss in
+    // production exactly like the JSON forgot-password limiter: flooding a
+    // victim's inbox must not get EASIER while the platform is degraded.
+    let client_ip = connect_info
+        .map(|ConnectInfo(addr)| {
+            crate::middleware::rate_limiter::extract_public_client_ip(
+                &headers,
+                addr.ip(),
+                &state.config.trusted_proxies,
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let ip_rate_key = format!("apexmail:resend_verification_rate:ip:{client_ip}");
+    // Audit J: hash the address into the Redis key — no raw PII key names.
+    let email_rate_key = format!(
+        "apexmail:resend_verification_rate:email:{}",
+        crate::routes::helpers::hash_token(&email)
+    );
+    let rate_limited = match state.redis.get().await {
+        Ok(mut conn) => deadpool_redis::redis::Script::new(
+            r#"
+                local ip_key = KEYS[1]
+                local email_key = KEYS[2]
+                local max_ip = tonumber(ARGV[1])
+                local max_email = tonumber(ARGV[2])
+                local window_secs = tonumber(ARGV[3])
+
+                local ip_count = redis.call('INCR', ip_key)
+                if ip_count == 1 then
+                    redis.call('EXPIRE', ip_key, window_secs)
+                end
+
+                local email_count = redis.call('INCR', email_key)
+                if email_count == 1 then
+                    redis.call('EXPIRE', email_key, window_secs)
+                end
+
+                if ip_count > max_ip or email_count > max_email then
+                    return 1
+                end
+                return 0
+            "#,
+        )
+        .key(&ip_rate_key)
+        .key(&email_rate_key)
+        .arg(RESEND_VERIFICATION_MAX_PER_IP)
+        .arg(RESEND_VERIFICATION_MAX_PER_EMAIL)
+        .arg(RESEND_VERIFICATION_WINDOW_SECS)
+        .invoke_async::<i64>(&mut *conn)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "resend-verification rate-limit script failed; treating as rate-limited");
+            1
+        })
+            == 1,
+        Err(error) => {
+            if state.config.environment.is_production() {
+                tracing::error!(error = %error, "Redis unavailable for resend-verification limiter; failing closed");
+                true
+            } else {
+                tracing::warn!(error = %error, "Redis unavailable for resend-verification limiter; failing open outside production");
+                false
+            }
+        }
+    };
+    if rate_limited {
+        return redirect_error(
+            "Too many verification emails requested. Try again in a few minutes.",
+            "/verify-email",
+            &state.config,
+        );
+    }
+
+    // Only a real, still-unverified, active account gets a fresh token. The
+    // issuance mirrors the signup flow exactly: SHA-256 token hash in
+    // users.metadata, verification email in the system-sender outbox, ONE
+    // transaction.
+    let user: Option<(String,)> = sqlx::query_as(
+        "SELECT id::text FROM users
+         WHERE LOWER(email) = LOWER($1) AND email_verified = false AND status = 'active'
+         LIMIT 1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((user_id,)) = user {
+        let token = uuid::Uuid::new_v4().to_string();
+        let token_hash = crate::routes::helpers::hash_token(&token);
+        let expires = Utc::now() + chrono::Duration::hours(24);
+
+        let issued: Result<(), crate::error::ApiError> = async {
+            let mut tx = state.db.begin().await?;
+            let update = sqlx::query(
+                "UPDATE users
+                 SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                 || jsonb_build_object('verification_token_hash', $1::text,
+                                                       'verification_expires', $2::text),
+                     updated_at = NOW()
+                 WHERE id = $3::uuid AND email_verified = false AND status = 'active'",
+            )
+            .bind(&token_hash)
+            .bind(expires.to_rfc3339())
+            .bind(&user_id)
+            .execute(&mut *tx)
+            .await?;
+            if update.rows_affected() != 1 {
+                // Verified (or deactivated) between the lookup and this
+                // write: no token, no email.
+                tx.rollback().await?;
+                return Ok(());
+            }
+
+            // Same body the signup flow queues (audit F9: the address is
+            // attacker-controllable text — escape it in the HTML body).
+            let verification_link = format!(
+                "{}/v1/auth/verify-email/{}",
+                state.config.base_url.trim_end_matches('/'),
+                urlencode(&token)
+            );
+            let email_html = html_escape_text(&email);
+            let html_body = format!(
+                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
+            );
+            let text_body = format!(
+                "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours."
+            );
+            crate::routes::system_sender::queue_system_email_in_transaction(
+                &mut tx,
+                &email,
+                "Verify your ApexMail account",
+                &html_body,
+                &text_body,
+                vec!["system".into(), "verification".into()],
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+
+        match issued {
+            Ok(()) => {
+                tracing::info!(user_id = %user_id, "web resend-verification email enqueued");
+            }
+            Err(error) => {
+                // Queue/hash faults must not leak into a distinguishable
+                // response: the neutral flash ships either way (the failure
+                // is logged with the cause).
+                tracing::error!(error = %error, "web resend-verification issuance failed");
+            }
+        }
+    }
+
+    redirect_success(neutral_flash, "/verify-email", &state.config)
 }
 
 async fn form_reset_password(
@@ -3884,6 +4185,121 @@ async fn form_contact_create(
         Err(_) => redirect_error(
             "Could not add the contact. It may already exist.",
             "/contacts/new",
+            &state.config,
+        ),
+    }
+}
+
+/// GET /contacts/{id}/edit — the contact editor (deferred-feature 3). Like
+/// the other detail pages this route lives outside require_auth and resolves
+/// the browser session inside the handler; the anonymous contract is the
+/// standard 303 /login?next=… redirect. A contact id from another workspace
+/// (or a deleted one) flashes the honest not-found instead of rendering an
+/// editor for a row that would never save.
+async fn web_contact_edit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user) = browser_session_user(&state, &headers, &uri).await else {
+        return login_redirect(
+            uri.path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or(uri.path()),
+        );
+    };
+    let flash = flash_from_headers(&headers, &state.config);
+    let row: Option<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id::text, email, name, status FROM contacts
+         WHERE id = $1::uuid AND tenant_id = $2 AND status <> 'deleted'",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((contact_id, email, name, status)) = row else {
+        return redirect_error(
+            "That contact could not be found in this workspace.",
+            "/contacts",
+            &state.config,
+        );
+    };
+    let detail = ui_foundation::view_data::ContactEditData {
+        id: contact_id,
+        email,
+        name: name.unwrap_or_default(),
+        status,
+    };
+    let form_csrf = form_csrf_for_render(&headers, &state.config);
+    let path = format!("/contacts/{}/edit", detail.id);
+    let mut inner = stub_flash_banner(&flash);
+    inner.push_str(&ui_foundation::leptos_views::web_contact_edit_page_with_values(
+        &detail,
+    ));
+    let layout = ui_foundation::leptos_views::web_dashboard_layout_with_csrf(
+        &inner,
+        &path,
+        &form_csrf.token,
+    );
+    let title = ui_foundation::axum_router::route_document_title("web", &path);
+    let html = ui_foundation::leptos_views::web_root_layout(&layout, &title);
+    html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
+}
+
+async fn form_contact_update(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/contacts", &state.config);
+    }
+    let id = field(&form, "id");
+    let name = field_truncated(&form, "name", 120);
+    let status = field(&form, "status").trim().to_string();
+    if id.is_empty() {
+        return redirect_error("Pick a contact to save.", "/contacts", &state.config);
+    }
+    // The status vocabulary is the contacts table's: anything else is a
+    // tampered form, refused before the UPDATE.
+    if !matches!(status.as_str(), "subscribed" | "unsubscribed" | "bounced") {
+        return redirect_error(
+            "Choose a valid status for the contact.",
+            "/contacts",
+            &state.config,
+        );
+    }
+    // contacts.id is a UUID column (068/069 lineage — ci/README §9 F4): cast
+    // the String form bind, and scope the UPDATE to the caller's tenant so a
+    // foreign-tenant id is honestly "not found", never "saved".
+    let result = sqlx::query(
+        "UPDATE contacts SET name = $1, status = $2, updated_at = NOW()
+         WHERE id = $3::uuid AND tenant_id = $4 AND status <> 'deleted'",
+    )
+    .bind(if name.is_empty() { None } else { Some(name) })
+    .bind(&status)
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .execute(&state.db)
+    .await;
+    match result {
+        // Honest row count: an id from another workspace (or a deleted one)
+        // must not be reported as saved.
+        Ok(result) if result.rows_affected() == 1 => {
+            redirect_success("Contact saved.", "/contacts", &state.config)
+        }
+        Ok(_) => redirect_error(
+            "That contact could not be found in this workspace.",
+            "/contacts",
+            &state.config,
+        ),
+        Err(_) => redirect_error(
+            "Could not save the contact. Check the identifier.",
+            "/contacts",
             &state.config,
         ),
     }
@@ -5485,6 +5901,19 @@ async fn form_confirm_destructive(
                 .map(|r| r.rows_affected())
         }
         // ── Bulk intents (item G): the id list is the signed resource ──
+        // Deferred-feature 3: single-contact soft-delete — the same
+        // `status = 'deleted'` treatment the bulk path applies, one row.
+        "delete-contact" => {
+            sqlx::query(
+                "UPDATE contacts SET status = 'deleted', updated_at = NOW()
+                 WHERE id = $1::uuid AND tenant_id = $2 AND status <> 'deleted'",
+            )
+            .bind(&id)
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .map(|r| r.rows_affected())
+        }
         "delete-campaigns-bulk" => {
             let ids = parse_bulk_ids(&id);
             sqlx::query("DELETE FROM campaigns WHERE id = ANY($1::uuid[]) AND tenant_id = $2")
@@ -5577,6 +6006,7 @@ async fn form_confirm_destructive(
         }
     };
     let noun = match intent.as_str() {
+        "delete-contact" => "contact(s)",
         "delete-contacts-bulk" => "contact(s)",
         "delete-campaigns-bulk" => "campaign(s)",
         "delete-lists-bulk" => "list(s)",
@@ -5968,6 +6398,199 @@ async fn form_admin_operator_create(
             &state.config,
         ),
     }
+}
+
+/// Server-side lifetime of a UI-minted impersonation token: 30 minutes —
+/// within the JSON surface's 1-hour cap, comfortably inside the session
+/// cookie budget, and long enough for a support session.
+const IMPERSONATION_UI_TTL_MS: i64 = 30 * 60 * 1000;
+
+/// Deferred-feature 6: POST /web/admin/tenants/:id/impersonate — START
+/// impersonation from the control-plane tenants list. The route rides
+/// `admin_router`'s system-tenant middleware; the handler additionally
+/// requires the OWNER role (the JSON surface's wildcard-scope check alone
+/// admits customer and admin-operator wildcard holders — audit D — so the
+/// SSR twin checks the authoritative role instead).
+///
+/// The token is minted server-side through the SAME machinery the JSON route
+/// verifies: HMAC-SHA256 (base64url payload + signature over
+/// `impersonation_secret`), mandatory `exp`/`jti`, single-use jti tombstone
+/// in Redis that FAILS CLOSED when Redis is unavailable, and the
+/// `impersonation_session_started` audit row written before the session
+/// cookie is set.
+async fn form_admin_tenant_impersonate(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let back = "/tenants";
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, back, &state.config);
+    }
+    // Owner-only: resolve the session user's authoritative role from the
+    // users table (the session claims' scopes are not the owner test).
+    let operator_role: Option<String> = match user.user_id.as_deref() {
+        Some(user_id) => sqlx::query_scalar("SELECT role FROM users WHERE id = $1::uuid")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    if operator_role.as_deref() != Some("owner") {
+        return redirect_error("Only ApexMail owners can start impersonation.", back, &state.config);
+    }
+    let target_tenant = field(&form, "id");
+    if target_tenant.is_empty() {
+        return redirect_error("Pick a tenant to impersonate.", back, &state.config);
+    }
+    let Some((tenant_id, tenant_name, tenant_status)): Option<(String, String, String)> =
+        sqlx::query_as("SELECT id::text, name, status FROM tenants WHERE id = $1")
+            .bind(&target_tenant)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+    else {
+        return redirect_error("That tenant could not be found.", back, &state.config);
+    };
+    if tenant_status == "deleted" {
+        return redirect_error("Deleted tenants cannot be impersonated.", back, &state.config);
+    }
+    let operator_id = user.user_id.clone().unwrap_or_default();
+    let operator_name = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT name FROM users WHERE id = $1::uuid",
+    )
+    .bind(&operator_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or_else(|| "Operator".to_string());
+
+    let now_ms = Utc::now().timestamp_millis();
+    let exp = now_ms + IMPERSONATION_UI_TTL_MS;
+    let jti = Uuid::new_v4().simple().to_string();
+    let token_payload = json!({
+        "type": "impersonation",
+        "tenantId": tenant_id,
+        "operatorId": operator_id,
+        "operatorName": operator_name,
+        "exp": exp,
+        "jti": jti,
+    });
+    let Some(token) = impersonation_sign_payload(&token_payload, &state.config.impersonation_secret)
+    else {
+        return redirect_error(
+            "Impersonation is temporarily unavailable. Try again.",
+            back,
+            &state.config,
+        );
+    };
+
+    // Consume the jti single-use (audit D) — fails CLOSED when Redis is
+    // unreachable, so an outage can never mint a replayable session.
+    if let Err(error) = impersonation_consume_jti(&state, &jti, exp).await {
+        tracing::error!(error = %error, "web impersonation jti consumption failed; refusing");
+        return redirect_error(
+            "Impersonation is temporarily unavailable. Try again.",
+            back,
+            &state.config,
+        );
+    }
+
+    // The audit row is on the critical path (same contract as the JSON
+    // route): an unaudited impersonation session is never minted.
+    let audited = crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(&tenant_id),
+        None,
+        "impersonation_session_started",
+        "session",
+        Some(&jti),
+        json!({
+            "operator_id": operator_id,
+            "operator_name": operator_name,
+            "token_id": jti,
+            "tenant_name": tenant_name,
+            "started_via": "web_console",
+        }),
+        None,
+        None,
+    )
+    .await;
+    if let Err(error) = audited {
+        tracing::error!(error = %error, "web impersonation audit write failed; refusing");
+        return redirect_error(
+            "Impersonation is temporarily unavailable. Try again.",
+            back,
+            &state.config,
+        );
+    }
+
+    let max_age_secs = IMPERSONATION_UI_TTL_MS / 1000;
+    let cookie = format!(
+        "impersonation_session={token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Strict{}",
+        if is_secure(&state.config) { "; Secure" } else { "" },
+    );
+    let mut response = redirect_success(
+        &format!("Impersonating {tenant_name}. Every action is audit-logged."),
+        "/dashboard",
+        &state.config,
+    );
+    if let Ok(value) = cookie.parse() {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+}
+
+/// Sign an impersonation token payload exactly like the JSON surface's
+/// `create_signed_token` (impersonate.rs): base64url(JSON) + '.' +
+/// base64url(HMAC-SHA256) under the impersonation secret.
+fn impersonation_sign_payload(payload: &serde_json::Value, secret: &str) -> Option<String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use base64::Engine as _;
+
+    let payload_json = serde_json::to_vec(payload).ok()?;
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json);
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload_b64.as_bytes());
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    Some(format!("{payload_b64}.{sig_b64}"))
+}
+
+/// Consume an impersonation jti single-use — the JSON route's
+/// `consume_impersonation_jti` semantics (audit D): `SET NX EX` tombstone
+/// for the token's remaining lifetime, failing closed (Err) when Redis is
+/// unavailable so tokens cannot be replayed during an outage.
+async fn impersonation_consume_jti(state: &AppState, jti: &str, exp_ms: i64) -> Result<(), String> {
+    const MAX_TTL_MS: i64 = 60 * 60 * 1000;
+    let now_ms = Utc::now().timestamp_millis();
+    let remaining_ms = (exp_ms - now_ms).max(0);
+    let ttl_secs = ((remaining_ms + 5_000) / 1000).clamp(1, MAX_TTL_MS / 1000 + 5) as u64;
+    let key = format!("apexmail:impersonation_used:{jti}");
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|error| format!("redis pool unavailable: {error}"))?;
+    let newly_set: Option<String> = deadpool_redis::redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|error| format!("redis SET NX failed: {error}"))?;
+    if newly_set.is_none() {
+        return Err("impersonation jti already consumed".to_string());
+    }
+    Ok(())
 }
 
 // ─── Admin sales ─────────────────────────────────────────────────
@@ -21732,4 +22355,1406 @@ mod outage_matrix_tests {
             }
         }
     }
+}
+// ─── Deferred console features: the adversarial close-out ─────────
+//
+// One focused test-cluster per deferred feature: MFA recovery-code login,
+// resend-verification with anti-enumeration, contact edit + single delete,
+// the suppressions page, per-campaign stats, impersonation START from the
+// control plane, the scheduled-campaign truth copy, and the favicon. Every
+// DB-backed test runs on its own canonical-pool clone; Redis-backed paths
+// gate on TEST_REDIS_URL and isolate their keys.
+#[cfg(test)]
+mod deferred_feature_tests {
+    use super::coverage_handler_tests::{
+        flash_text, location, set_cookies, signed_form,
+    };
+    use super::*;
+    use crate::routes::web::data::coverage_support;
+    use hmac::Mac as _;
+    use std::net::{IpAddr, SocketAddr};
+
+    /// Loopback address unique per test: the resend limiter's IP bucket must
+    /// never let two parallel tests share a window.
+    fn loopback_ip(octet: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, octet]), 0)
+    }
+
+    /// RFC 6238 TOTP (SHA-256, 6 digits, 30s) — same construction the
+    /// residual-coverage module uses (local copy: those helpers are
+    /// module-private).
+    fn totp_code(secret_base32: &str) -> String {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut key = Vec::new();
+        let mut bits: u64 = 0;
+        let mut bit_count: u32 = 0;
+        for symbol in secret_base32.trim_end_matches('=').bytes() {
+            let value = alphabet
+                .iter()
+                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .expect("base32 alphabet") as u64;
+            bits = (bits << 5) | value;
+            bit_count += 5;
+            if bit_count >= 8 {
+                bit_count -= 8;
+                key.push((bits >> bit_count) as u8);
+                bits &= (1u64 << bit_count) - 1;
+            }
+        }
+        let step = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            / 30;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("hmac key");
+        mac.update(&step.to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        let offset = (result[result.len() - 1] & 0x0f) as usize;
+        let code = u32::from_be_bytes([
+            result[offset] & 0x7f,
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ]);
+        format!("{:06}", code % 1_000_000)
+    }
+
+    fn random_base32_secret() -> String {
+        use rand::TryRngCore;
+        let mut bytes = [0u8; 20];
+        rand::rngs::OsRng.try_fill_bytes(&mut bytes).expect("os rng");
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut secret = String::with_capacity(32);
+        let mut buffer: u16 = 0;
+        let mut bits_left: u8 = 0;
+        for byte in bytes {
+            buffer = (buffer << 8) | u16::from(byte);
+            bits_left += 8;
+            while bits_left >= 5 {
+                let index = ((buffer >> (bits_left - 5)) & 0x1f) as usize;
+                secret.push(alphabet[index] as char);
+                bits_left -= 5;
+            }
+        }
+        secret
+    }
+
+    async fn flush_resend_limiter_keys(state: &AppState, email: &str, ip: &str) {
+        let Ok(mut conn) = state.redis.get().await else {
+            return;
+        };
+        let _: Result<i64, _> = redis::AsyncCommands::del(
+            &mut *conn,
+            format!("apexmail:resend_verification_rate:ip:{ip}"),
+        )
+        .await;
+        let _: Result<i64, _> = redis::AsyncCommands::del(
+            &mut *conn,
+            format!(
+                "apexmail:resend_verification_rate:email:{}",
+                crate::routes::helpers::hash_token(email)
+            ),
+        )
+        .await;
+    }
+
+    /// Seed one ACTIVE, MFA-ENROLLED user in a fresh tenant with the given
+    /// recovery codes. Returns (state, user id, email, totp secret, codes).
+    async fn seed_mfa_user(
+        test: &str,
+        codes: &[&str],
+    ) -> Option<(AppState, String, String, String, Vec<String>)> {
+        let app = coverage_support::rsa_state(test).await?;
+        let (tenant, tag) = coverage_support::tenant_pair("dfm");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Deferred MFA Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("dfm-{tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed tenant");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!("mfa-{tag}@example.test");
+        let secret = random_base32_secret();
+        let encrypted = apexmail_lib::secret_at_rest::encrypt_at_rest(
+            &secret,
+            format!("user_id={user_id}").as_bytes(),
+        )
+        .expect("encrypt secret");
+        let hashes: Vec<String> = codes
+            .iter()
+            .map(|code| apexmail_lib::mfa::hash_recovery_code(code))
+            .collect();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, mfa_secret, mfa_recovery_hashes,
+                                created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'MFA Owner', 'x', 'owner', 'active', true, true, $4, $5::jsonb, NOW(), NOW())",
+        )
+        .bind(&user_id)
+        .bind(&tenant)
+        .bind(&email)
+        .bind(&encrypted)
+        .bind(serde_json::to_value(&hashes).expect("recovery hashes json"))
+        .execute(&app.db)
+        .await
+        .expect("seed mfa user");
+        Some((app, user_id, email, secret, codes.iter().map(|c| c.to_string()).collect()))
+    }
+
+    /// Headers carrying a valid login challenge + the double-submit CSRF pair.
+    fn challenge_headers(config: &Config, challenge: &str) -> (HeaderMap, String) {
+        let csrf = form_csrf_for_render(&HeaderMap::new(), config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("apexmail_login_challenge={challenge}; csrf_token={}", csrf.token)
+                .parse()
+                .expect("cookie header"),
+        );
+        (headers, csrf.token)
+    }
+
+    // ── Feature 1: MFA recovery-code login ─────────────────────────
+
+    #[tokio::test]
+    async fn recovery_code_logs_in_and_totp_still_works() {
+        let Some((app, user_id, email, secret, codes)) = seed_mfa_user(
+            "df_recovery_login",
+            &["recover-alpha", "recover-beta"],
+        )
+        .await
+        else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let challenge = sign_login_challenge(&app.config, &user_id, &email);
+
+        // 1. The recovery code completes the challenge and mints a session.
+        let (headers, csrf) = challenge_headers(&app.config, &challenge);
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email.clone());
+        form.insert("recovery_code".to_string(), codes[0].clone());
+        form.insert("_csrf".to_string(), csrf);
+        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "a valid recovery code must complete the login; cookies {:?}",
+            set_cookies(&response)
+        );
+        // The consumed code is GONE from the store.
+        let remaining: i32 = sqlx::query_scalar(
+            "SELECT jsonb_array_length(mfa_recovery_hashes) FROM users WHERE id = $1::uuid",
+        )
+        .bind(&user_id)
+        .fetch_one(&app.db)
+        .await
+        .expect("recovery hash count");
+        assert_eq!(remaining, 1, "exactly one code must remain after consumption");
+
+        // 2. The authenticator path still works for a fresh challenge.
+        let challenge = sign_login_challenge(&app.config, &user_id, &email);
+        let (headers, csrf) = challenge_headers(&app.config, &challenge);
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email);
+        form.insert("code".to_string(), totp_code(&secret));
+        form.insert("_csrf".to_string(), csrf);
+        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "TOTP must still work after a recovery-code login"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_recovery_code_is_single_use() {
+        let Some((app, user_id, email, _secret, codes)) = seed_mfa_user(
+            "df_recovery_single_use",
+            &["reuse-one", "reuse-two"],
+        )
+        .await
+        else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let verify = |state: AppState, email: String, code: String| {
+            let challenge = sign_login_challenge(&state.config, &user_id, &email);
+            async move {
+                let (headers, csrf) = challenge_headers(&state.config, &challenge);
+                let mut form = HashMap::new();
+                form.insert("email".to_string(), email);
+                form.insert("recovery_code".to_string(), code);
+                form.insert("_csrf".to_string(), csrf);
+                form_mfa_verify(State(state), headers, Form(form)).await
+            }
+        };
+
+        // First presentation: success.
+        let response = verify(app.clone(), email.clone(), codes[0].clone()).await;
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "first use must succeed"
+        );
+        // Replay of the SAME code: refused with the mismatch flash.
+        let response = verify(app.clone(), email.clone(), codes[0].clone()).await;
+        assert_eq!(flash_text(&response, &app.config), "That code did not match. Check your authenticator and try again.");
+        assert!(
+            !set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "a replayed recovery code must never mint a session"
+        );
+        // The second, still-unspent code keeps working.
+        let response = verify(app.clone(), email, codes[1].clone()).await;
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("am_session=")),
+            "the second code must still work"
+        );
+        let remaining: i32 = sqlx::query_scalar(
+            "SELECT jsonb_array_length(mfa_recovery_hashes) FROM users WHERE id = $1::uuid",
+        )
+        .bind(&user_id)
+        .fetch_one(&app.db)
+        .await
+        .expect("recovery hash count");
+        assert_eq!(remaining, 0, "both codes are now consumed");
+    }
+
+    #[tokio::test]
+    async fn wrong_recovery_code_counts_toward_lockout() {
+        let Some((app, user_id, email, _secret, _codes)) =
+            seed_mfa_user("df_recovery_lockout", &["good-code-1"]).await
+        else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        // Clean the shared lockout key (the canonical pools reuse ids only
+        // within this test, but the Redis key space is global).
+        if let Ok(mut conn) = app.redis.get().await {
+            let _: Result<i64, _> =
+                redis::AsyncCommands::del(&mut *conn, mfa_verify_failure_key(&user_id)).await;
+        }
+        let verify_wrong = |state: AppState, email: String| {
+            let challenge = sign_login_challenge(&state.config, &user_id, &email);
+            async move {
+                let (headers, csrf) = challenge_headers(&state.config, &challenge);
+                let mut form = HashMap::new();
+                form.insert("email".to_string(), email);
+                form.insert("recovery_code".to_string(), "wrong-code".to_string());
+                form.insert("_csrf".to_string(), csrf);
+                form_mfa_verify(State(state), headers, Form(form)).await
+            }
+        };
+        for attempt in 0..MFA_VERIFY_MAX_ATTEMPTS {
+            let response = verify_wrong(app.clone(), email.clone()).await;
+            assert_eq!(
+                flash_text(&response, &app.config),
+                "That code did not match. Check your authenticator and try again.",
+                "attempt {attempt} must see the mismatch flash"
+            );
+        }
+        // The window is now full: even the VALID recovery code is refused.
+        let challenge = sign_login_challenge(&app.config, &user_id, &email);
+        let (headers, csrf) = challenge_headers(&app.config, &challenge);
+        let mut form = HashMap::new();
+        form.insert("email".to_string(), email.clone());
+        form.insert("recovery_code".to_string(), "good-code-1".to_string());
+        form.insert("_csrf".to_string(), csrf);
+        let response = form_mfa_verify(State(app.clone()), headers, Form(form)).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Too many verification attempts. Try again in a few minutes.",
+            "the shared lockout must bound recovery-code attempts too"
+        );
+        // The valid code was NOT consumed by the locked-out attempt.
+        let remaining: i32 = sqlx::query_scalar(
+            "SELECT jsonb_array_length(mfa_recovery_hashes) FROM users WHERE id = $1::uuid",
+        )
+        .bind(&user_id)
+        .fetch_one(&app.db)
+        .await
+        .expect("recovery hash count");
+        assert_eq!(remaining, 1);
+    }
+
+    // ── Feature 2: resend verification email ───────────────────────
+
+    async fn seed_unverified_user(
+        app: &AppState,
+        email: &str,
+    ) {
+        let (tenant, _tag) = coverage_support::tenant_pair("dfr");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Resend Co', $2, 'free', 'pending', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&app.db)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, metadata, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Resend Owner', 'x', 'owner', 'active', false,
+                     jsonb_build_object('verification_token_hash', 'stale-hash',
+                                        'verification_expires', '2020-01-01T00:00:00+00:00'),
+                     NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&tenant)
+        .bind(email)
+        .execute(&app.db)
+        .await
+        .expect("seed unverified user");
+    }
+
+    /// Seed the system sender domain (apexmail.ee) with valid DKIM material —
+    /// the exact convention of coverage_detail_session_tests' seed_signup_sender,
+    /// so `queue_system_email_in_transaction` can actually persist the queued
+    /// verification email. Callers hold DKIM_ENV_MUTEX.
+    async fn seed_resend_system_sender(db: &sqlx::PgPool) {
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(
+            uuid::Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                .expect("system domain id is a uuid"),
+        )
+        .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+        .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("system sender seed must insert");
+    }
+
+    async fn queued_verification_emails(app: &AppState, email: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE to_emails->>0 = $1 AND subject = 'Verify your ApexMail account'",
+        )
+        .bind(email)
+        .fetch_one(&app.db)
+        .await
+        .expect("queue count")
+    }
+
+    #[tokio::test]
+    async fn resend_verification_requeues_a_fresh_token() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(app) = coverage_support::state("df_resend_fresh").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        seed_resend_system_sender(&app.db).await;
+        let email = format!("resend-{}@example.test", coverage_support::unique_tag("u"));
+        seed_unverified_user(&app, &email).await;
+        flush_resend_limiter_keys(&app, &email, "127.0.0.41").await;
+        let before = queued_verification_emails(&app, &email).await;
+
+        let (headers, form) = signed_form(&app.config, &[("email", email.as_str())]);
+        let response = form_resend_verification(
+            State(app.clone()),
+            headers,
+            Some(ConnectInfo(loopback_ip(41))),
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/verify-email");
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "If that address needs verification, a fresh link is on the way."
+        );
+        assert_eq!(
+            queued_verification_emails(&app, &email).await,
+            before + 1,
+            "a fresh verification email must be queued"
+        );
+        // The metadata now carries a NEW token hash (not the stale one) with
+        // a future expiry.
+        let (hash, expires): (String, String) = sqlx::query_as(
+            "SELECT metadata->>'verification_token_hash', metadata->>'verification_expires'
+             FROM users WHERE LOWER(email) = LOWER($1)",
+        )
+        .bind(&email)
+        .fetch_one(&app.db)
+        .await
+        .expect("user row");
+        assert_ne!(hash, "stale-hash", "a fresh token hash must replace the stale one");
+        let expires_at =
+            chrono::DateTime::parse_from_rfc3339(&expires).expect("typed expiry");
+        assert!(expires_at > chrono::Utc::now(), "the fresh token must not be expired");
+    }
+
+    #[tokio::test]
+    async fn resend_verification_is_anti_enumeration() {
+        let Some(app) = coverage_support::state("df_resend_enum").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        // A real, verified address vs a fabricated one: the RESPONSE must be
+        // byte-identical (and neither may name whether an account exists).
+        let known = format!("known-{}@example.test", coverage_support::unique_tag("u"));
+        let unknown = format!("unknown-{}@example.test", coverage_support::unique_tag("u"));
+        seed_unverified_user(&app, &known).await;
+        sqlx::query("UPDATE users SET email_verified = true WHERE LOWER(email) = LOWER($1)")
+            .bind(&known)
+            .execute(&app.db)
+            .await
+            .expect("verify the seeded user");
+        flush_resend_limiter_keys(&app, &known, "127.0.0.42").await;
+        flush_resend_limiter_keys(&app, &unknown, "127.0.0.42").await;
+
+        let probe = |state: AppState, email: String| async move {
+            let (headers, form) = signed_form(&state.config, &[("email", email.as_str())]);
+            form_resend_verification(
+                State(state),
+                headers,
+                Some(ConnectInfo(loopback_ip(42))),
+                Form(form),
+            )
+            .await
+        };
+        let known_response = probe(app.clone(), known.clone()).await;
+        let unknown_response = probe(app.clone(), unknown.clone()).await;
+        assert_eq!(location(&known_response), location(&unknown_response));
+        assert_eq!(known_response.status(), unknown_response.status());
+        assert_eq!(
+            flash_text(&known_response, &app.config),
+            flash_text(&unknown_response, &app.config),
+        );
+        // The verified account received NOTHING.
+        assert_eq!(queued_verification_emails(&app, &known).await, 0);
+        // Malformed input rides the same neutral path.
+        let (headers, form) = signed_form(&app.config, &[("email", "not-an-email")]);
+        let response = form_resend_verification(
+            State(app.clone()),
+            headers,
+            Some(ConnectInfo(loopback_ip(42))),
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "If that address needs verification, a fresh link is on the way."
+        );
+    }
+
+    #[tokio::test]
+    async fn resend_verification_rate_limit_fires() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(app) = coverage_support::state("df_resend_limit").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        seed_resend_system_sender(&app.db).await;
+        let email = format!("limited-{}@example.test", coverage_support::unique_tag("u"));
+        seed_unverified_user(&app, &email).await;
+        flush_resend_limiter_keys(&app, &email, "127.0.0.43").await;
+
+        let send = |state: AppState, email: String| async move {
+            let (headers, form) = signed_form(&state.config, &[("email", email.as_str())]);
+            form_resend_verification(
+                State(state),
+                headers,
+                Some(ConnectInfo(loopback_ip(43))),
+                Form(form),
+            )
+            .await
+        };
+        for _ in 0..RESEND_VERIFICATION_MAX_PER_EMAIL {
+            let response = send(app.clone(), email.clone()).await;
+            assert_eq!(
+                flash_text(&response, &app.config),
+                "If that address needs verification, a fresh link is on the way."
+            );
+        }
+        // The (email bucket) budget is spent: the limiter names itself, and
+        // the account receives no further email.
+        let response = send(app.clone(), email.clone()).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Too many verification emails requested. Try again in a few minutes."
+        );
+        assert_eq!(
+            queued_verification_emails(&app, &email).await,
+            RESEND_VERIFICATION_MAX_PER_EMAIL,
+            "the rate-limited request must not queue a fourth email"
+        );
+    }
+
+    // ── Feature 3: contact edit + single delete ────────────────────
+
+    async fn seed_contact(app: &AppState, tenant: &str, email: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Before', 'subscribed', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(email)
+        .execute(&app.db)
+        .await
+        .expect("seed contact");
+        id
+    }
+
+    async fn seed_bare_tenant(app: &AppState, tag: &str) -> String {
+        let (tenant, _) = coverage_support::tenant_pair(tag);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Edit Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}-{tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed tenant");
+        tenant
+    }
+
+    #[tokio::test]
+    async fn contact_edit_persists_with_prg() {
+        let Some(app) = coverage_support::state("df_contact_edit").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = seed_bare_tenant(&app, "edit").await;
+        let contact_id = seed_contact(&app, &tenant, "edit-me@example.test").await;
+        let user = coverage_support::user(&tenant);
+
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", contact_id.as_str()),
+                ("name", "Edited Name"),
+                ("status", "unsubscribed"),
+            ],
+        );
+        let response = form_contact_update(
+            State(app.clone()),
+            axum::Extension(user),
+            headers,
+            Form(form),
+        )
+        .await;
+        // PRG: 303 back to the contacts list with an honest success flash.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/contacts");
+        assert_eq!(flash_text(&response, &app.config), "Contact saved.");
+        let (name, status): (Option<String>, String) = sqlx::query_as(
+            "SELECT name, status FROM contacts WHERE id = $1::uuid",
+        )
+        .bind(&contact_id)
+        .fetch_one(&app.db)
+        .await
+        .expect("contact row");
+        assert_eq!(name.as_deref(), Some("Edited Name"));
+        assert_eq!(status, "unsubscribed");
+
+        // The editor page renders the loaded values for the same session.
+        let response = web_contact_edit(
+            State(app.clone()),
+            Path(contact_id.clone()),
+            axum::http::Uri::from_static("/contacts/x/edit"),
+            HeaderMap::new(),
+        )
+        .await;
+        // Anonymous (no session cookie) → the standard login redirect.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(location(&response).starts_with("/login?next="));
+    }
+
+    #[tokio::test]
+    async fn contact_edit_refuses_tampered_status_and_foreign_ids() {
+        let Some(app) = coverage_support::state("df_contact_x").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant_a = seed_bare_tenant(&app, "xta").await;
+        let tenant_b = seed_bare_tenant(&app, "xtb").await;
+        let contact_id = seed_contact(&app, &tenant_a, "foreign@example.test").await;
+        let user_b = coverage_support::user(&tenant_b);
+
+        // A foreign-tenant id is honestly UNKNOWN — never "saved".
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", contact_id.as_str()),
+                ("name", "Hijack"),
+                ("status", "subscribed"),
+            ],
+        );
+        let response = form_contact_update(
+            State(app.clone()),
+            axum::Extension(user_b),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "That contact could not be found in this workspace.");
+        let (name, status): (Option<String>, String) = sqlx::query_as(
+            "SELECT name, status FROM contacts WHERE id = $1::uuid",
+        )
+        .bind(&contact_id)
+        .fetch_one(&app.db)
+        .await
+        .expect("contact row");
+        assert_eq!(name.as_deref(), Some("Before"), "nothing may change");
+        assert_eq!(status, "subscribed");
+
+        // A tampered status vocabulary is refused before any write.
+        let user_a = coverage_support::user(&tenant_a);
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("id", contact_id.as_str()),
+                ("name", "Any"),
+                ("status", "deleted; DROP TABLE contacts"),
+            ],
+        );
+        let response = form_contact_update(
+            State(app.clone()),
+            axum::Extension(user_a),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Choose a valid status for the contact."
+        );
+    }
+
+    #[tokio::test]
+    async fn single_delete_via_confirm_soft_deletes_like_bulk() {
+        let Some(app) = coverage_support::state("df_contact_del").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = seed_bare_tenant(&app, "del").await;
+        let contact_id = seed_contact(&app, &tenant, "delete-me@example.test").await;
+        let user = coverage_support::user(&tenant);
+
+        // The signed /confirm pattern: the intent+id pair is signed for a
+        // short TTL, and the POST re-verifies it server-side.
+        let sig = ui_foundation::flash::sign_confirmation_for_ttl(
+            &app.config.csrf_secret,
+            "delete-contact",
+            &contact_id,
+            Utc::now().timestamp(),
+            ui_foundation::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+        );
+        let (headers, form) = signed_form(
+            &app.config,
+            &[
+                ("intent", "delete-contact"),
+                ("id", contact_id.as_str()),
+                ("sig", sig.as_str()),
+                ("return_to", "/contacts"),
+            ],
+        );
+        let response = form_confirm_destructive(
+            State(app.clone()),
+            axum::Extension(user),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/contacts");
+        assert!(flash_text(&response, &app.config).contains("1 contact(s) processed."));
+        // SOFT delete: the row survives with status 'deleted' (bulk parity).
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM contacts WHERE id = $1::uuid")
+                .bind(&contact_id)
+                .fetch_one(&app.db)
+                .await
+                .expect("soft-deleted row");
+        assert_eq!(status, "deleted");
+    }
+
+    #[tokio::test]
+    async fn confirm_expiry_and_tamper_are_refused() {
+        let Some(app) = coverage_support::state("df_contact_sig").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = seed_bare_tenant(&app, "sig").await;
+        let contact_id = seed_contact(&app, &tenant, "sig-me@example.test").await;
+
+        let attempt = |state: AppState, sig: String| {
+            let user = coverage_support::user(&tenant);
+            let id = contact_id.clone();
+            async move {
+                let (headers, form) = signed_form(
+                    &state.config,
+                    &[
+                        ("intent", "delete-contact"),
+                        ("id", id.as_str()),
+                        ("sig", sig.as_str()),
+                        ("return_to", "/contacts"),
+                    ],
+                );
+                form_confirm_destructive(State(state), axum::Extension(user), headers, Form(form))
+                    .await
+            }
+        };
+        // Tampered signature.
+        let good_sig = ui_foundation::flash::sign_confirmation_for_ttl(
+            &app.config.csrf_secret,
+            "delete-contact",
+            &contact_id,
+            Utc::now().timestamp(),
+            ui_foundation::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+        );
+        let tampered = format!("{}{}", &good_sig[..good_sig.len() - 2], "zz");
+        let response = attempt(app.clone(), tampered).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "That confirmation link expired. Nothing was changed."
+        );
+        // A signature for a DIFFERENT id does not authorize this one.
+        let wrong_id_sig = ui_foundation::flash::sign_confirmation_for_ttl(
+            &app.config.csrf_secret,
+            "delete-contact",
+            &uuid::Uuid::new_v4().to_string(),
+            Utc::now().timestamp(),
+            ui_foundation::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+        );
+        let response = attempt(app.clone(), wrong_id_sig).await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "That confirmation link expired. Nothing was changed."
+        );
+        // Nothing was deleted.
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM contacts WHERE id = $1::uuid")
+                .bind(&contact_id)
+                .fetch_one(&app.db)
+                .await
+                .expect("untouched row");
+        assert_eq!(status, "subscribed");
+    }
+
+    // ── Feature 4: suppressions page ───────────────────────────────
+
+    async fn seed_suppression(app: &AppState, tenant: &str, email: &str, reason: &str) {
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
+             VALUES ($1, $2, $3, $4, NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(tenant)
+        .bind(email)
+        .bind(reason)
+        .execute(&app.db)
+        .await
+        .expect("seed suppression");
+    }
+
+    #[tokio::test]
+    async fn suppressions_rows_are_tenant_scoped_and_the_nav_link_resolves() {
+        let Some(app) = coverage_support::state("df_sup_scoped").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant_a = seed_bare_tenant(&app, "supa").await;
+        let tenant_b = seed_bare_tenant(&app, "supb").await;
+        seed_suppression(&app, &tenant_a, "a-one@example.test", "bounce").await;
+        seed_suppression(&app, &tenant_a, "a-two@example.test", "complaint").await;
+        seed_suppression(&app, &tenant_b, "b-other@example.test", "unsubscribe").await;
+
+        let user_a = coverage_support::user(&tenant_a);
+        let data =
+            load_page_data(&app, "web", "/settings/suppressions", None, Some(&user_a)).await;
+        let list = data.list.as_ref().expect("suppressions must be data-backed");
+        assert_eq!(list.title, "Suppressions");
+        assert_eq!(list.total_count, 2, "only tenant A's rows");
+        let rows = list.table.as_ref().expect("table").rows.clone();
+        let emails: Vec<String> = rows
+            .iter()
+            .filter_map(|row| row.cells.first())
+            .filter_map(|cell| match cell {
+                ui_foundation::view_data::DataCell::Text(email) => Some(email.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(emails.contains(&"a-one@example.test".to_string()));
+        assert!(emails.contains(&"a-two@example.test".to_string()));
+        assert!(
+            !emails.iter().any(|email| email.contains("b-other")),
+            "tenant B's suppression must never leak into tenant A's page"
+        );
+        // Read-only: no write affordances ride the data.
+        assert!(list.bulk_action.is_none(), "suppressions must not offer bulk deletes");
+        assert!(list.delete_intent.is_none(), "suppressions are compliance-owned");
+        assert!(list.primary_action.is_none());
+
+        // The full-page render carries the standard chrome + the nav entry
+        // under Settings.
+        let form_csrf = form_csrf_for_render(&HeaderMap::new(), &app.config);
+        let html = web_data_page(
+            "/settings/suppressions",
+            list,
+            "suppression",
+            &[],
+            &form_csrf.token,
+        );
+        assert!(html.contains("href=\"/settings/suppressions\""), "sidebar nav entry");
+        assert!(html.contains("a-one@example.test"));
+    }
+
+    #[tokio::test]
+    async fn suppressions_contract_is_unavailable_on_db_failure() {
+        let app = coverage_support::dead_state().await;
+        let user = coverage_support::user("dead0000000000000000000000");
+        let data =
+            load_page_data(&app, "web", "/settings/suppressions", None, Some(&user)).await;
+        let list = data.list.as_ref().expect("still data-backed");
+        assert!(
+            coverage_support::unavailable_marked(list),
+            "a failed query must render the explicit unavailable state, got {list:?}"
+        );
+        assert_eq!(list.total_count, 0, "the unknown count degrades to 0 WITH the flag");
+    }
+
+    // ── Feature 5: per-campaign stats ──────────────────────────────
+
+    async fn seed_campaign(app: &AppState, tenant: &str, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO campaigns (id, tenant_id, name, subject, status, sent_count, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 's', 'completed', 0, NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(name)
+        .execute(&app.db)
+        .await
+        .expect("seed campaign");
+        id
+    }
+
+    async fn seed_event(
+        app: &AppState,
+        tenant: &str,
+        campaign_id: &str,
+        event_type: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, campaign_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, $3, $4, 'r@example.test', NOW())",
+        )
+        .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
+        .bind(tenant)
+        .bind(campaign_id)
+        .bind(event_type)
+        .execute(&app.db)
+        .await
+        .expect("seed event");
+    }
+
+    fn stat_kpi<'a>(page: &'a ui_foundation::view_data::ListPageData, label: &str) -> ui_foundation::view_data::KpiCardData {
+        page.kpis
+            .iter()
+            .find(|kpi| kpi.label == label)
+            .unwrap_or_else(|| panic!("{label} KPI must render"))
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn campaign_detail_counts_only_this_campaigns_events() {
+        let Some(app) = coverage_support::state("df_stats_scoped").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant, _) = coverage_support::tenant_pair("stat");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Stats Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&app.db)
+        .await
+        .expect("seed tenant");
+        // campaigns carry UNIQUE(tenant_id, name): distinct names.
+        let campaign = seed_campaign(&app, &tenant, "Stats A").await;
+        let other_campaign = seed_campaign(&app, &tenant, "Stats B").await;
+
+        // 3 sent / 2 delivered / 1 opened / 1 clicked for THIS campaign.
+        for event_type in ["sent", "sent", "sent", "delivered", "delivered", "opened", "clicked"] {
+            seed_event(&app, &tenant, &campaign, event_type).await;
+        }
+        // Another campaign's events and another tenant's events must NOT
+        // leak into the counts.
+        seed_event(&app, &tenant, &other_campaign, "opened").await;
+        let (foreign, _) = coverage_support::tenant_pair("statf");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Foreign Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&foreign)
+        .bind(format!("slug-{foreign}"))
+        .execute(&app.db)
+        .await
+        .expect("seed foreign tenant");
+        seed_event(&app, &foreign, &campaign, "clicked").await;
+
+        let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
+            .await
+            .expect("campaign detail");
+        let page = detail.to_list_page();
+        assert_eq!(stat_kpi(&page, "Sent").value, "3");
+        assert_eq!(stat_kpi(&page, "Delivered").value, "2");
+        assert_eq!(stat_kpi(&page, "Opened").value, "1");
+        assert_eq!(stat_kpi(&page, "Clicked").value, "1");
+        // Shares are computed against THIS campaign's sends.
+        assert_eq!(stat_kpi(&page, "Delivered").hint.as_deref(), Some("66.7%"));
+    }
+
+    #[tokio::test]
+    async fn zero_send_campaign_shows_honest_zeros_with_hints() {
+        let Some(app) = coverage_support::state("df_stats_zero").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = seed_bare_tenant(&app, "zero").await;
+        let campaign = seed_campaign(&app, &tenant, "Stats Only").await;
+        let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
+            .await
+            .expect("campaign detail");
+        let page = detail.to_list_page();
+        assert_eq!(stat_kpi(&page, "Sent").value, "0");
+        assert_eq!(stat_kpi(&page, "Delivered").value, "0");
+        assert_eq!(stat_kpi(&page, "Opened").value, "0");
+        assert_eq!(stat_kpi(&page, "Clicked").value, "0");
+        for label in ["Sent", "Delivered", "Opened", "Clicked"] {
+            assert_eq!(
+                stat_kpi(&page, label).hint.as_deref(),
+                Some("No sends recorded yet"),
+                "{label} must carry the honest zero hint"
+            );
+        }
+        assert_ne!(
+            stat_kpi(&page, "Sent").value,
+            "unavailable",
+            "an empty events table is a loaded ZERO, not an outage"
+        );
+    }
+
+    #[tokio::test]
+    async fn campaign_stats_failure_is_unavailable_not_zero() {
+        // The events query failing (dead pool) is NOT an empty table: the
+        // stats carry the explicit unavailable contract.
+        let app = coverage_support::dead_state().await;
+        let stats = data::load_campaign_send_stats(&app.db, "tenant", "campaign").await;
+        assert!(stats.unavailable);
+        let detail = data::CampaignDetailData {
+            id: "c".into(),
+            name: "n".into(),
+            subject: String::new(),
+            status: "draft".into(),
+            scheduled_at: None,
+            list_id: None,
+            list_name: None,
+            recipient_count: 0,
+            actions: vec![],
+            lists: vec![],
+            stats,
+        };
+        let page = detail.to_list_page();
+        for label in ["Sent", "Delivered", "Opened", "Clicked"] {
+            assert_eq!(
+                stat_kpi(&page, label).value,
+                "unavailable",
+                "{label} must say unavailable, never a fabricated zero"
+            );
+            assert_eq!(stat_kpi(&page, label).hint.as_deref(), Some("Events query failed"));
+        }
+    }
+
+    // ── Feature 6: impersonation START from the control plane ──────
+
+    async fn seed_operator(
+        app: &AppState,
+        role: &str,
+    ) -> (AuthUser, String) {
+        let system_tenant: String =
+            sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
+                .fetch_optional(&app.db)
+                .await
+                .expect("system tenant lookup")
+                .expect("the canonical schema must seed the system tenant");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let email = format!(
+            "operator-{}@example.test",
+            coverage_support::unique_tag("imp")
+        );
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Impersonator', 'x', $4, 'active', true, true, NOW(), NOW())",
+        )
+        .bind(&user_id)
+        .bind(&system_tenant)
+        .bind(&email)
+        .bind(role)
+        .execute(&app.db)
+        .await
+        .expect("seed operator");
+        let auth = AuthUser {
+            tenant_id: system_tenant,
+            user_id: Some(user_id),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        (auth, email)
+    }
+
+    async fn impersonation_audit_count(app: &AppState, jti_probe: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'impersonation_session_started' AND resource_id = $1",
+        )
+        .bind(jti_probe)
+        .fetch_one(&app.db)
+        .await
+        .expect("audit count")
+    }
+
+    #[tokio::test]
+    async fn owner_starts_impersonation_from_the_tenants_list_and_end_works() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(app) = coverage_support::state("df_imp_start").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let (owner, _email) = seed_operator(&app, "owner").await;
+        let target = seed_bare_tenant(&app, "victim").await;
+
+        let (headers, form) = signed_form(&app.config, &[("id", target.as_str())]);
+        let response = form_admin_tenant_impersonate(
+            State(app.clone()),
+            axum::Extension(owner.clone()),
+            headers,
+            Form(form),
+        )
+        .await;
+        // PRG into the console, carrying the impersonation session cookie
+        // (the banner's Terminate button ends exactly this session).
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/dashboard");
+        let cookie = set_cookies(&response)
+            .iter()
+            .find(|cookie| cookie.starts_with("impersonation_session="))
+            .expect("impersonation session cookie must be set")
+            .clone();
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+
+        // The audit row names the session (jti) — written BEFORE the cookie.
+        let session_token_value = cookie
+            .split_once('=')
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        let (payload_part, _sig) = session_token_value.rsplit_once('.').unwrap();
+        let payload_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            payload_part,
+        )
+        .expect("token payload");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("token json");
+        let jti = payload["jti"].as_str().expect("jti").to_string();
+        assert_eq!(payload["type"], "impersonation");
+        assert_eq!(payload["tenantId"], target.as_str());
+        assert_eq!(
+            impersonation_audit_count(&app, &jti).await,
+            1,
+            "the start must be audited"
+        );
+        // Replay of the same jti is refused (single-use machinery intact).
+        let replay = impersonation_consume_jti(&app, &jti, payload["exp"].as_i64().unwrap()).await;
+        assert!(replay.is_err(), "a consumed jti must not be consumable again");
+
+        // END: the banner twin clears the session for the same operator.
+        let (mut end_headers, end_form) = signed_form(&app.config, &[]);
+        let session_token = cookie
+            .split_once('=')
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let csrf_cookie = end_headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        end_headers.insert(
+            header::COOKIE,
+            format!("impersonation_session={session_token}; {csrf_cookie}")
+                .parse()
+                .expect("cookie header"),
+        );
+        let response = form_impersonate_end(
+            State(app.clone()),
+            axum::Extension(owner),
+            end_headers,
+            Form(end_form),
+        )
+        .await;
+        assert!(
+            set_cookies(&response)
+                .iter()
+                .any(|c| c.starts_with("impersonation_session=;")),
+            "ending must clear the impersonation session cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn impersonation_start_refuses_non_owners_and_missing_tenants() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(app) = coverage_support::state("df_imp_refuse").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let target = seed_bare_tenant(&app, "novic").await;
+
+        // A system-tenant ADMIN (wildcard scopes, like customer owners) is
+        // still not an OWNER: the role is the gate, not the scope.
+        let (admin, _admin_email) = seed_operator(&app, "admin").await;
+        let (headers, form) = signed_form(&app.config, &[("id", target.as_str())]);
+        let response = form_admin_tenant_impersonate(
+            State(app.clone()),
+            axum::Extension(admin),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(
+            flash_text(&response, &app.config),
+            "Only ApexMail owners can start impersonation."
+        );
+        assert!(
+            !set_cookies(&response)
+                .iter()
+                .any(|cookie| cookie.starts_with("impersonation_session=")),
+            "no session may be minted for a non-owner"
+        );
+
+        // An unknown tenant id is an honest refusal (no session either).
+        let (owner, _owner_email) = seed_operator(&app, "owner").await;
+        let (headers, form) =
+            signed_form(&app.config, &[("id", &uuid::Uuid::new_v4().to_string())]);
+        let response = form_admin_tenant_impersonate(
+            State(app.clone()),
+            axum::Extension(owner),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(flash_text(&response, &app.config), "That tenant could not be found.");
+
+        // No audit rows were written by the refusals (scoped to THIS run's
+        // target tenant: the per-test clone persists across runs).
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'impersonation_session_started' AND tenant_id = $1",
+        )
+        .bind(&target)
+        .fetch_one(&app.db)
+        .await
+        .expect("audit total");
+        assert_eq!(total, 0, "refusals must never audit a start");
+    }
+
+    // ── Feature 7: scheduled campaigns state the manual-start truth ──
+
+    #[test]
+    fn scheduled_campaigns_say_they_wait_for_a_manual_start() {
+        // The product truth (pinned): nothing in the worker polls scheduled
+        // campaigns for a due time, so every scheduling surface says the
+        // campaign waits for Start.
+        let editor = ui_foundation::leptos_views::web_campaign_edit_page_with_values(
+            &ui_foundation::view_data::CampaignEditData {
+                id: "c1".into(),
+                name: "Scheduled".into(),
+                subject: "s".into(),
+                html_body: String::new(),
+                scheduled_at: "2026-12-01T10:00".into(),
+            },
+        );
+        assert!(
+            editor.contains("waits for you to press Start"),
+            "the editor must state the manual-start truth"
+        );
+        let new_campaign = ui_foundation::leptos_views::web_campaigns_new_page();
+        assert!(
+            new_campaign.contains("still waits for you to press Start"),
+            "the new-campaign editor must state the manual-start truth"
+        );
+
+        // The detail page's Scheduled KPI names it when a time is stored.
+        // The detail flow only renders for UUID-shaped ids (the
+        // detail_id_under gate) — production ids are always UUIDs.
+        let detail = data::CampaignDetailData {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "n".into(),
+            subject: String::new(),
+            status: "draft".into(),
+            scheduled_at: Some("2026-12-01T10:00:00+00:00".into()),
+            list_id: None,
+            list_name: None,
+            recipient_count: 0,
+            actions: vec![],
+            lists: vec![],
+            stats: data::CampaignSendStats::default(),
+        };
+        let page = detail.to_list_page();
+        let scheduled = stat_kpi(&page, "Scheduled");
+        assert_eq!(
+            scheduled.hint.as_deref(),
+            Some("Waits for a manual Start"),
+            "a stored schedule must not imply an automatic send"
+        );
+        // And the monitor note repeats the truth.
+        let section = ui_foundation::leptos_views::data_list_page(&page, "action");
+        assert!(section.contains("scheduled campaigns wait for a manual Start"));
+    }
+
+    #[tokio::test]
+    async fn unscheduled_campaign_keeps_the_neutral_hint() {
+        let Some(app) = coverage_support::state("df_sched_none").await else {
+            eprintln!("skipping: no TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = seed_bare_tenant(&app, "nosched").await;
+        let campaign = seed_campaign(&app, &tenant, "Stats Only").await;
+        let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
+            .await
+            .expect("detail");
+        assert_eq!(detail.scheduled_at, None);
+        let page = detail.to_list_page();
+        assert_eq!(stat_kpi(&page, "Scheduled").hint.as_deref(), Some("Scheduled time"));
+        assert_eq!(stat_kpi(&page, "Scheduled").value, "—");
+    }
+
+    // ── Feature 8: favicon ─────────────────────────────────────────
+
+    #[test]
+    fn favicon_layout_links_carry_the_shared_inline_svg() {
+        // Deferred-feature 8: the favicon is the inline data: URL (no extra
+        // route — /favicon.ico is already served by the marketing asset
+        // router), and BOTH root layouts embed it.
+        let expected = ui_foundation::leptos_views::FAVICON_SVG;
+        let data_url = ui_foundation::leptos_views::favicon_data_url();
+        assert!(data_url.starts_with("data:image/svg+xml,"));
+        // The data URL decodes back to exactly the shared SVG.
+        let encoded = data_url.trim_start_matches("data:image/svg+xml,");
+        let mut decoded = String::new();
+        let bytes = encoded.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'%' if index + 2 < bytes.len() => {
+                    let hi = (bytes[index + 1] as char).to_digit(16).expect("hex");
+                    let lo = (bytes[index + 2] as char).to_digit(16).expect("hex");
+                    decoded.push((hi * 16 + lo) as u8 as char);
+                    index += 3;
+                }
+                byte => {
+                    decoded.push(byte as char);
+                    index += 1;
+                }
+            }
+        }
+        assert_eq!(decoded, expected, "the data URL must round-trip the SVG");
+
+        let web = ui_foundation::leptos_views::web_root_layout("<p>x</p>", "T — ApexMail");
+        assert!(
+            web.contains(&format!(
+                "<link rel=\"icon\" type=\"image/svg+xml\" href=\"{data_url}\">"
+            )),
+            "the web root layout must carry the favicon link"
+        );
+        let cp = ui_foundation::leptos_views::control_plane_root_layout_with_title("<p>x</p>", "T");
+        assert!(
+            cp.contains("rel=\"icon\""),
+            "the control-plane root layout must carry the favicon link"
+        );
+        assert!(expected.starts_with("<svg"), "the asset is an inline SVG");
+        assert!(expected.contains("viewBox=\"0 0 32 32\""));
+    }
+
 }

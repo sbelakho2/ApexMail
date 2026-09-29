@@ -631,6 +631,8 @@ async fn web_route_data(
         "/settings/team" => Some(web_team(state, &tenant, cid).await),
         "/settings/billing" => Some(web_billing(state, &tenant, cid).await),
         "/settings/dedicated-ips" => Some(web_dedicated_ips(state, &tenant, cid).await),
+        // Deferred-feature 4: the tenant's suppression list (read-only).
+        "/settings/suppressions" => Some(web_suppressions(state, &tenant, q, cid).await),
         _ => None,
     };
     let campaign_edit = if path.starts_with("/campaigns/") && path.ends_with("/edit") {
@@ -1005,6 +1007,13 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
         button_label: "Delete selected".into(),
     });
     data.primary_action = Some(("Add Contact".into(), "/contacts/new".into()));
+    // Deferred-feature 3: per-row Edit (→ /contacts/{id}/edit) and single
+    // Delete (signed confirm intent `delete-contact`, soft-deleting to
+    // status 'deleted' exactly like the bulk path). Contacts have no detail
+    // page, so the edit link carries its own prefix instead of riding
+    // `detail_path_prefix`.
+    data.edit_path_prefix = Some("/contacts/".into());
+    data.delete_intent = Some("delete-contact".into());
     data.empty_title = "No contacts yet".into();
     data.empty_description = "Add your first contact to start building an audience.".into();
     if rows_unavailable {
@@ -2229,6 +2238,106 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
                             .map(|w| format!("{:.0}%", w * 100.0))
                             .unwrap_or_else(|| "—".into()),
                     ),
+                ],
+            })
+            .collect(),
+    });
+    data
+}
+
+/// Suppressions list (deferred-feature 4): the tenant's suppression rows —
+/// the addresses compliance flows (bounces, complaints, unsubscribes) have
+/// withheld from sending. READ-ONLY on the console: no write affordances are
+/// rendered, the compliance surface owns the mutations. Same honesty
+/// contract as every list: a failed query is "unavailable", never an empty
+/// list.
+async fn web_suppressions(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
+    let mut where_sql = WhereBuilder::new();
+    where_sql.eq("tenant_id", tenant);
+    if !q.search.is_empty() {
+        where_sql.ilike("email", &q.search);
+    }
+    let where_clause = where_sql.build();
+
+    let total = loaded_count(
+        state,
+        "web.suppressions.count",
+        cid,
+        &format!("SELECT COUNT(*)::bigint FROM suppressions WHERE {where_clause}"),
+        &where_sql.binds,
+    )
+    .await;
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
+
+    // suppressions.id is VARCHAR(26) (canonical migration 088/115) — String.
+    let rows = load_query(
+        "web.suppressions.list",
+        cid,
+        async {
+            let suppressions_sql = format!(
+                "SELECT id, email, reason, subtype, created_at FROM suppressions WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+            );
+            let mut query = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                ),
+            >(&suppressions_sql);
+            for value in &where_sql.binds {
+                query = query.bind(value);
+            }
+            query.fetch_all(&state.db).await
+        },
+    )
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
+
+    let mut data = base_list(
+        "Suppressions",
+        "Addresses withheld from sending — recorded by bounces, complaints, and unsubscribes.",
+        "/settings/suppressions",
+    );
+    data.search_label = "Search suppressions".into();
+    data.search_placeholder = "Search by email".into();
+    data.current_query = q.search.clone();
+    data.page = page;
+    data.total_pages = total_pages;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
+    data.filter_query = filter_query(q);
+    // Read-only: no bulk action, no delete intent, no primary write action.
+    data.empty_title = "No suppressions".into();
+    data.empty_description =
+        "Nothing is withheld yet — bounces, complaints, and unsubscribes land here."
+            .into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Suppressions", cid);
+    }
+    data.table = Some(TableData {
+        columns: vec![
+            "Email".into(),
+            "Reason".into(),
+            "Subtype".into(),
+            "Added".into(),
+        ],
+        rows: rows
+            .into_iter()
+            .map(|(id, email, reason, subtype, created)| DataRowData {
+                id,
+                cells: vec![
+                    DataCell::text(email),
+                    DataCell::status(&reason),
+                    DataCell::text(subtype.unwrap_or_else(|| "—".into())),
+                    time_cell(created),
                 ],
             })
             .collect(),
@@ -4072,6 +4181,69 @@ pub(crate) struct CampaignDetailData {
     pub actions: Vec<(String, String, bool)>,
     /// The tenant's lists for the recipients select: (id, name, selected).
     pub lists: Vec<(String, String, bool)>,
+    /// Deferred-feature 5: THIS campaign's send statistics, counted from the
+    /// same events table `/reports` and `/analytics` aggregate — scoped by
+    /// campaign_id, never a tenant-wide number.
+    pub stats: CampaignSendStats,
+}
+
+/// One campaign's send statistics (deferred-feature 5). `unavailable` keeps
+/// the audit-F14 contract: a failed events query renders "unavailable" —
+/// never a fabricated all-zero row that would read as "nobody opened it".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CampaignSendStats {
+    pub sent: i64,
+    pub delivered: i64,
+    pub opened: i64,
+    pub clicked: i64,
+    pub unavailable: bool,
+}
+
+impl CampaignSendStats {
+    /// KPI value: the count when the aggregate loaded, an explicit
+    /// "unavailable" when the events query failed.
+    fn kpi(&self, value: i64) -> String {
+        if self.unavailable {
+            "unavailable".to_string()
+        } else {
+            value.to_string()
+        }
+    }
+}
+
+/// Count THIS campaign's events (sent/delivered/opened/clicked) from the
+/// same events source `/reports` and `/analytics` aggregate — scoped to the
+/// caller's tenant AND the campaign id (events.campaign_id is TEXT; the
+/// campaign's UUID travels as its canonical text form). Any query failure
+/// degrades to the honest `unavailable` stats, never a zero.
+pub(crate) async fn load_campaign_send_stats(db: &sqlx::PgPool, tenant: &str, id: &str) -> CampaignSendStats {
+    let counts: Result<(i64, i64, i64, i64), sqlx::Error> = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE event_type = 'sent')::bigint,
+                COUNT(*) FILTER (WHERE event_type = 'delivered')::bigint,
+                COUNT(*) FILTER (WHERE event_type = 'opened')::bigint,
+                COUNT(*) FILTER (WHERE event_type = 'clicked')::bigint
+         FROM events WHERE tenant_id = $1 AND campaign_id = $2",
+    )
+    .bind(tenant)
+    .bind(id)
+    .fetch_one(db)
+    .await;
+    match counts {
+        Ok((sent, delivered, opened, clicked)) => CampaignSendStats {
+            sent,
+            delivered,
+            opened,
+            clicked,
+            unavailable: false,
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "campaign send stats query failed; data unavailable");
+            CampaignSendStats {
+                unavailable: true,
+                ..Default::default()
+            }
+        }
+    }
 }
 
 impl CampaignDetailData {
@@ -4101,8 +4273,70 @@ impl CampaignDetailData {
                 "Scheduled",
                 self.scheduled_at.clone().unwrap_or_else(|| "—".into()),
             )
-            .with_hint("Scheduled time"),
+            // Deferred-feature 7: the schedule is stored, not executed —
+            // nothing polls campaigns for a due time (the worker has no
+            // scheduled-start loop), so the copy states the truth.
+            .with_hint(if self.scheduled_at.is_some() {
+                "Waits for a manual Start"
+            } else {
+                "Scheduled time"
+            }),
         ];
+        // Deferred-feature 5: THIS campaign's send statistics — the same
+        // sent/delivered/opened/clicked vocabulary /reports and /analytics
+        // use, scoped to this campaign's events. A failed events query
+        // renders "unavailable"; an honest zero-send campaign renders zeros
+        // with the "no sends yet" hints.
+        data.kpis.push(
+            KpiCardData::new("Sent", self.stats.kpi(self.stats.sent)).with_hint(
+                if self.stats.unavailable {
+                    "Events query failed"
+                } else if self.stats.sent == 0 {
+                    "No sends recorded yet"
+                } else {
+                    "This campaign's recipients"
+                },
+            ),
+        );
+        // Delivered/Opened/Clicked carry the share-of-sent hint (— when
+        // nothing was sent yet), computed before the card so the temporary
+        // outlives the constructor call.
+        let delivered_rate = rate(self.stats.delivered, self.stats.sent);
+        let opened_rate = rate(self.stats.opened, self.stats.sent);
+        let clicked_rate = rate(self.stats.clicked, self.stats.sent);
+        data.kpis.push(
+            KpiCardData::new("Delivered", self.stats.kpi(self.stats.delivered)).with_hint(
+                if self.stats.unavailable {
+                    "Events query failed"
+                } else if self.stats.sent == 0 {
+                    "No sends recorded yet"
+                } else {
+                    &delivered_rate
+                },
+            ),
+        );
+        data.kpis.push(
+            KpiCardData::new("Opened", self.stats.kpi(self.stats.opened)).with_hint(
+                if self.stats.unavailable {
+                    "Events query failed"
+                } else if self.stats.sent == 0 {
+                    "No sends recorded yet"
+                } else {
+                    &opened_rate
+                },
+            ),
+        );
+        data.kpis.push(
+            KpiCardData::new("Clicked", self.stats.kpi(self.stats.clicked)).with_hint(
+                if self.stats.unavailable {
+                    "Events query failed"
+                } else if self.stats.sent == 0 {
+                    "No sends recorded yet"
+                } else {
+                    &clicked_rate
+                },
+            ),
+        );
         data.table = Some(TableData {
             columns: vec!["Field".into(), "Value".into()],
             rows: vec![
@@ -4287,6 +4521,8 @@ pub(crate) async fn load_campaign_detail(
         .map(|(label, target, available)| (label.to_string(), target, available))
         .collect();
     let lists = tenant_lists_for_select(db, tenant).await;
+    // Deferred-feature 5: per-campaign send statistics ride the detail data.
+    let stats = load_campaign_send_stats(db, tenant, &id).await;
     Some(CampaignDetailData {
         id,
         name,
@@ -4298,6 +4534,7 @@ pub(crate) async fn load_campaign_detail(
         recipient_count,
         actions,
         lists,
+        stats,
     })
 }
 
@@ -7025,6 +7262,8 @@ mod coverage_residual_tests {
             recipient_count: 0,
             actions: actions.clone(),
             lists: vec![("list-1".into(), "Newsletter".into(), true)],
+            // Zero-send campaign: the honest zeros-with-hints stats.
+            stats: CampaignSendStats::default(),
         };
         let page = wired_zero.to_list_page();
         let audience = page
@@ -7050,6 +7289,7 @@ mod coverage_residual_tests {
             recipient_count: 0,
             actions: actions.clone(),
             lists: vec![],
+            stats: CampaignSendStats::default(),
         };
         let page = unwired.to_list_page();
         let audience = page

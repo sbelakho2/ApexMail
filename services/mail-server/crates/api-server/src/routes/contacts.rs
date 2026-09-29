@@ -45,8 +45,16 @@ pub fn router() -> Router<AppState> {
 const KEYSET_CURSOR_SEP: char = '\n';
 
 /// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+///
+/// The timestamp MUST be rendered with `to_rfc3339()`: `DateTime`'s `Display`
+/// emits "2026-01-01 00:00:00 UTC", which [`decode_keyset_cursor`]'s
+/// `parse_from_rfc3339` rejects — a cursor this function minted used to fail
+/// its very next request with 400.
 fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &Uuid) -> String {
-    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+    encode_cursor(&format!(
+        "{}{KEYSET_CURSOR_SEP}{id}",
+        created_at.to_rfc3339()
+    ))
 }
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
@@ -2742,5 +2750,244 @@ mod bulk_import_coverage_tests {
         assert!(body.to_string().contains("maximum is"), "{body}");
 
         let _ = &env.credential;
+    }
+}
+
+/// Keyset-pagination adversarial properties for `GET /v1/contacts`:
+/// the OFFSET property contract (cursor sweeps == offset sweeps, zero
+/// skips/duplicates across page boundaries even when every row shares one
+/// `created_at`), cursor-wins-over-offset, tenant scoping under cursor
+/// continuation, and hostile cursor shapes. HTTP-driven against the real
+/// router.
+#[cfg(test)]
+mod pagination_adversarial_tests {
+    use super::*;
+    use crate::app::test_support::adv::AdvEnv;
+    use axum::http::StatusCode;
+
+    /// Seed `n` contacts of `tenant` in ONE statement so all rows share a
+    /// single `created_at` value — the bulk-insert shape where a timestamp
+    /// cursor alone skips or duplicates rows and only the (created_at, id)
+    /// tie-break is total.
+    async fn seed_contact_cohort(pool: &sqlx::PgPool, tenant: &str, n: i64, tag: &str) {
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, name, status, tags, created_at, updated_at)
+             SELECT gen_random_uuid(), $1, $3 || g || '-sweep@example.test', 'Sweep', 'active',
+                    '[]'::jsonb, NOW(), NOW()
+             FROM generate_series(0, $2 - 1) AS g",
+        )
+        .bind(tenant)
+        .bind(n)
+        .bind(format!("{tag}-"))
+        .execute(pool)
+        .await
+        .expect("seed contact cohort");
+    }
+
+    /// The tenant's full listing order per the SAME ORDER BY the endpoint
+    /// uses — the ground truth every walk must reproduce exactly.
+    async fn expected_order(pool: &sqlx::PgPool, tenant: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT id::text FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC")
+            .bind(tenant)
+            .fetch_all(pool)
+            .await
+            .expect("expected order")
+    }
+
+    /// Walk the list with `page_size` per page following `meta.nextCursor`
+    /// until `hasMore` flips false.
+    async fn cursor_walk(env: &AdvEnv, page_size: usize) -> Vec<String> {
+        let mut seen = Vec::new();
+        let mut uri = format!("/v1/contacts?limit={page_size}");
+        loop {
+            let (status, body) = env.get(&uri).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let page = body["data"].as_array().expect("data array");
+            for item in page {
+                seen.push(item["id"].as_str().expect("id string").to_string());
+            }
+            let has_more = body["meta"]["hasMore"].as_bool().expect("hasMore flag");
+            let next = body["meta"]["nextCursor"].as_str();
+            if !has_more {
+                break;
+            }
+            let cursor = next.expect("hasMore=true implies nextCursor").to_string();
+            uri = format!("/v1/contacts?limit={page_size}&cursor={cursor}");
+        }
+        seen
+    }
+
+    /// Walk the list with the legacy `offset` parameter (backward compat).
+    async fn offset_walk(env: &AdvEnv, page_size: usize) -> Vec<String> {
+        let mut seen = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let (status, body) = env
+                .get(&format!("/v1/contacts?limit={page_size}&offset={offset}"))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let page = body["data"].as_array().expect("data array");
+            if page.is_empty() {
+                break;
+            }
+            for item in page {
+                seen.push(item["id"].as_str().expect("id string").to_string());
+            }
+            offset += page_size;
+        }
+        seen
+    }
+
+    /// Page through the cohort one row at a time via cursor and via offset:
+    /// the two walks must produce the SAME ids in the SAME order — zero
+    /// skips, zero duplicates — with every row sharing one `created_at`.
+    #[tokio::test]
+    async fn cursor_sweep_matches_offset_sweep_row_for_row() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_cursor_sweep").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        seed_contact_cohort(&pool, &tenant, 6, "sweep-a").await;
+
+        let expected = expected_order(&pool, &tenant).await;
+        assert_eq!(expected.len(), 6);
+
+        let by_cursor = cursor_walk(&env, 1).await;
+        assert_eq!(
+            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor.len(),
+            "a cursor sweep must never repeat a row"
+        );
+        assert_eq!(by_cursor, expected, "one-by-one cursor sweep vs DB order");
+
+        // Page size 2 (a page boundary falling inside the tied timestamp).
+        assert_eq!(cursor_walk(&env, 2).await, expected);
+        // Deep-offset equivalence: cursor page K == OFFSET page K.
+        assert_eq!(offset_walk(&env, 1).await, expected);
+        assert_eq!(offset_walk(&env, 2).await, expected);
+
+        // Cursor wins over offset when both are present: page 1's cursor
+        // plus a deep offset still yields page 2, not offset 99.
+        let (status, body) = env.get("/v1/contacts?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let minted = body["meta"]["nextCursor"].as_str().unwrap().to_string();
+        let (status, body) = env
+            .get(&format!("/v1/contacts?limit=1&offset=99&cursor={minted}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Vec<&str> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(page, vec![expected[1].as_str()], "cursor must beat offset");
+
+        pool.close().await;
+    }
+
+    /// Tenant scoping holds on every cursor continuation page: rows of a
+    /// neighbour tenant seeded between pages never leak into the walk.
+    #[tokio::test]
+    async fn cursor_continuation_never_leaks_across_tenants() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_cursor_tenant").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        let (other_env, other_tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        seed_contact_cohort(&pool, &tenant, 4, "mine").await;
+        seed_contact_cohort(&pool, &other_tenant, 4, "theirs").await;
+
+        let mine = expected_order(&pool, &tenant).await;
+        let theirs = expected_order(&pool, &other_tenant).await;
+
+        let walked = cursor_walk(&env, 1).await;
+        assert_eq!(walked, mine, "tenant A sees exactly tenant A's rows");
+        for foreign in &theirs {
+            assert!(
+                !walked.contains(foreign),
+                "neighbour row {foreign} leaked into tenant A's walk"
+            );
+        }
+        // And the neighbour's own walk stays inside its tenant.
+        assert_eq!(cursor_walk(&other_env, 1).await, theirs);
+
+        pool.close().await;
+    }
+
+    /// Hostile cursors: truncated encodings, valid-hex-bogus payloads, and
+    /// SQL-metacharacter ids are client errors with an honest message —
+    /// never a silently-ignored parameter or a database 500.
+    #[tokio::test]
+    async fn hostile_cursors_are_client_errors() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_cursor_hostile").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        seed_contact_cohort(&pool, &tenant, 2, "hostile").await;
+
+        let hex_cursor = |payload: &str| encode_cursor(payload);
+        let hostile = [
+            // Truncated mid-payload (odd hex length).
+            "ab",
+            // Valid hex of garbage.
+            &hex_cursor("totally-bogus"),
+            // Missing separator.
+            &hex_cursor("no-separator-here"),
+            // Wrong type in the id half (not a UUID).
+            &hex_cursor("2026-01-01T00:00:00Z\nnot-a-uuid"),
+            // SQL metacharacters in the id half.
+            &hex_cursor("2026-01-01T00:00:00Z\nx'; DROP TABLE contacts; --"),
+            // Metacharacters in the timestamp half.
+            &hex_cursor("'; --\n11111111-1111-4111-8111-111111111111"),
+        ];
+        for cursor in &hostile {
+            let (status, body) = env
+                .get(&format!("/v1/contacts?limit=2&cursor={cursor}"))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "cursor {cursor:?}: {body}"
+            );
+            assert!(
+                body.to_string().contains("invalid cursor"),
+                "cursor {cursor:?}: {body}"
+            );
+        }
+
+        // A valid page still works after the hostile wave.
+        let (status, body) = env.get("/v1/contacts?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+        pool.close().await;
+    }
+
+    /// Regression: a cursor the server MINTED must be accepted by the
+    /// server. `encode_keyset_cursor` used `DateTime`'s `Display`
+    /// ("2026-01-01 00:00:00 UTC") while the decoder demanded RFC 3339 —
+    /// every follow request 400'd on a cursor the previous page had just
+    /// issued. The minted payload must now be RFC 3339 and round-trip.
+    #[tokio::test]
+    async fn minted_cursor_round_trips_through_the_decoder() {
+        let ts = Utc::now();
+        let id = Uuid::new_v4();
+        let minted = encode_keyset_cursor(&ts, &id);
+        // The payload must be RFC 3339 — not Display's "00:00:00 UTC" form.
+        let decoded = decode_cursor(&minted).expect("hex round trip");
+        let (payload_ts, payload_id) = decoded
+            .split_once(KEYSET_CURSOR_SEP)
+            .expect("separator present");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(payload_ts).is_ok(),
+            "minted timestamp {payload_ts:?} must be RFC 3339, not Display format"
+        );
+        assert_eq!(payload_id, id.to_string());
+
+        // And the full decode path accepts what the encoder produced.
+        let (decoded_ts, decoded_id) = decode_keyset_cursor(&minted).expect("minted cursor valid");
+        assert_eq!(decoded_ts, ts);
+        assert_eq!(decoded_id, id);
     }
 }
