@@ -240,6 +240,24 @@ fn encrypt_optional_oidc_secret(
         .map_err(|error| format!("Encrypt OIDC client secret: {error}"))
 }
 
+/// Decrypt a stored OIDC client secret for the token exchange. Rows written
+/// before field-level encryption existed hold the plaintext directly; those
+/// are used as-is so a pre-encryption configuration keeps working until it is
+/// re-saved through [`SSOService::configure`].
+fn decrypt_oidc_client_secret(stored: &str, config: &Config) -> Result<String, String> {
+    if !crate::field_encryption::FieldEncryptor::is_encrypted(stored) {
+        return Ok(stored.to_string());
+    }
+    let decryptor = crate::field_encryption::encryptor_from_secret(
+        &config.sso.encryption_key,
+        OIDC_SECRET_ENCRYPTION_PURPOSE,
+    )
+    .map_err(|error| format!("Decrypt OIDC client secret: {error}"))?;
+    decryptor
+        .decrypt(stored)
+        .map_err(|error| format!("Decrypt OIDC client secret: {error}"))
+}
+
 /// SSO Service:SAML 2.0 + OIDC authentication
 pub struct SSOService {
     db: PgPool,
@@ -412,11 +430,17 @@ impl SSOService {
             saml_request_xml.as_bytes(),
         );
 
+        // RelayState carries the tenant domain: the IdP echoes it back to the
+        // ACS verbatim, which lets a deployment point `SAML_ACS_URL` at the
+        // domain-less `POST /sso/acs` endpoint and still resolve the tenant
+        // configuration (the per-domain `POST /sso/acs/:domain` route takes
+        // the domain from the path instead). `request_id` remains in the
+        // returned [`SSOLoginRedirect`] for the initiator to correlate.
         let redirect_url = format!(
             "{}?SAMLRequest={}&RelayState={}",
             sso_url,
             urlencoding::encode(&saml_request_b64),
-            urlencoding::encode(&request_id)
+            urlencoding::encode(domain)
         );
 
         info!(domain = domain, request_id = %request_id, "SAML login initiated");
@@ -613,6 +637,203 @@ impl SSOService {
         .await
     }
 
+    /// Complete the browser-facing half of [`Self::initiate_oidc_login`] and
+    /// issue a session.
+    ///
+    /// 1. Consume the single-use login `state` — an unknown, expired or
+    ///    replayed state refuses the flow before any network call.
+    /// 2. Cross-check the state's tenant domain against the callback path's
+    ///    `domain` (present on `GET /sso/callback/oidc/:domain`), so a state
+    ///    minted for one tenant can never be redeemed on another domain's
+    ///    callback.
+    /// 3. Discover the IdP's `token_endpoint` and `jwks_uri` from
+    ///    `{issuer}/.well-known/openid-configuration`.
+    /// 4. Exchange `code` for tokens at the token endpoint using the PKCE
+    ///    `code_verifier` persisted at initiation (plus the decrypted client
+    ///    secret when one is configured).
+    /// 5. Validate the returned `id_token` against the IdP's published JWKS:
+    ///    RS256 only, with the configured issuer, the configured client id as
+    ///    audience, and the standard expiry checks.
+    /// 6. Issue an SSO session via [`Self::handle_oidc_callback`].
+    ///
+    /// `Ok(Ok(session))` — a session was issued. `Ok(Err(reason))` — the flow
+    /// is refused (state, domain, or id_token rejected; the HTTP layer answers
+    /// 401). `Err(error)` — infrastructure or upstream IdP failure (500).
+    pub async fn complete_oidc_callback(
+        &self,
+        http: &reqwest::Client,
+        domain: Option<&str>,
+        code: &str,
+        state: &str,
+    ) -> Result<Result<SSOCallbackResult, String>, String> {
+        // 1. Single-use state: unknown/expired/replayed never proceeds.
+        let state_data = match self.validate_oidc_state(state).await? {
+            Some(state_data) => state_data,
+            None => {
+                return Ok(Err(
+                    "OIDC login state is invalid, expired, or already used".to_string()
+                ))
+            }
+        };
+
+        // 2. The state belongs to exactly one tenant domain.
+        if let Some(domain) = domain {
+            if state_data.domain != domain {
+                tracing::warn!(
+                    state_domain = %state_data.domain,
+                    callback_domain = %domain,
+                    "OIDC state redeemed on a foreign domain"
+                );
+                return Ok(Err(
+                    "OIDC login state does not belong to this domain".to_string()
+                ));
+            }
+        }
+        let domain = state_data.domain.clone();
+
+        let config = match self.get_config_by_domain(&domain).await? {
+            Some(config) => config,
+            None => return Ok(Err("OIDC not configured for domain".to_string())),
+        };
+        let tenant_id = match state_data.tenant_id.as_deref() {
+            Some(state_tenant) if state_tenant != config.tenant_id => {
+                return Ok(Err(
+                    "OIDC login state does not belong to this tenant".to_string()
+                ))
+            }
+            Some(state_tenant) => state_tenant.to_string(),
+            None => config.tenant_id.clone(),
+        };
+
+        let issuer = config
+            .oidc_issuer
+            .clone()
+            .map(|issuer| issuer.trim_end_matches('/').to_string())
+            .filter(|issuer| !issuer.is_empty())
+            .ok_or_else(|| "OIDC issuer is not configured for domain".to_string());
+        let issuer = match issuer {
+            Ok(issuer) => issuer,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let client_id = config
+            .oidc_client_id
+            .clone()
+            .filter(|client_id| !client_id.trim().is_empty())
+            .ok_or_else(|| "OIDC client id is not configured for domain".to_string());
+        let client_id = match client_id {
+            Ok(client_id) => client_id,
+            Err(reason) => return Ok(Err(reason)),
+        };
+        let client_secret = match config.oidc_client_secret_encrypted.as_deref() {
+            Some(stored) if !stored.trim().is_empty() => {
+                Some(decrypt_oidc_client_secret(stored, &self.config)?)
+            }
+            _ => None,
+        };
+
+        // 3. Discovery: the token endpoint and JWKS location come from the
+        //    IdP's own metadata, so deployments only configure the issuer.
+        let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+        let discovery: serde_json::Value = http
+            .get(&discovery_url)
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("OIDC discovery request to {discovery_url} failed: {error}"))?
+            .json()
+            .await
+            .map_err(|error| format!("OIDC discovery response from {issuer} was not JSON: {error}"))?;
+        let token_endpoint = discovery["token_endpoint"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("OIDC discovery document from {issuer} has no token_endpoint"))?;
+        let jwks_uri = discovery["jwks_uri"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("OIDC discovery document from {issuer} has no jwks_uri"))?;
+
+        // 4. Authorization-code exchange with the persisted PKCE verifier.
+        let mut form: Vec<(&str, &str)> = vec![
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &self.config.sso.oidc.redirect_uri),
+            ("client_id", &client_id),
+            ("code_verifier", &state_data.code_verifier),
+        ];
+        if let Some(secret) = &client_secret {
+            form.push(("client_secret", secret));
+        }
+        let token_response: serde_json::Value = http
+            .post(token_endpoint)
+            .form(&form)
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+            .map_err(|error| format!("OIDC token request to {token_endpoint} failed: {error}"))?
+            .json()
+            .await
+            .map_err(|error| {
+                format!("OIDC token response from {token_endpoint} was not JSON: {error}")
+            })?;
+        let id_token = token_response["id_token"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!("OIDC token response from {token_endpoint} has no id_token")
+            })?;
+
+        // 5. Validate the id_token against the IdP's published keys.
+        let claims = match validate_oidc_id_token(id_token, &issuer, &client_id, jwks_uri, http)
+            .await
+        {
+            Ok(claims) => claims,
+            Err(reason) => return Ok(Err(reason)),
+        };
+
+        // 6. Session issuance from the validated identity.
+        let external_user_id = claims
+            .get("sub")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty());
+        let Some(external_user_id) = external_user_id else {
+            return Ok(Err("OIDC id_token has no sub claim".to_string()));
+        };
+        let email = claims
+            .get("email")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(external_user_id)
+            .to_string();
+        let display_name = claims
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        let groups = claims
+            .get("groups")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .map(serde_json::Value::Array);
+
+        let result = self
+            .handle_oidc_callback(
+                &tenant_id,
+                &email,
+                display_name.as_deref(),
+                external_user_id,
+                groups,
+            )
+            .await?;
+        match result.data {
+            Some(session) => Ok(Ok(session)),
+            None => Ok(Err(
+                result
+                    .error
+                    .unwrap_or_else(|| "OIDC session issuance failed".to_string()),
+            )),
+        }
+    }
+
     /// Create or update SSO session
     #[allow(clippy::too_many_arguments)]
     async fn create_sso_session(
@@ -716,7 +937,6 @@ impl SSOService {
     /// 6. Sanitizes `NameID` and `Attribute` values (rejects `<`, `>`, `&`, control chars, >256 chars)
     ///
     /// Returns a struct with validated NameID and attributes on success.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn parse_and_validate_saml_response(
         &self,
         saml_response_xml: &str,
@@ -1117,6 +1337,61 @@ impl SSOService {
     }
 }
 
+// ── OIDC id_token validation ───────────────────────────────────────────
+
+/// Validate an OIDC `id_token` against the IdP's published JWKS and return
+/// its claims.
+///
+/// Security posture: RS256 only (no `alg`-switching: an id_token declaring
+/// any other algorithm is refused before a key is selected), the signing key
+/// is chosen by `kid` from the IdP's JWKS, and the standard issuer, audience
+/// and expiry checks all apply. Returns the decoded claim set, or a refusal
+/// reason for the flow to surface as a 401.
+async fn validate_oidc_id_token(
+    id_token: &str,
+    issuer: &str,
+    client_id: &str,
+    jwks_uri: &str,
+    http: &reqwest::Client,
+) -> Result<serde_json::Value, String> {
+    use jsonwebtoken::jwk::JwkSet;
+
+    let header = jsonwebtoken::decode_header(id_token)
+        .map_err(|error| format!("OIDC id_token header is malformed: {error}"))?;
+    if header.alg != jsonwebtoken::Algorithm::RS256 {
+        return Err(format!(
+            "OIDC id_token must be RS256-signed, got {:?}",
+            header.alg
+        ));
+    }
+    let kid = header
+        .kid
+        .filter(|kid| !kid.trim().is_empty())
+        .ok_or_else(|| "OIDC id_token header is missing kid".to_string())?;
+
+    let jwks: JwkSet = http
+        .get(jwks_uri)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("OIDC JWKS request to {jwks_uri} failed: {error}"))?
+        .json()
+        .await
+        .map_err(|error| format!("OIDC JWKS response from {jwks_uri} was not JSON: {error}"))?;
+    let jwk = jwks
+        .find(&kid)
+        .ok_or_else(|| format!("OIDC JWKS from {jwks_uri} has no signing key for kid {kid}"))?;
+    let decoding_key = jsonwebtoken::DecodingKey::from_jwk(jwk)
+        .map_err(|error| format!("OIDC JWKS key for kid {kid} is unusable: {error}"))?;
+
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[client_id]);
+    let data = jsonwebtoken::decode::<serde_json::Value>(id_token, &decoding_key, &validation)
+        .map_err(|error| format!("OIDC id_token validation failed: {error}"))?;
+    Ok(data.claims)
+}
+
 // ── PKCE helpers ───────────────────────────────────────────────────────
 
 /// Generate a PKCE code verifier (43-128 characters, URL-safe)
@@ -1203,9 +1478,12 @@ fn sanitize_saml_value(value: &str) -> String {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
+//
+// `pub(crate)` items here are the shared IdP-signing fixtures reused by the
+// router-level end-to-end tests in `routes.rs` (same crate, same cfg(test)).
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use quick_xml::events::Event;
     use quick_xml::Reader;
@@ -2469,7 +2747,7 @@ mod tests {
     // signing bug fails loudly instead of faking coverage.
     // ═══════════════════════════════════════════════════════════════════
 
-    mod idp {
+    pub(crate) mod idp {
         use super::*;
 
         // ── big integer (little-endian u64 limbs) ──
@@ -2679,6 +2957,7 @@ mod tests {
         /// An RSA private key with just the pieces signing needs.
         pub struct RsaPrivateKey {
             pub n: Vec<u64>,
+            pub e: Vec<u64>,
             pub d: Vec<u64>,
             pub byte_len: usize,
         }
@@ -2706,16 +2985,33 @@ mod tests {
                 assert_eq!(t_seq, 0x30);
                 let (_tv, _version, p) = read_tlv(seq, 0);
                 let (_tn, n, p) = read_tlv(seq, p);
-                let (_te, _e, p) = read_tlv(seq, p);
+                let (_te, e, p) = read_tlv(seq, p);
                 let (_td, d, _p) = read_tlv(seq, p);
                 let n = if n[0] == 0 { &n[1..] } else { n };
                 let d = if d[0] == 0 { &d[1..] } else { d };
                 let byte_len = n.len();
                 RsaPrivateKey {
                     n: le_bytes_to_limbs(n),
+                    e: le_bytes_to_limbs(e),
                     d: le_bytes_to_limbs(d),
                     byte_len,
                 }
+            }
+
+            /// The public modulus, big-endian, without a leading zero byte —
+            /// the exact byte string an RSA JWK's `n` field carries.
+            pub fn modulus_be(&self) -> Vec<u8> {
+                limbs_to_be_bytes(&self.n, self.byte_len)
+            }
+
+            /// The public exponent, big-endian, minimal length (the JWK `e`).
+            pub fn exponent_be(&self) -> Vec<u8> {
+                let raw = limbs_to_be_bytes(&self.e, self.byte_len);
+                let first = raw
+                    .iter()
+                    .position(|&byte| byte != 0)
+                    .unwrap_or(raw.len() - 1);
+                raw[first..].to_vec()
             }
 
             /// RSASSA-PKCS1-v1_5 signature over `message` with SHA-256.
@@ -2785,29 +3081,47 @@ mod tests {
                 b64(&signature)
             )
         }
+
+        /// Sign a JOSE JWT with RS256 — the same RSASSA-PKCS1-v1_5/SHA-256
+        /// primitive `seal` uses for XML-DSig, applied to the base64url
+        /// signing input. Exercises the production JWKS verification path in
+        /// `validate_oidc_id_token` end-to-end.
+        pub fn sign_rs256_jwt(kid: &str, claims: &serde_json::Value, key: &RsaPrivateKey) -> String {
+            use base64::Engine;
+            let b64url =
+                |data: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data);
+            let header = format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{kid}"}}"#);
+            let signing_input = format!(
+                "{}.{}",
+                b64url(header.as_bytes()),
+                b64url(claims.to_string().as_bytes())
+            );
+            let signature = key.sign_pkcs1_sha256(signing_input.as_bytes());
+            format!("{signing_input}.{}", b64url(&signature))
+        }
     }
 
-    const IDP_PRIVATE_KEY_PEM: &str = include_str!("../tests/keys/saml_idp_key.pem");
-    const IDP_CERTIFICATE_PEM: &str = include_str!("../tests/keys/saml_idp_cert.pem");
+    pub(crate) const IDP_PRIVATE_KEY_PEM: &str = include_str!("../tests/keys/saml_idp_key.pem");
+    pub(crate) const IDP_CERTIFICATE_PEM: &str = include_str!("../tests/keys/saml_idp_cert.pem");
 
     /// The properties of one IdP response fixture; every refusal arm of the
     /// parser is a small mutation of this struct.
-    struct SamlFixture {
-        issuer: String,
-        audience: String,
-        name_id: String,
-        status_value: String,
-        assertion_id: String,
-        not_before: Option<DateTime<Utc>>,
-        not_on_or_after: Option<DateTime<Utc>>,
-        attributes: Vec<(String, String)>,
-        include_signature: bool,
-        include_audience: bool,
-        include_conditions: bool,
+    pub(crate) struct SamlFixture {
+        pub issuer: String,
+        pub audience: String,
+        pub name_id: String,
+        pub status_value: String,
+        pub assertion_id: String,
+        pub not_before: Option<DateTime<Utc>>,
+        pub not_on_or_after: Option<DateTime<Utc>>,
+        pub attributes: Vec<(String, String)>,
+        pub include_signature: bool,
+        pub include_audience: bool,
+        pub include_conditions: bool,
     }
 
     impl SamlFixture {
-        fn valid(expected_entity_id: &str, expected_acs_url: &str) -> SamlFixture {
+        pub(crate) fn valid(expected_entity_id: &str, expected_acs_url: &str) -> SamlFixture {
             SamlFixture {
                 issuer: expected_entity_id.to_string(),
                 audience: expected_acs_url.to_string(),
@@ -2826,7 +3140,7 @@ mod tests {
             }
         }
 
-        fn unsigned_document(&self) -> String {
+        pub(crate) fn unsigned_document(&self) -> String {
             let conditions = if self.include_conditions {
                 let mut attrs = String::new();
                 if let Some(nb) = self.not_before {
@@ -2887,7 +3201,7 @@ mod tests {
 
         /// The full signed document (or unsigned when
         /// `include_signature == false`).
-        fn render(&self, key: &idp::RsaPrivateKey) -> String {
+        pub(crate) fn render(&self, key: &idp::RsaPrivateKey) -> String {
             let document = self.unsigned_document();
             if !self.include_signature {
                 return document;

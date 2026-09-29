@@ -1,11 +1,11 @@
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Form, Path, Query, State},
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        header::{AUTHORIZATION, CONTENT_TYPE, LOCATION},
         HeaderMap, StatusCode,
     },
     middleware,
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
@@ -141,6 +141,16 @@ async fn auth_middleware(
         || path == "/metrics"
         || path.starts_with("/sso/login/")
         || path == "/sso/validate"
+        // The ACS and OIDC callback are the landing points of the IdP's
+        // browser redirects; an IdP never presents our bearer tokens. The
+        // domain-less variants serve the configured (domain-less)
+        // `SAML_ACS_URL` / `OIDC_REDIRECT_URI` defaults.
+        || path == "/sso/acs"
+        || path.starts_with("/sso/acs/")
+        || path == "/sso/callback/oidc"
+        || path.starts_with("/sso/callback/oidc/")
+        || path == "/api/sso/saml/callback"
+        || path == "/api/sso/oidc/callback"
     {
         return next.run(req).await;
     }
@@ -701,6 +711,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sso/config/domain/:domain", get(sso_get_config_by_domain))
         .route("/sso/login/saml/:domain", get(sso_saml_login))
         .route("/sso/login/oidc/:domain", get(sso_oidc_login))
+        .route("/sso/acs/:domain", post(sso_saml_acs))
+        .route("/sso/acs", post(sso_saml_acs_domain_less))
+        .route("/sso/callback/oidc/:domain", get(sso_oidc_callback))
+        .route("/sso/callback/oidc", get(sso_oidc_callback_domain_less))
+        // The default `SAML_ACS_URL` / `OIDC_REDIRECT_URI` values point at
+        // these legacy paths; mount the same handlers so the zero-config
+        // defaults are live endpoints too.
+        .route("/api/sso/saml/callback", post(sso_saml_acs_domain_less))
+        .route("/api/sso/oidc/callback", get(sso_oidc_callback_domain_less))
         .route("/sso/validate", get(sso_validate_session))
         .route("/sso/cleanup", post(sso_cleanup_sessions))
         // Compliance
@@ -1614,31 +1633,292 @@ async fn sso_get_config_by_domain(
     }
 }
 
+/// Build the 302 that hands the browser to the IdP.
+fn redirect_to(url: &str) -> Response {
+    (
+        StatusCode::FOUND,
+        [(LOCATION, url.to_string())],
+    )
+        .into_response()
+}
+
+/// Map a service-level [`crate::types::ApiResult`] refusal to its status:
+/// NOT_FOUND keeps 404, anything else is an authenticated-flow refusal (401).
+fn sso_refusal_status(code: Option<&str>) -> StatusCode {
+    match code {
+        Some("NOT_FOUND") => StatusCode::NOT_FOUND,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
 /// GET /sso/login/saml/:domain
 ///
-/// Fix G (dead ACS): this service has no SAML Assertion Consumer Service
-/// route — the `parse_and_validate_saml_response` / `handle_saml_callback`
-/// pair is not wired to any HTTP endpoint, so an IdP could never complete a
-/// login started here. Redirecting users to the IdP would strand them at a
-/// callback that does not exist. Until a callback route is wired, the login
-/// initiation fails fast with 501 instead of pretending SSO works.
-async fn sso_saml_login(State(_state): State<S>, Path(_domain): Path<String>) -> impl IntoResponse {
-    err_json(
-        StatusCode::NOT_IMPLEMENTED,
-        "SSO callback not configured: SAML login cannot complete because no ACS endpoint is wired; refusing to redirect to the IdP",
-    )
+/// SP-initiated SAML, step 1: build the tenant's AuthnRequest and send the
+/// browser to its IdP. The IdP posts the signed response back to the ACS
+/// (`POST /sso/acs/:domain`), which issues the session. Unknown or disabled
+/// domains are refused with 404 instead of a redirect.
+async fn sso_saml_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
+    match state.sso.initiate_saml_login(&domain).await {
+        Ok(result) => match result.data {
+            Some(redirect) => redirect_to(&redirect.redirect_url),
+            None => err_json(
+                sso_refusal_status(result.code.as_deref()),
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or("SAML not configured for domain"),
+            )
+            .into_response(),
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
+    }
 }
 
 /// GET /sso/login/oidc/:domain
 ///
-/// Fix G (dead ACS): same as the SAML login above — there is no OIDC callback
-/// route and no authorization-code → token exchange in this service, so the
-/// flow can never complete. Fail fast with 501 instead of redirecting.
-async fn sso_oidc_login(State(_state): State<S>, Path(_domain): Path<String>) -> impl IntoResponse {
-    err_json(
-        StatusCode::NOT_IMPLEMENTED,
-        "SSO callback not configured: OIDC login cannot complete because no callback/token-exchange endpoint is wired; refusing to redirect to the IdP",
+/// SP-initiated OIDC, step 1: stage the single-use `state` + PKCE verifier
+/// and send the browser to the IdP's authorize endpoint. The IdP redirects
+/// back to `GET /sso/callback/oidc/:domain`, which completes the exchange and
+/// issues the session. Unknown or disabled domains are refused with 404.
+async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
+    match state.sso.initiate_oidc_login(&domain).await {
+        Ok(result) => match result.data {
+            Some(redirect) => redirect_to(&redirect.redirect_url),
+            None => err_json(
+                sso_refusal_status(result.code.as_deref()),
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or("OIDC not configured for domain"),
+            )
+            .into_response(),
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
+    }
+}
+
+/// The SAML ACS POST body (HTTP-POST binding: the IdP sends url-encoded
+/// form fields).
+#[derive(Debug, Deserialize)]
+struct SamlAcsBody {
+    #[serde(rename = "SAMLResponse")]
+    saml_response: String,
+    #[serde(rename = "RelayState")]
+    relay_state: Option<String>,
+}
+
+/// Decode the base64 `SAMLResponse` POST field into the XML document.
+fn decode_saml_response(encoded: &str) -> Result<String, String> {
+    use base64::Engine;
+    let clean: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(clean.as_bytes())
+        .map_err(|error| format!("SAMLResponse is not valid base64: {error}"))?;
+    String::from_utf8(bytes).map_err(|_| "SAMLResponse is not valid UTF-8 XML".to_string())
+}
+
+/// POST /sso/acs/:domain — the SAML Assertion Consumer Service, and
+/// POST /sso/acs — the same ACS at a configured (domain-less) `SAML_ACS_URL`,
+/// where the tenant domain arrives in RelayState.
+///
+/// Full validation order, all inside the manager: XML-DSig signature against
+/// the tenant's configured IdP certificate, success status, issuer ==
+/// configured entity_id, audience == configured ACS URL, NotBefore/NotOnOrAfter
+/// window, and the per-tenant replay guard. Only a fully validated assertion
+/// yields a session.
+async fn sso_saml_acs(
+    State(state): State<S>,
+    Path(domain): Path<String>,
+    Form(body): Form<SamlAcsBody>,
+) -> impl IntoResponse {
+    sso_saml_acs_inner(state, Some(domain), body).await
+}
+
+/// The domain-less ACS: `SAML_ACS_URL` need not embed a tenant domain — the
+/// domain arrives in RelayState.
+async fn sso_saml_acs_domain_less(
+    State(state): State<S>,
+    Form(body): Form<SamlAcsBody>,
+) -> impl IntoResponse {
+    sso_saml_acs_inner(state, None, body).await
+}
+
+async fn sso_saml_acs_inner(
+    state: S,
+    path_domain: Option<String>,
+    body: SamlAcsBody,
+) -> Response {
+    let domain = path_domain
+        .or(body.relay_state.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(domain) = domain else {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "SAML ACS requires the tenant domain in the path or RelayState",
+        )
+        .into_response();
+    };
+    let saml_xml = match decode_saml_response(&body.saml_response) {
+        Ok(saml_xml) => saml_xml,
+        Err(reason) => return err_json(StatusCode::BAD_REQUEST, &reason).into_response(),
+    };
+
+    let validated = match state
+        .sso
+        .parse_and_validate_saml_response(&saml_xml, &domain)
+        .await
+    {
+        Ok(validated) => validated,
+        Err(reason) => return err_json(StatusCode::UNAUTHORIZED, &reason).into_response(),
+    };
+    let config = match state.sso.get_config_by_domain(&domain).await {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return err_json(StatusCode::UNAUTHORIZED, "SAML not configured for domain")
+                .into_response()
+        }
+        Err(error) => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response()
+        }
+    };
+
+    // The assertion is trusted here: NameID identifies the user, attributes
+    // carry the profile. Email falls back to the NameID (the common
+    // email-as-NameID IdP shape); display name and groups come from the
+    // standard attribute names.
+    let attribute = |name: &str| {
+        validated
+            .attributes
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    };
+    let email = attribute("email").unwrap_or_else(|| validated.name_id.clone());
+    let display_name = attribute("displayName").or_else(|| attribute("display_name"));
+    let groups = {
+        let values: Vec<String> = validated
+            .attributes
+            .iter()
+            .filter(|(key, _)| {
+                key.eq_ignore_ascii_case("group") || key.eq_ignore_ascii_case("groups")
+            })
+            .map(|(_, value)| value.clone())
+            .collect();
+        if values.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!(values))
+        }
+    };
+    let attributes = serde_json::to_value(
+        validated
+            .attributes
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<String, String>>(),
     )
+    .ok();
+
+    match state
+        .sso
+        .handle_saml_callback(
+            &config.tenant_id,
+            &email,
+            display_name.as_deref(),
+            &validated.name_id,
+            groups,
+            attributes,
+        )
+        .await
+    {
+        Ok(result) => match result.data {
+            Some(session) => ok_json(session).into_response(),
+            None => err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or("SSO session issuance failed"),
+            )
+            .into_response(),
+        },
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
+    }
+}
+
+/// The OIDC callback query parameters the IdP appends to the redirect_uri.
+#[derive(Debug, Deserialize)]
+struct OidcCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+/// GET /sso/callback/oidc/:domain — the OIDC redirect_uri target, and
+/// GET /sso/callback/oidc — the same callback at a configured (domain-less)
+/// `OIDC_REDIRECT_URI`, where the tenant domain arrives inside the state.
+///
+/// Consumes the single-use state, exchanges the authorization code with the
+/// persisted PKCE verifier, validates the id_token against the IdP's JWKS,
+/// and issues the session.
+async fn sso_oidc_callback(
+    State(state): State<S>,
+    Path(domain): Path<String>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> impl IntoResponse {
+    sso_oidc_callback_inner(state, Some(domain), query).await
+}
+
+/// The domain-less OIDC callback: `OIDC_REDIRECT_URI` need not embed a tenant
+/// domain — the domain arrives inside the single-use state.
+async fn sso_oidc_callback_domain_less(
+    State(state): State<S>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> impl IntoResponse {
+    sso_oidc_callback_inner(state, None, query).await
+}
+
+async fn sso_oidc_callback_inner(state: S, path_domain: Option<String>, query: OidcCallbackQuery) -> Response {
+    let code = query
+        .code
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(code) = code else {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "OIDC callback is missing the authorization code",
+        )
+        .into_response();
+    };
+    let oidc_state = query
+        .state
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let Some(oidc_state) = oidc_state else {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "OIDC callback is missing the state parameter",
+        )
+        .into_response();
+    };
+    let path_domain = path_domain
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    match state
+        .sso
+        .complete_oidc_callback(
+            &state.http_client,
+            path_domain.as_deref(),
+            &code,
+            &oidc_state,
+        )
+        .await
+    {
+        Ok(Ok(session)) => ok_json(session).into_response(),
+        Ok(Err(reason)) => err_json(StatusCode::UNAUTHORIZED, &reason).into_response(),
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
+    }
 }
 
 /// Validate an SSO session.
@@ -3720,5 +4000,778 @@ mod tests {
         assert_eq!(clamp_limit(50, 10), 10);
         assert_eq!(clamp_limit(0, 10), 1);
         assert_eq!(clamp_limit(-3, 10), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // SSO end-to-end through the router: both login flows, from the
+    // browser-facing initiation through the IdP round-trip to a live
+    // session, driven over HTTP with a genuinely signed SAML assertion and
+    // a real (loopback) OIDC provider.
+    // ═══════════════════════════════════════════════════════════════════
+
+    const JWT_TEST_PRIVATE_PEM: &str = include_str!("../tests/keys/test_rsa_private.pem");
+    const JWT_TEST_PUBLIC_PEM: &str = include_str!("../tests/keys/test_rsa_public.pem");
+    const OIDC_TEST_KID: &str = "routes-oidc-test-key";
+
+    use crate::sso::tests::{idp, SamlFixture, IDP_CERTIFICATE_PEM, IDP_PRIVATE_KEY_PEM};
+    use chrono::{TimeDelta, Utc};
+
+    static SSO_FLOW_IDP_KEY: std::sync::OnceLock<idp::RsaPrivateKey> = std::sync::OnceLock::new();
+
+    fn sso_flow_idp_key() -> &'static idp::RsaPrivateKey {
+        SSO_FLOW_IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM))
+    }
+
+    /// A unique tenant id that fits the canonical `VARCHAR(26)` width.
+    fn sso_flow_tenant(tag: &str) -> String {
+        let unique = Uuid::new_v4().simple().to_string();
+        let keep = 26usize.saturating_sub(tag.len() + 1);
+        format!("{tag}_{}", &unique[..keep.min(unique.len())])
+    }
+
+    /// Provision a canonical database and the real router for the SSO flow
+    /// tests. The JWT gate is pointed at the repo's test keypair so admin
+    /// tokens can be minted for the authenticated `/sso/configure` call.
+    async fn provision_sso_router(tag: &str) -> (Router, Arc<AppState>) {
+        if std::env::var("SSO_ENCRYPTION_KEY").is_err() {
+            std::env::set_var("SSO_ENCRYPTION_KEY", "sso-routes-coverage-key-0123456789");
+        }
+        if std::env::var("LOG_STREAM_ENCRYPTION_KEY").is_err() {
+            std::env::set_var(
+                "LOG_STREAM_ENCRYPTION_KEY",
+                "log-stream-routes-coverage-key-0123456789",
+            );
+        }
+        let pool = migrator::test_support::fresh_canonical_pool(tag, &format!("routes_sso_{tag}"))
+            .await
+            .expect("provision canonical pool")
+            .expect("TEST_DATABASE_URL must be configured for this suite");
+        let mut config = Config::from_env().unwrap();
+        config.jwt_public_key_pem = JWT_TEST_PUBLIC_PEM.to_string();
+        config.jwt_audience = None;
+        config.jwt_issuer = None;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let state = Arc::new(AppState::new(pool, config, recorder.handle()));
+        (router(state.clone()), state)
+    }
+
+    /// Mint an admin JWT the router's auth middleware accepts.
+    fn mint_sso_admin_token(tenant_id: &str, subject: &str) -> String {
+        #[derive(serde::Serialize)]
+        struct Claims<'a> {
+            sub: &'a str,
+            tenant_id: &'a str,
+            admin: bool,
+            exp: usize,
+        }
+        let key =
+            jsonwebtoken::EncodingKey::from_rsa_pem(JWT_TEST_PRIVATE_PEM.as_bytes()).unwrap();
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &Claims {
+                sub: subject,
+                tenant_id,
+                admin: true,
+                exp: (Utc::now() + TimeDelta::try_hours(1).unwrap()).timestamp() as usize,
+            },
+            &key,
+        )
+        .unwrap()
+    }
+
+    async fn send_request(app: &Router, request: Request<Body>) -> axum::response::Response {
+        app.clone().oneshot(request).await.unwrap()
+    }
+
+    async fn get_request(app: &Router, path: &str) -> axum::response::Response {
+        send_request(
+            app,
+            Request::get(path)
+                .body(Body::empty())
+                .expect("GET request"),
+        )
+        .await
+    }
+
+    async fn get_bearer(app: &Router, path: &str, token: &str) -> axum::response::Response {
+        send_request(
+            app,
+            Request::get(path)
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("GET request"),
+        )
+        .await
+    }
+
+    async fn post_json(
+        app: &Router,
+        path: &str,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> axum::response::Response {
+        send_request(
+            app,
+            Request::post(path)
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("POST request"),
+        )
+        .await
+    }
+
+    async fn post_form(app: &Router, path: &str, form: &str) -> axum::response::Response {
+        send_request(
+            app,
+            Request::post(path)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form.to_string()))
+                .expect("POST request"),
+        )
+        .await
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn response_header(response: &axum::response::Response, name: &str) -> String {
+        response
+            .headers()
+            .get(name)
+            .expect(name)
+            .to_str()
+            .expect("header value")
+            .to_string()
+    }
+
+    /// First decoded occurrence of `name` in a URL's query string.
+    fn query_param(url: &str, name: &str) -> Option<String> {
+        let query = url.split_once('?')?.1;
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=')?;
+            if key == name {
+                return urlencoding::decode(value).ok().map(|v| v.to_string());
+            }
+        }
+        None
+    }
+
+    /// The urlencoded ACS POST body carrying a base64 SAMLResponse.
+    fn saml_acs_form(signed_document: &str, relay_state: &str) -> String {
+        use base64::Engine;
+        format!(
+            "SAMLResponse={}&RelayState={}",
+            urlencoding::encode(
+                &base64::engine::general_purpose::STANDARD.encode(signed_document.as_bytes())
+            ),
+            urlencoding::encode(relay_state),
+        )
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|window| window == needle)
+    }
+
+    /// A minimal but REAL OpenID Provider on 127.0.0.1: discovery metadata, a
+    /// JWKS holding the test RSA key, and a token endpoint that exchanges any
+    /// code for an RS256 id_token signed by that key (or a tampered one when
+    /// the `tamper` flag is set). Records every form field of the latest
+    /// token request so tests can assert the code + PKCE exchange.
+    struct MockOidcIdp {
+        issuer: String,
+        recorded_form: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        tamper: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl MockOidcIdp {
+        async fn spawn(
+            signing_key: &idp::RsaPrivateKey,
+            client_id: &str,
+            identity_email: &str,
+        ) -> Self {
+            use base64::Engine;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let issuer = format!("http://{}", listener.local_addr().unwrap());
+
+            let jwk_n = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(signing_key.modulus_be());
+            let jwk_e = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(signing_key.exponent_be());
+            let jwks = serde_json::json!({
+                "keys": [{
+                    "kty": "RSA",
+                    "kid": OIDC_TEST_KID,
+                    "use": "sig",
+                    "alg": "RS256",
+                    "n": jwk_n,
+                    "e": jwk_e,
+                }]
+            })
+            .to_string();
+            let discovery = serde_json::json!({
+                "issuer": issuer,
+                "token_endpoint": format!("{issuer}/token"),
+                "jwks_uri": format!("{issuer}/jwks.json"),
+            })
+            .to_string();
+            let claims = serde_json::json!({
+                "iss": issuer,
+                "sub": "oidc-user-routes-1",
+                "email": identity_email,
+                "name": "Riley Routes",
+                "groups": ["engineering", "admins"],
+                "aud": client_id,
+                "iat": Utc::now().timestamp(),
+                "exp": (Utc::now() + TimeDelta::try_minutes(5).unwrap()).timestamp(),
+            });
+            let valid_id_token = idp::sign_rs256_jwt(OIDC_TEST_KID, &claims, signing_key);
+            // A tampered variant: flip the first signature character in place
+            // (same length, still parses, fails RS256 verification).
+            let mut tampered_id_token = valid_id_token.clone();
+            let sig_start = tampered_id_token.rfind('.').unwrap() + 1;
+            let first = tampered_id_token.as_bytes()[sig_start] as char;
+            let replacement = if first == 'A' { 'B' } else { 'A' };
+            tampered_id_token.replace_range(sig_start..sig_start + 1, &replacement.to_string());
+
+            let recorded_form: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+            let tamper = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let recorded_task = recorded_form.clone();
+            let tamper_task = tamper.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = match listener.accept().await {
+                        Ok(accepted) => accepted,
+                        Err(_) => break,
+                    };
+                    // Read one HTTP/1.1 request: head, then Content-Length body.
+                    let mut buffer: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break buffer.len(),
+                            Ok(read) => {
+                                buffer.extend_from_slice(&chunk[..read]);
+                                if let Some(position) = find_subsequence(&buffer, b"\r\n\r\n") {
+                                    break position + 4;
+                                }
+                            }
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buffer[..head_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if !name.eq_ignore_ascii_case("content-length") {
+                                return None;
+                            }
+                            value.trim().parse::<usize>().ok()
+                        })
+                        .unwrap_or(0);
+                    while buffer.len() < head_end + content_length {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let request_line = head.lines().next().unwrap_or_default().to_string();
+                    let path = request_line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or_default()
+                        .to_string();
+                    let body = String::from_utf8_lossy(&buffer[head_end..]).to_string();
+
+                    let (status, payload) = if path.starts_with("/.well-known/openid-configuration")
+                    {
+                        ("200 OK", discovery.clone())
+                    } else if path.starts_with("/jwks.json") {
+                        ("200 OK", jwks.clone())
+                    } else if path.starts_with("/token") {
+                        let pairs: Vec<(String, String)> = body
+                            .split('&')
+                            .filter_map(|pair| {
+                                let (key, value) = pair.split_once('=')?;
+                                Some((
+                                    key.to_string(),
+                                    urlencoding::decode(value).ok()?.to_string(),
+                                ))
+                            })
+                            .collect();
+                        *recorded_task.lock().unwrap() = pairs;
+                        let id_token =
+                            if tamper_task.load(std::sync::atomic::Ordering::Relaxed) {
+                                tampered_id_token.clone()
+                            } else {
+                                valid_id_token.clone()
+                            };
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "access_token": "mock-access-token",
+                                "token_type": "Bearer",
+                                "expires_in": 3600,
+                                "id_token": id_token,
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        (
+                            "404 Not Found",
+                            serde_json::json!({"error": "not found"}).to_string(),
+                        )
+                    };
+
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                }
+            });
+            Self {
+                issuer,
+                recorded_form,
+                tamper,
+            }
+        }
+
+        fn token_request_form(&self) -> Vec<(String, String)> {
+            self.recorded_form.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn saml_sso_completes_end_to_end_through_the_router() {
+        let (app, state) = provision_sso_router("saml_e2e").await;
+        let tag = "saml_e2e";
+        let tenant = sso_flow_tenant(tag);
+        let domain = "saml-e2e.routes.example.com";
+        let entity_id = "https://idp.routes-saml.example.com/metadata";
+        let sso_url = "https://idp.routes-saml.example.com/sso";
+        let acs_url = state.config.sso.saml.acs_url.clone();
+        let admin = mint_sso_admin_token(&tenant, "routes-saml-admin");
+
+        // Configure the tenant IdP THROUGH the router (admin JWT → handler).
+        let configure = serde_json::json!({
+            "tenant_id": tenant,
+            "provider_type": "saml",
+            "domain": domain,
+            "enabled": true,
+            "entity_id": entity_id,
+            "sso_url": sso_url,
+            "certificate": IDP_CERTIFICATE_PEM,
+            "enforce_sso": true,
+            "session_duration_hours": 4,
+        });
+        let response = post_json(&app, "/sso/configure", &admin, &configure).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 1. Login initiation → 302 to the IdP with AuthnRequest + RelayState.
+        let response = get_request(&app, &format!("/sso/login/saml/{domain}")).await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response_header(&response, "location");
+        assert!(
+            location.starts_with(&format!("{sso_url}?SAMLRequest=")),
+            "unexpected redirect: {location}"
+        );
+        let relay_state = query_param(&location, "RelayState").expect("RelayState");
+        assert_eq!(
+            relay_state, domain,
+            "RelayState carries the tenant domain so the domain-less ACS can resolve it"
+        );
+        let saml_request = {
+            use base64::Engine;
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(
+                        query_param(&location, "SAMLRequest")
+                            .expect("SAMLRequest")
+                            .as_bytes(),
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(saml_request.contains("AuthnRequest"), "{saml_request}");
+        assert!(saml_request.contains(entity_id), "{saml_request}");
+        assert!(saml_request.contains(&acs_url), "{saml_request}");
+
+        // 2. A valid, genuinely signed response → session issued.
+        let signed = SamlFixture::valid(entity_id, &acs_url).render(sso_flow_idp_key());
+        let form = saml_acs_form(&signed, domain);
+        let response = post_form(&app, &format!("/sso/acs/{domain}"), &form).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["is_new_user"], true, "{body}");
+        assert_eq!(body["session"]["email"], "alice.smith@example.com");
+        assert_eq!(body["session"]["groups"], serde_json::json!(["engineering"]));
+        let session_token = body["session"]["session_token"]
+            .as_str()
+            .expect("session token")
+            .to_string();
+        assert!(!session_token.is_empty());
+
+        // 3. The session validates through /sso/validate.
+        let response = get_bearer(&app, "/sso/validate", &session_token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["email"], "alice.smith@example.com");
+
+        // 4. The same assertion replayed is refused.
+        let response = post_form(&app, &format!("/sso/acs/{domain}"), &form).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("replay rejected"),
+            "{body}"
+        );
+
+        // 5. A tampered (digest-flipped) response is refused at the signature gate.
+        let mut tamperable = SamlFixture::valid(entity_id, &acs_url);
+        tamperable.name_id = "tamper-check@example.com".into();
+        let signed_document = tamperable.render(sso_flow_idp_key());
+        let marker = "<ds:DigestValue>";
+        let position = signed_document.find(marker).expect("signed doc has a digest");
+        let digest_start = position + marker.len();
+        let mut tampered = signed_document.clone();
+        let original_char = tampered.as_bytes()[digest_start] as char;
+        let replacement = if original_char == 'A' { 'B' } else { 'A' };
+        tampered.replace_range(digest_start..digest_start + 1, &replacement.to_string());
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&tampered, domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("signature verification failed"),
+            "{body}"
+        );
+        // The untouched document still validates (the gate is exact).
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&signed_document, domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 6. Wrong tenant: a response signed for tenant A's entity id posted
+        //    to tenant B's ACS is refused on the Issuer check.
+        let tenant_b = sso_flow_tenant(tag);
+        let domain_b = "saml-e2e-b.routes.example.com";
+        let configure_b = serde_json::json!({
+            "tenant_id": tenant_b,
+            "provider_type": "saml",
+            "domain": domain_b,
+            "enabled": true,
+            "entity_id": "https://idp.other.example.com/metadata",
+            "sso_url": sso_url,
+            "certificate": IDP_CERTIFICATE_PEM,
+        });
+        let admin_b = mint_sso_admin_token(&tenant_b, "routes-saml-admin-b");
+        let response = post_json(&app, "/sso/configure", &admin_b, &configure_b).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let foreign = SamlFixture::valid(entity_id, &acs_url);
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain_b}"),
+            &saml_acs_form(&foreign.render(sso_flow_idp_key()), domain_b),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Issuer does not match"),
+            "{body}"
+        );
+
+        // 7. An expired assertion is refused.
+        let mut expired = SamlFixture::valid(entity_id, &acs_url);
+        expired.not_on_or_after = Some(Utc::now() - TimeDelta::try_minutes(30).unwrap());
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&expired.render(sso_flow_idp_key()), domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("has expired"),
+            "{body}"
+        );
+
+        // 8. An unsigned assertion is refused.
+        let mut unsigned = SamlFixture::valid(entity_id, &acs_url);
+        unsigned.include_signature = false;
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&unsigned.render(sso_flow_idp_key()), domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // 9. Unknown domains are refused, not redirected.
+        let response = get_request(&app, "/sso/login/saml/no-such.routes.example.com").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = post_form(
+            &app,
+            "/sso/acs/no-such.routes.example.com",
+            &saml_acs_form(&signed, domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // 10. The domain-less ACS (the SAML_ACS_URL default shape) resolves
+        //     the tenant domain from RelayState and issues a session.
+        let domain_less = SamlFixture::valid(entity_id, &acs_url);
+        let response = post_form(
+            &app,
+            "/sso/acs",
+            &saml_acs_form(&domain_less.render(sso_flow_idp_key()), domain),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["is_new_user"], false, "returning user, {body}");
+        // And the RelayState-less POST is an honest 400.
+        let response = post_form(
+            &app,
+            "/sso/acs",
+            &format!(
+                "SAMLResponse={}",
+                urlencoding::encode("e30=")
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // 11. Expiry + cleanup: sessions stop validating and are swept.
+        sqlx::query("UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 minute' WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .expect("expire sessions");
+        let response = get_bearer(&app, "/sso/validate", &session_token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = post_json(&app, "/sso/cleanup", &admin, &serde_json::json!({})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let cleaned = body["cleaned"].as_u64().expect("cleaned count");
+        assert!(cleaned >= 1, "the expired sessions were swept: {body}");
+    }
+
+    #[tokio::test]
+    async fn oidc_sso_completes_end_to_end_through_the_router() {
+        let (app, state) = provision_sso_router("oidc_e2e").await;
+        let tag = "oidc_e2e";
+        let tenant = sso_flow_tenant(tag);
+        let domain = "oidc-e2e.routes.example.com";
+        let client_id = "routes-oidc-client";
+        let client_secret = "routes-oidc-secret";
+        let admin = mint_sso_admin_token(&tenant, "routes-oidc-admin");
+
+        let mock = MockOidcIdp::spawn(
+            sso_flow_idp_key(),
+            client_id,
+            "riley@oidc-e2e.routes.example.com",
+        )
+        .await;
+
+        // Configure the tenant IdP THROUGH the router.
+        let configure = serde_json::json!({
+            "tenant_id": tenant,
+            "provider_type": "oidc",
+            "domain": domain,
+            "enabled": true,
+            "oidc_client_id": client_id,
+            "oidc_client_secret": client_secret,
+            "oidc_issuer": mock.issuer,
+            "enforce_sso": true,
+        });
+        let response = post_json(&app, "/sso/configure", &admin, &configure).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 1. Login initiation → 302 to the IdP's authorize endpoint.
+        let response = get_request(&app, &format!("/sso/login/oidc/{domain}")).await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response_header(&response, "location");
+        assert!(
+            location.starts_with(&format!("{}/authorize?", mock.issuer)),
+            "unexpected redirect: {location}"
+        );
+        for expected in [
+            "client_id=routes-oidc-client",
+            "response_type=code",
+            "code_challenge_method=S256",
+        ] {
+            assert!(location.contains(expected), "missing {expected}: {location}");
+        }
+        let login_state = query_param(&location, "state").expect("state");
+        let code_challenge = query_param(&location, "code_challenge").expect("code_challenge");
+        assert!(!login_state.is_empty() && !code_challenge.is_empty());
+
+        // 2. State + PKCE verifier persisted (durable fallback), and the
+        //    challenge in the redirect is exactly sha256(verifier).
+        let (verifier, state_domain, state_tenant): (String, String, String) = sqlx::query_as(
+            "SELECT code_verifier, domain, tenant_id FROM sso_oidc_state WHERE state = $1",
+        )
+        .bind(&login_state)
+        .fetch_one(&state.db)
+        .await
+        .expect("staged OIDC state");
+        assert_eq!(state_domain, domain);
+        assert_eq!(state_tenant, tenant);
+        assert!(!verifier.is_empty());
+        {
+            use base64::Engine;
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(verifier.as_bytes());
+            assert_eq!(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize()),
+                code_challenge,
+                "the persisted verifier must match the advertised S256 challenge"
+            );
+        }
+
+        // 3. Callback → the code is exchanged with the verifier and a session
+        //    is issued from the validated id_token.
+        let callback = format!("/sso/callback/oidc/{domain}?code=routes-code-1&state={login_state}");
+        let response = get_request(&app, &callback).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["is_new_user"], true, "{body}");
+        assert_eq!(
+            body["session"]["email"],
+            "riley@oidc-e2e.routes.example.com"
+        );
+        assert_eq!(body["session"]["display_name"], "Riley Routes");
+        assert_eq!(
+            body["session"]["groups"],
+            serde_json::json!(["engineering", "admins"])
+        );
+        let session_token = body["session"]["session_token"]
+            .as_str()
+            .expect("session token")
+            .to_string();
+
+        // The mock saw a proper PKCE code exchange, secret included.
+        let form = mock.token_request_form();
+        let form_pair = |name: &str| {
+            form.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(form_pair("grant_type").as_deref(), Some("authorization_code"));
+        assert_eq!(form_pair("code").as_deref(), Some("routes-code-1"));
+        assert_eq!(form_pair("code_verifier").as_deref(), Some(verifier.as_str()));
+        assert_eq!(form_pair("client_id").as_deref(), Some(client_id));
+        assert_eq!(form_pair("client_secret").as_deref(), Some(client_secret));
+
+        // 4. The session validates through /sso/validate.
+        let response = get_bearer(&app, "/sso/validate", &session_token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // 5. The state is single-use: the same callback replays to a refusal.
+        let response = get_request(&app, &callback).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid, expired, or already used"),
+            "{body}"
+        );
+
+        // 6. A state minted for one domain is refused on another domain's callback.
+        let response = get_request(&app, &format!("/sso/login/oidc/{domain}")).await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response_header(&response, "location");
+        let second_state = query_param(&location, "state").expect("state");
+        let response = get_request(
+            &app,
+            &format!(
+                "/sso/callback/oidc/other.routes.example.com?code=routes-code-2&state={second_state}"
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not belong to this domain"),
+            "{body}"
+        );
+
+        // 7. A tampered id_token (signature flipped) is refused.
+        mock.tamper
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let response = get_request(&app, &format!("/sso/login/oidc/{domain}")).await;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response_header(&response, "location");
+        let third_state = query_param(&location, "state").expect("state");
+        let response = get_request(
+            &app,
+            &format!("/sso/callback/oidc/{domain}?code=routes-code-3&state={third_state}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("id_token validation failed"),
+            "{body}"
+        );
+        mock.tamper
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // 8. A bogus state is refused before any network call.
+        let response = get_request(
+            &app,
+            &format!("/sso/callback/oidc/{domain}?code=routes-code-4&state=bogus-state"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // 9. Missing code or state are honest 400s.
+        let response = get_request(&app, &format!("/sso/callback/oidc/{domain}")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = get_request(&app, &format!("/sso/callback/oidc/{domain}?state=x")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // 10. Unconfigured domains refuse login initiation with 404.
+        let response = get_request(&app, "/sso/login/oidc/no-such.routes.example.com").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

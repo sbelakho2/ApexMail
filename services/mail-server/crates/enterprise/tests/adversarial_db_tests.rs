@@ -1963,7 +1963,10 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-        // The login-initiation endpoints fail fast (no ACS wired).
+        // The login-initiation endpoints refuse a domain with no SSO
+        // configuration instead of redirecting to an unverified IdP (the
+        // callbacks themselves are wired: `POST /sso/acs/:domain`,
+        // `GET /sso/callback/oidc/:domain`).
         let (status, _) = call(
             &app,
             "GET",
@@ -1972,7 +1975,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = call(
             &app,
             "GET",
@@ -1981,7 +1984,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(status, StatusCode::NOT_FOUND);
 
         // Configuring with a certificate that is not a valid X.509 PEM must
         // not silently enable signature-less validation.

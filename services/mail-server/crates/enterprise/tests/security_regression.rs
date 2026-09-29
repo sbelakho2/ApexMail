@@ -1097,14 +1097,18 @@ async fn cors_policy_is_enforced_from_config() {
     assert!(!allow_origin.is_empty());
 }
 
-// ── Fix G: SSO honest 501 ───────────────────────────────────────────────────
+// ── SSO login initiation refuses unknown domains ────────────────────────────
 
 #[tokio::test]
-async fn sso_login_returns_501_without_callback_wiring() {
+async fn sso_login_refuses_unknown_domains_instead_of_redirecting() {
     let Some(app) = setup().await else {
         skip_notice("test");
         return;
     };
+    // The callbacks ARE wired now (`POST /sso/acs/:domain`,
+    // `GET /sso/callback/oidc/:domain`), so a configured domain redirects to
+    // its IdP — but a domain with no SSO configuration must still be refused
+    // outright, never bounced toward an IdP that is not ours.
     for path in ["/sso/login/saml/example.com", "/sso/login/oidc/example.com"] {
         let response = app
             .app
@@ -1114,8 +1118,12 @@ async fn sso_login_returns_501_without_callback_wiring() {
             .unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "{path} must not redirect to an IdP with no ACS wired"
+            StatusCode::NOT_FOUND,
+            "{path} must refuse an unconfigured domain instead of redirecting to an IdP"
+        );
+        assert!(
+            response.headers().get("location").is_none(),
+            "{path} must not redirect for an unconfigured domain"
         );
     }
 }
