@@ -293,13 +293,25 @@ cmd_run() {
     if [ "$_overall" = ok ]; then
         rm -f "$CI_DIR/.last-failure" 2>/dev/null || true
         # Remember the sha so --skip-unchanged polls can no-op cheaply — but
-        # only when this run actually exercised the full CI lane (partial
-        # --stages runs must not mark an untested sha as good).
-        case " $_run_list " in
-            *" test "*|*" security "*)
-                [ "$_status" = unchanged ] || printf '%s\n' "$CI_SHA" >"$RUNS_DIR/.last-good-sha"
-                ;;
-        esac
+        # ONLY when this run exercised EVERY mandatory stage (a partial
+        # --stages run must never bless an untested sha; the old test-OR-
+        # security condition let a manual test-only run create a full-lane
+        # blessing). The record is a release-gate MANIFEST, not a naked sha:
+        # it names the pipeline config and every stage that passed, so a
+        # later policy change cannot silently validate stale blessings.
+        _required_stages_full=true
+        for _stage in validate ui test security; do
+            case " $_run_list " in
+                *" $_stage "*) ;;
+                *) _required_stages_full=false ;;
+            esac
+        done
+        if [ "$_required_stages_full" = true ]; then
+            _pipeline_hash=$(cat "$CI_ROOT/pipeline.conf" "$CI_ROOT"/stages/*.sh 2>/dev/null | sha256sum | cut -d' ' -f1)
+            printf '{"sha":"%s","pipelineConfigHash":"%s","passedStages":["validate","ui","test","security"],"completedAt":"%s"}\n' \
+                "$CI_SHA" "$_pipeline_hash" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                >"$RUNS_DIR/.last-good-sha"
+        fi
     fi
     cleanup
     trap - EXIT

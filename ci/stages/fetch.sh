@@ -63,12 +63,22 @@ stage_main() {
     # sha that already completed a green run ends the run right here in
     # seconds instead of re-running the full lane every 5 minutes.
     if [ "${CI_SKIP_UNCHANGED:-0}" = 1 ]; then
+        # The blessing is a release-gate MANIFEST (see pipeline.sh): sha +
+        # pipeline-config hash + the stages that passed. A partial-lane run
+        # can no longer write one, and a manifest from a DIFFERENT pipeline
+        # configuration (or a naked sha from an old format) does not bless.
         _last_good=''
-        [ -f "$RUNS_DIR/.last-good-sha" ] && _last_good=$(head -n1 "$RUNS_DIR/.last-good-sha")
+        _last_config=''
+        [ -f "$RUNS_DIR/.last-good-sha" ] && {
+            _last_good=$(sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' "$RUNS_DIR/.last-good-sha" | head -n1)
+            _last_config=$(sed -n 's/.*"pipelineConfigHash":"\([^"]*\)".*/\1/p' "$RUNS_DIR/.last-good-sha" | head -n1)
+        }
+        _pipeline_hash=$(cat "$CI_ROOT/pipeline.conf" "$CI_ROOT"/stages/*.sh 2>/dev/null | sha256sum | cut -d' ' -f1)
         _dirty=0
         [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1)" ] && _dirty=1
-        if [ "$_head" = "$_last_good" ] && [ "$_dirty" = 0 ]; then
-            ci_info "sha $_head already completed a green run and the tree is clean — nothing to do"
+        if [ -n "$_last_config" ] && [ "$_last_config" = "$_pipeline_hash" ] \
+            && [ "$_head" = "$_last_good" ] && [ "$_dirty" = 0 ]; then
+            ci_info "sha $_head completed a green run under the CURRENT pipeline config and the tree is clean — nothing to do"
             exit "$CI_EXIT_UNCHANGED"
         fi
     fi

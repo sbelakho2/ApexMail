@@ -75,9 +75,9 @@ steps:
 
   # --- UI/UX gates over the exported visual fixtures (flash copy, form
   #     hygiene, a11y, dead links, terminology, strings-catalog drift) ---
-  # All six gates are ADVISORY by default (see the CI_UI_* block in
-  # ci/pipeline.conf); fixtures are exported into the run dir, never the
-  # working tree.
+  # All six gates are REQUIRED by default since the 2026-09-27 baseline went
+  # green (see the CI_UI_* block in ci/pipeline.conf); fixtures are exported
+  # into the run dir, never the working tree.
   - name: ui
     image: ghcr.io/sbelakho2/apexmail-ci:1
     environment:
