@@ -120,7 +120,7 @@ async fn build_harness() -> Option<Harness> {
     let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
     let (host, port, red_db) = parse_redis_url(&redis_url);
 
-    let mut config = Config::from_env();
+    let mut config = Config::from_env().expect("HA config must load in development");
     config.internal_api_key = INTERNAL_KEY.into();
     config.admin_api_key = ADMIN_KEY.into();
     config.redis.host = host;

@@ -991,6 +991,7 @@ mod tests {
     async fn ready_reports_ready_when_database_is_up() {
         use tower::ServiceExt;
 
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let Some(database_url) = std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())

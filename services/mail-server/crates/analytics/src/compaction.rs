@@ -947,6 +947,7 @@ mod gap_tests {
     /// compaction lock (`compaction:lock:{date}`) never collides across
     /// parallel nextest processes.
     fn private_redis(db: u32) -> Option<deadpool_redis::Pool> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
         let base = std::env::var("TEST_REDIS_URL").ok()?;
         let url = format!("{}/{}", base.trim_end_matches('/'), db);
         deadpool_redis::Config::from_url(url)

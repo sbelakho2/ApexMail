@@ -12,7 +12,11 @@ pub struct SSOConfiguration {
     pub enabled: bool,
     pub domain: String,
     pub metadata_url: Option<String>,
-    pub entity_id: Option<String>,
+    /// The IDP's entity id — the `<saml:Issuer>` we accept on responses and
+    /// assertions. (Audit rename: the column was `entity_id`, which invited
+    /// putting the IdP value into the AuthnRequest Issuer — that element must
+    /// always name APEXMAIL, the SP: `config.sso.saml.entity_id`.)
+    pub idp_entity_id: Option<String>,
     pub sso_url: Option<String>,
     pub slo_url: Option<String>,
     pub certificate: Option<String>,
@@ -44,7 +48,7 @@ pub struct SSOPublicConfig {
     pub enabled: bool,
     pub domain: String,
     pub metadata_url: Option<String>,
-    pub entity_id: Option<String>,
+    pub idp_entity_id: Option<String>,
     pub sso_url: Option<String>,
     pub slo_url: Option<String>,
     pub oidc_client_id: Option<String>,
@@ -68,7 +72,7 @@ impl From<SSOConfiguration> for SSOPublicConfig {
             enabled: c.enabled,
             domain: c.domain,
             metadata_url: c.metadata_url,
-            entity_id: c.entity_id,
+            idp_entity_id: c.idp_entity_id,
             sso_url: c.sso_url,
             slo_url: c.slo_url,
             oidc_client_id: c.oidc_client_id,
@@ -96,7 +100,11 @@ pub struct SSOSession {
     pub display_name: Option<String>,
     pub groups: Option<serde_json::Value>,
     pub attributes: Option<serde_json::Value>,
-    pub session_token: String,
+    /// Retired at-rest plaintext (migration 232). The presented token is
+    /// validated against `session_token_digest`; the raw value is never
+    /// persisted and therefore never selected back.
+    #[serde(skip_serializing)]
+    pub session_token: Option<String>,
     pub access_token_encrypted: Option<String>,
     pub refresh_token_encrypted: Option<String>,
     pub expires_at: DateTime<Utc>,
@@ -110,7 +118,10 @@ pub struct SSOConfigureRequest {
     pub provider_type: String,
     pub domain: String,
     pub enabled: Option<bool>,
-    pub entity_id: Option<String>,
+    /// The IdP's entity id (accepted as `<saml:Issuer>` on responses).
+    /// `entity_id` stays accepted on the wire for API compatibility.
+    #[serde(alias = "entity_id")]
+    pub idp_entity_id: Option<String>,
     pub sso_url: Option<String>,
     pub certificate: Option<String>,
     pub oidc_client_id: Option<String>,
@@ -133,6 +144,8 @@ pub struct OidcStateData {
     pub code_verifier: String,
     pub domain: String,
     pub tenant_id: Option<String>,
+    /// Staged post-login redirect target (consumed with the state).
+    pub return_to: Option<String>,
 }
 
 /// OIDC state row from database
@@ -142,6 +155,7 @@ pub struct OidcStateRow {
     pub code_verifier: String,
     pub domain: String,
     pub tenant_id: String,
+    pub return_to: Option<String>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -149,6 +163,45 @@ pub struct OidcStateRow {
 pub struct SSOCallbackResult {
     pub session: SSOSessionInfo,
     pub is_new_user: bool,
+    /// The canonical console session minted for this login (audit P1-3).
+    /// Never serialized — the cookie rides the redirect's Set-Cookie header.
+    #[serde(default, skip_serializing)]
+    pub canonical: Option<CanonicalSession>,
+}
+
+/// The four independent SAML ground truths every response is validated
+/// against (audit deconflation). Each is checked separately: the Response
+/// `Destination` and the SubjectConfirmationData `Recipient` must equal the
+/// ACS URL, the Assertion `Audience` must equal the SP entity id, and the
+/// Assertion/Response `Issuer` must equal the configured IdP entity id.
+#[derive(Debug, Clone)]
+pub struct SamlValidationContext {
+    /// Expected `<saml:Issuer>` on the Response and the Assertion (the IdP).
+    pub idp_entity_id: String,
+    /// Expected Assertion `<saml:Audience>` (APEXMAIL, the SP).
+    pub sp_entity_id: String,
+    /// Expected Response `Destination` and SubjectConfirmationData `Recipient`.
+    pub acs_url: String,
+    /// The staged AuthnRequest id the response must carry in `InResponseTo`
+    /// (both on the Response and on the bearer SubjectConfirmationData).
+    /// `None` only when the configuration explicitly allows IdP-initiated
+    /// logins and the response carries no `InResponseTo`.
+    pub expected_request_id: Option<String>,
+}
+
+/// The canonical console session minted for a validated SSO login — the same
+/// `am_session` JWT + cookie shape the web login issues, so an SSO callback
+/// lands the user in a REAL logged-in console session instead of only an
+/// enterprise bearer token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanonicalSession {
+    /// Canonical `users.id` the federation identity resolved/provisioned to.
+    pub user_id: String,
+    pub tenant_id: String,
+    /// The `am_session=…; HttpOnly; …` Set-Cookie header value.
+    pub cookie: String,
+    /// Sanitized in-console redirect target (safe return path).
+    pub return_to: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

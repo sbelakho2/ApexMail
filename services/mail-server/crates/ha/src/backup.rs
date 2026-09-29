@@ -1244,7 +1244,7 @@ mod tests {
             .unwrap()
     }
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_env())
+        Arc::new(Config::from_env().expect("HA config must load in development"))
     }
 
     #[test]
@@ -1487,7 +1487,7 @@ mod tests {
 
     #[test]
     fn test_backup_service_requires_encryption_key_in_production() {
-        let mut cfg = Config::from_env();
+        let mut cfg = Config::from_env().expect("HA config must load in development");
         cfg.environment = "production".into();
         cfg.backup.encryption_key = None;
         let err = match BackupService::new(test_pool(), Arc::new(cfg)) {
@@ -1500,7 +1500,7 @@ mod tests {
         );
 
         // …and a valid key is accepted.
-        let mut cfg = Config::from_env();
+        let mut cfg = Config::from_env().expect("HA config must load in development");
         cfg.environment = "production".into();
         cfg.backup.encryption_key = Some("12345678901234567890123456789012".into());
         assert!(BackupService::new(test_pool(), Arc::new(cfg)).is_ok());
@@ -1552,6 +1552,7 @@ mod tests {
         // tests):with a completed full backup present, PITR performs the
         // base-restore sequence and MUST report success=false with the
         // unsupported WAL-replay step spelled out.
+        migrator::test_support::assert_soft_skip_allowed("HA_TEST_DATABASE_URL");
         let Ok(url) = std::env::var("HA_TEST_DATABASE_URL") else {
             eprintln!("skipping: HA_TEST_DATABASE_URL not set");
             return;

@@ -24,6 +24,7 @@ async fn canonical_pool(test_name: &str) -> Option<sqlx::PgPool> {
 use crate::routes::test_support::redis_url_in_db;
 
 fn live_redis() -> Option<RedisPool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let url = redis_url_in_db(&std::env::var("TEST_REDIS_URL").ok()?, 8)?;
     let pool = deadpool_redis::Config::from_url(&url)
         .builder()

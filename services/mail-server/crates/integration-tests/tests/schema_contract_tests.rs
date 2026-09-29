@@ -54,6 +54,7 @@ async fn apply_canonical_migrations(pool: &PgPool) {
 /// `crm_pg::initialize`, which creates `sales_leads` at runtime) from
 /// polluting this suite's catalog and `_sqlx_migrations` lineage ledger.
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {

@@ -315,6 +315,7 @@ mod sales {
     async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
         let ready = INIT
             .get_or_init(|| async {
+                migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
                 let Some(base_url) = test_database_url() else {
                     eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
                     return false;

@@ -107,7 +107,7 @@ async fn build_harness() -> Option<Harness> {
     .await
     .expect("create isolation-owned emails table");
 
-    let mut config = Config::from_env();
+    let mut config = Config::from_env().expect("isolation config loads in the test environment");
     config.internal_api_key = INTERNAL_KEY.into();
     config.internal_api_keys = vec![INTERNAL_KEY.into()];
     config.security = security_config();

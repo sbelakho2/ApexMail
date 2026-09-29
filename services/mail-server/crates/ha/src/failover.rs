@@ -1057,7 +1057,7 @@ mod tests {
             .unwrap()
     }
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_env())
+        Arc::new(Config::from_env().expect("HA config must load in development"))
     }
 
     #[test]
@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn test_failback_requires_failed_over() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             // G.8: failback is opt-in since the manual-default change.
             cfg.failover.failback_enabled = true;
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
@@ -1127,7 +1127,7 @@ mod tests {
     fn test_failback_disabled_by_default() {
         test_runtime().block_on(async {
             // G.8: automatic failback must be off unless explicitly enabled.
-            let cfg = Config::from_env();
+            let cfg = Config::from_env().expect("HA config must load in development");
             if std::env::var("FAILBACK_ENABLED").is_ok() {
                 eprintln!("skipping: FAILBACK_ENABLED explicitly set in environment");
                 return;
@@ -1142,7 +1142,7 @@ mod tests {
     #[test]
     fn test_select_failover_target_no_replicas() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.database.replica_hosts = vec![];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             let res = svc.select_failover_target("node-1").await;
@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn test_select_failover_target_picks_different() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             // The fake pool cannot probe health: both replicas are
@@ -1167,7 +1167,7 @@ mod tests {
     #[test]
     fn test_select_failover_target_skips_unhealthy_replica() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.database.replica_hosts = vec!["replica-sick".into(), "replica-good".into()];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             {
@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn test_select_failover_target_all_unhealthy_refuses() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             {
@@ -1208,7 +1208,7 @@ mod tests {
     #[test]
     fn test_select_failover_target_unknown_probe_falls_back() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             {
@@ -1226,7 +1226,7 @@ mod tests {
     #[test]
     fn test_failover_disabled_report_failure() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.failover.enabled = false;
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
             let res = svc.report_failure("db").await;
@@ -1264,7 +1264,7 @@ mod tests {
 
     /// Config with an unreachable Redis (deterministic failure paths).
     fn dead_redis_config() -> Arc<Config> {
-        let mut cfg = Config::from_env();
+        let mut cfg = Config::from_env().expect("HA config must load in development");
         cfg.redis.host = "127.0.0.1".into();
         cfg.redis.port = 1; // nothing listens here
         cfg.database.replica_hosts = vec!["replica-1".into()];
@@ -1323,7 +1323,7 @@ mod tests {
     }
 
     fn live_redis_config(port: u16) -> Arc<Config> {
-        let mut cfg = Config::from_env();
+        let mut cfg = Config::from_env().expect("HA config must load in development");
         cfg.redis.host = "127.0.0.1".into();
         cfg.redis.port = port;
         cfg.multi_region.node_id = "node-primary".into();
@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn test_per_component_counters_isolated() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.failover.threshold = 10; // never trigger in this test
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
 
@@ -1399,7 +1399,7 @@ mod tests {
         test_runtime().block_on(async {
             // Dead Redis: the triggered failover must fail at the lock stage
             // (lock-first) and the machine must return to Normal, not Detecting.
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.failover.threshold = 2;
             cfg.redis.host = "127.0.0.1".into();
             cfg.redis.port = 1; // nothing listens here
@@ -1828,7 +1828,7 @@ mod tests {
             return;
         };
         test_runtime().block_on(async move {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.redis.host = "127.0.0.1".into();
             cfg.redis.port = redis.port;
             cfg.multi_region.node_id = "node-primary".into();
@@ -1901,7 +1901,7 @@ mod tests {
             return;
         };
         test_runtime().block_on(async move {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.redis.host = "127.0.0.1".into();
             cfg.redis.port = redis.port;
             cfg.multi_region.node_id = "node-primary".into();
@@ -1929,6 +1929,7 @@ mod tests {
 
     #[test]
     fn test_bootstrap_tables_round_trip() {
+        migrator::test_support::assert_soft_skip_allowed("HA_TEST_DATABASE_URL");
         let Ok(url) = std::env::var("HA_TEST_DATABASE_URL") else {
             eprintln!("skipping: HA_TEST_DATABASE_URL not set");
             return;
@@ -1946,7 +1947,7 @@ mod tests {
 
             // Round-trip a failover event through record_event/get_history
             // — this INSERT failed at runtime before the tables existed.
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.multi_region.node_id = "roundtrip-node".into();
             let svc = FailoverService::new(pool.clone(), Arc::new(cfg));
             let event = FailoverEvent {

@@ -17,6 +17,7 @@ use outbound_mta::{Relay, RelayConfig, SubmitRequest};
 /// via UNIQUE source IPs and send units — the real `dedicated_ips` table,
 /// the real `outbound_relay_ledger`, the real Redis counters).
 async fn test_db() -> Option<sqlx::PgPool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     let url = std::env::var("TEST_DATABASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())?;
@@ -30,6 +31,7 @@ async fn test_db() -> Option<sqlx::PgPool> {
 }
 
 fn redis_pool() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let url = std::env::var("TEST_REDIS_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())?;

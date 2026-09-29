@@ -32,6 +32,13 @@ pub(crate) mod test_db {
     /// key under each other mid-flight.
     pub(crate) static DKIM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Release-mode soft-skip contract (audit CI-2): under
+    /// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a
+    /// hard panic naming the variable, never a silent skip. Thin re-export of
+    /// the workspace guard so every skip decision point in this crate names
+    /// one implementation.
+    pub(crate) use migrator::test_support::assert_soft_skip_allowed;
+
     /// Deterministic environment for every AWS SDK client a test builds.
     ///
     /// Two failure modes this closes, both observed as flaky 15-90s test
@@ -133,6 +140,7 @@ pub(crate) mod test_db {
         let database_url = match std::env::var("TEST_DATABASE_URL") {
             Ok(value) if !value.trim().is_empty() => value,
             _ => {
+                assert_soft_skip_allowed("TEST_DATABASE_URL");
                 eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
                 return None;
             }

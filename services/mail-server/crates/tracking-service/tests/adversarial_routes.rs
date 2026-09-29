@@ -215,6 +215,7 @@ async fn pixel_always_returns_the_gif_and_never_leaks_recipient_data() {
     let Some(db) = canonical_pool("tracking_pixel").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Some(redis_url) = std::env::var("TEST_REDIS_URL").ok() else {
         return;
     };
@@ -332,6 +333,7 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     let Some(db) = canonical_pool("tracking_click_domain").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -455,6 +457,7 @@ async fn one_click_unsubscribe_is_durable_idempotent_and_refuses_bad_input() {
     let Some(db) = canonical_pool("tracking_unsub_routes").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -603,6 +606,7 @@ async fn preferences_center_persists_consent_and_reconciles_dedup() {
     let Some(db) = canonical_pool("tracking_prefs").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -728,6 +732,7 @@ async fn health_and_ready_report_dependency_state_honestly() {
     let Some(db) = canonical_pool("tracking_health").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -766,6 +771,7 @@ async fn rate_limit_middleware_returns_gif_for_pixels_and_json_elsewhere() {
     let Some(db) = canonical_pool("tracking_ratelimit").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -873,6 +879,7 @@ async fn sse_requires_a_signed_stream_scoped_token_and_caps_connections() {
     let Some(db) = canonical_pool("tracking_sse").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -949,6 +956,7 @@ async fn sse_wrong_tenant_token_cannot_read_another_tenants_channel() {
     let Some(db) = canonical_pool("tracking_sse_iso").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -994,6 +1002,7 @@ async fn prefs_post_survives_database_faults() {
     let Some(db) = canonical_pool("tracking_prefs_faults").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -1125,6 +1134,7 @@ async fn dedup_side_channels_survive_a_dead_redis() {
     let Some(db) = canonical_pool("tracking_dedup_dead").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -1178,6 +1188,7 @@ async fn dedup_side_channels_survive_a_dead_redis() {
 /// page — never a fabricated success.
 #[tokio::test]
 async fn confirm_with_a_dead_database_answers_the_error_page() {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };
@@ -1211,6 +1222,7 @@ async fn webhook_queue_failure_does_not_break_one_click() {
     let Some(db) = canonical_pool("tracking_webhook_fail").await else {
         return;
     };
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
         return;
     };

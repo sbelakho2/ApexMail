@@ -535,6 +535,7 @@ mod tests {
     /// dimensionally wrong `refill_interval_ms * capacity + 1000`.
     #[tokio::test]
     async fn test_token_bucket_ttl_derived_from_refill_math() {
+        migrator::test_support::assert_soft_skip_allowed("REDIS_TEST_URL");
         let Ok(url) = std::env::var("REDIS_TEST_URL") else {
             eprintln!("skipping: REDIS_TEST_URL not set");
             return;

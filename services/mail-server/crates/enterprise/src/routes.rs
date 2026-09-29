@@ -1651,14 +1651,52 @@ fn sso_refusal_status(code: Option<&str>) -> StatusCode {
     }
 }
 
+/// Turn a minted SSO session into the browser-facing outcome (audit P1-3).
+///
+/// With the canonical session available, the callback is a REAL login: a 302
+/// to the sanitized post-login target with the `am_session` cookie attached
+/// — the identical session shape the web login issues. Without it (the
+/// deployment has not configured the shared `JWT_PRIVATE_KEY_PEM`), the
+/// enterprise session JSON is returned as before so the bearer flow keeps
+/// working.
+fn sso_session_response(result: crate::types::SSOCallbackResult) -> Response {
+    match result.canonical {
+        Some(canonical) => {
+            let mut response = redirect_to(&canonical.return_to);
+            if let Ok(value) = canonical.cookie.parse() {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, value);
+            }
+            response
+        }
+        None => ok_json(result).into_response(),
+    }
+}
+
 /// GET /sso/login/saml/:domain
 ///
 /// SP-initiated SAML, step 1: build the tenant's AuthnRequest and send the
 /// browser to its IdP. The IdP posts the signed response back to the ACS
 /// (`POST /sso/acs/:domain`), which issues the session. Unknown or disabled
-/// domains are refused with 404 instead of a redirect.
-async fn sso_saml_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
-    match state.sso.initiate_saml_login(&domain).await {
+/// domains are refused with 404 instead of a redirect. An optional
+/// `?return_to=` query parameter stages the sanitized post-login redirect
+/// target with the AuthnRequest.
+#[derive(Debug, Deserialize)]
+struct SsoLoginQuery {
+    return_to: Option<String>,
+}
+
+async fn sso_saml_login(
+    State(state): State<S>,
+    Path(domain): Path<String>,
+    Query(query): Query<SsoLoginQuery>,
+) -> impl IntoResponse {
+    match state
+        .sso
+        .initiate_saml_login(&domain, query.return_to.as_deref())
+        .await
+    {
         Ok(result) => match result.data {
             Some(redirect) => redirect_to(&redirect.redirect_url),
             None => err_json(
@@ -1677,11 +1715,20 @@ async fn sso_saml_login(State(state): State<S>, Path(domain): Path<String>) -> i
 /// GET /sso/login/oidc/:domain
 ///
 /// SP-initiated OIDC, step 1: stage the single-use `state` + PKCE verifier
-/// and send the browser to the IdP's authorize endpoint. The IdP redirects
-/// back to `GET /sso/callback/oidc/:domain`, which completes the exchange and
-/// issues the session. Unknown or disabled domains are refused with 404.
-async fn sso_oidc_login(State(state): State<S>, Path(domain): Path<String>) -> impl IntoResponse {
-    match state.sso.initiate_oidc_login(&domain).await {
+/// and send the browser to the IdP's DISCOVERED authorization endpoint. The
+/// IdP redirects back to `GET /sso/callback/oidc/:domain`, which completes
+/// the exchange and issues the session. Unknown or disabled domains are
+/// refused with 404.
+async fn sso_oidc_login(
+    State(state): State<S>,
+    Path(domain): Path<String>,
+    Query(query): Query<SsoLoginQuery>,
+) -> impl IntoResponse {
+    match state
+        .sso
+        .initiate_oidc_login(&domain, query.return_to.as_deref())
+        .await
+    {
         Ok(result) => match result.data {
             Some(redirect) => redirect_to(&redirect.redirect_url),
             None => err_json(
@@ -1819,21 +1866,27 @@ async fn sso_saml_acs_inner(
             .collect::<std::collections::BTreeMap<String, String>>(),
     )
     .ok();
+    // The staged AuthnRequest's redirect target was consumed atomically with
+    // the InResponseTo correlation.
+    let return_to = validated.return_to.clone();
 
     match state
         .sso
         .handle_saml_callback(
-            &config.tenant_id,
-            &email,
-            display_name.as_deref(),
-            &validated.name_id,
-            groups,
-            attributes,
+            &config,
+            crate::sso::FederationIdentity {
+                email: &email,
+                display_name: display_name.as_deref(),
+                external_user_id: &validated.name_id,
+                groups,
+                attributes,
+            },
+            return_to.as_deref(),
         )
         .await
     {
         Ok(result) => match result.data {
-            Some(session) => ok_json(session).into_response(),
+            Some(session) => sso_session_response(session),
             None => err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 result
@@ -1907,12 +1960,7 @@ async fn sso_oidc_callback_inner(state: S, path_domain: Option<String>, query: O
 
     match state
         .sso
-        .complete_oidc_callback(
-            &state.http_client,
-            path_domain.as_deref(),
-            &code,
-            &oidc_state,
-        )
+        .complete_oidc_callback(path_domain.as_deref(), &code, &oidc_state, None)
         .await
     {
         Ok(Ok(session)) => ok_json(session).into_response(),
@@ -4029,6 +4077,23 @@ mod tests {
         format!("{tag}_{}", &unique[..keep.min(unique.len())])
     }
 
+    /// Seed the tenants row a generated test tenant id needs before the SSO
+    /// callback can provision a canonical `users` row
+    /// (`users_tenant_id_fkey`).
+    async fn seed_sso_flow_tenant(state: &AppState, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("SSO Flow Tenant {tenant}"))
+        .bind(format!("sso-flow-{tenant}"))
+        .execute(&state.db)
+        .await
+        .expect("seed SSO flow tenant");
+    }
+
     /// Provision a canonical database and the real router for the SSO flow
     /// tests. The JWT gate is pointed at the repo's test keypair so admin
     /// tokens can be minted for the authenticated `/sso/configure` call.
@@ -4041,6 +4106,12 @@ mod tests {
                 "LOG_STREAM_ENCRYPTION_KEY",
                 "log-stream-routes-coverage-key-0123456789",
             );
+        }
+        // The federation egress guard (audit P3-9) refuses plaintext and
+        // private addresses; the in-process mock IdPs bind 127.0.0.1 over
+        // http, so the loopback host is allowlisted for this test process.
+        if std::env::var("SSO_FEDERATION_ALLOWLIST").is_err() {
+            std::env::set_var("SSO_FEDERATION_ALLOWLIST", "127.0.0.1");
         }
         let pool = migrator::test_support::fresh_canonical_pool(tag, &format!("routes_sso_{tag}"))
             .await
@@ -4173,6 +4244,37 @@ mod tests {
         )
     }
 
+    /// The AuthnRequest `ID` attribute from a decoded SAMLRequest document —
+    /// the request id the login initiation staged for InResponseTo
+    /// correlation (audit P2-6).
+    fn authn_request_id(saml_request: &str) -> String {
+        let marker = "ID=\"";
+        let start = saml_request.find(marker).expect("AuthnRequest ID") + marker.len();
+        let end = saml_request[start..].find('"').expect("closing quote") + start;
+        saml_request[start..end].to_string()
+    }
+
+    /// Stage one SP-initiated AuthnRequest for InResponseTo correlation
+    /// (audit P2-6) — the E2E equivalent of the staging `GET
+    /// /sso/login/saml/:domain` performs, without minting a new request id.
+    async fn stage_saml_authn_request(
+        state: &AppState,
+        tenant: &str,
+        domain: &str,
+        request_id: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO ent_saml_authn_requests (request_id, tenant_id, domain, expires_at)
+             VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')",
+        )
+        .bind(request_id)
+        .bind(tenant)
+        .bind(domain)
+        .execute(&state.db)
+        .await
+        .expect("stage AuthnRequest");
+    }
+
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|window| window == needle)
     }
@@ -4217,6 +4319,10 @@ mod tests {
             .to_string();
             let discovery = serde_json::json!({
                 "issuer": issuer,
+                // Audit P3-10: a NONSTANDARD authorization endpoint — the
+                // flow must take the authorize URL from discovery, never
+                // from `{issuer}/authorize`.
+                "authorization_endpoint": format!("{issuer}/oidc-auth"),
                 "token_endpoint": format!("{issuer}/token"),
                 "jwks_uri": format!("{issuer}/jwks.json"),
             })
@@ -4355,10 +4461,14 @@ mod tests {
         let tag = "saml_e2e";
         let tenant = sso_flow_tenant(tag);
         let domain = "saml-e2e.routes.example.com";
-        let entity_id = "https://idp.routes-saml.example.com/metadata";
+        // The IDP's entity id — what we ACCEPT on responses, never what we
+        // send in the AuthnRequest Issuer (audit P2-4).
+        let idp_entity_id = "https://idp.routes-saml.example.com/metadata";
         let sso_url = "https://idp.routes-saml.example.com/sso";
         let acs_url = state.config.sso.saml.acs_url.clone();
+        let sp_entity_id = state.config.sso.saml.entity_id.clone();
         let admin = mint_sso_admin_token(&tenant, "routes-saml-admin");
+        seed_sso_flow_tenant(&state, &tenant).await;
 
         // Configure the tenant IdP THROUGH the router (admin JWT → handler).
         let configure = serde_json::json!({
@@ -4366,7 +4476,7 @@ mod tests {
             "provider_type": "saml",
             "domain": domain,
             "enabled": true,
-            "entity_id": entity_id,
+            "idp_entity_id": idp_entity_id,
             "sso_url": sso_url,
             "certificate": IDP_CERTIFICATE_PEM,
             "enforce_sso": true,
@@ -4402,12 +4512,34 @@ mod tests {
             .unwrap()
         };
         assert!(saml_request.contains("AuthnRequest"), "{saml_request}");
-        assert!(saml_request.contains(entity_id), "{saml_request}");
+        // Audit P2-4: the AuthnRequest Issuer names APEXMAIL (the SP); the
+        // IdP's entity id never appears in it.
+        assert!(
+            saml_request.contains(&sp_entity_id),
+            "the SP entity id is the AuthnRequest Issuer: {saml_request}"
+        );
+        assert!(
+            !saml_request.contains(idp_entity_id),
+            "the IdP entity id must NOT appear in the AuthnRequest: {saml_request}"
+        );
         assert!(saml_request.contains(&acs_url), "{saml_request}");
+        let request_id = authn_request_id(&saml_request);
+        assert!(request_id.starts_with("_saml_"), "{request_id}");
+        // The initiation staged it durably (audit P2-6).
+        let staged: Option<String> = sqlx::query_scalar(
+            "SELECT tenant_id FROM ent_saml_authn_requests WHERE request_id = $1",
+        )
+        .bind(&request_id)
+        .fetch_optional(&state.db)
+        .await
+        .expect("staged AuthnRequest");
+        assert_eq!(staged.as_deref(), Some(tenant.as_str()));
 
-        // 2. A valid, genuinely signed response → session issued.
-        let signed = SamlFixture::valid(entity_id, &acs_url).render(sso_flow_idp_key());
-        let form = saml_acs_form(&signed, domain);
+        // 2. A valid, genuinely signed response → session issued. The
+        //    InResponseTo names the staged request from step 1.
+        let mut signed = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
+        signed.in_response_to = Some(request_id.clone());
+        let form = saml_acs_form(&signed.render(sso_flow_idp_key()), domain);
         let response = post_form(&app, &format!("/sso/acs/{domain}"), &form).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
@@ -4426,7 +4558,10 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["email"], "alice.smith@example.com");
 
-        // 4. The same assertion replayed is refused.
+        // 4. The same assertion replayed is refused (the correlation stage
+        //    is re-inserted so the failure demonstrably lands on the replay
+        //    guard, not the one-shot correlation gate).
+        stage_saml_authn_request(&state, &tenant, domain, &request_id).await;
         let response = post_form(&app, &format!("/sso/acs/{domain}"), &form).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = response_json(response).await;
@@ -4439,7 +4574,7 @@ mod tests {
         );
 
         // 5. A tampered (digest-flipped) response is refused at the signature gate.
-        let mut tamperable = SamlFixture::valid(entity_id, &acs_url);
+        let mut tamperable = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         tamperable.name_id = "tamper-check@example.com".into();
         let signed_document = tamperable.render(sso_flow_idp_key());
         let marker = "<ds:DigestValue>";
@@ -4464,7 +4599,15 @@ mod tests {
                 .contains("signature verification failed"),
             "{body}"
         );
-        // The untouched document still validates (the gate is exact).
+        // The untouched document still validates (the gate is exact) — it
+        // correlates against a fresh stage of the same request id.
+        stage_saml_authn_request(
+            &state,
+            &tenant,
+            domain,
+            tamperable.in_response_to.as_deref().expect("fixture InResponseTo"),
+        )
+        .await;
         let response = post_form(
             &app,
             &format!("/sso/acs/{domain}"),
@@ -4477,19 +4620,28 @@ mod tests {
         //    to tenant B's ACS is refused on the Issuer check.
         let tenant_b = sso_flow_tenant(tag);
         let domain_b = "saml-e2e-b.routes.example.com";
+        seed_sso_flow_tenant(&state, &tenant_b).await;
         let configure_b = serde_json::json!({
             "tenant_id": tenant_b,
             "provider_type": "saml",
             "domain": domain_b,
             "enabled": true,
-            "entity_id": "https://idp.other.example.com/metadata",
+            "idp_entity_id": "https://idp.other.example.com/metadata",
             "sso_url": sso_url,
             "certificate": IDP_CERTIFICATE_PEM,
         });
         let admin_b = mint_sso_admin_token(&tenant_b, "routes-saml-admin-b");
         let response = post_json(&app, "/sso/configure", &admin_b, &configure_b).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let foreign = SamlFixture::valid(entity_id, &acs_url);
+        let mut foreign = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
+        foreign.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
+        stage_saml_authn_request(
+            &state,
+            &tenant_b,
+            domain_b,
+            foreign.in_response_to.as_deref().expect("fixture InResponseTo"),
+        )
+        .await;
         let response = post_form(
             &app,
             &format!("/sso/acs/{domain_b}"),
@@ -4507,8 +4659,16 @@ mod tests {
         );
 
         // 7. An expired assertion is refused.
-        let mut expired = SamlFixture::valid(entity_id, &acs_url);
+        let mut expired = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         expired.not_on_or_after = Some(Utc::now() - TimeDelta::try_minutes(30).unwrap());
+        expired.not_before = None;
+        stage_saml_authn_request(
+            &state,
+            &tenant,
+            domain,
+            expired.in_response_to.as_deref().expect("fixture InResponseTo"),
+        )
+        .await;
         let response = post_form(
             &app,
             &format!("/sso/acs/{domain}"),
@@ -4526,7 +4686,7 @@ mod tests {
         );
 
         // 8. An unsigned assertion is refused.
-        let mut unsigned = SamlFixture::valid(entity_id, &acs_url);
+        let mut unsigned = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         unsigned.include_signature = false;
         let response = post_form(
             &app,
@@ -4542,14 +4702,25 @@ mod tests {
         let response = post_form(
             &app,
             "/sso/acs/no-such.routes.example.com",
-            &saml_acs_form(&signed, domain),
+            &saml_acs_form(&signed.render(sso_flow_idp_key()), domain),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         // 10. The domain-less ACS (the SAML_ACS_URL default shape) resolves
         //     the tenant domain from RelayState and issues a session.
-        let domain_less = SamlFixture::valid(entity_id, &acs_url);
+        let mut domain_less = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
+        domain_less.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
+        stage_saml_authn_request(
+            &state,
+            &tenant,
+            domain,
+            domain_less
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
+        )
+        .await;
         let response = post_form(
             &app,
             "/sso/acs",
@@ -4595,6 +4766,7 @@ mod tests {
         let client_id = "routes-oidc-client";
         let client_secret = "routes-oidc-secret";
         let admin = mint_sso_admin_token(&tenant, "routes-oidc-admin");
+        seed_sso_flow_tenant(&state, &tenant).await;
 
         let mock = MockOidcIdp::spawn(
             sso_flow_idp_key(),
@@ -4617,12 +4789,13 @@ mod tests {
         let response = post_json(&app, "/sso/configure", &admin, &configure).await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        // 1. Login initiation → 302 to the IdP's authorize endpoint.
+        // 1. Login initiation → 302 to the IdP's DISCOVERED authorization
+        //    endpoint (nonstandard on the mock — audit P3-10).
         let response = get_request(&app, &format!("/sso/login/oidc/{domain}")).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         let location = response_header(&response, "location");
         assert!(
-            location.starts_with(&format!("{}/authorize?", mock.issuer)),
+            location.starts_with(&format!("{}/oidc-auth?", mock.issuer)),
             "unexpected redirect: {location}"
         );
         for expected in [
@@ -4664,9 +4837,17 @@ mod tests {
         //    is issued from the validated id_token.
         let callback = format!("/sso/callback/oidc/{domain}?code=routes-code-1&state={login_state}");
         let response = get_request(&app, &callback).await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let callback_status = response.status();
         let body = response_json(response).await;
-        assert_eq!(body["is_new_user"], true, "{body}");
+        assert_eq!(
+            callback_status,
+            StatusCode::OK,
+            "callback status with body: {body}"
+        );
+        assert_eq!(
+            body["is_new_user"], true,
+            "callback result: {body}"
+        );
         assert_eq!(
             body["session"]["email"],
             "riley@oidc-e2e.routes.example.com"

@@ -4041,7 +4041,7 @@ pub(crate) async fn load_domain_detail(
     tenant: &str,
     id: &str,
     aws_region: &str,
-) -> Option<ListPageData> {
+) -> Result<Option<ListPageData>, sqlx::Error> {
     let row: Option<(
         String,
         String,
@@ -4061,9 +4061,7 @@ pub(crate) async fn load_domain_detail(
     .bind(id)
     .bind(tenant)
     .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    .await?;
     let (
         id,
         name,
@@ -4075,7 +4073,12 @@ pub(crate) async fn load_domain_detail(
         dkim_selector,
         dkim_public_key,
         dkim_private_key,
-    ) = row?;
+    ) = match row {
+        Some(row) => row,
+        // Outage honesty (audit #16): Ok(None) is the GENUINE not-found;
+        // a storage failure propagates as Err.
+        None => return Ok(None),
+    };
 
     let mut data = base_list(
         "Domain",
@@ -4159,7 +4162,7 @@ pub(crate) async fn load_domain_detail(
             rows: Vec::new(),
         });
     }
-    Some(data)
+    Ok(Some(data))
 }
 
 /// Per-status action data for the campaign detail page (item B): which
@@ -4396,33 +4399,33 @@ impl CampaignDetailData {
 }
 
 /// Load `/lists/{id}` detail data (batch-2 list-detail fix): the real list
-/// name plus its subscriber counts. `None` when the row does not exist in
-/// this workspace (the handler flashes the honest not-found) — never a
+/// name plus its subscriber counts. `Ok(None)` when the row does not exist
+/// in this workspace (the handler flashes the honest not-found) — never a
 /// demo list. A count query failure renders "unavailable", not zero.
+///
+/// Storage failures are RETURNED (outage-honesty audit #16): the handler
+/// answers `Ok(None)` with its genuine not-found copy and `Err` with the
+/// temporary-unavailable flash — a database outage must not read as
+/// "list not found".
 pub(crate) async fn load_list_detail(
     db: &sqlx::PgPool,
     tenant: &str,
     id: &str,
-) -> Option<ui_foundation::view_data::ListDetailData> {
-    let row: Option<(String, String)> = match sqlx::query_as(
+) -> Result<Option<ui_foundation::view_data::ListDetailData>, sqlx::Error> {
+    let row: Option<(String, String)> = sqlx::query_as(
         "SELECT id::text, name FROM lists WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(id)
     .bind(tenant)
     .fetch_optional(db)
-    .await
-    {
-        Ok(row) => row,
-        Err(error) => {
-            tracing::warn!(error = %error, "list detail lookup failed");
-            return None;
-        }
+    .await?;
+    let Some((id, name)) = row else {
+        return Ok(None);
     };
-    let (id, name) = row?;
 
     // Counts come from the subscribers join. list_subscribers.status is the
     // per-subscriber state ('subscribed' vs anything else).
-    let counts: Option<(i64, i64, i64)> = match sqlx::query_as(
+    let counts: Option<(i64, i64, i64)> = sqlx::query_as(
         "SELECT COUNT(*)::bigint,
                 COUNT(*) FILTER (WHERE status = 'subscribed')::bigint,
                 COUNT(*) FILTER (WHERE status <> 'subscribed')::bigint
@@ -4430,43 +4433,44 @@ pub(crate) async fn load_list_detail(
     )
     .bind(&id)
     .fetch_optional(db)
-    .await
-    {
-        Ok(counts) => counts,
-        Err(error) => {
-            tracing::warn!(error = %error, "list detail counts failed");
-            None
-        }
-    };
+    .await?;
+    // Unknown ≠ zero: the page must say the figure is unavailable. A COUNT
+    // aggregate always yields one row, so `None` here can only mean the
+    // list row vanished between the two queries — render the figures as
+    // unavailable, never as a fabricated zero.
     let (subscribers, subscribed, unsubscribed) = match counts {
         Some(counts) => (
             counts.0.to_string(),
             counts.1.to_string(),
             counts.2.to_string(),
         ),
-        // Unknown ≠ zero: the page must say the figure is unavailable.
         None => (
             "unavailable".to_string(),
             "unavailable".to_string(),
             "unavailable".to_string(),
         ),
     };
-    Some(ui_foundation::view_data::ListDetailData {
+    Ok(Some(ui_foundation::view_data::ListDetailData {
         id,
         name,
         subscribers,
         subscribed,
         unsubscribed,
-    })
+    }))
 }
 
 /// Load `/campaigns/{id}` detail data (tenant-scoped), including the
 /// per-status action availability computed by web.rs's pure rule.
+///
+/// Storage failures are RETURNED (outage-honesty audit #16): the handler
+/// answers `Ok(None)` with its genuine not-found copy and `Err` with the
+/// temporary-unavailable flash — an outage must not read as "campaign not
+/// found", and a failed recipient count must not fabricate a zero.
 pub(crate) async fn load_campaign_detail(
     db: &sqlx::PgPool,
     tenant: &str,
     id: &str,
-) -> Option<CampaignDetailData> {
+) -> Result<Option<CampaignDetailData>, sqlx::Error> {
     let row: Option<(
         String,
         String,
@@ -4484,46 +4488,46 @@ pub(crate) async fn load_campaign_detail(
     .bind(id)
     .bind(tenant)
     .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
-    let (id, name, subject, status, scheduled_at, recipients_job) = row?;
+    .await?;
+    let (id, name, subject, status, scheduled_at, recipients_job) = match row {
+        Some(row) => row,
+        None => return Ok(None),
+    };
     // The wired audience is the latest `recipients:{list}:{segment}` job.
     let (list_id, segment) = recipients_job
         .as_deref()
         .and_then(super::parse_recipients_job)
         .unzip();
     let list_name: Option<String> = match &list_id {
-        Some(list_id) => {
-            sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
-                .bind(list_id)
-                .bind(tenant)
-                .fetch_optional(db)
-                .await
-                .ok()
-                .flatten()
-        }
+        Some(list_id) => sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(list_id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await?,
         None => None,
     };
     let recipient_count = match &list_id {
-        Some(list_id) => count_list_recipients_filtered(
-            db,
-            tenant,
-            list_id,
-            segment.as_deref().unwrap_or("subscribed"),
-        )
-        .await
-        .unwrap_or(0),
+        Some(list_id) => {
+            count_list_recipients_filtered(
+                db,
+                tenant,
+                list_id,
+                segment.as_deref().unwrap_or("subscribed"),
+            )
+            .await?
+        }
         None => 0,
     };
     let actions = super::campaign_actions(&id, &status)
         .into_iter()
         .map(|(label, target, available)| (label.to_string(), target, available))
         .collect();
-    let lists = tenant_lists_for_select(db, tenant).await;
+    // Outage honesty (audit #16): a failed lists select fails the whole
+    // detail load closed — never an empty audience select.
+    let lists = tenant_lists_for_select(db, tenant).await?;
     // Deferred-feature 5: per-campaign send statistics ride the detail data.
     let stats = load_campaign_send_stats(db, tenant, &id).await;
-    Some(CampaignDetailData {
+    Ok(Some(CampaignDetailData {
         id,
         name,
         subject: subject.unwrap_or_default(),
@@ -4535,20 +4539,26 @@ pub(crate) async fn load_campaign_detail(
         actions,
         lists,
         stats,
-    })
+    }))
 }
 
 /// Count a list's contacts with an optional segment filter (all /
 /// subscribed / unsubscribed / bounced) for the recipients wiring. The
 /// segment is a BIND (audit F8), never string-interpolated SQL.
+///
+/// Storage failures are RETURNED (outage-honesty audit #16): a database
+/// outage used to read as "zero recipients", which blocked honest
+/// campaign starts with the wrong copy ("no subscribed contacts") and let
+/// wiring proceed against fabricated zeroes. Callers answer `Err` with
+/// the temporary-unavailable flash.
 pub(crate) async fn count_list_recipients_filtered(
     db: &sqlx::PgPool,
     tenant: &str,
     list_id: &str,
     segment: &str,
-) -> Option<i64> {
+) -> Result<i64, sqlx::Error> {
     if segment == "all" {
-        return sqlx::query_scalar(
+        let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::bigint
              FROM list_subscribers ls
              JOIN contacts c ON c.id = ls.contact_id
@@ -4557,11 +4567,11 @@ pub(crate) async fn count_list_recipients_filtered(
         .bind(list_id)
         .bind(tenant)
         .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
+        .await?
+        .unwrap_or(0);
+        return Ok(count);
     }
-    sqlx::query_scalar(
+    let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint
          FROM list_subscribers ls
          JOIN contacts c ON c.id = ls.contact_id
@@ -4571,57 +4581,60 @@ pub(crate) async fn count_list_recipients_filtered(
     .bind(tenant)
     .bind(segment)
     .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
+    .await?
+    .unwrap_or(0);
+    Ok(count)
 }
 
 /// The tenant's lists for the campaign-recipients select: (id, name,
 /// selected) triples with none selected by default.
+/// The tenant's lists for the campaign-recipients select: (id, name,
+/// selected). Storage failures are RETURNED (outage-honesty audit #16):
+/// degrading to an empty select used to render the campaign detail page as
+/// if the workspace had no lists — a fabricated negative an operator could
+/// act on. The detail loader now fails closed to the temporary-unavailable
+/// state instead, so this helper bypasses [`load_query`] (which folds the
+/// error into `LoadState::Unavailable`) to keep the actual `sqlx::Error`.
 pub(crate) async fn tenant_lists_for_select(
     db: &sqlx::PgPool,
     tenant: &str,
-) -> Vec<(String, String, bool)> {
-    // Called outside the page-render path — own correlation id (audit F14).
+) -> Result<Vec<(String, String, bool)>, sqlx::Error> {
+    // Own correlation id for the failure record (audit F14 convention).
     let correlation_id = next_correlation_id();
-    let rows: Vec<(String, String)> =
-        match load_query("web.campaign_detail.lists", &correlation_id, async {
-            sqlx::query_as::<_, (String, String)>(
-                "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name ASC LIMIT 200",
-            )
-            .bind(tenant)
-            .fetch_all(db)
-            .await
-        })
-        .await
-        {
-            LoadState::Loaded(rows) => rows,
-            // The select degrades to empty rather than blocking campaign
-            // detail rendering; the failure is logged with the query id.
-            LoadState::Unavailable => Vec::new(),
-        };
-    rows.into_iter()
-        .map(|(id, name)| (id, name, false))
-        .collect()
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name ASC LIMIT 200",
+    )
+    .bind(tenant)
+    .fetch_all(db)
+    .await
+    .map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            query_id = "web.campaign_detail.lists",
+            correlation_id = %correlation_id,
+            "campaign-detail lists select failed; the page fails closed (outage-honesty audit #16)"
+        );
+        error
+    })
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(id, name)| (id, name, false))
+            .collect()
+    })
 }
 
 /// Plan names from the billing catalog (item I) — the tenant-create
 /// form's plan select is validated against this exact set.
-pub(crate) async fn tenant_plan_names(db: &sqlx::PgPool) -> Vec<String> {
-    // Called outside the page-render path — own correlation id (audit F14).
-    let correlation_id = next_correlation_id();
-    match load_query("web.tenant_create.plans", &correlation_id, async {
-        sqlx::query_as::<_, (String,)>("SELECT name FROM plans ORDER BY price_cents ASC LIMIT 50")
-            .fetch_all(db)
-            .await
-    })
-    .await
-    {
-        LoadState::Loaded(rows) => rows.into_iter().map(|(name,)| name).collect(),
-        // An unreadable catalog degrades to an empty select; the failure
-        // is logged with the query id rather than silently swallowed.
-        LoadState::Unavailable => Vec::new(),
-    }
+///
+/// Storage failures are RETURNED (outage-honesty audit #16): an unreadable
+/// catalog used to degrade to an empty list, which lied to the operator as
+/// "Choose a plan from the catalog." for perfectly valid plans. Callers
+/// answer `Err` with the temporary-unavailable flash.
+pub(crate) async fn tenant_plan_names(db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_as::<_, (String,)>("SELECT name FROM plans ORDER BY price_cents ASC LIMIT 50")
+        .fetch_all(db)
+        .await
+        .map(|rows| rows.into_iter().map(|(name,)| name).collect())
 }
 
 /// Render the admin transfer-suggestion data (item J) as list-page data.
@@ -6836,7 +6849,9 @@ mod coverage_loader_tests {
                 );
             }
         }
-        // Detail loaders return None rather than a fabricated page.
+        // Detail loaders FAIL CLOSED (outage-honesty audit #16): a dead
+        // database is `Err` — never a fabricated page. (Malformed ids are
+        // pre-validated by the handlers, so `Err` here means storage.)
         assert!(load_domain_detail(
             &app.db,
             "t",
@@ -6844,24 +6859,25 @@ mod coverage_loader_tests {
             "us-east-1"
         )
         .await
-        .is_none());
+        .is_err());
         assert!(
             load_campaign_detail(&app.db, "t", "00000000-0000-0000-0000-000000000000")
                 .await
-                .is_none()
+                .is_err()
         );
-        // Select helpers degrade to empty, never to invented names.
-        assert!(tenant_lists_for_select(&app.db, "t").await.is_empty());
-        assert!(tenant_plan_names(&app.db).await.is_empty());
-        assert_eq!(
+        // Select helpers propagate the failure — never an invented empty
+        // list or zero count (outage-honesty audit #16).
+        assert!(tenant_lists_for_select(&app.db, "t").await.is_err());
+        assert!(tenant_plan_names(&app.db).await.is_err());
+        assert!(
             count_list_recipients_filtered(
                 &app.db,
                 "t",
                 "00000000-0000-0000-0000-000000000000",
                 "all"
             )
-            .await,
-            None
+            .await
+            .is_err()
         );
     }
 
@@ -7048,24 +7064,29 @@ mod coverage_loader_tests {
         // Domain detail: with DKIM material the DNS record table renders.
         let detail = load_domain_detail(&app.db, &tenant_a, &seeded.domain_id, "us-east-1")
             .await
+            .expect("domain detail query succeeds")
             .expect("domain detail for owner");
         assert_eq!(kpi(&detail, "Domain"), format!("{tag_a}.example.test"));
         assert!(table(&detail).rows.len() >= 4, "DNS records must render");
-        // Cross-tenant and malformed ids are refused.
+        // Cross-tenant and malformed ids are refused. The malformed id makes
+        // the `$1::uuid` cast fail at Postgres — the loaders are only ever
+        // handed handler-pre-validated ids, so `Err` there is expected.
         assert!(
             load_domain_detail(&app.db, &tenant_b, &seeded.domain_id, "us-east-1")
                 .await
+                .expect("cross-tenant query succeeds")
                 .is_none()
         );
         assert!(
             load_domain_detail(&app.db, &tenant_a, "not-a-uuid", "us-east-1")
                 .await
-                .is_none()
+                .is_err()
         );
         // DKIM-less domain: the page renders its headers with no record rows
         // and the explicit "not generated yet" copy (never fabricated DNS).
         let bare = load_domain_detail(&app.db, &tenant_a, &seeded.domain_without_dkim, "us-east-1")
             .await
+            .expect("bare domain query succeeds")
             .expect("bare domain detail");
         assert!(table(&bare).rows.is_empty());
         assert!(bare.empty_title.contains("not generated"));
@@ -7074,43 +7095,62 @@ mod coverage_loader_tests {
         // Campaign detail: recipients job resolves back to the list name.
         let campaign = load_campaign_detail(&app.db, &tenant_a, &seeded.campaign_id)
             .await
+            .expect("campaign detail query succeeds")
             .expect("campaign detail for owner");
         let debug = format!("{campaign:?}");
         assert!(debug.contains(&tag_a), "list name must resolve");
         assert!(
             load_campaign_detail(&app.db, &tenant_b, &seeded.campaign_id)
                 .await
+                .expect("cross-tenant campaign query succeeds")
                 .is_none()
         );
-        assert!(load_campaign_detail(&app.db, &tenant_a, "not-a-uuid")
-            .await
-            .is_none());
+        assert!(
+            load_campaign_detail(&app.db, &tenant_a, "not-a-uuid")
+                .await
+                .is_err()
+        );
 
         // Select helpers return only this tenant's rows.
-        let lists = tenant_lists_for_select(&app.db, &tenant_a).await;
+        let lists = tenant_lists_for_select(&app.db, &tenant_a)
+            .await
+            .expect("lists select succeeds");
         assert_eq!(lists.len(), 1);
         assert!(lists[0].1.contains(&tag_a));
         assert!(!lists[0].2, "nothing selected by default");
-        assert!(tenant_plan_names(&app.db)
-            .await
-            .iter()
-            .any(|name| !name.is_empty()));
+        assert!(
+            tenant_plan_names(&app.db)
+                .await
+                .expect("plans catalog query succeeds")
+                .iter()
+                .any(|name| !name.is_empty())
+        );
+        // Audit #16: counts are `Ok(i64)` now — a cross-tenant list is a
+        // genuine (empty) count, not an error.
         assert_eq!(
-            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "all").await,
-            Some(1)
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "all")
+                .await
+                .expect("count query succeeds"),
+            1
         );
         assert_eq!(
-            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "subscribed").await,
-            Some(1)
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "subscribed")
+                .await
+                .expect("count query succeeds"),
+            1
         );
         assert_eq!(
-            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "bounced").await,
-            Some(0)
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "bounced")
+                .await
+                .expect("count query succeeds"),
+            0
         );
         // Another tenant asking for this list's counts sees nothing.
         assert_eq!(
-            count_list_recipients_filtered(&app.db, &tenant_b, &seeded.list_id, "all").await,
-            Some(0)
+            count_list_recipients_filtered(&app.db, &tenant_b, &seeded.list_id, "all")
+                .await
+                .expect("count query succeeds"),
+            0
         );
     }
 

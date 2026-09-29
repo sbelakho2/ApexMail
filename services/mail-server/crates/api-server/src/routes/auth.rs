@@ -482,15 +482,28 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
 }
 
-/// F8: enterprise SSO enforcement. A tenant whose `ent_sso_configurations`
-/// row has `enforce_sso = true` must not be able to authenticate with a
-/// local password — every login has to go through the SSO flow. Returns
-/// `Ok(false)` when the table does not exist (deployments without the
-/// enterprise schema) so enforcement degrades safely; any other database
-/// error is propagated.
+/// F8 (audit P1-1/P1-2): enterprise SSO enforcement. A tenant whose
+/// `ent_sso_configurations` rows have `enforce_sso = true` must not be able
+/// to authenticate with a local password — every login has to go through the
+/// SSO flow.
+///
+/// Deterministic by construction (audit P1-2): a tenant may hold a
+/// configuration row PER DOMAIN, and the previous `LIMIT 1` pick was an
+/// arbitrary one of them. The aggregate
+/// `COALESCE(bool_or(enabled AND enforce_sso), FALSE)` answers the policy
+/// question directly — SSO is enforced when ANY enabled configuration row
+/// for the tenant demands it. This mirrors
+/// `enterprise::sso::tenant_enforces_sso` (the same query lives there for
+/// the enterprise crate's own routes; the crates cannot share code without
+/// a new dependency).
+///
+/// Returns `Ok(false)` when the table does not exist (deployments without
+/// the enterprise schema) so enforcement degrades safely; any other
+/// database error is propagated.
 async fn tenant_sso_enforced(db: &sqlx::PgPool, tenant_id: &str) -> Result<bool, ApiError> {
     let enforced: Option<bool> = match sqlx::query_scalar::<_, bool>(
-        "SELECT enforce_sso FROM ent_sso_configurations WHERE tenant_id = $1 LIMIT 1",
+        "SELECT COALESCE(bool_or(enabled AND enforce_sso), FALSE)
+         FROM ent_sso_configurations WHERE tenant_id = $1",
     )
     .bind(tenant_id)
     .fetch_optional(db)
@@ -518,7 +531,15 @@ async fn tenant_sso_enforced(db: &sqlx::PgPool, tenant_id: &str) -> Result<bool,
     Ok(enforced.unwrap_or(false))
 }
 
-fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
+/// The shared password-verification step (audit P1-1): both the JSON login
+/// and the browser SSR login verify credentials through THIS function, so
+/// the `$sso$` placeholder refusal and the scheme logging behave
+/// identically on every surface.
+pub(crate) fn verify_password_or_log(
+    password: &str,
+    hash: &str,
+    subject: &str,
+) -> Result<bool, ApiError> {
     // SSO-only accounts (auto-provisioned by routes/sso.rs) carry a
     // `$sso$…` placeholder that no password can ever verify; routing it
     // into the hash verifiers below fails with an Internal error on every
@@ -557,6 +578,167 @@ fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<b
             )))
         }
     }
+}
+
+// ─── Shared password-login policy ladder (audit P1-1) ──────────────────────
+//
+// ONE ladder, BOTH login surfaces. The JSON login (`login` below) and the
+// browser SSR login (`routes::web::perform_password_login`) previously
+// maintained two divergent copies of the post-password policy — and the
+// browser copy never evaluated tenant SSO enforcement at all, so an
+// SSO-enforced tenant's users could walk straight past the gate through the
+// console form. Both surfaces now call [`evaluate_password_login_policy`]
+// and only map its verdict onto their own transport (JSON errors vs SSR
+// redirects).
+//
+/// What the shared ladder demands of the MFA step (audit P1-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MfaChallengeRequirement {
+    /// The account has an enrolled authenticator — a code must be verified
+    /// (TOTP / recovery code / email MFA, per the surface's machinery).
+    Verify,
+    /// `mfa_enabled` is set but no usable secret is stored: the account can
+    /// never complete a challenge. Surfaces map this onto their own
+    /// transport: the JSON API refuses ("MFA is not configured", matching
+    /// its original behavior); the console SSR still issues the challenge —
+    /// its verify step is the brute-force-bounded place that shape fails
+    /// (every code counts toward the lockout).
+    Misconfigured,
+    /// The role's MFA policy demands enrollment and nothing is enrolled —
+    /// enrollment comes before any session.
+    Setup,
+}
+
+/// The shared ladder's verdict (audit P1-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasswordLoginVerdict {
+    /// Authentication may complete; no MFA challenge stands in the way.
+    Allowed,
+    /// The account exists but is not `active`.
+    AccountInactive,
+    /// The tenant enforces SSO: password login is disabled.
+    SsoRequired,
+    /// The account's email address is not verified.
+    EmailUnverified,
+    /// High-risk ATO refusal. MUST be rendered byte-identically to a
+    /// wrong-password failure (anti-enumeration) and rate-limited as one.
+    RefusedHighRisk,
+    /// An MFA challenge stands between the password and the session.
+    MfaRequired {
+        requirement: MfaChallengeRequirement,
+    },
+}
+
+/// The policy-relevant projection of the authenticating user. Both surfaces
+/// construct this from their own row types, so the ladder stays decoupled
+/// from either query shape.
+pub(crate) struct PasswordLoginSubject<'a> {
+    pub user_id: &'a str,
+    pub tenant_id: &'a str,
+    pub role: &'a str,
+    pub status: &'a str,
+    pub email_verified: bool,
+    /// The `mfa_enabled` flag — set even when the stored secret is missing
+    /// (that combination is the [`MfaChallengeRequirement::Misconfigured`]
+    /// verdict).
+    pub mfa_enabled: bool,
+    /// `mfa_enabled` AND a usable (non-empty) `mfa_secret` is stored.
+    pub mfa_enrolled: bool,
+}
+
+/// The ONE password-login policy ladder (audit P1-1). Run AFTER the password
+/// verified — policy is disclosed only to callers who presented the correct
+/// credentials, never to anonymous probes.
+///
+/// Order (the audit's): status → SSO enforcement → email verification →
+/// ATO risk verdict → MFA step-up → verdict.
+///
+/// `enforce_role_mfa` selects whether the role policy (`role_requires_mfa`)
+/// forces enrollment on this surface. The JSON API enforces it with its
+/// enrollment challenge; the SSR console passes `false` — it has no
+/// pre-authentication enrollment flow, so forcing [`MfaChallengeRequirement::Setup`]
+/// there would dead-end administrators behind an uncompletable challenge
+/// (the console enforces the flag post-login via the CP/session gates).
+pub(crate) async fn evaluate_password_login_policy(
+    state: &AppState,
+    subject: PasswordLoginSubject<'_>,
+    client_ip: Option<&str>,
+    user_agent: Option<&str>,
+    enforce_role_mfa: bool,
+) -> Result<PasswordLoginVerdict, ApiError> {
+    // 1. Status: an inactive account never receives a session.
+    if subject.status != "active" {
+        return Ok(PasswordLoginVerdict::AccountInactive);
+    }
+
+    // 2. SSO enforcement: SSO-enforced tenants reject password login on
+    //    EVERY surface (audit P1-1 — the browser path never checked this).
+    //    The entitlement gate honours the capability: a tenant whose
+    //    configuration enforces SSO without the `sso_enabled` entitlement is
+    //    refused instead of silently receiving an unbought feature.
+    if tenant_sso_enforced(&state.db, subject.tenant_id).await? {
+        crate::entitlements::require_feature(
+            state,
+            subject.tenant_id,
+            billing_entitlements::FeatureKey::Sso,
+        )
+        .await?;
+        tracing::info!(
+            tenant_id = %subject.tenant_id,
+            "password login rejected: tenant enforces SSO"
+        );
+        return Ok(PasswordLoginVerdict::SsoRequired);
+    }
+
+    // 3. Email verification is a login prerequisite.
+    if !subject.email_verified {
+        return Ok(PasswordLoginVerdict::EmailUnverified);
+    }
+
+    // 4. ATO risk verdict on the successful-password authentication. The
+    //    high-risk refusal is anti-enumeration: it renders exactly like a
+    //    wrong password. Medium risk steps up to MFA — which requires an
+    //    enrollment, so an unenrolled medium-risk login is allowed+flagged
+    //    inside the engine.
+    let ato_decision = ato_evaluate_password_login(
+        state,
+        subject.user_id,
+        subject.tenant_id,
+        subject.mfa_enrolled,
+        client_ip,
+        user_agent,
+    )
+    .await;
+    let ato_step_up = match ato_decision {
+        AtoLoginDecision::Refuse => return Ok(PasswordLoginVerdict::RefusedHighRisk),
+        AtoLoginDecision::StepUpMfa => true,
+        AtoLoginDecision::Allow => false,
+    };
+
+    // 5. MFA step-up: a challenge is required when the account enrolled one
+    //    (either surface), when the role's policy demands enrollment, or
+    //    when the ATO ladder forced a step-up (that implies an enrollment —
+    //    never an enrollment forcing).
+    if subject.mfa_enrolled {
+        return Ok(PasswordLoginVerdict::MfaRequired {
+            requirement: MfaChallengeRequirement::Verify,
+        });
+    }
+    if subject.mfa_enabled {
+        // The flag without a secret cannot complete any challenge.
+        return Ok(PasswordLoginVerdict::MfaRequired {
+            requirement: MfaChallengeRequirement::Misconfigured,
+        });
+    }
+    // Every enrolled/misconfigured shape already returned above, so reaching
+    // this point means nothing is enrolled.
+    if ato_step_up || (enforce_role_mfa && role_requires_mfa(subject.role)) {
+        return Ok(PasswordLoginVerdict::MfaRequired {
+            requirement: MfaChallengeRequirement::Setup,
+        });
+    }
+
+    Ok(PasswordLoginVerdict::Allowed)
 }
 
 pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
@@ -2251,89 +2433,83 @@ async fn login(
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
-    // ── ATO protection: evaluate the successful-password authentication ──
-    // (risk ladder documented on `ato_evaluate_password_login`). A high-risk
-    // refusal is byte-identical to the wrong-password error above: the
-    // attacker learns nothing except that the credentials did not yield a
-    // session. The real reason lives in the auth.ato_login_risk audit row.
-    let ato_decision = ato_evaluate_password_login(
+    // ── Shared login policy ladder (audit P1-1) ──────────────────────────
+    // Status → SSO enforcement → email verification → ATO risk verdict →
+    // MFA step-up, evaluated by the SAME `evaluate_password_login_policy`
+    // the browser SSR login runs (its verdict maps onto redirects there).
+    // Policy is disclosed only AFTER the password verified: these branches
+    // previously ran pre-verification, letting an anonymous caller confirm
+    // an email is registered (and whether its org enforces SSO) without any
+    // credential knowledge.
+    let mfa_enrolled = user.mfa_enabled
+        && user
+            .mfa_secret
+            .as_deref()
+            .is_some_and(|secret| !secret.is_empty());
+    let verdict = evaluate_password_login_policy(
         &state,
-        &user.id,
-        &user.tenant_id,
-        user.mfa_enabled
-            && user
-                .mfa_secret
-                .as_deref()
-                .is_some_and(|secret| !secret.is_empty()),
+        PasswordLoginSubject {
+            user_id: &user.id,
+            tenant_id: &user.tenant_id,
+            role: &user.role,
+            status: &user.status,
+            email_verified: user.email_verified,
+            mfa_enabled: user.mfa_enabled,
+            mfa_enrolled,
+        },
         Some(client_ip.as_str()),
         headers
             .get("user-agent")
             .and_then(|value| value.to_str().ok()),
+        // The JSON API enforces the role MFA policy with its enrollment
+        // challenge (the SSR console cannot complete enrollment
+        // pre-authentication; see `evaluate_password_login_policy`).
+        true,
     )
-    .await;
-    let ato_step_up = match ato_decision {
-        AtoLoginDecision::Refuse => {
+    .await?;
+
+    match verdict {
+        PasswordLoginVerdict::RefusedHighRisk => {
             // Rate-limit the attempt exactly like a wrong password (the M-6
             // distinct-IP corroboration still applies, so the ATO path alone
             // never disables the account), then return the anti-enumeration
-            // error.
+            // error. The real reason lives in the auth.ato_login_risk row.
             record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
             return Err(ApiError::Unauthorized("invalid credentials".into()));
         }
-        AtoLoginDecision::StepUpMfa => true,
-        AtoLoginDecision::Allow => false,
-    };
-
-    // Status and SSO policy are revealed only AFTER the password verified:
-    // these branches previously ran pre-verification, letting an anonymous
-    // caller confirm an email is registered (and whether its org enforces
-    // SSO) without any credential knowledge.
-    if user.status != "active" {
-        return Err(ApiError::Forbidden("account is not active".into()));
+        PasswordLoginVerdict::AccountInactive => {
+            return Err(ApiError::Forbidden("account is not active".into()));
+        }
+        PasswordLoginVerdict::SsoRequired => {
+            return Err(ApiError::Forbidden(
+                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled"
+                    .into(),
+            ));
+        }
+        // The authentication itself survived the policy — clear the lockout
+        // counter (its pre-ladder placement, preserved).
+        PasswordLoginVerdict::EmailUnverified
+        | PasswordLoginVerdict::MfaRequired { .. }
+        | PasswordLoginVerdict::Allowed => {
+            clear_login_failures(&state.redis, &login_identifier).await?;
+        }
     }
 
-    // F8: SSO-enforced tenants reject password login. The password check
-    // above still runs first so password-guessing against SSO-only
-    // accounts is rate-limited identically to normal accounts; only the
-    // policy disclosure moves after verification.
-    if tenant_sso_enforced(&state.db, &user.tenant_id).await? {
-        // Entitlement gate: honouring SSO enforcement hands the tenant the
-        // SSO capability, so the plan must include `sso_enabled`. A tenant
-        // whose configuration enforces SSO without the entitlement is
-        // refused (403) instead of silently receiving an unbought feature.
-        crate::entitlements::require_feature(
-            &state,
-            &user.tenant_id,
-            billing_entitlements::FeatureKey::Sso,
-        )
-        .await?;
-        tracing::info!(
-            tenant_id = %user.tenant_id,
-            "password login rejected: tenant enforces SSO"
-        );
-        return Err(ApiError::Forbidden(
-            "SSO_REQUIRED: this organization requires single sign-on; password login is disabled"
-                .into(),
-        ));
-    }
-
-    clear_login_failures(&state.redis, &login_identifier).await?;
-
-    // Email verification is a login prerequisite, enforced only after the
-    // password verified (never leaking account existence to anonymous
-    // callers).
-    if !user.email_verified {
+    if let PasswordLoginVerdict::EmailUnverified = verdict {
         return Err(ApiError::Forbidden(
             "email not verified — check your inbox for the verification link".into(),
         ));
     }
 
-    // ATO step-up (medium risk with MFA enrolled) enters the same challenge
-    // machinery as MFA-required roles; the branch below only issues a
-    // challenge because `ato_step_up` implies an enrolled, configured
-    // secret — never an enrollment forcing.
-    if ato_step_up || role_requires_mfa(&user.role) {
-        if user.mfa_enabled {
+    if let PasswordLoginVerdict::MfaRequired { requirement } = verdict {
+        // The flag without a secret can never complete a challenge: refuse
+        // instead of dead-ending the account in a challenge loop.
+        if requirement == MfaChallengeRequirement::Misconfigured {
+            return Err(ApiError::Forbidden(
+                "MFA is not configured for this admin account".into(),
+            ));
+        }
+        if requirement == MfaChallengeRequirement::Verify {
             let secret = user
                 .mfa_secret
                 .as_deref()
@@ -2512,7 +2688,10 @@ async fn login(
                     MfaChallengeResponse::verify(challenge_token),
                 ));
             }
-        } else {
+        }
+        // Enrollment forcing (role policy): the JSON surface carries the
+        // enrollment challenge machinery.
+        if requirement == MfaChallengeRequirement::Setup {
             let secret = generate_mfa_secret()?;
             let challenge_token = store_mfa_challenge(
                 &state.redis,
@@ -5044,6 +5223,7 @@ mod tests {
         // F6: never probe the ambient 6379 — the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL not set");
             return;
         };
@@ -5139,6 +5319,7 @@ mod tests {
         // F6: never probe the ambient 6379 — the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL not set");
             return;
         };
@@ -5216,6 +5397,7 @@ mod tests {
         // F6: never probe the ambient 6379 — the variable must name the
         // Redis under test explicitly; unset means skip.
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL not set");
             return;
         };
@@ -5428,6 +5610,7 @@ mod tests {
     /// ambient 6379 is never probed implicitly).
     async fn live_redis_pool_or_skip() -> Option<deadpool_redis::Pool> {
         let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL not set");
             return None;
         };
@@ -5992,6 +6175,7 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty());
         let Some(database_url) = database_url else {
+            crate::test_db::assert_soft_skip_allowed("TEST_DATABASE_URL");
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
@@ -6670,6 +6854,7 @@ mod adversarial_auth_tests {
 
     /// A Redis URL on the given logical DB, derived from TEST_REDIS_URL.
     fn redis_url_for(db: u32) -> Option<String> {
+        crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
         let base = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;
@@ -7922,6 +8107,7 @@ mod adversarial_auth_tests_2 {
     const TEST_PASSWORD: &str = "Sup3r#SecurePass";
 
     fn redis_url_for(db: u32) -> Option<String> {
+        crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
         let base = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;
@@ -9093,6 +9279,7 @@ mod adversarial_auth_tests_3 {
     const NEW_PASSWORD: &str = "Ev3n#StrongerPassphrase";
 
     fn redis_url_for(db: u32) -> Option<String> {
+        crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
         let base = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;
@@ -10732,6 +10919,7 @@ mod transactional_email_contracts {
             .ok()
             .filter(|v| !v.trim().is_empty())
         else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping {test_name}: TEST_REDIS_URL unset");
             pool.close().await;
             return None;

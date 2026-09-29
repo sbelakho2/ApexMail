@@ -42,6 +42,7 @@ fn clickhouse_config(database: &str) -> Option<ClickHouseConfig> {
 /// Build a ClickHouse engine against a freshly created `apexmail_test`
 /// database. Panics when the server is configured but unreachable.
 async fn clickhouse_engine() -> Option<ClickHouseEngine> {
+    migrator::test_support::assert_soft_skip_allowed("CLICKHOUSE_TEST_URL");
     let Some(config) = clickhouse_config("apexmail_test") else {
         eprintln!("skipping: CLICKHOUSE_TEST_URL is not configured");
         return None;

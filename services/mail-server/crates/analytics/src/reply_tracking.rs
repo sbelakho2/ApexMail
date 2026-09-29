@@ -790,6 +790,7 @@ CREATE TABLE IF NOT EXISTS events (
 "#;
 
     async fn isolated_pool(db_suffix: &str) -> Option<PgPool> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let database_url = match std::env::var("TEST_DATABASE_URL") {
             Ok(v) if !v.trim().is_empty() => v,
             _ => {

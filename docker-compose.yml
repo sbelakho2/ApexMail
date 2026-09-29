@@ -1111,7 +1111,8 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info,compliance=debug}
       # NODE_ENV=production (prod overlay) makes the service refuse an
-      # ephemeral AUDIT_SIGNING_KEY — dev keeps the inline defaults below.
+      # ephemeral AUDIT_SIGNING_KEY and refuse missing COMPLIANCE_AUTH_TOKEN /
+      # SECRETS_ENCRYPTION_KEY (exit 78) — dev keeps the inline defaults below.
       NODE_ENV: ${NODE_ENV:-development}
       # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
       DATABASE_URL: ""

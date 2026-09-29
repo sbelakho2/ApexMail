@@ -763,6 +763,7 @@ mod tests {
             allowed_ips: Vec<String>,
         ) -> Option<(AppState, sqlx::PgPool)> {
             let pool = crate::test_db::canonical_pool(test_name).await?;
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
             let redis = deadpool_redis::Config::from_url(&redis_url)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))

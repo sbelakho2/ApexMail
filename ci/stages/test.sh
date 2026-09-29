@@ -21,7 +21,10 @@
 #      REQUIRED via ci_have_tool (fail-closed on the deploy host, warn-skip
 #      on dev machines); licenses gate: inventory-driven deny.toml allow list
 #   6. ephemeral services per CI_TEST_DB / CI_TEST_REDIS, then
-#      cargo test --workspace
+#      cargo test --workspace; under APEXMAIL_RELEASE_TEST_MODE=1 the run log
+#      is additionally gated on soft-skip markers (audit CI-2:
+#      tools/check_soft_skips.py) — a GREEN release run must be a skip-FREE
+#      release run
 #   6b. coverage ratchet: cargo llvm-cov nextest --workspace →
 #      $RUN_DIR/coverage.lcov; OVERALL line coverage compared against
 #      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK)
@@ -157,6 +160,52 @@ _provision_test_services() {
     fi
 }
 
+# _cargo_run_capture <log-path> <cmd...> — run cmd with its combined output
+# captured to <log-path> (UNCAPPED, the gate needs the full stream) and
+# capped into $CI_STAGE_LOG exactly like ci_run_logged; returns the command's
+# exit code. The uncapped side copy is what the release-mode soft-skip log
+# gate reads: a marker can sit beyond ci_cap_stream's cap window.
+_cargo_run_capture() {
+    _cc_log=$1
+    shift
+    _cc_rc=0
+    "$@" >"$_cc_log" 2>&1 || _cc_rc=$?
+    ci_cap_stream <"$_cc_log" >>"$CI_STAGE_LOG"
+    return "$_cc_rc"
+}
+
+# soft_skip_log_gate <run-log> — audit CI-2's belt to the guard's braces.
+# Under APEXMAIL_RELEASE_TEST_MODE=1 the guarded helpers PANIC on a missing
+# infrastructure variable, so a passing run must contain no soft-skip
+# markers at all: any hit means a helper was missed in the release-mode
+# sweep and a REQUIRES-INFRASTRUCTURE test degraded into a green no-op.
+# tools/check_soft_skips.py owns the marker list (with its self-test); when
+# python3 is absent the gate degrades to a fixed grep over the same
+# families — still fail-closed.
+soft_skip_log_gate() {
+    _sg_log=$1
+    [ "${APEXMAIL_RELEASE_TEST_MODE:-}" = "1" ] || return "$CI_EXIT_OK"
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 "$REPO_ROOT/tools/check_soft_skips.py" "$_sg_log"; then
+            ci_info "PASS: release-mode soft-skip log gate (no skip markers)"
+        else
+            ci_err "FAIL: soft-skip markers found in a APEXMAIL_RELEASE_TEST_MODE=1 run — \
+a REQUIRES-INFRASTRUCTURE test skipped instead of running (audit CI-2). \
+Guard the helper that prints the marker with \
+migrator::test_support::assert_soft_skip_allowed, or wire the missing fixture."
+            return "$CI_EXIT_FAIL"
+        fi
+    else
+        if grep -Eq 'skipping.*(set TEST_|not set|unset|not configured|no TEST_DATABASE_URL|no TEST_REDIS_URL|unconfigured|migrator could not run|no ClickHouse at|unreachable|Redis unavailable)' \
+            "$_sg_log"; then
+            ci_err "FAIL: soft-skip markers found in a APEXMAIL_RELEASE_TEST_MODE=1 run (grep fallback) — audit CI-2"
+            return "$CI_EXIT_FAIL"
+        fi
+        ci_info "PASS: release-mode soft-skip log gate (grep fallback)"
+    fi
+    return "$CI_EXIT_OK"
+}
+
 run_cargo_tests() {
     _provision_test_services
 
@@ -183,12 +232,18 @@ run_cargo_tests() {
                 _nx_args="$_nx_args --skip $_kft"
             fi
         done
+        _nx_log=$RUN_DIR/nextest.log
         # shellcheck disable=SC2086  # _TEST_ENV/_nx_args are intentional word lists
-        if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never \
+        if ! (cd "$WS" && _cargo_run_capture "$_nx_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
                 cargo nextest run --workspace --all-targets $_nx_args); then
             ci_err "cargo nextest run FAILED — see the output above"
+            soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"
         fi
+        # Release-mode contract (audit CI-2): a GREEN run must also be a
+        # skip-FREE run. A test that panicked in release mode already failed
+        # the run above; this gate catches the helpers the panic sweep missed.
+        soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
     elif [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
         # Hermetic CI (the Woodpecker image): no fallback. A nextest-less
         # environment means the image is broken — prove that, don't degrade
@@ -197,11 +252,15 @@ run_cargo_tests() {
         return "$CI_EXIT_FAIL"
     else
         ci_warn "cargo-nextest missing — falling back to cargo test (known env-race, §9 F10); install nextest via ci/install.sh"
+        _ct_log=$RUN_DIR/cargo-test.log
         # shellcheck disable=SC2086
-        if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never cargo test --workspace); then
+        if ! (cd "$WS" && _cargo_run_capture "$_ct_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
+                cargo test --workspace); then
             ci_err "cargo test --workspace FAILED — see the output above"
+            soft_skip_log_gate "$_ct_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"
         fi
+        soft_skip_log_gate "$_ct_log" || return "$CI_EXIT_FAIL"
     fi
 }
 

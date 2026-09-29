@@ -561,6 +561,7 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// audit F01, carries the full canonical migration chain). Skips unless
     /// TEST_DATABASE_URL is set (workspace convention).
     async fn audit_chain_test_pool(db_suffix: &str) -> Option<PgPool> {
+        crate::test_db::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;

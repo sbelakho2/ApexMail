@@ -49,6 +49,16 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: apexmail_ci
       POSTGRES_DB: apexmail_ci
+  # A second, NEVER-MIGRATED database: the migrator binary's fresh-database
+  # regression test (applied_count == 0 before any chain is applied) needs a
+  # truly empty database, which the canonical one cannot be. Its soft skip is
+  # a release-mode failure (audit CI-2), so the fixture is provided here.
+  - name: postgres-fresh
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: apexmail_ci
+      POSTGRES_DB: apexmail_fresh
   - name: redis
     image: redis:7-alpine
   # The analytics and tracking-service suites are gated on a live ClickHouse
@@ -82,6 +92,10 @@ steps:
     image: ghcr.io/sbelakho2/apexmail-ci:1
     environment:
       CI_MISSING_TOOLS: fail
+      # Release-mode soft-skip contract (audit CI-2): a REQUIRES-INFRASTRUCTURE
+      # test whose fixture variable is missing must hard-panic, never degrade
+      # into a green no-op. Kept on every stage that can execute tests.
+      APEXMAIL_RELEASE_TEST_MODE: "1"
     commands:
       - ./ci/woodpecker/stage.sh ui
 
@@ -94,6 +108,12 @@ steps:
       CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
       CI_TEST_REDIS: service
+      # Release-mode soft-skip contract (audit CI-2): with the fixtures below
+      # provided, any test still trying to soft-skip on a missing variable is
+      # a broken fixture — panic naming the variable instead of passing as a
+      # no-op. ci/stages/test.sh additionally fails the stage if a known
+      # "skipping:" marker ever reaches the run log.
+      APEXMAIL_RELEASE_TEST_MODE: "1"
       TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       # The DML-only-role release test provisions a role, so it needs a
       # CREATEROLE connection; the postgres service user IS the superuser.
@@ -102,6 +122,14 @@ steps:
       REDIS_TEST_URL: redis://redis:6379
       CLICKHOUSE_TEST_URL: http://clickhouse:8123
       CLICKHOUSE_TEST_USER: default
+      # The HA bootstrap/PITR round-trip tests bootstrap their own ha_* tables
+      # (idempotent) and seed their own rows, so the provided canonical
+      # database is a valid target; wired because their soft skip is now a
+      # release-mode failure.
+      HA_TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+      # Truly EMPTY database (second postgres service, never migrated) for
+      # the migrator fresh-database regression test.
+      TEST_FRESH_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres-fresh:5432/apexmail_fresh
     commands:
       # Apply the canonical ClickHouse schema (the same file the compose stack
       # mounts) before the tests that read it.
@@ -123,9 +151,12 @@ steps:
       CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
       CI_TEST_REDIS: service
+      # Release-mode soft-skip contract (audit CI-2) — same as the test step.
+      APEXMAIL_RELEASE_TEST_MODE: "1"
       TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       TEST_REDIS_URL: redis://redis:6379
+      REDIS_TEST_URL: redis://redis:6379
       CLICKHOUSE_TEST_URL: http://clickhouse:8123
     commands:
       - ./ci/woodpecker/stage.sh security

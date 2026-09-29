@@ -41,6 +41,7 @@ const SKIP_REASON: &str =
 const LIVE_DB: &str = "apexmail_calendar_live";
 
 async fn live_pool(test_name: &str) -> Option<PgPool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     let base_url = std::env::var("TEST_DATABASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())?;

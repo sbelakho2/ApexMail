@@ -43,7 +43,20 @@ fn init_tracing() -> Option<TracingGuard> {
 async fn main() -> Result<(), Box<dyn Error>> {
     let _guard = init_tracing();
 
-    let config = Arc::new(Config::from_env());
+    // SEC fix: from_env is fallible now — production REFUSES missing
+    // INTERNAL_API_KEY / ADMIN_API_KEY / DB_PASSWORD instead of generating
+    // synthetic credentials (EX_CONFIG, mirroring the isolation crate's
+    // exit-78 convention).
+    let config = match Config::from_env() {
+        Ok(config) => Arc::new(config),
+        Err(error) => {
+            error!(
+                "SECURITY: HA configuration refused to load: {error} — set the required \
+                 environment variables and restart (exit 78 / EX_CONFIG)"
+            );
+            std::process::exit(78); // EX_CONFIG
+        }
+    };
     info!(
         port = config.port,
         version = config.version,

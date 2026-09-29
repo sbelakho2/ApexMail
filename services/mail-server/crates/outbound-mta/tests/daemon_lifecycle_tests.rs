@@ -15,6 +15,7 @@ const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const STOP_DEADLINE: Duration = Duration::from_secs(15);
 
 fn test_database_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     match std::env::var("TEST_DATABASE_URL") {
         Ok(url) if !url.trim().is_empty() => Some(url),
         _ => None,

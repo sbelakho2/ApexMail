@@ -97,7 +97,7 @@ async fn list_gdpr_requests(
     // Slug-aware system-tenant resolution (audit F1): human operators belong
     // to `system_internal_tenant01`, not the literal `system` sentinel — the
     // literal comparison silently scoped this console to an empty tenant.
-    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await?;
 
     // Check if table exists
     let exists: (bool,) = sqlx::query_as("SELECT to_regclass('public.gdpr_requests') IS NOT NULL")
@@ -227,7 +227,7 @@ async fn update_gdpr_request(
         return Err(ApiError::Validation(vec!["Invalid status".into()]));
     }
 
-    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await?;
 
     // Fetch the request first: completion gating needs its type, and a
     // tenant-scoped operator must not learn anything about foreign requests.

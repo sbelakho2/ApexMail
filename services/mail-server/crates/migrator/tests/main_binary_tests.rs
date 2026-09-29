@@ -38,6 +38,7 @@ fn run(command: &mut Command) -> (bool, String, String) {
 }
 
 fn base_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
     let (server, db) = url.rsplit_once('/')?;
     let db_only = db.split('?').next().unwrap_or(db);

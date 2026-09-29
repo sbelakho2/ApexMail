@@ -936,6 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clickhouse_init() {
+        migrator::test_support::assert_soft_skip_allowed("CLICKHOUSE_TEST_URL");
         let url =
             std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://localhost:8123".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
@@ -995,6 +996,7 @@ mod tests {
     async fn engine_e2e() {
         use chrono::{TimeZone, Utc};
 
+        migrator::test_support::assert_soft_skip_allowed("CLICKHOUSE_TEST_URL");
         let url =
             std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());

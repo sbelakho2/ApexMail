@@ -856,18 +856,25 @@ async fn clear_mfa_verify_failures(state: &AppState, user_id: &str) {
 /// code between this read and this write) matches zero rows and fails closed.
 /// A DB fault also fails closed; the caller records a verification failure
 /// either way, so wrong codes count toward the shared lockout.
+/// Verify an MFA recovery code and consume it single-use. Storage failures
+/// are RETURNED (outage-honesty audit #16): mapping the guarded UPDATE's
+/// error to `false` made a database outage indistinguishable from "that
+/// recovery code did not match" — the caller now answers `Ok(false)` with
+/// its genuine wrong-code copy and `Err` with [`temporary_storage_failure`].
+/// `Ok(false)` covers ONLY genuine negatives: no stored hashes, no hash
+/// matched, or the remaining-set re-serialization failed.
 async fn verify_and_consume_recovery_code(
     db: &sqlx::PgPool,
     user_id: &str,
     tenant_id: &str,
     code: &str,
     stored_hashes_json: Option<&serde_json::Value>,
-) -> bool {
+) -> Result<bool, sqlx::Error> {
     let Some(stored_hashes) = stored_hashes_json.and_then(|json| json.as_array()) else {
-        return false;
+        return Ok(false);
     };
     if stored_hashes.is_empty() {
-        return false;
+        return Ok(false);
     }
     let hashes: Vec<String> = stored_hashes
         .iter()
@@ -877,7 +884,7 @@ async fn verify_and_consume_recovery_code(
         .iter()
         .position(|hash| apexmail_lib::mfa::verify_recovery_code(code, hash))
     else {
-        return false;
+        return Ok(false);
     };
     let remaining: Vec<&str> = hashes
         .iter()
@@ -886,9 +893,9 @@ async fn verify_and_consume_recovery_code(
         .map(|(_, hash)| hash.as_str())
         .collect();
     let Ok(remaining_json) = serde_json::to_value(&remaining) else {
-        return false;
+        return Ok(false);
     };
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE users SET mfa_recovery_hashes = $1, updated_at = NOW()
          WHERE id = $2::uuid AND tenant_id = $3 AND mfa_recovery_hashes = $4",
     )
@@ -897,9 +904,8 @@ async fn verify_and_consume_recovery_code(
     .bind(tenant_id)
     .bind(stored_hashes_json)
     .execute(db)
-    .await
-    .map(|result| result.rows_affected() == 1)
-    .unwrap_or(false)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 /// Revoke every live session for the user (same Redis key the auth
@@ -1832,20 +1838,26 @@ struct WebUserRow {
     status: String,
     mfa_enabled: bool,
     email_verified: bool,
+    /// Stored (encrypted at rest) MFA secret — presence is what
+    /// distinguishes an enrolled account from a bare `mfa_enabled` flag in
+    /// the shared login-policy ladder (audit P1-1).
+    mfa_secret: Option<String>,
 }
 
-const USER_COLUMNS: &str =
-    "id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, email_verified";
+const USER_COLUMNS: &str = "id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret";
 
-async fn find_user_by_email(state: &AppState, email: &str) -> Option<WebUserRow> {
+/// Look up a console user by email or username. Storage failures are
+/// RETURNED (outage-honesty audit #16): the caller must answer
+/// `Ok(None)` with its genuine "invalid credentials" copy and `Err(_)`
+/// with [`temporary_storage_failure`] — a database outage used to be
+/// indistinguishable from a wrong password here.
+async fn find_user_by_email(state: &AppState, email: &str) -> Result<Option<WebUserRow>, sqlx::Error> {
     sqlx::query_as::<_, WebUserRow>(&format!(
         "SELECT {USER_COLUMNS} FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($1)"
     ))
     .bind(email)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten()
 }
 
 fn scopes_for_role(role: &str) -> Vec<String> {
@@ -1958,6 +1970,96 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     )
 }
 
+/// The honest error surface for request-path web actions (outage-honesty
+/// audit #16).
+///
+/// A request-path storage failure must NEVER collapse into the same
+/// response the handler uses for "invalid credentials", "contact not
+/// found", "zero recipients", or "tenant not found": the audited console
+/// swallowed every `fetch_optional` error with `.ok().flatten()`, which made
+/// a database outage semantically identical to a negative answer. Handlers
+/// now distinguish
+///
+/// * `Ok(Some(_))` → proceed,
+/// * `Ok(None)`    → the handler's GENUINE not-found copy,
+/// * `Err(_)`      → [`temporary_storage_failure`] (unknown, not negative).
+enum WebActionError {
+    /// The storage layer failed: the truth is UNKNOWN, never negative.
+    Database(sqlx::Error),
+    /// Caller-controlled input was refused; the payload carries the
+    /// field-level copy the same handler would have flashed for it anyway.
+    Validation(String),
+}
+
+impl From<sqlx::Error> for WebActionError {
+    fn from(error: sqlx::Error) -> Self {
+        WebActionError::Database(error)
+    }
+}
+
+/// The browser-visible copy every storage failure flashes (outage-honesty
+/// audit #16) — shared so call sites outside [`temporary_storage_failure`]
+/// cannot drift from it.
+const TEMPORARY_STORAGE_FLASH: &str = "The service is temporarily unavailable. Please try again.";
+
+/// The response half of [`temporary_storage_failure`] (outage-honesty audit
+/// #16): the outage counter ticks and the neutral flash ships. Call sites
+/// whose storage cause is NOT carried as a `sqlx::Error` (e.g. an
+/// `ApiError::Internal` surfaced by a shared JSON-flow helper) log their
+/// richer cause first and then land here, so every storage failure —
+/// whatever its wrapper — is counted and flashes the same copy.
+fn temporary_storage_response(back: &str, config: &Config) -> Response {
+    metrics::counter!("apexmail_web_storage_failures").increment(1);
+    redirect_error(TEMPORARY_STORAGE_FLASH, back, config)
+}
+
+/// The single friendly PRG exit for a request-path action failure
+/// (outage-honesty audit #16). `Database` failures log the cause at error
+/// level, increment the outage counter, and flash the neutral
+/// "temporarily unavailable" copy — NEVER the not-found /
+/// invalid-credentials / zero-count copy an outage must not be confused
+/// with. A `Validation` payload carries its own caller-facing refusal copy
+/// (warn-logged; it never trips the outage counter).
+fn temporary_storage_failure(error: &WebActionError, back: &str, config: &Config) -> Response {
+    match error {
+        WebActionError::Database(db_error) => {
+            tracing::error!(
+                error = %db_error,
+                back,
+                "web action failed: storage unavailable"
+            );
+            temporary_storage_response(back, config)
+        }
+        WebActionError::Validation(copy) => {
+            tracing::warn!(refusal = %copy, back, "web action refused (input validation)");
+            redirect_error(copy, back, config)
+        }
+    }
+}
+
+/// Validate the campaign schedule field (outage-honesty audit #16):
+/// caller input is refused BEFORE the storage call, so a hostile date can
+/// never fail Postgres's `::timestamptz` cast and land in the
+/// storage-failure arm masquerading as an outage. `Ok(None)` = blank
+/// (no schedule), `Ok(Some)` = the timestamp text to store. Both the full
+/// RFC 3339 form and the `datetime-local` form browsers submit
+/// (`YYYY-MM-DDTHH:MM`) are accepted; anything else is a refusal.
+fn validate_scheduled_at(value: &str) -> Result<Option<String>, &'static str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let rfc3339 = chrono::DateTime::parse_from_rfc3339(trimmed).is_ok();
+    let datetime_local = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M").is_ok();
+    if rfc3339 || datetime_local {
+        Ok(Some(trimmed.to_string()))
+    } else {
+        Err(
+            "Enter the schedule as an ISO 8601 date-time such as 2026-12-01T10:00:00Z, or leave it blank.",
+        )
+    }
+}
+
 fn password_policy_error(password: &str) -> Option<&'static str> {
     let len = password.chars().count();
     if !(12..=128).contains(&len) {
@@ -2033,7 +2135,19 @@ async fn form_cp_login(
         );
     }
 
-    let Some(user) = find_user_by_email(&state, &email).await else {
+    let user = match find_user_by_email(&state, &email).await {
+        Ok(user) => user,
+        Err(error) => {
+            // Outage honesty (audit #16): storage down is NOT "invalid
+            // credentials".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/login",
+                &state.config,
+            );
+        }
+    };
+    let Some(user) = user else {
         return redirect_error("Invalid email or password.", "/login", &state.config);
     };
     if user.status != "active" {
@@ -2056,7 +2170,17 @@ async fn form_cp_login(
             &state.config,
         );
     }
-    if !is_system_tenant(&state, &user.tenant_id).await || !is_operator_role(&user.role) {
+    let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/login",
+                &state.config,
+            );
+        }
+    };
+    if !system_tenant || !is_operator_role(&user.role) {
         // P0: a customer session must never reach the control plane. Say
         // so clearly instead of minting a CP session for them.
         return redirect_error(
@@ -2126,19 +2250,23 @@ async fn form_cp_login(
 
 /// System-tenant membership: the literal `system` sentinel (static API
 /// keys) or a tenants row whose slug is `system`.
-pub(crate) async fn is_system_tenant(state: &AppState, tenant_id: &str) -> bool {
+///
+/// Storage failures are RETURNED (outage-honesty audit #16): mapping a
+/// database outage to `false` used to tell a system operator "you are not
+/// an operator" — a fabricated negative. Callers answer `Err` with
+/// [`temporary_storage_failure`] instead.
+pub(crate) async fn is_system_tenant(state: &AppState, tenant_id: &str) -> Result<bool, sqlx::Error> {
     if tenant_id == "system" {
-        return true;
+        return Ok(true);
     }
-    sqlx::query_scalar::<_, bool>(
+    let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM tenants WHERE id::text = $1 AND slug = 'system')",
     )
     .bind(tenant_id)
     .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(false)
+    .await?
+    .unwrap_or(false);
+    Ok(exists)
 }
 
 fn is_operator_role(role: &str) -> bool {
@@ -2226,28 +2354,54 @@ async fn perform_password_login(
     }
     let _ = headers; // rate limiting is enforced by the surrounding stack
 
-    let Some(user) = find_user_by_email(&state, &email).await else {
+    let user = match find_user_by_email(&state, &email).await {
+        Ok(user) => user,
+        Err(error) => {
+            // Outage honesty (audit #16): a database outage must flash
+            // "temporarily unavailable", never the wrong-password copy.
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/login",
+                &state.config,
+            );
+        }
+    };
+    let Some(user) = user else {
         return redirect_error("Invalid email or password.", "/login", &state.config);
     };
-    if user.status != "active" {
-        return redirect_error(
-            "This account is not active yet. Check your verification email.",
-            "/login",
-            &state.config,
-        );
-    }
-    if !verify_password(&user.password_hash, &password) {
-        return redirect_error("Invalid email or password.", "/login", &state.config);
+
+    // Shared password-verification step (audit P1-1): the SAME
+    // `verify_password_or_log` the JSON login runs, so the `$sso$`
+    // placeholder refusal and the scheme logging behave identically on both
+    // surfaces. The password still verifies first — password-guessing
+    // against SSO-only accounts is rate-limited identically to normal
+    // accounts — and only then is any policy disclosed.
+    match crate::routes::auth::verify_password_or_log(&password, &user.password_hash, &user.email)
+    {
+        Ok(true) => {}
+        Ok(false) => return redirect_error("Invalid email or password.", "/login", &state.config),
+        Err(error) => {
+            // The `$sso$` refusal carries user-facing copy ("This account
+            // uses single sign-on"); everything else stays generic (the
+            // specific reason is logged inside the verifier).
+            let message = match &error {
+                crate::error::ApiError::Unauthorized(message)
+                | crate::error::ApiError::Forbidden(message) => message.clone(),
+                _ => "Invalid email or password.".to_string(),
+            };
+            return redirect_error(&message, "/login", &state.config);
+        }
     }
 
-    // ── ATO protection: evaluate the successful-password authentication ──
-    // Same risk ladder as the JSON login (see
-    // `crate::routes::auth::ato_evaluate_password_login`). A high-risk
-    // refusal below returns the byte-identical wrong-password flash, so the
-    // SSR form exposes no new oracle either; a medium-risk verdict falls
-    // through into the existing MFA-challenge redirect for enrolled users
-    // (allow + flag for the rest). The real reason always lands in the
-    // auth.ato_login_risk audit row.
+    // ── Shared login policy ladder (audit P1-1) ──────────────────────────
+    // Status → SSO enforcement → email verification → ATO risk verdict →
+    // MFA step-up, evaluated by the SAME `evaluate_password_login_policy`
+    // the JSON login runs. This is the fix for the browser SSO bypass: the
+    // SSR form previously never evaluated tenant SSO enforcement, so an
+    // SSO-enforced tenant's users could walk straight past the gate through
+    // the console. The verdict maps onto the SSR idioms below; a high-risk
+    // ATO refusal returns the byte-identical wrong-password flash, so the
+    // SSR form exposes no new oracle either.
     let ato_client_ip = peer_ip.map(|ip| {
         crate::middleware::rate_limiter::extract_public_client_ip(
             &headers,
@@ -2255,74 +2409,144 @@ async fn perform_password_login(
             &state.config.trusted_proxies,
         )
     });
-    if let crate::routes::auth::AtoLoginDecision::Refuse =
-        crate::routes::auth::ato_evaluate_password_login(
+    let verdict =
+        match crate::routes::auth::evaluate_password_login_policy(
             &state,
-            &user.id,
-            &user.tenant_id,
-            user.mfa_enabled,
+            crate::routes::auth::PasswordLoginSubject {
+                user_id: &user.id,
+                tenant_id: &user.tenant_id,
+                role: &user.role,
+                status: &user.status,
+                email_verified: user.email_verified,
+                mfa_enabled: user.mfa_enabled,
+                mfa_enrolled: user
+                    .mfa_secret
+                    .as_deref()
+                    .is_some_and(|secret| !secret.is_empty()),
+            },
             ato_client_ip.as_deref(),
             headers
                 .get(header::USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
+            // The SSR console has no pre-authentication enrollment flow, so
+            // the role MFA policy cannot complete here (see
+            // `evaluate_password_login_policy`).
+            false,
         )
         .await
     {
-        // Rate-limit the attempt exactly like a wrong password would
-        // (M-6 distinct-IP corroboration intact — the ATO path alone never
-        // disables the account). A Redis outage must not change the refusal
-        // shape, so the recording failure is logged, not propagated.
-        if let Err(error) = crate::routes::auth::record_login_failure(
-            &state.redis,
-            &crate::routes::auth::normalized_login_identifier(&email),
-            ato_client_ip.as_deref(),
-        )
-        .await
-        {
-            tracing::error!(
-                error = %error,
-                user_id = %user.id,
-                "ATO high-risk SSR login refused; login-failure recording failed"
+        Ok(verdict) => verdict,
+        // A policy evaluation failure (SSO lookup, entitlement service) is
+        // infrastructure, not "invalid credentials" — refuse honestly.
+        Err(error) => {
+            tracing::error!(error = %error, user_id = %user.id, "login policy evaluation failed");
+            return redirect_error(
+                "Sign-in is temporarily unavailable. Try again.",
+                "/login",
+                &state.config,
             );
         }
-        return redirect_error("Invalid email or password.", "/login", &state.config);
-    }
+    };
 
-    // Email verification is a login prerequisite (checked only after the
-    // password verified, so unauthenticated callers learn nothing).
-    if !user.email_verified {
-        return redirect_error(
-            "Verify your email address before signing in — check your inbox for the verification link.",
-            "/login",
-            &state.config,
-        );
-    }
-
-    if user.mfa_enabled {
-        // Multi-step SSR MFA: redirect to the login page's challenge state
-        // with a short-lived signed challenge token in a cookie. The
-        // return_to target rides along so the flow ends where it started.
-        let challenge = sign_login_challenge(&state.config, &user.id, &user.email);
-        let mut response = redirect_with_flash(
-            &[FlashMessage::info(
-                "Enter the 6-digit code from your authenticator app.",
-            )],
-            &format!(
-                "/login?mfa=1&email={}&return_to={}",
-                urlencode(&user.email),
-                urlencode(&return_to)
-            ),
-            &state.config,
-        );
-        let challenge_cookie = format!(
-            "apexmail_login_challenge={challenge}; Path=/login; Max-Age=300; HttpOnly; SameSite=Lax{}",
-            if is_secure(&state.config) { "; Secure" } else { "" },
-        );
-        if let Ok(value) = challenge_cookie.parse() {
-            // Append (the flash cookie is already set; Append preserves it).
-            response.headers_mut().append(header::SET_COOKIE, value);
+    match verdict {
+        crate::routes::auth::PasswordLoginVerdict::RefusedHighRisk => {
+            // Rate-limit the attempt exactly like a wrong password would
+            // (M-6 distinct-IP corroboration intact — the ATO path alone never
+            // disables the account). A Redis outage must not change the refusal
+            // shape, so the recording failure is logged, not propagated.
+            if let Err(error) = crate::routes::auth::record_login_failure(
+                &state.redis,
+                &crate::routes::auth::normalized_login_identifier(&email),
+                ato_client_ip.as_deref(),
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %error,
+                    user_id = %user.id,
+                    "ATO high-risk SSR login refused; login-failure recording failed"
+                );
+            }
+            return redirect_error("Invalid email or password.", "/login", &state.config);
         }
-        return response;
+        crate::routes::auth::PasswordLoginVerdict::AccountInactive => {
+            return redirect_error(
+                "This account is not active yet. Check your verification email.",
+                "/login",
+                &state.config,
+            );
+        }
+        crate::routes::auth::PasswordLoginVerdict::SsoRequired => {
+            return redirect_error(
+                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled",
+                "/login",
+                &state.config,
+            );
+        }
+        crate::routes::auth::PasswordLoginVerdict::EmailUnverified => {
+            return redirect_error(
+                "Verify your email address before signing in — check your inbox for the verification link.",
+                "/login",
+                &state.config,
+            );
+        }
+        crate::routes::auth::PasswordLoginVerdict::MfaRequired { requirement } => {
+            // Multi-step SSR MFA: redirect to the login page's challenge
+            // state with a short-lived signed challenge token in a cookie.
+            // The return_to target rides along so the flow ends where it
+            // started. The step-up (ATO-forced) and self-enrolled shapes are
+            // the same challenge — the observable response is identical, so
+            // the risk path adds no new oracle.
+            //
+            // A `Misconfigured` account (flag set, no stored secret) still
+            // gets the challenge HERE — this preserves the console's
+            // documented contract: the verify step is the bounded place that
+            // shape fails (every code "did not match", each attempt counted,
+            // the brute-force lockout ends the loop). Refusing at the
+            // password step instead would (a) diverge the surfaces for no
+            // audit reason — the JSON API keeps its own Misconfigured
+            // refusal, which matches its original behavior — and (b) hand a
+            // config-state oracle to the password form.
+            //
+            // `Setup` (role-policy enrollment forcing) genuinely cannot be
+            // satisfied pre-authentication on the console and is refused
+            // with a clear flash instead of dead-ending in a challenge loop
+            // (the SSR surface never forces enrollment: `enforce_role_mfa`
+            // is false below — this arm is defense in depth).
+            let flash = match requirement {
+                crate::routes::auth::MfaChallengeRequirement::Setup => {
+                    return redirect_error(
+                        "Multi-factor authentication enrollment is required before you can sign in.",
+                        "/login",
+                        &state.config,
+                    );
+                }
+                crate::routes::auth::MfaChallengeRequirement::Misconfigured
+                | crate::routes::auth::MfaChallengeRequirement::Verify => {
+                    "Enter the 6-digit code from your authenticator app."
+                }
+            };
+            let challenge = sign_login_challenge(&state.config, &user.id, &user.email);
+            let mut response = redirect_with_flash(
+                &[FlashMessage::info(flash)],
+                &format!(
+                    "/login?mfa=1&email={}&return_to={}",
+                    urlencode(&user.email),
+                    urlencode(&return_to)
+                ),
+                &state.config,
+            );
+            let challenge_cookie = format!(
+                "apexmail_login_challenge={challenge}; Path=/login; Max-Age=300; HttpOnly; SameSite=Lax{}",
+                if is_secure(&state.config) { "; Secure" } else { "" },
+            );
+            if let Ok(value) = challenge_cookie.parse() {
+                // Append (the flash cookie is already set; Append preserves it).
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            return response;
+        }
+        crate::routes::auth::PasswordLoginVerdict::Allowed => {}
     }
 
     match session_cookie_for_user(&state, &user) {
@@ -2366,7 +2590,19 @@ async fn form_mfa_verify(
         .unwrap_or("")
         .to_string();
 
-    let Some(user) = find_user_by_email(&state, &email).await else {
+    let user = match find_user_by_email(&state, &email).await {
+        Ok(user) => user,
+        Err(error) => {
+            // Outage honesty (audit #16): storage down must not read as
+            // "invalid credentials" on the MFA step either.
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/login",
+                &state.config,
+            );
+        }
+    };
+    let Some(user) = user else {
         return redirect_error("Invalid email or password.", "/login", &state.config);
     };
     if !verify_login_challenge(&state.config, &challenge_cookie, &user.id, &user.email) {
@@ -2410,16 +2646,28 @@ async fn form_mfa_verify(
     // users.id is UUID (canonical migration 052): the session user id is a
     // String, so cast the bind — an uncast text bind is an operator error
     // (uuid = text does not exist), not a match.
-    let (secret, recovery_hashes): (Option<String>, Option<serde_json::Value>) = sqlx::query_as(
-        "SELECT mfa_secret, mfa_recovery_hashes FROM users WHERE id = $1::uuid",
-    )
-    .bind(&user.id)
-    .fetch_one(&state.db)
-    .await
-    .map(|(secret, hashes): (Option<String>, Option<serde_json::Value>)| {
-        (secret.filter(|stored| !stored.is_empty()), hashes)
-    })
-    .unwrap_or((None, None));
+    // Outage honesty (audit #16): the lookup's failure used to degrade to
+    // `(None, None)` — "no MFA secret enrolled" — so a database outage made
+    // every MFA login read as "that code did not match". `Ok` carries the
+    // genuine enrolled-or-not answer; `Err` refuses with the
+    // temporary-unavailable flash.
+    let (secret, recovery_hashes): (Option<String>, Option<serde_json::Value>) =
+        match sqlx::query_as::<_, (Option<String>, Option<serde_json::Value>)>(
+            "SELECT mfa_secret, mfa_recovery_hashes FROM users WHERE id = $1::uuid",
+        )
+        .bind(&user.id)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok((secret, hashes)) => (secret.filter(|stored| !stored.is_empty()), hashes),
+            Err(error) => {
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    &return_to,
+                    &state.config,
+                );
+            }
+        };
     let mut totp_valid = false;
     if recovery_code.is_empty() {
         totp_valid = match secret {
@@ -2446,8 +2694,11 @@ async fn form_mfa_verify(
     // authenticator path did not already succeed. Consumption is single-use:
     // a matched code is removed from the stored set in the same guarded
     // UPDATE, so presenting it again fails and counts toward lockout.
+    // Outage honesty (audit #16): a storage failure here is NOT "that code
+    // did not match" — the code may well be correct, so refuse with the
+    // temporary-unavailable flash instead of the wrong-code copy.
     let recovery_valid = if !totp_valid && !recovery_code.is_empty() {
-        verify_and_consume_recovery_code(
+        match verify_and_consume_recovery_code(
             &state.db,
             &user.id,
             &user.tenant_id,
@@ -2455,6 +2706,16 @@ async fn form_mfa_verify(
             recovery_hashes.as_ref(),
         )
         .await
+        {
+            Ok(valid) => valid,
+            Err(error) => {
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    &return_to,
+                    &state.config,
+                );
+            }
+        }
     } else {
         false
     };
@@ -2479,8 +2740,21 @@ async fn form_mfa_verify(
             }
             // A system-tenant operator completing MFA also receives the
             // control-plane session cookie (mfa_enabled now true) so the
-            // CP gate admits them on /web/admin/* and /v1/admin/*.
-            if is_system_tenant(&state, &user.tenant_id).await && is_operator_role(&user.role) {
+            // CP gate admits them on /web/admin/* and /v1/admin/*. The
+            // system-tenant resolution is on the critical path: a storage
+            // failure here refuses the session honestly (audit #16)
+            // instead of silently minting a customer-shaped session.
+            let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+                Ok(system_tenant) => system_tenant,
+                Err(error) => {
+                    return temporary_storage_failure(
+                        &WebActionError::Database(error),
+                        &return_to,
+                        &state.config,
+                    );
+                }
+            };
+            if system_tenant && is_operator_role(&user.role) {
                 let cp_cookie = crate::middleware::cp_auth::issue_cp_session_cookie(
                     &state.config.cp_auth,
                     &user.id,
@@ -2574,13 +2848,25 @@ async fn form_signup(
     // Anti-enumeration: mirror the JSON register flow, which deliberately
     // returns the same "check your email" response for existing addresses.
     // Telling an anonymous visitor "an account with this email already
-    // exists" defeated that posture for the SSR form.
-    let existing =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)")
-            .bind(&email)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    // exists" defeated that posture for the SSR form. A storage failure is
+    // NOT "zero existing accounts" (audit #16): it refuses with the
+    // honest unavailable flash before any write is attempted.
+    let existing = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)",
+    )
+    .bind(&email)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/signup",
+                &state.config,
+            );
+        }
+    };
     if existing > 0 {
         return redirect_success(
             "Check your email to finish creating your account.",
@@ -2751,14 +3037,33 @@ async fn form_forgot_password(
     // SHA-256 token hash lands in users.metadata and the reset email is
     // enqueued through the same system-sender outbox — in ONE transaction.
     // The response never reveals whether the account exists.
-    let user: Option<(String, String)> = sqlx::query_as(
+    //
+    // ANTI-ENUMERATION EXCEPTION (outage-honesty audit #16): the public
+    // response below is deliberately byte-identical for "absent account"
+    // and every other outcome — flashing "temporarily unavailable" ONLY
+    // when the row exists would hand an attacker a storage-failure oracle
+    // for account existence. The absent/unavailable distinction therefore
+    // lives in the CODE and TELEMETRY, never in the response: a lookup
+    // error is logged and counted
+    // (`apexmail_web_forgot_password_storage_failures`) and then rides the
+    // neutral flash — it is never folded into the "absent" path.
+    let user: Option<(String, String)> = match sqlx::query_as(
         "SELECT id::text, tenant_id::text FROM users WHERE LOWER(email) = LOWER($1) AND status = 'active' LIMIT 1",
     )
     .bind(&email)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "web forgot-password lookup failed; answering neutrally (anti-enumeration)"
+            );
+            metrics::counter!("apexmail_web_forgot_password_storage_failures").increment(1);
+            None
+        }
+    };
 
     if let Some((user_id, _tenant_id)) = user {
         let token = apexmail_lib::id::generate_verification_token();
@@ -2941,7 +3246,14 @@ async fn form_resend_verification(
     // issuance mirrors the signup flow exactly: SHA-256 token hash in
     // users.metadata, verification email in the system-sender outbox, ONE
     // transaction.
-    let user: Option<(String,)> = sqlx::query_as(
+    //
+    // ANTI-ENUMERATION EXCEPTION (outage-honesty audit #16): same contract
+    // as the forgot-password form — the neutral flash ships for EVERY
+    // outcome, so a storage failure may not flash "unavailable" only for
+    // addresses that resolve. The error is logged and counted
+    // (`apexmail_web_resend_verification_storage_failures`) and folded into
+    // the neutral response, never into the "absent account" path.
+    let user: Option<(String,)> = match sqlx::query_as(
         "SELECT id::text FROM users
          WHERE LOWER(email) = LOWER($1) AND email_verified = false AND status = 'active'
          LIMIT 1",
@@ -2949,8 +3261,17 @@ async fn form_resend_verification(
     .bind(&email)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "web resend-verification lookup failed; answering neutrally (anti-enumeration)"
+            );
+            metrics::counter!("apexmail_web_resend_verification_storage_failures").increment(1);
+            None
+        }
+    };
 
     if let Some((user_id,)) = user {
         let token = uuid::Uuid::new_v4().to_string();
@@ -3063,9 +3384,11 @@ async fn form_reset_password(
 
     // Same verification chain as the JSON twin (auth.rs reset_password):
     // hash lookup → status → expiry (primary + 24h absolute cap) →
-    // optimistic-lock UPDATE that consumes the token.
+    // optimistic-lock UPDATE that consumes the token. A storage failure is
+    // NOT "invalid or expired" (audit #16): the link may be perfectly
+    // valid — the truth is unknown, so refuse honestly.
     let token_hash = crate::routes::helpers::hash_token(&token);
-    let user: Option<(String, String, String, serde_json::Value)> = sqlx::query_as(
+    let user: Option<(String, String, String, serde_json::Value)> = match sqlx::query_as(
         "SELECT id::text, tenant_id::text, status, metadata FROM users
          WHERE LOWER(email) = LOWER($1) AND metadata->>'password_reset_token_hash' = $2
          LIMIT 1",
@@ -3074,8 +3397,12 @@ async fn form_reset_password(
     .bind(&token_hash)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(user) => user,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
 
     let Some((user_id, tenant_id, status, metadata)) = user else {
         return redirect_error(
@@ -3119,12 +3446,25 @@ async fn form_reset_password(
 
     // Revoke live sessions BEFORE rotating the credential (fail closed),
     // then rotate through one pipeline: hashing, the optimistic UPDATE,
-    // and storage faults all land on the same honest flashes, with the
+    // and storage faults all land on honest flashes, with the
     // consumed/expired-token race separated by its sentinel.
     revoke_user_sessions(&state, &tenant_id, &user_id).await;
 
-    let outcome: Result<(), &'static str> = async {
-        let new_hash = hash_password(&password).map_err(|_| "unavailable")?;
+    // Outage honesty (audit #16): the storage fault is carried to the match
+    // as data — the old `&'static str` sentinels swallowed it into the same
+    // bespoke "try again" copy a hasher fault got, so the outage was never
+    // counted as a storage failure.
+    #[derive(Debug)]
+    enum ResetFailure {
+        /// The guarded UPDATE matched zero rows: the token was consumed (or
+        /// the row changed) between the lookup and this write.
+        Consumed,
+        /// The local Argon2id hasher faulted — NOT a storage problem.
+        Hasher,
+        Database(sqlx::Error),
+    }
+    let outcome: Result<(), ResetFailure> = async {
+        let new_hash = hash_password(&password).map_err(|_| ResetFailure::Hasher)?;
         let update = sqlx::query(
             "UPDATE users
              SET password_hash = $1,
@@ -3139,14 +3479,11 @@ async fn form_reset_password(
         .bind(&token_hash)
         .execute(&state.db)
         .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "web reset password update failed");
-            "unavailable"
-        })?;
+        .map_err(ResetFailure::Database)?;
         if update.rows_affected() != 1 {
             // The token was consumed (or the row changed) between the
             // lookup and this guarded write.
-            return Err("expired");
+            return Err(ResetFailure::Consumed);
         }
         Ok(())
     }
@@ -3157,12 +3494,19 @@ async fn form_reset_password(
             "/login",
             &state.config,
         ),
-        Err("expired") => redirect_error(
+        Err(ResetFailure::Consumed) => redirect_error(
             "That reset link is invalid or has expired.",
             "/forgot-password",
             &state.config,
         ),
-        Err(_) => redirect_error(
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — instead of the bespoke copy that
+        // made the outage indistinguishable from a hasher fault.
+        Err(ResetFailure::Database(error)) => {
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
+        }
+        Err(ResetFailure::Hasher) => redirect_error(
             "Could not reset the password. Try again.",
             "/forgot-password",
             &state.config,
@@ -3235,8 +3579,11 @@ async fn form_profile_update(
             "/settings/profile",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not save your profile. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never the same copy a refusal gets.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/settings/profile",
             &state.config,
         ),
@@ -3272,9 +3619,12 @@ async fn form_change_password(
                 &state.config,
             )
         }
-        Err(_) => {
-            return redirect_error(
-                "Could not update the password. Try again.",
+        // FIX (outage-honesty audit #16): a dead database must not read as
+        // "wrong password" — the storage failure rides the single honest
+        // exit (error-logged, outage-counted, temporary-unavailable flash).
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
                 "/settings/profile",
                 &state.config,
             )
@@ -3285,8 +3635,21 @@ async fn form_change_password(
     // current session is re-established by the redirect target's login
     // flow), then the guarded UPDATE. Storage faults and a row that no
     // longer matches flash honestly instead of lying about success.
-    let outcome: Result<(), &'static str> = async {
-        let new_hash = hash_password(&new_password).map_err(|_| "unavailable")?;
+    //
+    // Outage honesty (audit #16): the storage fault is carried to the match
+    // as data — the old `&'static str` sentinel swallowed it, so the outage
+    // was never counted as a storage failure.
+    #[derive(Debug)]
+    enum PasswordChangeFailure {
+        /// The guarded UPDATE matched zero rows: the user row is gone (or
+        /// the id no longer resolves) after the sessions were revoked.
+        MissingRow,
+        /// The local Argon2id hasher faulted — NOT a storage problem.
+        Hasher,
+        Database(sqlx::Error),
+    }
+    let outcome: Result<(), PasswordChangeFailure> = async {
+        let new_hash = hash_password(&new_password).map_err(|_| PasswordChangeFailure::Hasher)?;
         revoke_user_sessions(
             &state,
             &user.tenant_id,
@@ -3301,10 +3664,7 @@ async fn form_change_password(
         .bind(user.user_id.clone().unwrap_or_default())
         .execute(&state.db)
         .await
-        .map_err(|error| {
-            tracing::error!(tenant_id = %user.tenant_id, error = %error, "password change failed");
-            "unavailable"
-        })?;
+        .map_err(PasswordChangeFailure::Database)?;
         // `rows_affected()` is checked: a session whose user row was deleted
         // (or whose id no longer resolves) matched zero rows, and the old
         // arm flashed "Password updated" for a password that was never
@@ -3316,7 +3676,7 @@ async fn form_change_password(
                 user_id = ?user.user_id,
                 "password change matched no user row; refusing to report success"
             );
-            return Err("missing-row");
+            return Err(PasswordChangeFailure::MissingRow);
         }
         Ok(())
     }
@@ -3327,12 +3687,22 @@ async fn form_change_password(
             "/login",
             &state.config,
         ),
-        Err("missing-row") => redirect_error(
+        Err(PasswordChangeFailure::MissingRow) => redirect_error(
             "Could not update the password for this account. Sign in again.",
             "/settings/profile",
             &state.config,
         ),
-        Err(_) => redirect_error(
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash.
+        Err(PasswordChangeFailure::Database(error)) => {
+            temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/settings/profile",
+                &state.config,
+            )
+        }
+        Err(PasswordChangeFailure::Hasher) => redirect_error(
             "Could not update the password. Try again.",
             "/settings/profile",
             &state.config,
@@ -3362,14 +3732,21 @@ async fn form_mfa_setup(
     // users.id is UUID (canonical migration 052): cast the String bind.
     // One query resolves BOTH the gate (mfa_enabled) and the otpauth label
     // (email) — a missing row and an enrolled account share the same
-    // refusal, exactly like the previous two-query shape.
-    let row: Option<(Option<bool>, String)> =
-        sqlx::query_as("SELECT mfa_enabled, email FROM users WHERE id = $1::uuid")
-            .bind(&user_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    // refusal, exactly like the previous two-query shape. A storage
+    // failure is refused honestly (audit #16), never reported as
+    // "already enabled".
+    let row: Option<(Option<bool>, String)> = match sqlx::query_as(
+        "SELECT mfa_enabled, email FROM users WHERE id = $1::uuid",
+    )
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     let Some((enabled, email)) = row else {
         return redirect_error(
             "MFA is already enabled for this account.",
@@ -3452,11 +3829,13 @@ async fn form_mfa_confirm(
     // failure pipeline: every internal fault flashes the same friendly
     // "Could not enable MFA" (with the cause logged), while the
     // concurrent-enrollment case — someone else enabled MFA first — gets
-    // its actionable sentinel.
+    // its actionable sentinel. The storage fault is carried as data (audit
+    // #16) so the match can route it through the single honest exit.
     #[derive(Debug)]
     enum ConfirmFailure {
         AlreadyEnabled,
         Internal,
+        Database(sqlx::Error),
     }
     let outcome: Result<Vec<String>, ConfirmFailure> = async {
         let recovery_codes = apexmail_lib::mfa::try_generate_default_recovery_codes()
@@ -3482,10 +3861,7 @@ async fn form_mfa_confirm(
         .bind(user.tenant_id.as_str())
         .execute(&state.db)
         .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "web mfa confirm update failed");
-            ConfirmFailure::Internal
-        })?;
+        .map_err(ConfirmFailure::Database)?;
         if result.rows_affected() != 1 {
             return Err(ConfirmFailure::AlreadyEnabled);
         }
@@ -3497,6 +3873,16 @@ async fn form_mfa_confirm(
         Err(cause @ ConfirmFailure::Internal) => {
             tracing::error!(?cause, "web mfa confirm failed");
             return redirect_error("Could not enable MFA. Try again.", &back, &state.config);
+        }
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — not the crypto-fault copy.
+        Err(ConfirmFailure::Database(error)) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &back,
+                &state.config,
+            );
         }
         Err(ConfirmFailure::AlreadyEnabled) => {
             return redirect_error(
@@ -3594,7 +3980,14 @@ async fn form_impersonate_end(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/cp", &state.config);
     }
-    if !is_system_tenant(&state, &user.tenant_id).await {
+    let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            // Audit #16: storage down is not "you are not an operator".
+            return temporary_storage_failure(&WebActionError::Database(error), "/cp", &state.config);
+        }
+    };
+    if !system_tenant {
         return redirect_error(
             "Only ApexMail operators can end impersonation sessions.",
             "/cp",
@@ -3646,12 +4039,23 @@ async fn form_api_key_create(
     )
     .await
     {
-        tracing::warn!(error = %error, "api key create refused by entitlement");
-        return redirect_error(
-            "API access is not part of the current plan. Upgrade the plan or contact support to create API keys.",
-            "/settings/api-keys",
-            &state.config,
-        );
+        // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
+        // say "upgrade the plan" — a storage failure behind the lookup
+        // rides the single honest exit instead of masquerading as one.
+        match error {
+            crate::error::ApiError::Forbidden(message) => {
+                tracing::warn!(%message, "api key create refused by entitlement");
+                return redirect_error(
+                    "API access is not part of the current plan. Upgrade the plan or contact support to create API keys.",
+                    "/settings/api-keys",
+                    &state.config,
+                );
+            }
+            other => {
+                tracing::error!(error = %other, "api key entitlement check failed: storage unavailable");
+                return temporary_storage_response("/settings/api-keys", &state.config);
+            }
+        }
     }
     let form_map: HashMap<String, String> = form.pairs.iter().cloned().collect();
     let name = field_truncated(&form_map, "name", 100);
@@ -3721,13 +4125,17 @@ async fn form_api_key_create(
         Err(crate::error::ApiError::Forbidden(message)) => {
             redirect_error(&message, "/settings/api-keys", &state.config)
         }
+        // FIX (outage-honesty audit #16): `mint_api_key` surfaces its
+        // storage faults as an opaque `ApiError::Internal`, so the cause is
+        // logged here and the shared response (outage counter + neutral
+        // flash) ships — not a bespoke "could not create" copy.
         Err(error) => {
-            tracing::error!(error = ?error, "web api-key create failed");
-            redirect_error(
-                "Could not create the key. Try again.",
-                "/settings/api-keys",
-                &state.config,
-            )
+            tracing::error!(
+                error = ?error,
+                back = "/settings/api-keys",
+                "web api-key create failed: storage unavailable"
+            );
+            temporary_storage_response("/settings/api-keys", &state.config)
         }
     }
 }
@@ -3763,12 +4171,23 @@ async fn form_webhook_create(
     )
     .await
     {
-        tracing::warn!(error = %error, "webhook create refused by entitlement");
-        return redirect_error(
-            "Webhooks are not part of the current plan. Upgrade the plan or contact support to add webhooks.",
-            "/settings/webhooks",
-            &state.config,
-        );
+        // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
+        // say "upgrade the plan" — a storage failure behind the lookup
+        // rides the single honest exit instead of masquerading as one.
+        match error {
+            crate::error::ApiError::Forbidden(message) => {
+                tracing::warn!(%message, "webhook create refused by entitlement");
+                return redirect_error(
+                    "Webhooks are not part of the current plan. Upgrade the plan or contact support to add webhooks.",
+                    "/settings/webhooks",
+                    &state.config,
+                );
+            }
+            other => {
+                tracing::error!(error = %other, "webhook entitlement check failed: storage unavailable");
+                return temporary_storage_response("/settings/webhooks", &state.config);
+            }
+        }
     }
     let mut fields = FormFieldMap::new("webhook-create");
     let url = form.field("url").trim().to_string();
@@ -3797,10 +4216,12 @@ async fn form_webhook_create(
             fields.error("url", &message);
             return redirect_with_field_map(&fields, &message, "/settings/webhooks", &state.config);
         }
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
-            tracing::error!(error = %error, "webhook count check failed");
-            return redirect_error(
-                "Could not add the webhook. Try again.",
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
                 "/settings/webhooks",
                 &state.config,
             );
@@ -3825,13 +4246,24 @@ async fn form_webhook_create(
             // Batch-2 leaked-copy fix (P1-6): the entitlement Display leaks
             // plan ids and snake_case feature keys into a customer banner —
             // name the missing capability in plain words and log the detail.
-            tracing::info!(error = %error, "inbound webhook refused: plan lacks inbound_email");
-            return redirect_with_field_map(
-                &fields,
-                "Webhooks are not part of the current plan. Upgrade your plan to receive inbound email events.",
-                "/settings/webhooks",
-                &state.config,
-            );
+            // FIX (outage-honesty audit #16): only a GENUINE plan refusal
+            // gets the upgrade copy; a storage failure behind the lookup
+            // rides the single honest exit.
+            match error {
+                crate::error::ApiError::Forbidden(message) => {
+                    tracing::info!(%message, "inbound webhook refused: plan lacks inbound_email");
+                    return redirect_with_field_map(
+                        &fields,
+                        "Webhooks are not part of the current plan. Upgrade your plan to receive inbound email events.",
+                        "/settings/webhooks",
+                        &state.config,
+                    );
+                }
+                other => {
+                    tracing::error!(error = %other, "inbound webhook entitlement check failed: storage unavailable");
+                    return temporary_storage_response("/settings/webhooks", &state.config);
+                }
+            }
         }
     }
     // webhooks schema (075/065): id VARCHAR(26) ULID, secret NOT NULL
@@ -3863,14 +4295,14 @@ async fn form_webhook_create(
                 &state.config,
             )
         }
-        Err(error) => {
-            tracing::error!(error = %error, "web webhook create failed");
-            redirect_error(
-                "Could not add the webhook. Try again.",
-                "/settings/webhooks",
-                &state.config,
-            )
-        }
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/settings/webhooks",
+            &state.config,
+        ),
     }
 }
 
@@ -3907,15 +4339,24 @@ async fn form_team_invite(
             &state.config,
         );
     };
-    let caller_role: Option<String> = sqlx::query_scalar(
+    let caller_role: Option<String> = match sqlx::query_scalar(
         "SELECT role FROM users WHERE id = $1::uuid AND tenant_id = $2 AND status = 'active'",
     )
     .bind(&caller_id)
     .bind(user.tenant_id.as_str())
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(role) => role,
+        Err(error) => {
+            // Audit #16: storage down is not "not an owner/admin".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/settings/team",
+                &state.config,
+            );
+        }
+    };
     let Some(caller_role) = caller_role else {
         return redirect_error(
             "Only workspace owners and admins can send invitations.",
@@ -3971,10 +4412,13 @@ async fn form_team_invite(
     // faults (pool, locks, counts, the insert, the commit) share one honest
     // "try again" flash with the cause logged; the operator-actionable cases
     // (entitlement failures, the invitation ceiling) keep their own messages.
+    // Outage honesty (audit #16): `Internal` carries the sqlx cause so the
+    // match can route the storage failure through the single honest exit
+    // (error-logged, outage-counted, standard flash).
     enum InviteFailure {
         Entitlement(crate::error::ApiError),
         Limit,
-        Internal,
+        Internal(sqlx::Error),
     }
     let outcome: Result<(), InviteFailure> = async {
         let entitlement = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
@@ -3985,14 +4429,14 @@ async fn form_team_invite(
             .db
             .begin()
             .await
-            .map_err(|_| InviteFailure::Internal)?;
+            .map_err(InviteFailure::Internal)?;
         if let Err(error) = sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
             .bind(user.tenant_id.as_str())
             .fetch_optional(&mut *tx)
             .await
         {
             tracing::error!(error = %error, "team invite tenant lock failed");
-            return Err(InviteFailure::Internal);
+            return Err(InviteFailure::Internal(error));
         }
         let seat_count: i64 =
             match sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
@@ -4003,7 +4447,7 @@ async fn form_team_invite(
                 Ok(count) => count,
                 Err(error) => {
                     tracing::error!(error = %error, "team seat count failed");
-                    return Err(InviteFailure::Internal);
+                    return Err(InviteFailure::Internal(error));
                 }
             };
         if let Err(error) = crate::entitlements::gate_capacity(
@@ -4027,7 +4471,7 @@ async fn form_team_invite(
             Ok(count) => count,
             Err(error) => {
                 tracing::error!(error = %error, "team invite count check failed");
-                return Err(InviteFailure::Internal);
+                return Err(InviteFailure::Internal(error));
             }
         };
         if open_invites >= MAX_OPEN_INVITATIONS_PER_TENANT {
@@ -4050,13 +4494,13 @@ async fn form_team_invite(
         if let Err(error) = inserted {
             tracing::error!(error = %error, "team invite insert failed");
             let _ = tx.rollback().await;
-            return Err(InviteFailure::Internal);
+            return Err(InviteFailure::Internal(error));
         }
         match tx.commit().await {
             Ok(()) => Ok(()),
             Err(error) => {
                 tracing::error!(error = %error, "team invite commit failed");
-                Err(InviteFailure::Internal)
+                Err(InviteFailure::Internal(error))
             }
         }
     }
@@ -4065,7 +4509,12 @@ async fn form_team_invite(
         Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
         // Batch-2 leaked-copy fix: the entitlement detail (internal plan /
         // field names) stays in the log; the invitation flash speaks plainly.
-        Err(InviteFailure::Entitlement(error)) => {
+        // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
+        // say "upgrade the plan" — a storage failure behind the snapshot /
+        // capacity lookup rides the single honest exit instead.
+        Err(InviteFailure::Entitlement(error))
+            if matches!(error, crate::error::ApiError::Forbidden(_)) =>
+        {
             tracing::warn!(error = %error, "team invite refused by entitlement");
             redirect_error(
                 "This plan does not include more team seats. Upgrade the plan to invite more teammates.",
@@ -4073,18 +4522,21 @@ async fn form_team_invite(
                 &state.config,
             )
         }
+        Err(InviteFailure::Entitlement(error)) => {
+            tracing::error!(error = %error, "team invite entitlement check failed: storage unavailable");
+            temporary_storage_response("/settings/team", &state.config)
+        }
         Err(InviteFailure::Limit) => redirect_error(
             "Invitation limit reached: clear outstanding invitations before sending more.",
             "/settings/team",
             &state.config,
         ),
-        Err(InviteFailure::Internal) => {
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(InviteFailure::Internal(error)) => {
             tracing::error!(email = %email, "team invitation could not be created");
-            redirect_error(
-                "Could not create the invitation. Try again.",
-                "/settings/team",
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), "/settings/team", &state.config)
         }
     }
 }
@@ -4182,8 +4634,19 @@ async fn form_contact_create(
     .await;
     match result {
         Ok(_) => redirect_success("Contact added.", "/contacts", &state.config),
-        Err(_) => redirect_error(
+        // A genuine duplicate (SQLSTATE 23505) is caller-actionable and
+        // keeps the long-standing copy…
+        Err(error) if is_unique_violation(&error) => redirect_error(
             "Could not add the contact. It may already exist.",
+            "/contacts/new",
+            &state.config,
+        ),
+        // …but FIX (outage-honesty audit #16): a storage failure must NOT
+        // read as "duplicate" — an outage is unknown, never a negative
+        // answer about the address. It rides the single honest exit
+        // (error-logged, outage-counted, temporary-unavailable flash).
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/contacts/new",
             &state.config,
         ),
@@ -4210,7 +4673,7 @@ async fn web_contact_edit(
         );
     };
     let flash = flash_from_headers(&headers, &state.config);
-    let row: Option<(String, String, Option<String>, String)> = sqlx::query_as(
+    let row: Option<(String, String, Option<String>, String)> = match sqlx::query_as(
         "SELECT id::text, email, name, status FROM contacts
          WHERE id = $1::uuid AND tenant_id = $2 AND status <> 'deleted'",
     )
@@ -4218,8 +4681,18 @@ async fn web_contact_edit(
     .bind(user.tenant_id.as_str())
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            // Audit #16: a storage outage must not render "contact not
+            // found" — the contact may well exist.
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/contacts",
+                &state.config,
+            );
+        }
+    };
     let Some((contact_id, email, name, status)) = row else {
         return redirect_error(
             "That contact could not be found in this workspace.",
@@ -4297,8 +4770,12 @@ async fn form_contact_update(
             "/contacts",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not save the contact. Check the identifier.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a copy that reads like a
+        // bad identifier (the identifier was validated above).
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/contacts",
             &state.config,
         ),
@@ -4330,8 +4807,11 @@ async fn form_list_create(
     .await;
     match result {
         Ok(_) => redirect_success("List created.", "/lists", &state.config),
-        Err(_) => redirect_error(
-            "Could not create the list. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/lists/new",
             &state.config,
         ),
@@ -4373,8 +4853,12 @@ async fn form_list_update(
             "/lists",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not save the list. Check the identifier.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a copy that reads like a
+        // bad identifier.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/lists",
             &state.config,
         ),
@@ -4414,14 +4898,13 @@ async fn form_domain_create(
     let snapshot = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
         Ok(snapshot) => snapshot,
         // Batch-2 leaked-copy fix: a failed entitlement read is an outage,
-        // not a refusal — the browser gets the retry copy, the log the cause.
+        // not a refusal. FIX (outage-honesty audit #16): it lands on the
+        // single honest exit — the snapshot surfaces as an opaque ApiError,
+        // so the cause is logged here and the shared response (outage
+        // counter + the neutral temporary-unavailable flash) ships.
         Err(error) => {
             tracing::error!(error = %error, "entitlement snapshot failed for domain create");
-            return redirect_error(
-                "Could not check the domain limit right now. Try again.",
-                "/domains/new",
-                &state.config,
-            );
+            return temporary_storage_response("/domains/new", &state.config);
         }
     };
     let domain_count: i64 =
@@ -4431,10 +4914,13 @@ async fn form_domain_create(
             .await
         {
             Ok(count) => count,
+            // FIX (outage-honesty audit #16): the storage failure rides the
+            // single honest exit — error-logged, outage-counted, standard
+            // temporary-unavailable flash — never a bespoke "try again" copy.
             Err(error) => {
                 tracing::error!(error = %error, "domain count check failed");
-                return redirect_error(
-                    "Could not add the domain. Try again.",
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
                     "/domains/new",
                     &state.config,
                 );
@@ -4495,11 +4981,10 @@ async fn form_domain_create(
                 error = %error,
                 "domain insert failed"
             );
-            redirect_error(
-                "Could not add the domain right now. Try again.",
-                "/domains/new",
-                &state.config,
-            )
+            // FIX (outage-honesty audit #16): the storage failure rides the
+            // single honest exit — error-logged, outage-counted, standard
+            // temporary-unavailable flash — never a bespoke "try again" copy.
+            temporary_storage_failure(&WebActionError::Database(error), "/domains/new", &state.config)
         }
     }
 }
@@ -4522,12 +5007,23 @@ async fn form_template_create(
     )
     .await
     {
-        tracing::warn!(error = %error, "template create refused by entitlement");
-        return redirect_error(
-            "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
-            "/templates/new",
-            &state.config,
-        );
+        // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
+        // say "upgrade the plan" — a storage failure behind the lookup
+        // rides the single honest exit instead of masquerading as one.
+        match error {
+            crate::error::ApiError::Forbidden(message) => {
+                tracing::warn!(%message, "template create refused by entitlement");
+                return redirect_error(
+                    "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
+                    "/templates/new",
+                    &state.config,
+                );
+            }
+            other => {
+                tracing::error!(error = %other, "template entitlement check failed: storage unavailable");
+                return temporary_storage_response("/templates/new", &state.config);
+            }
+        }
     }
     let name = field_truncated(&form, "name", 120);
     let subject = field_truncated(&form, "subject", 200);
@@ -4558,8 +5054,11 @@ async fn form_template_create(
     .await;
     match result {
         Ok(_) => redirect_success("Template saved.", "/templates", &state.config),
-        Err(_) => redirect_error(
-            "Could not save the template. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/templates/new",
             &state.config,
         ),
@@ -4599,10 +5098,21 @@ async fn form_campaign_create(
     // The campaigns status CHECK (live schema) allows draft/sending/
     // paused/stopped/completed/failed — there is no 'scheduled' status, so
     // a picked time is stored in scheduled_at on a draft row.
-    let scheduled: Option<String> = if scheduled_at.trim().is_empty() {
-        None
-    } else {
-        Some(scheduled_at)
+    // FIX (outage-honesty audit #16): a hostile date is caller input and is
+    // refused HERE — the old shape let Postgres's `::timestamptz` cast
+    // failure land in the storage arm, so bad input flashed the same copy
+    // an outage gets.
+    let scheduled: Option<String> = match validate_scheduled_at(&scheduled_at) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            fields.error("scheduled_at", message);
+            return redirect_with_field_map(
+                &fields,
+                "Enter the schedule as an ISO 8601 date-time such as 2026-12-01T10:00:00Z, or leave it blank.",
+                "/campaigns/new",
+                &state.config,
+            );
+        }
     };
     // campaigns.id is a UUID column (both schema lineages; ci/README §9 F4)
     // — text nanoid ids fail the bind.
@@ -4628,8 +5138,11 @@ async fn form_campaign_create(
             "/campaigns",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not save the campaign. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/campaigns/new",
             &state.config,
         ),
@@ -4693,10 +5206,15 @@ async fn form_campaign_update(
             &state.config,
         );
     }
-    let scheduled: Option<String> = if scheduled_at.trim().is_empty() {
-        None
-    } else {
-        Some(scheduled_at)
+    // FIX (outage-honesty audit #16): a hostile date is caller input and is
+    // refused HERE — the old shape let Postgres's `::timestamptz` cast
+    // failure land in the storage arm, so bad input flashed the same copy
+    // an outage gets.
+    let scheduled: Option<String> = match validate_scheduled_at(&scheduled_at) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return redirect_error(message, &back, &state.config);
+        }
     };
     // campaigns.id is a UUID column: cast the String form bind.
     let result = sqlx::query(
@@ -4719,13 +5237,12 @@ async fn form_campaign_update(
             "/campaigns",
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web campaign update failed");
-            redirect_error(
-                "Could not save the campaign. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -4775,8 +5292,11 @@ async fn form_placement_create(
             "/inbox-placement",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not start the test. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/inbox-placement/new",
             &state.config,
         ),
@@ -4818,8 +5338,19 @@ async fn form_dedicated_ip_request(
             "/settings/dedicated-ips",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not record the request. Try again.",
+        // A second pending request is refused by the partial unique index
+        // (SQLSTATE 23505): caller-actionable, honest as-is.
+        Err(error) if is_unique_violation(&error) => redirect_error(
+            "A provisioning request is already pending — the allocator will pick it up.",
+            "/settings/dedicated-ips",
+            &state.config,
+        ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy
+        // that made an outage read like a refused request.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/settings/dedicated-ips",
             &state.config,
         ),
@@ -4888,7 +5419,7 @@ async fn web_domain_detail(
     )
     .await
     {
-        Some(list) => {
+        Ok(Some(list)) => {
             let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = web_data_page(
                 &format!("/domains/{id}"),
@@ -4899,8 +5430,16 @@ async fn web_domain_detail(
             );
             html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
-        None => redirect_error(
+        // Audit #16: the domain genuinely resolved to nothing — the
+        // handler's honest not-found copy.
+        Ok(None) => redirect_error(
             "That domain could not be found in this workspace.",
+            "/domains",
+            &state.config,
+        ),
+        // A storage outage is NOT "domain not found".
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/domains",
             &state.config,
         ),
@@ -5009,13 +5548,21 @@ async fn web_list_detail(
     }
     let flash = flash_from_headers(&headers, &state.config);
     match data::load_list_detail(&state.db, user.tenant_id.as_str(), &id).await {
-        Some(detail) => {
+        Ok(Some(detail)) => {
             let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = leptos_list_detail_page(&detail, &flash, &form_csrf.token);
             html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
-        None => redirect_error(
+        // Audit #16: the list genuinely resolved to nothing — the handler's
+        // honest not-found copy.
+        Ok(None) => redirect_error(
             "That list could not be found in this workspace.",
+            "/lists",
+            &state.config,
+        ),
+        // A storage outage is NOT "list not found".
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/lists",
             &state.config,
         ),
@@ -5058,7 +5605,7 @@ async fn web_campaign_detail(
     }
     let flash = flash_from_headers(&headers, &state.config);
     match data::load_campaign_detail(&state.db, user.tenant_id.as_str(), &id).await {
-        Some(detail) => {
+        Ok(Some(detail)) => {
             let list = detail.to_list_page();
             let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = web_data_page(
@@ -5070,8 +5617,16 @@ async fn web_campaign_detail(
             );
             html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
-        None => redirect_error(
+        // Audit #16: the campaign genuinely resolved to nothing — the
+        // handler's honest not-found copy.
+        Ok(None) => redirect_error(
             "That campaign could not be found in this workspace.",
+            "/campaigns",
+            &state.config,
+        ),
+        // A storage outage is NOT "campaign not found".
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/campaigns",
             &state.config,
         ),
@@ -5091,14 +5646,24 @@ async fn campaign_transition(
     allowed_from_label: &str,
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(id));
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(id)
-            .bind(user.tenant_id.as_str())
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let row: Option<(String,)> = match sqlx::query_as(
+        "SELECT status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            // Audit #16: storage down is not "campaign not found".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/campaigns",
+                &state.config,
+            );
+        }
+    };
     let Some((status,)) = row else {
         return redirect_error(
             "That campaign could not be found in this workspace.",
@@ -5145,13 +5710,12 @@ async fn campaign_transition(
             &back,
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web campaign transition failed");
-            redirect_error(
-                "Could not update the campaign. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -5175,7 +5739,7 @@ async fn form_campaign_start(
     // Honest recipient accounting before any transition: a campaign with
     // no wired audience must never flip to "sending". The audience is the
     // campaign's latest `recipients` job (list + segment).
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, Option<String>)> = match sqlx::query_as(
         "SELECT status,
                 (SELECT job_type FROM campaign_jobs
                  WHERE campaign_id = campaigns.id AND job_type LIKE 'recipients:%'
@@ -5186,8 +5750,13 @@ async fn form_campaign_start(
     .bind(user.tenant_id.as_str())
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            // Audit #16: storage down is not "campaign not found".
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     let Some((status, recipients_job)) = row else {
         return redirect_error(
             "That campaign could not be found in this workspace.",
@@ -5209,14 +5778,21 @@ async fn form_campaign_start(
             &state.config,
         );
     };
-    let subscribers = data::count_list_recipients_filtered(
+    // Audit #16: a failed count is "unknown", never zero — a storage
+    // outage must not read as "no subscribed contacts".
+    let subscribers = match data::count_list_recipients_filtered(
         &state.db,
         user.tenant_id.as_str(),
         &list_id,
         &segment,
     )
     .await
-    .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     if subscribers == 0 {
         return redirect_error(
             "The selected audience list has no subscribed contacts — add contacts before starting.",
@@ -5244,13 +5820,12 @@ async fn form_campaign_start(
             &back,
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web campaign start failed");
-            redirect_error(
-                "Could not start the campaign. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -5367,14 +5942,20 @@ async fn form_campaign_recipients(
             &state.config,
         );
     }
-    let campaign: Option<(String,)> =
-        sqlx::query_as("SELECT id::text FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(&id)
-            .bind(user.tenant_id.as_str())
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let campaign: Option<(String,)> = match sqlx::query_as(
+        "SELECT id::text FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(campaign) => campaign,
+        Err(error) => {
+            // Audit #16: storage down is not "campaign not found".
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     if campaign.is_none() {
         return redirect_error(
             "That campaign could not be found in this workspace.",
@@ -5382,14 +5963,20 @@ async fn form_campaign_recipients(
             &state.config,
         );
     }
-    let list: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(&list_id)
-            .bind(user.tenant_id.as_str())
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let list: Option<(String,)> = match sqlx::query_as(
+        "SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&list_id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(list) => list,
+        Err(error) => {
+            // Audit #16: storage down is not "list not in this workspace".
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     let Some((list_name,)) = list else {
         fields.error("list_id", "That list is not in this workspace.");
         return redirect_with_field_map(
@@ -5399,14 +5986,20 @@ async fn form_campaign_recipients(
             &state.config,
         );
     };
-    let count = data::count_list_recipients_filtered(
+    // Audit #16: a failed count is "unknown", never zero.
+    let count = match data::count_list_recipients_filtered(
         &state.db,
         user.tenant_id.as_str(),
         &list_id,
         &segment,
     )
     .await
-    .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     if count == 0 {
         fields.error("list_id", "That selection matches no contacts.");
         return redirect_with_field_map(
@@ -5446,13 +6039,12 @@ async fn form_campaign_recipients(
             &back,
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web campaign recipients failed");
-            redirect_error(
-                "Could not wire the recipients. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -5527,13 +6119,22 @@ async fn form_contacts_import(
         }
     }
     let batch: Vec<String> = unique.iter().map(|row| row.email.clone()).collect();
-    let existing: Vec<String> =
-        sqlx::query_scalar("SELECT email FROM contacts WHERE tenant_id = $1 AND email = ANY($2)")
-            .bind(user.tenant_id.as_str())
-            .bind(&batch)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+    // Audit #16: an unreadable dedupe table is NOT "no duplicates" —
+    // reporting "Imported N" from a fabricated empty dedupe set would
+    // corrupt the tenant's contact accounting. Refuse honestly.
+    let existing: Vec<String> = match sqlx::query_scalar(
+        "SELECT email FROM contacts WHERE tenant_id = $1 AND email = ANY($2)",
+    )
+    .bind(user.tenant_id.as_str())
+    .bind(&batch)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(existing) => existing,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), back, &state.config);
+        }
+    };
     let existing_set: std::collections::HashSet<String> = existing.into_iter().collect();
     let fresh: Vec<ContactCsvRow> = unique
         .into_iter()
@@ -5643,12 +6244,23 @@ async fn form_template_update(
     )
     .await
     {
-        tracing::warn!(error = %error, "template update refused by entitlement");
-        return redirect_error(
-            "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
-            &back,
-            &state.config,
-        );
+        // FIX (outage-honesty audit #16): only a GENUINE plan refusal may
+        // say "upgrade the plan" — a storage failure behind the lookup
+        // rides the single honest exit instead of masquerading as one.
+        match error {
+            crate::error::ApiError::Forbidden(message) => {
+                tracing::warn!(%message, "template update refused by entitlement");
+                return redirect_error(
+                    "Custom templates are not part of the current plan. Upgrade the plan or contact support.",
+                    &back,
+                    &state.config,
+                );
+            }
+            other => {
+                tracing::error!(error = %other, "template entitlement check failed: storage unavailable");
+                return temporary_storage_response(&back, &state.config);
+            }
+        }
     }
     let mut fields = FormFieldMap::new("template-update");
     fields.set("id", &id);
@@ -5665,15 +6277,24 @@ async fn form_template_update(
         fields.error("html_body", "Add some HTML content.");
         return redirect_with_field_map(&fields, "Add some HTML content.", &back, &state.config);
     }
-    let existing: Option<(i32, String)> = sqlx::query_as(
+    let existing: Option<(i32, String)> = match sqlx::query_as(
         "SELECT version, COALESCE(subject, '') FROM templates WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&id)
     .bind(user.tenant_id.as_str())
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(existing) => existing,
+        Err(error) => {
+            // Audit #16: storage down is not "template not found".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/templates",
+                &state.config,
+            );
+        }
+    };
     let Some((version, existing_subject)) = existing else {
         return redirect_error(
             "That template could not be found in this workspace.",
@@ -5726,13 +6347,12 @@ async fn form_template_update(
             &back,
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web template update failed");
-            redirect_error(
-                "Could not save the template. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -5754,16 +6374,24 @@ async fn form_template_preview(
     let id = field(&form, "id");
     if html_body.trim().is_empty() && !id.is_empty() {
         // Preview the stored body when the form posts only the template id.
-        html_body = sqlx::query_scalar::<_, String>(
+        // Audit #16: storage down is not "stored body is empty".
+        html_body = match sqlx::query_scalar::<_, String>(
             "SELECT html_body FROM templates WHERE id = $1 AND tenant_id = $2",
         )
         .bind(&id)
         .bind(user.tenant_id.as_str())
         .fetch_optional(&state.db)
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+        {
+            Ok(body) => body.unwrap_or_default(),
+            Err(error) => {
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    &back,
+                    &state.config,
+                );
+            }
+        };
     }
     if html_body.trim().is_empty() {
         return redirect_error("Add some HTML content to preview.", &back, &state.config);
@@ -5946,7 +6574,19 @@ async fn form_confirm_destructive(
         }
         // ── Control-plane intents (items I) — system-gated ──
         "suspend-tenant" => {
-            if !is_system_tenant(&state, &tenant).await {
+            let system_tenant = match is_system_tenant(&state, &tenant).await {
+                Ok(system_tenant) => system_tenant,
+                Err(error) => {
+                    // Audit #16: storage down is not "operator access
+                    // required" — the operator may well be one.
+                    return temporary_storage_failure(
+                        &WebActionError::Database(error),
+                        &return_to,
+                        &state.config,
+                    );
+                }
+            };
+            if !system_tenant {
                 return redirect_error("Operator access required.", "/tenants", &state.config);
             }
             let suspended = sqlx::query(
@@ -5964,18 +6604,39 @@ async fn form_confirm_destructive(
             suspended
         }
         "delete-tenant" => {
-            if !is_system_tenant(&state, &tenant).await {
+            let system_tenant = match is_system_tenant(&state, &tenant).await {
+                Ok(system_tenant) => system_tenant,
+                Err(error) => {
+                    // Audit #16: storage down is not "operator access
+                    // required" — the operator may well be one.
+                    return temporary_storage_failure(
+                        &WebActionError::Database(error),
+                        &return_to,
+                        &state.config,
+                    );
+                }
+            };
+            if !system_tenant {
                 return redirect_error("Operator access required.", "/tenants", &state.config);
             }
             // Typed confirmation (item I): the operator must repeat the
             // tenant's exact name — verified against the row server-side.
             let confirmation = field(&form, "confirmation").trim().to_string();
-            let name: Option<String> = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+            let name: Option<String> = match sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
                 .bind(&id)
                 .fetch_optional(&state.db)
                 .await
-                .ok()
-                .flatten();
+            {
+                Ok(name) => name,
+                Err(error) => {
+                    // Audit #16: storage down is not "tenant not found".
+                    return temporary_storage_failure(
+                        &WebActionError::Database(error),
+                        "/tenants",
+                        &state.config,
+                    );
+                }
+            };
             match name {
                 Some(expected) if confirmation == expected => {
                     sqlx::query("DELETE FROM tenants WHERE id = $1 AND name = $2")
@@ -6029,7 +6690,14 @@ async fn form_confirm_destructive(
             &return_to,
             &state.config,
         ),
-        Err(_) => redirect_error("Could not delete it. Try again.", &return_to, &state.config),
+        // Audit #16: the only `Err` here is a storage failure — surface it
+        // through the honest unavailable flash (logged + counted), not a
+        // generic retry copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
+            &return_to,
+            &state.config,
+        ),
     }
 }
 
@@ -6109,6 +6777,9 @@ async fn form_contacts_export(
 ) -> Response {
     // Entitlement gate: exporting customer data is the `data_export` feature.
     // Batch-2 leaked-copy fix: plain refusal copy; detail logged.
+    // Audit #16: only a GENUINE entitlement refusal (403) may say "upgrade
+    // the plan" — a storage failure behind the lookup must not masquerade
+    // as a plan limitation, so it takes the temporary-unavailable flash.
     if let Err(error) = crate::entitlements::require_feature(
         &state,
         &user.tenant_id,
@@ -6116,29 +6787,48 @@ async fn form_contacts_export(
     )
     .await
     {
-        tracing::warn!(error = %error, "contacts export refused by entitlement");
-        return redirect_error(
-            "CSV export is not part of the current plan. Upgrade the plan or contact support to enable it.",
-            "/contacts",
-            &state.config,
-        );
+        match error {
+            crate::error::ApiError::Forbidden(_) => {
+                tracing::warn!(error = %error, "contacts export refused by entitlement");
+                return redirect_error(
+                    "CSV export is not part of the current plan. Upgrade the plan or contact support to enable it.",
+                    "/contacts",
+                    &state.config,
+                );
+            }
+            other => {
+                tracing::error!(
+                    error = %other,
+                    "contacts export failed before reading contacts; storage or gate unavailable"
+                );
+                metrics::counter!("apexmail_web_storage_failures").increment(1);
+                return redirect_error(TEMPORARY_STORAGE_FLASH, "/contacts", &state.config);
+            }
+        }
     }
+    // Audit #16: a failed export used to download a header-only CSV — a
+    // silently empty contact list. The operator gets the honest outage
+    // flash instead (same treatment as form_audit_export).
     let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT email, name, status FROM contacts WHERE tenant_id = $1 AND status != 'deleted' ORDER BY created_at DESC LIMIT 10000",
     )
     .bind(user.tenant_id.as_str())
     .fetch_all(&state.db)
     .await;
-    let mut csv = String::from("email,name,status\n");
-    if let Ok(rows) = rows {
-        for (email, name, status) in rows {
-            csv.push_str(&format!(
-                "{},{},{}\n",
-                csv_escape(&email),
-                csv_escape(name.as_deref().unwrap_or("")),
-                csv_escape(&status),
-            ));
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            return temporary_storage_failure(&WebActionError::Database(error), "/contacts", &state.config);
         }
+    };
+    let mut csv = String::from("email,name,status\n");
+    for (email, name, status) in rows {
+        csv.push_str(&format!(
+            "{},{},{}\n",
+            csv_escape(&email),
+            csv_escape(name.as_deref().unwrap_or("")),
+            csv_escape(&status),
+        ));
     }
     csv_response(csv, "contacts.csv")
 }
@@ -6150,7 +6840,18 @@ async fn form_audit_export(
 ) -> Response {
     // Defense in depth: the router stack already gates this route behind
     // require_system_tenant_middleware; re-verify here (slug-aware).
-    if !is_system_tenant(&state, &user.tenant_id).await {
+    let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            // Audit #16: storage down is not "operator access required".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/audit",
+                &state.config,
+            );
+        }
+    };
+    if !system_tenant {
         return redirect_error("Operator access required.", "/audit", &state.config);
     }
     // Item M: the export honors the SAME widened search + optional days
@@ -6214,17 +6915,28 @@ async fn form_audit_export(
         query = query.bind(value);
     }
     let rows = query.fetch_all(&state.db).await;
-    let mut csv = String::from("timestamp,action,resource_type,actor\n");
-    if let Ok(rows) = rows {
-        for (created_at, action, resource_type, user_id) in rows {
-            csv.push_str(&format!(
-                "{},{},{},{}\n",
-                created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
-                csv_escape(action.as_deref().unwrap_or("")),
-                csv_escape(resource_type.as_deref().unwrap_or("")),
-                csv_escape(user_id.as_deref().unwrap_or("")),
-            ));
+    // Audit #16: a failed export used to download a header-only CSV — a
+    // silently empty audit trail. The operator gets the honest outage
+    // flash instead.
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/audit",
+                &state.config,
+            );
         }
+    };
+    let mut csv = String::from("timestamp,action,resource_type,actor\n");
+    for (created_at, action, resource_type, user_id) in rows {
+        csv.push_str(&format!(
+            "{},{},{},{}\n",
+            created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
+            csv_escape(action.as_deref().unwrap_or("")),
+            csv_escape(resource_type.as_deref().unwrap_or("")),
+            csv_escape(user_id.as_deref().unwrap_or("")),
+        ));
     }
     csv_response(csv, "audit-logs.csv")
 }
@@ -6298,7 +7010,19 @@ async fn form_admin_tenant_create(
     }
     // Item I: the plan select is bound — the value must exist in the
     // plans catalog (same source cp_plans reads), defaulting to free.
-    let catalog = data::tenant_plan_names(&state.db).await;
+    // Audit #16: an unreadable catalog is NOT an empty catalog — refusing
+    // every real plan with "Choose a plan from the catalog." would lie
+    // about the deployment.
+    let catalog = match data::tenant_plan_names(&state.db).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/tenants/new",
+                &state.config,
+            );
+        }
+    };
     let plan = if catalog.contains(&plan) {
         plan
     } else if plan.is_empty() {
@@ -6335,8 +7059,11 @@ async fn form_admin_tenant_create(
             "/tenants",
             &state.config,
         ),
-        Err(_) => redirect_error(
-            "Could not create the tenant. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/tenants/new",
             &state.config,
         ),
@@ -6361,13 +7088,22 @@ async fn form_admin_operator_create(
             &state.config,
         );
     }
-    let system_tenant = sqlx::query_scalar::<_, String>(
+    let system_tenant = match sqlx::query_scalar::<_, String>(
         "SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1",
     )
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            // Audit #16: storage down is not "system tenant absent".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/operators/new",
+                &state.config,
+            );
+        }
+    };
     let Some(system_tenant) = system_tenant else {
         return redirect_error(
             "Provisioning is unavailable. Try again shortly.",
@@ -6392,8 +7128,11 @@ async fn form_admin_operator_create(
     .await;
     match result {
         Ok(_) => redirect_success("Operator invited.", "/operators", &state.config),
-        Err(_) => redirect_error(
-            "Could not create the invitation. Try again.",
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
+        Err(error) => temporary_storage_failure(
+            &WebActionError::Database(error),
             "/operators/new",
             &state.config,
         ),
@@ -6431,12 +7170,21 @@ async fn form_admin_tenant_impersonate(
     // Owner-only: resolve the session user's authoritative role from the
     // users table (the session claims' scopes are not the owner test).
     let operator_role: Option<String> = match user.user_id.as_deref() {
-        Some(user_id) => sqlx::query_scalar("SELECT role FROM users WHERE id = $1::uuid")
+        Some(user_id) => match sqlx::query_scalar("SELECT role FROM users WHERE id = $1::uuid")
             .bind(user_id)
             .fetch_optional(&state.db)
             .await
-            .ok()
-            .flatten(),
+        {
+            Ok(role) => role,
+            Err(error) => {
+                // Audit #16: storage down is not "not an owner".
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    back,
+                    &state.config,
+                );
+            }
+        },
         None => None,
     };
     if operator_role.as_deref() != Some("owner") {
@@ -6444,15 +7192,28 @@ async fn form_admin_tenant_impersonate(
     }
     let target_tenant = field(&form, "id");
     if target_tenant.is_empty() {
-        return redirect_error("Pick a tenant to impersonate.", back, &state.config);
+        return temporary_storage_failure(
+            &WebActionError::Validation("Pick a tenant to impersonate.".into()),
+            back,
+            &state.config,
+        );
     }
     let Some((tenant_id, tenant_name, tenant_status)): Option<(String, String, String)> =
-        sqlx::query_as("SELECT id::text, name, status FROM tenants WHERE id = $1")
+        (match sqlx::query_as("SELECT id::text, name, status FROM tenants WHERE id = $1")
             .bind(&target_tenant)
             .fetch_optional(&state.db)
             .await
-            .ok()
-            .flatten()
+        {
+            Ok(row) => row,
+            Err(error) => {
+                // Audit #16: storage down is not "tenant not found".
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    back,
+                    &state.config,
+                );
+            }
+        })
     else {
         return redirect_error("That tenant could not be found.", back, &state.config);
     };
@@ -6460,16 +7221,25 @@ async fn form_admin_tenant_impersonate(
         return redirect_error("Deleted tenants cannot be impersonated.", back, &state.config);
     }
     let operator_id = user.user_id.clone().unwrap_or_default();
-    let operator_name = sqlx::query_scalar::<_, Option<String>>(
+    let operator_name = match sqlx::query_scalar::<_, Option<String>>(
         "SELECT name FROM users WHERE id = $1::uuid",
     )
     .bind(&operator_id)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten()
-    .flatten()
-    .unwrap_or_else(|| "Operator".to_string());
+    {
+        Ok(name) => name.flatten().unwrap_or_else(|| "Operator".to_string()),
+        Err(error) => {
+            // Audit #16: the operator identity rides the token payload and
+            // the audit row — fabricating a default name during an outage
+            // writes unauditable fiction. Refuse honestly.
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                back,
+                &state.config,
+            );
+        }
+    };
 
     let now_ms = Utc::now().timestamp_millis();
     let exp = now_ms + IMPERSONATION_UI_TTL_MS;
@@ -6726,13 +7496,12 @@ async fn form_admin_alert_ack(
             "/alerts",
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web alert ack failed");
-            redirect_error(
-                "Could not acknowledge the alert. Try again.",
-                "/alerts",
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts", &state.config)
         }
     }
 }
@@ -6783,13 +7552,12 @@ async fn form_admin_alert_ack_bulk(
                 )
             }
         }
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web alert ack-bulk failed");
-            redirect_error(
-                "Could not acknowledge the alerts. Try again.",
-                "/alerts",
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), "/alerts", &state.config)
         }
     }
 }
@@ -6808,12 +7576,21 @@ async fn form_admin_tenant_suspend(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants", &state.config);
     }
-    let row: Option<(String,)> = sqlx::query_as("SELECT status FROM tenants WHERE id = $1")
+    let row: Option<(String,)> = match sqlx::query_as("SELECT status FROM tenants WHERE id = $1")
         .bind(&id)
         .fetch_optional(&state.db)
         .await
-        .ok()
-        .flatten();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            // Audit #16: storage down is not "tenant not found".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/tenants",
+                &state.config,
+            );
+        }
+    };
     match row {
         Some((status,)) if matches!(status.as_str(), "pending" | "active") => {
             redirect_to_bulk_confirm("suspend-tenant", &[id], "/tenants", &state.config)
@@ -6862,13 +7639,12 @@ async fn form_admin_tenant_resume(
             "/tenants",
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web tenant resume failed");
-            redirect_error(
-                "Could not resume the tenant. Try again.",
-                "/tenants",
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), "/tenants", &state.config)
         }
     }
 }
@@ -6886,12 +7662,21 @@ async fn form_admin_tenant_delete(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants", &state.config);
     }
-    let exists: Option<(String,)> = sqlx::query_as("SELECT id::text FROM tenants WHERE id = $1")
+    let exists: Option<(String,)> = match sqlx::query_as("SELECT id::text FROM tenants WHERE id = $1")
         .bind(&id)
         .fetch_optional(&state.db)
         .await
-        .ok()
-        .flatten();
+    {
+        Ok(exists) => exists,
+        Err(error) => {
+            // Audit #16: storage down is not "tenant not found".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/tenants",
+                &state.config,
+            );
+        }
+    };
     match exists {
         Some(_) => redirect_to_bulk_confirm("delete-tenant", &[id], "/tenants", &state.config),
         None => redirect_error("That tenant could not be found.", "/tenants", &state.config),
@@ -7256,13 +8041,17 @@ async fn form_admin_gdpr_transition(
     }
     let target = field(&form, "status").trim().to_string();
     let back = safe_return_to(&form, "/compliance/gdpr");
-    let current: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM gdpr_requests WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let current: Option<(String,)> = match sqlx::query_as("SELECT status FROM gdpr_requests WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(current) => current,
+        Err(error) => {
+            // Audit #16: storage down is not "request not found".
+            return temporary_storage_failure(&WebActionError::Database(error), &back, &state.config);
+        }
+    };
     let Some((current,)) = current else {
         return redirect_error(
             "That GDPR request could not be found.",
@@ -7318,13 +8107,12 @@ async fn form_admin_gdpr_transition(
             &back,
             &state.config,
         ),
+        // FIX (outage-honesty audit #16): the storage failure rides the
+        // single honest exit — error-logged, outage-counted, standard
+        // temporary-unavailable flash — never a bespoke "try again" copy.
         Err(error) => {
             tracing::error!(error = %error, "web gdpr transition failed");
-            redirect_error(
-                "Could not update the request. Try again.",
-                &back,
-                &state.config,
-            )
+            temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
     }
 }
@@ -9119,7 +9907,8 @@ mod tests {
             // The detail loader exposes per-status actions from the same rule.
             let detail = data::load_campaign_detail(&state.db, &tenant, &campaign.to_string())
                 .await
-                .expect("detail loads");
+                .expect("detail query succeeds")
+                .expect("detail present");
             assert_eq!(detail.status, "sending");
             assert_eq!(detail.recipient_count, 2);
             assert_eq!(detail.list_name.as_deref(), Some("Starters"));
@@ -10567,7 +11356,8 @@ mod tests {
             let empty =
                 data::load_domain_detail(&state.db, &tenant, &domain.to_string(), "us-east-1")
                     .await
-                    .expect("detail loads without material");
+                    .expect("detail query succeeds")
+                    .expect("detail present without material");
             assert!(empty.empty_title.contains("not generated"));
 
             // Provision DKIM material exactly like the JSON verify path,
@@ -10589,7 +11379,8 @@ mod tests {
             let detail =
                 data::load_domain_detail(&state.db, &tenant, &domain.to_string(), "us-east-1")
                     .await
-                    .expect("detail loads");
+                    .expect("detail query succeeds")
+                    .expect("detail present");
             let table = detail.table.expect("records table");
             assert!(table.columns.contains(&"Value".to_string()));
             let hostnames: Vec<String> = table
@@ -10627,6 +11418,7 @@ mod tests {
                 "us-east-1"
             )
             .await
+            .expect("cross-tenant query succeeds")
             .is_none());
 
             cleanup_tenant(&state, &tenant).await;
@@ -12005,6 +12797,67 @@ mod tests {
                 );
             }
 
+            /// Audit P1-1 (the browser SSO bypass): a tenant whose
+            /// `ent_sso_configurations` row enforces SSO must refuse password
+            /// login on the CONSOLE form exactly as the JSON API always has.
+            /// The shared policy ladder runs on every surface — and SSO
+            /// enforcement is evaluated BEFORE email verification, so even an
+            /// unverified account is told to use its IdP, never walked part
+            /// way into the login.
+            #[tokio::test]
+            async fn sso_enforced_tenant_refuses_password_login_on_the_console_form() {
+                let Some(db) = crate::test_db::canonical_pool("waved_sso_enforced").await else {
+                    eprintln!(
+                        "skipping sso_enforced_tenant_refuses_password_login_on_the_console_form: no TEST_DATABASE_URL"
+                    );
+                    return;
+                };
+                let tenant = apexmail_lib::id::generate_id("wsso", 20);
+                seed_tenant(&db, &tenant, &format!("slug-{tenant}")).await;
+                let verified = seed_user(&db, &tenant, "owner", "active", true, false).await;
+                let unverified = seed_user(&db, &tenant, "owner", "active", false, false).await;
+
+                // The enforcement gate honours the capability (a tenant is
+                // never silently handed an unbought feature), so the tenant's
+                // plan must entitle SSO. `enterprise` carries `sso_enabled`.
+                sqlx::query("UPDATE tenants SET plan = 'enterprise' WHERE id = $1")
+                    .bind(&tenant)
+                    .execute(&db)
+                    .await
+                    .expect("grade the tenant to an SSO-entitled plan");
+                sqlx::query(
+                    "INSERT INTO ent_sso_configurations
+                        (tenant_id, provider_type, domain, idp_entity_id, sso_url, enforce_sso)
+                     VALUES ($1, 'saml', $2, 'https://idp.waved.example.com/metadata',
+                             'https://idp.waved.example.com/sso', true)",
+                )
+                .bind(&tenant)
+                .bind(format!("{tenant}.sso.example.com"))
+                .execute(&db)
+                .await
+                .expect("configure enforced SSO for the tenant");
+
+                let state = gated_state(db, |_| {}).await;
+                let app = public_forms(state.clone());
+
+                for (who, email) in [
+                    ("the verified account", &verified.1),
+                    ("the unverified account", &unverified.1),
+                ] {
+                    let body = csrf_body(&state, &[("email", email), ("password", PW)]);
+                    let response = app
+                        .clone()
+                        .oneshot(form_post_with_cookie("/web/auth/login", &body, ""))
+                        .await
+                        .unwrap();
+                    let flash = flash_of(response, &state.config.csrf_secret).await;
+                    assert!(
+                        flash.contains("SSO_REQUIRED"),
+                        "{who} must be directed to the organization IdP, got {flash:?}"
+                    );
+                }
+            }
+
             /// A session whose user row vanished must never be told its profile
             /// was saved.
             #[tokio::test]
@@ -12851,7 +13704,11 @@ mod coverage_handler_tests {
             Form(form),
         )
         .await;
-        assert!(flash_text(&response, &app.config).contains("Could not record"));
+        // FIX (outage-honesty audit #16): the duplicate pending request is
+        // refused by the partial unique index and keeps an actionable copy;
+        // it is no longer the same flash a storage outage gets.
+        assert!(flash_text(&response, &app.config)
+            .contains("A provisioning request is already pending"));
         let pending: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM dedicated_ip_provisioning_requests WHERE tenant_id = $1 AND status = 'pending'",
         )
@@ -12976,6 +13833,7 @@ mod coverage_handler_tests {
         // ── P0-B: the data-backed detail page ───────────────────────────
         let detail = crate::routes::web::data::load_list_detail(&app.db, &tenant, &seeded.list_id)
             .await
+            .expect("the detail query succeeds")
             .expect("the seeded list must load");
         // The P0-A rename above already applied, so the detail page must
         // show the UPDATED name — one row, read fresh.
@@ -12999,17 +13857,19 @@ mod coverage_handler_tests {
         );
 
         // A REAL id that does not exist in this workspace renders no demo
-        // content anywhere: the loader returns None (the handler flashes
+        // content anywhere: the loader returns Ok(None) (the handler flashes
         // the honest not-found) — for both this tenant and another's id.
         assert!(
             crate::routes::web::data::load_list_detail(&app.db, &tenant, &seeded.campaign_id)
                 .await
+                .expect("the absence query succeeds")
                 .is_none(),
             "a campaign id is not a list — no fabricated detail"
         );
         assert!(
             crate::routes::web::data::load_list_detail(&app.db, &other_tenant, &seeded.list_id)
                 .await
+                .expect("the cross-tenant query succeeds")
                 .is_none(),
             "another workspace's list id must not resolve here"
         );
@@ -16043,6 +16903,68 @@ mod adversarial_outage_tests {
             .collect()
     }
 
+    /// RFC 4648 base32 secret for a pending MFA enrollment (same shape the
+    /// auth outage tests use) — needed so the confirm handler passes its
+    /// pre-storage validation and REACHES the dead pool.
+    fn random_base32_secret() -> String {
+        use rand::TryRngCore;
+        let mut bytes = [0u8; 20];
+        rand::rngs::OsRng.try_fill_bytes(&mut bytes).expect("os rng");
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut secret = String::with_capacity(32);
+        let mut buffer: u16 = 0;
+        let mut bits_left: u8 = 0;
+        for byte in bytes {
+            buffer = (buffer << 8) | u16::from(byte);
+            bits_left += 8;
+            while bits_left >= 5 {
+                let index = ((buffer >> (bits_left - 5)) & 0x1f) as usize;
+                secret.push(alphabet[index] as char);
+                bits_left -= 5;
+            }
+        }
+        secret
+    }
+
+    /// RFC 6238 TOTP (SHA-256, 6 digits, 30s) — the verifier form_mfa_confirm
+    /// shares via `verify_totp_code_guarded`.
+    fn totp_code(secret_base32: &str) -> String {
+        use hmac::Mac;
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let mut key = Vec::new();
+        let mut bits: u64 = 0;
+        let mut bit_count: u32 = 0;
+        for symbol in secret_base32.trim_end_matches('=').bytes() {
+            let value = alphabet
+                .iter()
+                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .expect("base32 alphabet") as u64;
+            bits = (bits << 5) | value;
+            bit_count += 5;
+            if bit_count >= 8 {
+                bit_count -= 8;
+                key.push((bits >> bit_count) as u8);
+                bits &= (1u64 << bit_count) - 1;
+            }
+        }
+        let step = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            / 30;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key).expect("hmac key");
+        mac.update(&step.to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        let offset = (result[result.len() - 1] & 0x0f) as usize;
+        let code = u32::from_be_bytes([
+            result[offset] & 0x7f,
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ]);
+        format!("{:06}", code % 1_000_000)
+    }
+
     fn assert_graceful_error(response: &Response, config: &Config, context: &str) {
         assert_eq!(response.status(), StatusCode::SEE_OTHER, "{context}");
         let flash = flash_of(response, config);
@@ -16056,6 +16978,39 @@ mod adversarial_outage_tests {
             response.headers().get(header::LOCATION).is_some(),
             "{context} must redirect (PRG)"
         );
+        // Outage honesty (audit #16): with storage down and the form input
+        // valid, the error text must be the temporary-unavailable copy
+        // family (the shared flash or its surface-specific sign-in /
+        // registration variants) — NEVER the negative answer a swallowed
+        // outage used to produce ("invalid credentials", "not found",
+        // "unknown X"), which made a dead database a lie about the data.
+        let text = flash
+            .iter()
+            .map(|message| message.text.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let lowered = text.to_lowercase();
+        assert!(
+            lowered.contains("temporarily unavailable"),
+            "{context} must flash the temporary-unavailable copy on a dead \
+             pool, got {text:?}"
+        );
+        for forbidden in [
+            "invalid email or password",
+            "could not be found",
+            "not found",
+            "does not exist",
+            "no such",
+            "unknown list",
+            "unknown campaign",
+            "unknown domain",
+        ] {
+            assert!(
+                !lowered.contains(forbidden),
+                "{context} must never dress an outage up as the negative \
+                 answer {forbidden:?} — got {text:?}"
+            );
+        }
     }
 
     #[test]
@@ -16318,12 +17273,17 @@ mod adversarial_outage_tests {
         .await;
         assert_graceful_error(&response, &config, "dedicated ip request");
 
+        // FIX (outage-honesty audit #16): the form must carry the fields the
+        // handler validates BEFORE storage (name/subject/html_body) — the
+        // previous body_text-only input pinned the required-fields refusal,
+        // not the outage flash this dead-pool matrix exists to pin.
         let (headers, form) = signed_form(
             &state,
             &[
+                ("name", "Placement"),
                 ("from_email", "sender@example.com"),
                 ("subject", "Placement"),
-                ("body_text", "hello"),
+                ("html_body", "<p>hello</p>"),
             ],
         );
         let response = form_placement_create(
@@ -16351,12 +17311,16 @@ mod adversarial_outage_tests {
         .await;
         assert_graceful_error(&response, &config, "profile update");
 
+        // FIX (outage-honesty audit #16): the new password must satisfy the
+        // 12-128 policy — the previous 11-char input was refused by the
+        // policy BEFORE storage, so the test pinned the policy copy, not
+        // the outage flash this dead-pool matrix exists to pin.
         let (headers, form) = signed_form(
             &state,
             &[
-                ("current_password", "Old#Pass123"),
-                ("new_password", "New#Pass123"),
-                ("confirm_password", "New#Pass123"),
+                ("current_password", "Old#Pass1234"),
+                ("new_password", "New#Pass12345"),
+                ("confirm_password", "New#Pass12345"),
             ],
         );
         let response = form_change_password(
@@ -16378,13 +17342,43 @@ mod adversarial_outage_tests {
         .await;
         assert_graceful_error(&response, &config, "mfa setup");
 
-        let (headers, form) =
-            signed_form(&state, &[("code", "123456"), ("return_to", "/cp/security")]);
+        // FIX (outage-honesty audit #16): the confirm handler validates the
+        // pending-setup cookie and the TOTP code BEFORE storage — with no
+        // cookie the test pinned the "setup window expired" refusal, not
+        // the outage flash this dead-pool matrix exists to pin. Mint a
+        // valid pending enrollment (offline HMAC) and present a current
+        // code so the handler reaches its storage UPDATE.
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mfa_caller = AuthUser {
+            tenant_id: "toverflow0000000000000000".into(),
+            user_id: Some(user_id.clone()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let mfa_secret = random_base32_secret();
+        let signature = sign_mfa_setup(&state.config, &user_id, &mfa_secret);
+        let setup_value = encode_mfa_setup_value(&mfa_secret, "otpauth://totp/outage", &signature);
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        let mut mfa_headers = HeaderMap::new();
+        mfa_headers.insert(
+            header::COOKIE,
+            format!("csrf_token={}; {MFA_SETUP_COOKIE}={setup_value}", csrf.token)
+                .parse()
+                .unwrap(),
+        );
+        let mfa_form: HashMap<String, String> = [
+            ("code".to_string(), totp_code(&mfa_secret)),
+            ("_csrf".to_string(), csrf.token),
+            ("return_to".to_string(), "/cp/security".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let response = form_mfa_confirm(
             State(state.clone()),
-            Extension(caller()),
-            headers,
-            Form(form),
+            Extension(mfa_caller),
+            mfa_headers,
+            Form(mfa_form),
         )
         .await;
         assert_graceful_error(&response, &config, "mfa confirm");
@@ -16453,11 +17447,18 @@ mod adversarial_outage_tests {
         .await;
         assert_graceful_error(&response, &config, "domain create");
 
-        let (headers, form) = signed_form(&state, &[("id", "camp-1"), ("return_to", "/campaigns")]);
+        // FIX (outage-honesty audit #16): the id must be a WELL-FORMED
+        // UUID here — the handler refuses malformed ids before any storage
+        // access, so a fake id would assert the validation copy, not the
+        // outage flash this dead-pool matrix exists to pin.
+        let (headers, form) = signed_form(
+            &state,
+            &[("id", "00000000-0000-0000-0000-000000000001"), ("return_to", "/campaigns")],
+        );
         let response = form_campaign_start(
             State(state.clone()),
             Extension(caller()),
-            Path("camp-1".to_string()),
+            Path("00000000-0000-0000-0000-000000000001".to_string()),
             headers,
             Form(form),
         )
@@ -16796,14 +17797,71 @@ mod adversarial_auth_outage_tests {
         );
     }
 
-    /// `find_user_by_email` treats a database outage as "no such user" so
-    /// the caller's enumeration-resistant messaging stays intact.
+    /// FIX (outage-honesty audit #16): `find_user_by_email` used to map a
+    /// database outage to `None` — the caller's "invalid credentials" copy —
+    /// so a storage failure was indistinguishable from a wrong password. The
+    /// helper now returns `Result<Option<_>, sqlx::Error>` and the outage
+    /// surfaces as `Err` (handled by `temporary_storage_failure`).
     #[tokio::test]
-    async fn find_user_by_email_hides_storage_errors() {
+    async fn find_user_by_email_surfaces_storage_errors() {
         let state = dead_state().await;
-        assert!(find_user_by_email(&state, "user@example.com")
-            .await
-            .is_none());
+        let result = find_user_by_email(&state, "user@example.com").await;
+        assert!(
+            result.is_err(),
+            "a dead database must surface as Err, not Ok(None)/\"no such user\""
+        );
+    }
+
+    /// ANTI-ENUMERATION EXCEPTION spot-check (outage-honesty audit #16):
+    /// forgot-password is a deliberately-identical-response path. With
+    /// storage down it answers with the SAME neutral flash a genuinely
+    /// absent account gets — the public copy is NEVER swapped for
+    /// [`temporary_storage_failure`], because flashing "unavailable" only
+    /// for resolvable addresses would hand attackers a storage-failure
+    /// oracle for account existence. "Absent" and "unavailable" stay
+    /// distinct in CODE and TELEMETRY: the lookup `Err` is error-logged and
+    /// counted (`apexmail_web_forgot_password_storage_failures`) before it
+    /// rides the neutral path — it is never folded into the absent branch.
+    #[tokio::test]
+    async fn forgot_password_outage_keeps_the_neutral_anti_enumeration_flash() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+        let (headers, form) = signed_form(&state, &[("email", "outage-ghost@example.test")]);
+        let response = form_forgot_password(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_of(&response, &config);
+        assert_eq!(flash.len(), 1, "exactly the neutral flash, got {flash:?}");
+        assert_eq!(
+            flash[0].text,
+            "If that account exists, a reset link is on the way.",
+            "a dead database must answer byte-identically to the absent-account \
+             copy, never with the outage flash and never with a not-found copy"
+        );
+    }
+
+    /// ANTI-ENUMERATION EXCEPTION spot-check (outage-honesty audit #16):
+    /// resend-verification, same deliberately-identical-response contract as
+    /// forgot-password — a lookup failure is logged and counted
+    /// (`apexmail_web_resend_verification_storage_failures`) and the neutral
+    /// flash ships, so an outage is never distinguishable from "no such
+    /// unverified account". (The test config's limiter fails OPEN on the
+    /// dead Redis, letting the request reach the storage-failure path.)
+    #[tokio::test]
+    async fn resend_verification_outage_keeps_the_neutral_anti_enumeration_flash() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+        let (headers, form) = signed_form(&state, &[("email", "outage-ghost@example.test")]);
+        let response =
+            form_resend_verification(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_of(&response, &config);
+        assert_eq!(flash.len(), 1, "exactly the neutral flash, got {flash:?}");
+        assert_eq!(
+            flash[0].text,
+            "If that address needs verification, a fresh link is on the way.",
+            "a dead database must answer byte-identically to the absent-account \
+             copy, never with the outage flash and never with a not-found copy"
+        );
     }
 
     #[tokio::test]
@@ -17601,9 +18659,12 @@ mod residual_zero_tests {
             ],
         );
         let response = form_reset_password(State(state.clone()), headers, None, Form(form)).await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not reset the password. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -17625,9 +18686,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &dead.config),
-            "Could not update the password. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (b) The user row disappears between the hash SELECT and the
@@ -17751,9 +18815,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not update the password. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -17954,9 +19021,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not enable MFA. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let enabled: bool = sqlx::query_scalar(
             "SELECT COALESCE(mfa_enabled, false) FROM users WHERE id = $1::uuid",
@@ -18191,9 +19261,12 @@ mod residual_zero_tests {
             body,
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not add the webhook. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (b) The webhook INSERT fails: same honest retry.
@@ -18223,9 +19296,12 @@ mod residual_zero_tests {
             body,
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not add the webhook. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (c) The API-key mint fails inside the shared creation path.
@@ -18258,9 +19334,12 @@ mod residual_zero_tests {
             body,
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not create the key. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let stored: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE name = 'Faulty Key'")
@@ -18372,8 +19451,49 @@ mod residual_zero_tests {
         .execute(&app.db)
         .await
         .expect("seed capped plan");
+        // FIX (outage-honesty audit #16): seed the COMPLETE PlanFeatures
+        // JSON with the seat cap. The previous bare
+        // `{"max_team_members": 1}` object failed `PlanFeatures`
+        // deserialization, so the snapshot failed closed and the handler
+        // honestly reported a storage-lookup failure — the old code
+        // dressed that up as "upgrade your plan", which is exactly the
+        // conflation this audit removes. A complete document makes this
+        // scenario exercise the REAL CapacityExceeded refusal.
         sqlx::query("UPDATE plans SET features = $1::jsonb WHERE name = $2")
-            .bind(serde_json::json!({"max_team_members": 1}))
+            .bind(serde_json::json!({
+                "dedicated_ip": false,
+                "dedicated_ip_count": 0,
+                "max_sending_domains": 1,
+                "sso_enabled": false,
+                "audit_logs": false,
+                "api_access": true,
+                "webhooks_enabled": false,
+                "inbound_email": false,
+                "advanced_analytics": false,
+                "send_time_optimization": false,
+                "ab_testing": false,
+                "time_travel_debugging": false,
+                "data_export": false,
+                "custom_tracking_domain": false,
+                "custom_templates": false,
+                "template_approval_workflow": false,
+                "white_label": false,
+                "powered_by_footer": true,
+                "custom_retention": false,
+                "max_retention_days": 7,
+                "max_team_members": 1,
+                "subaccounts": false,
+                "max_subaccounts": 0,
+                "support_level": "community",
+                "dedicated_csm": false,
+                "priority_onboarding": false,
+                "byoip": false,
+                "sla_guarantee": false,
+                "sla_credit_percentage": 0,
+                "hipaa_compliance": false,
+                "soc2_compliance": false,
+                "private_cloud": false
+            }))
             .bind(&plan)
             .execute(&app.db)
             .await
@@ -18435,9 +19555,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not create the invitation. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let invited: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
@@ -18778,9 +19901,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not save the template. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (b) Placement test INSERT fails.
@@ -18810,9 +19936,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not start the test. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -18961,9 +20090,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not wire the recipients. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         // The aborted transaction leaves exactly the pre-existing (seeded)
         // wiring — no second job row may have landed.
@@ -19129,9 +20261,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not update the campaign. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -19214,9 +20349,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not start the campaign. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -19482,9 +20620,12 @@ mod residual_zero_tests {
         wait_for_blocked_statement(&pool).await;
         tx.commit().await.expect("commit delete");
         let response = task.await.expect("handler task").into_response();
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not save the template. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (b) The UPDATE fails outright.
@@ -19515,9 +20656,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not save the template. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -19753,9 +20897,13 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted delete is a STORAGE
+        // failure, so it now surfaces through `temporary_storage_failure`
+        // (error-logged, outage-counted) instead of the generic
+        // "Could not delete it. Try again." retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not delete it. Try again."
+            "The service is temporarily unavailable. Please try again."
         );
         let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM campaigns WHERE id = $1::uuid")
             .bind(&seeded.campaign_id)
@@ -19937,9 +21085,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not create the tenant. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (b) Operator invite: no resolvable system tenant → provisioning
@@ -19963,9 +21114,15 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): with the tenants relation hidden,
+        // the system-tenant SELECT FAILS — that is a storage failure, not a
+        // resolvable "no system tenant" answer, so it now flashes the
+        // temporary-unavailable copy (the old
+        // "Provisioning is unavailable. Try again shortly." copy stays
+        // reserved for the genuine `Ok(None)` case).
         assert_eq!(
             flash_text(&response, &state.config),
-            "Provisioning is unavailable. Try again shortly."
+            "The service is temporarily unavailable. Please try again."
         );
 
         // (c) Operator invite INSERT fails → retry flash, no row.
@@ -19990,9 +21147,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not create the invitation. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
             .bind(&op_email)
@@ -20073,9 +21233,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &dead.config),
-            "Could not acknowledge the alert. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let (headers, form) = signed_form(&dead.config, &[("ids", alert_id.as_str())]);
         let response = form_admin_alert_ack_bulk(
@@ -20085,9 +21248,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &dead.config),
-            "Could not acknowledge the alerts. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // Resume: an armed UPDATE fault flashes the retry.
@@ -20117,9 +21283,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not resume the tenant. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -20609,9 +21778,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not update the request. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -20653,7 +21825,8 @@ mod residual_zero_tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Outage: the query fails and the CSV degrades to the header only.
+        // Outage: the query fails and the export REFUSES (audit #16) — the
+        // old header-only CSV download fabricated an empty audit trail.
         let Some(pool) = crate::test_db::canonical_pool("web_res_audit_fault").await else {
             return;
         };
@@ -20673,13 +21846,16 @@ mod residual_zero_tests {
             AxumQuery(HashMap::new()),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_string(response).await;
-        assert_eq!(body, "timestamp,action,resource_type,actor\n");
+        // FIX (outage-honesty audit #16): the outage now flashes the
+        // temporary-unavailable PRG redirect instead of downloading a
+        // header-only CSV that lied "no audit events".
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_text(&response, &state.config);
+        assert_eq!(flash, "The service is temporarily unavailable. Please try again.");
     }
 
     #[tokio::test]
-    async fn contacts_export_degrades_to_header_only_on_outage() {
+    async fn contacts_export_refuses_on_outage() {
         let Some(pool) = crate::test_db::canonical_pool("web_res_contacts_export").await else {
             return;
         };
@@ -20692,12 +21868,12 @@ mod residual_zero_tests {
             .expect("hide contacts");
         let caller = coverage_support::user(&tenant);
         let response = form_contacts_export(State(state.clone()), axum::Extension(caller)).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_string(response).await;
-        assert_eq!(
-            body, "email,name,status\n",
-            "an outage must not fabricate rows"
-        );
+        // FIX (outage-honesty audit #16): the outage now refuses with the
+        // temporary-unavailable PRG flash — a header-only CSV download
+        // fabricated an empty contact list.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_text(&response, &state.config);
+        assert_eq!(flash, "The service is temporarily unavailable. Please try again.");
     }
 
     // ── SSR fallback: field-map clearing + unknown paths ────────────
@@ -20780,6 +21956,7 @@ mod residual_zero_tests {
         .expect("seed bare campaign");
         let detail = data::load_campaign_detail(&app.db, &tenant, &bare_campaign)
             .await
+            .expect("detail query succeeds")
             .expect("the campaign detail loads");
         assert_eq!(detail.list_id, None);
         assert_eq!(detail.list_name, None);
@@ -21098,12 +22275,14 @@ mod residual_zero_tests {
         let flash = flash_text(&response, &app.config);
         // Batch-2 leaked-copy fix (P1-6): the entitlement failure used to
         // surface as the raw error Display ("... tenant not found ...");
-        // the browser now gets the honest retry copy while the cause goes
-        // to the log. The contract that matters is unchanged: no success
-        // flash, and no domain row under a ghost tenant.
+        // the cause goes to the log. FIX (outage-honesty audit #16): the
+        // browser copy is now the SHARED temporary-unavailable flash — an
+        // outage must not wear the bespoke retry copy either. The contract
+        // that matters is unchanged: no success flash, and no domain row
+        // under a ghost tenant.
         assert!(
-            flash.contains("Could not check the domain limit right now"),
-            "the snapshot failure must flash the retry copy, got {flash:?}"
+            flash == TEMPORARY_STORAGE_FLASH,
+            "the snapshot failure must flash the shared outage copy, got {flash:?}"
         );
         let ghost_domains: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
@@ -21304,9 +22483,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not add the domain right now. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
 
         // (e) The capacity COUNT itself failing fails closed with its own
@@ -21338,9 +22520,12 @@ mod residual_zero_tests {
             Form(form),
         )
         .await;
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not add the domain. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
     }
 
@@ -21655,12 +22840,16 @@ mod residual_zero_tests {
             "the schedule must actually persist, got {stored:?}"
         );
 
-        // (b) A hostile date is an honest retry flash, and the stored
-        //     schedule survives the failed write untouched.
+        // (b) FIX (outage-honesty audit #16): a hostile date is caller
+        //     INPUT and is refused before storage with an actionable
+        //     validation copy — the old shape let the Postgres cast failure
+        //     land in the storage arm, so bad input flashed the same
+        //     "retry" copy an outage gets. The stored schedule survives
+        //     the refused write untouched.
         let response = update("not-a-timestamp-at-all").await;
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not save the campaign. Try again."
+            "Enter the schedule as an ISO 8601 date-time such as 2026-12-01T10:00:00Z, or leave it blank."
         );
         let stored: Option<String> =
             sqlx::query_scalar("SELECT scheduled_at::text FROM campaigns WHERE id = $1::uuid")
@@ -22102,9 +23291,12 @@ mod residual_zero_tests {
         tx.rollback().await.expect("release the fixture lock");
 
         let response = task.await.expect("handler task finishes despite severance");
+        // FIX (outage-honesty audit #16): the faulted storage now lands on
+        // the shared honest exit — TEMPORARY_STORAGE_FLASH via
+        // temporary_storage_failure — not the bespoke retry copy.
         assert_eq!(
             flash_text(&response, &state.config),
-            "Could not create the invitation. Try again."
+            TEMPORARY_STORAGE_FLASH
         );
         let invited: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
@@ -22354,6 +23546,48 @@ mod outage_matrix_tests {
                 );
             }
         }
+    }
+
+    /// PG down × the converted detail/aggregate loaders (audit #16): every
+    /// one surfaces `Err` — its call site turns that into the
+    /// temporary-unavailable flash — NEVER `Ok(None)`/"not found" and never
+    /// a fabricated zero. Before the conversion these helpers collapsed a
+    /// dead database into `None`/`0` with `.ok().flatten()` /
+    /// `.unwrap_or(0)`, making an outage indistinguishable from the
+    /// handler's negative answers.
+    #[tokio::test]
+    async fn pg_down_detail_and_count_loaders_surface_errors_not_negatives() {
+        let state = coverage_support::dead_state().await;
+        let missing = uuid::Uuid::new_v4().to_string();
+
+        assert!(
+            data::load_list_detail(&state.db, "tenant-x", &missing)
+                .await
+                .is_err(),
+            "list detail must Err on a dead pool — Ok(None) would read as \
+             \"That list could not be found in this workspace.\""
+        );
+        assert!(
+            data::load_campaign_detail(&state.db, "tenant-x", &missing)
+                .await
+                .is_err(),
+            "campaign detail must Err on a dead pool — Ok(None) would read as \
+             \"That campaign could not be found in this workspace.\""
+        );
+        assert!(
+            data::load_domain_detail(&state.db, "tenant-x", &missing, "eu-central-1")
+                .await
+                .is_err(),
+            "domain detail must Err on a dead pool — Ok(None) would read as \
+             \"That domain could not be found in this workspace.\""
+        );
+        assert!(
+            data::count_list_recipients_filtered(&state.db, "tenant-x", &missing, "all")
+                .await
+                .is_err(),
+            "the recipient count must Err on a dead pool — Ok(0) would dress \
+             the outage up as \"zero recipients\""
+        );
     }
 }
 // ─── Deferred console features: the adversarial close-out ─────────
@@ -22886,6 +24120,7 @@ mod deferred_feature_tests {
             .filter(|v| !v.trim().is_empty())
             .is_none()
         {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL unset");
             return;
         }
@@ -23354,6 +24589,7 @@ mod deferred_feature_tests {
 
         let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
             .await
+            .expect("detail query succeeds")
             .expect("campaign detail");
         let page = detail.to_list_page();
         assert_eq!(stat_kpi(&page, "Sent").value, "3");
@@ -23374,6 +24610,7 @@ mod deferred_feature_tests {
         let campaign = seed_campaign(&app, &tenant, "Stats Only").await;
         let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
             .await
+            .expect("detail query succeeds")
             .expect("campaign detail");
         let page = detail.to_list_page();
         assert_eq!(stat_kpi(&page, "Sent").value, "0");
@@ -23481,6 +24718,7 @@ mod deferred_feature_tests {
             .filter(|v| !v.trim().is_empty())
             .is_none()
         {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL unset");
             return;
         }
@@ -23582,6 +24820,7 @@ mod deferred_feature_tests {
             .filter(|v| !v.trim().is_empty())
             .is_none()
         {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL unset");
             return;
         }
@@ -23703,6 +24942,7 @@ mod deferred_feature_tests {
         let campaign = seed_campaign(&app, &tenant, "Stats Only").await;
         let detail = data::load_campaign_detail(&app.db, &tenant, &campaign)
             .await
+            .expect("detail query succeeds")
             .expect("detail");
         assert_eq!(detail.scheduled_at, None);
         let page = detail.to_list_page();

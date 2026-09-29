@@ -81,7 +81,7 @@ curl -X POST https://enterprise.apexmail.ee/sso/configure \
     "provider_type": "saml",
     "domain": "yourcompany.com",
     "enabled": true,
-    "entity_id": "https://idp.yourcompany.com/metadata",
+    "idp_entity_id": "https://idp.yourcompany.com/metadata",
     "sso_url": "https://idp.yourcompany.com/sso",
     "certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
     "enforce_sso": true,
@@ -92,10 +92,13 @@ curl -X POST https://enterprise.apexmail.ee/sso/configure \
 4. **Log in**
 
 Point the browser at `GET /sso/login/saml/yourcompany.com`. ApexMail builds
-the AuthnRequest and redirects to your IdP with the tenant domain in
+the AuthnRequest — its `<saml:Issuer>` is APEXMAIL's SP entity id
+(`SAML_ENTITY_ID`), never your IdP's — durably stages its request id for
+10 minutes, and redirects to your IdP with the tenant domain in
 `RelayState`. Your IdP posts the signed response to the ACS
-(`POST /sso/acs/{domain}`), where the assertion is verified and a session is
-issued.
+(`POST /sso/acs/{domain}`), where the response's `InResponseTo` is
+atomically matched against the staged request and the assertion is fully
+validated before a session is issued.
 
 ### OIDC Setup
 
@@ -132,9 +135,9 @@ The client secret is encrypted at rest with the deployment's
 
 Point the browser at `GET /sso/login/oidc/yourcompany.com`. ApexMail stages a
 single-use `state` plus a PKCE `code_verifier` (S256 challenge) and redirects
-to your IdP's authorize endpoint. Your IdP redirects back to the callback with
-the code; ApexMail discovers the token endpoint from
-`{issuer}/.well-known/openid-configuration`, exchanges the code with the
+to your IdP's DISCOVERED `authorization_endpoint`. Your IdP redirects back to
+the callback with the code; ApexMail discovers the token endpoint and JWKS URI
+from `{issuer}/.well-known/openid-configuration`, exchanges the code with the
 persisted verifier, validates the `id_token` against your IdP's JWKS, and
 issues the session.
 
@@ -143,14 +146,20 @@ issues the session.
 ### Auto-Provisioning
 
 Users are provisioned automatically on first SSO login: the validated
-identity (SAML NameID/attributes or the id_token's `sub`/`email`/`name`
-claims) creates the SSO session record, and the callback response reports
-`is_new_user: true` for the first login of an external user id. Subsequent
-logins for the same user are recognized as returning users.
+identity (SAML NameID/attributes or the id_token's `email`/`name` claims) is
+resolved onto the canonical `users` table and the durable
+`ent_sso_identities` binding — keyed `(sso_config_id, external_user_id)` — is
+written. The callback response reports `is_new_user: true` exactly when that
+binding did not exist before the login (identity-based, not session-based),
+and an SSO-provisioned account carries an unusable `$sso$` password
+placeholder, so it can never be attacked through the password form.
 
 The `domain` configured on the tenant's SSO row scopes which email domain
 logs in through which IdP; the login is initiated per domain
-(`/sso/login/saml/{domain}`, `/sso/login/oidc/{domain}`).
+(`/sso/login/saml/{domain}`, `/sso/login/oidc/{domain}`). A federated email
+must belong to the configured domain (OIDC additionally honors
+`email_verified` and requires a syntactically valid email — the `sub` claim
+never silently becomes an email address).
 
 ### SCIM Provisioning
 
@@ -198,11 +207,23 @@ sequenceDiagram
 
 ## Session Management
 
+### Canonical Console Sessions
+
+A successful SSO callback does not stop at the enterprise session record: the
+federated identity is resolved (or provisioned) onto the canonical `users`
+table and the SAME `am_session` JWT cookie the console password login issues
+is minted for it (requires the deployment's `JWT_PRIVATE_KEY_PEM` shared
+signing key), then the browser is redirected to a sanitized `return_to`
+target (same-origin paths only; anything else falls back to `/dashboard`).
+In other words, SSO logs the user into the real console. The enterprise
+bearer flow (`GET /sso/validate`) keeps working alongside it.
+
 ### Session Lifetime
 
 Sessions are stored server-side and expire after the configured per-tenant
-duration. Pass `session_duration_hours` in the `/sso/configure` body
-(the default is 8):
+duration (taken from the exact configuration row that served the login).
+Pass `session_duration_hours` in the `/sso/configure` body (the default is
+8):
 
 ```json
 {
@@ -221,6 +242,52 @@ endpoint (the `SAML_SLO_URL` deployment setting already exists) and
 per-session revocation are planned; sessions currently expire per the
 configured lifetime, and enforced tenants keep `enforce_sso` on so password
 fallback stays disabled.
+
+## Security Model
+
+Every layer below is covered by regression tests in
+`crates/enterprise/src/sso.rs` and `crates/enterprise/tests/sso_integration.rs`.
+
+**Password-login parity.** The JSON API login and the console SSR login run
+through ONE shared policy ladder (`evaluate_password_login_policy` in the
+api-server): account status → tenant SSO enforcement → email verification →
+ATO risk verdict → MFA step-up. An `enforce_sso` tenant rejects password
+login on every surface, so the console form can never bypass the SSO gate.
+
+**Deterministic multi-domain policy.** Tenants may hold one SSO
+configuration PER DOMAIN; enforcement is answered with
+`bool_or(enabled AND enforce_sso)` over all of the tenant's rows — never an
+arbitrary `LIMIT 1` pick.
+
+**SAML protocol correctness.** The AuthnRequest `<saml:Issuer>` is
+ApexMail's SP entity id (`SAML_ENTITY_ID`); the configured
+`idp_entity_id` names your IdP and is enforced as the Issuer on responses.
+Response `Destination`, SubjectConfirmationData `Recipient` and the
+assertion `Audience` are each checked against their own expected value
+(ACS URL vs SP entity id) — they are never conflated. Every SP-initiated
+login stages its request id durably (`ent_saml_authn_requests`, 10-minute
+window); the ACS atomically consumes it and refuses responses whose
+`InResponseTo` does not match, so unsolicited (IdP-initiated) assertions are
+rejected unless the configuration explicitly sets `allow_idp_initiated`.
+Claims parse ONLY from the signature-verified assertion node (XML
+signature-wrapping defense), a missing or malformed `NotOnOrAfter` fails
+closed, and the replay guard retains each assertion record for its full
+validity lifetime.
+
+**Session-token digests at rest.** `ent_sso_sessions` stores only the
+SHA-256 digest of its bearer token — the database never holds a usable
+credential.
+
+**OIDC egress guard (SSRF).** Because the issuer is tenant-configurable,
+every outbound federation fetch — discovery, token endpoint, JWKS URI — goes
+through a guard that requires HTTPS, resolves the host and refuses any
+private/reserved address (loopback, RFC1918, link-local 169.254.x including
+the cloud-metadata endpoint, IPv6 loopback/ULA), follows no redirects, and
+requires the discovery document's `issuer` to exactly match the configured
+one.
+
+**Single-use OIDC state.** The login `state` is consumed atomically with
+Redis `GETDEL` — concurrent callbacks with the same state cannot both win.
 
 ## Security Best Practices
 

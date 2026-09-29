@@ -616,6 +616,7 @@ mod tests {
         // `redis-server` locally it proves the Redis code path end-to-end.
         // F6: no ambient 6379 default — the variable must name the Redis
         // under test explicitly; unset means skip.
+        migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
         let Ok(url) = std::env::var("TEST_REDIS_URL") else {
             eprintln!("skipping: TEST_REDIS_URL not set");
             return;

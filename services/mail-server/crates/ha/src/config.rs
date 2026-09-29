@@ -275,6 +275,35 @@ fn generated_runtime_secret(label: &str) -> String {
     format!("{label}-{}", uuid::Uuid::new_v4().simple())
 }
 
+/// Errors raised while loading [`Config`] from the environment.
+///
+/// Hand-rolled mirror of the workspace's audit convention (`api-server`'s
+/// `thiserror` `ConfigError`); this crate does not depend on `thiserror`,
+/// so the `Display`/`Error` impls are spelled out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// A required environment variable is missing (or whitespace-only).
+    MissingVar(String),
+    /// An environment variable has a value production cannot accept.
+    Invalid { var: String, reason: String },
+    /// A production security check failed.
+    SecurityCheck(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingVar(var) => write!(f, "missing required environment variable: {var}"),
+            Self::Invalid { var, reason } => write!(f, "invalid value for {var}: {reason}"),
+            Self::SecurityCheck(reason) => {
+                write!(f, "production security check failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
 impl Config {
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let data = std::fs::read_to_string(path.as_ref())
@@ -282,7 +311,21 @@ impl Config {
         serde_json::from_str(&data).map_err(|e| format!("parse HA config JSON: {e}"))
     }
 
-    pub fn from_env() -> Self {
+    /// Load configuration from the environment.
+    ///
+    /// SEC (external audit): missing `INTERNAL_API_KEY` / `ADMIN_API_KEY`
+    /// used to be replaced by `generated_runtime_secret` values HERE —
+    /// BEFORE `harden_production` ran, so its production checks could never
+    /// fire and every production restart silently rotated the API keys. A
+    /// missing `DB_PASSWORD` was "fixed" with a random password that could
+    /// never authenticate. `from_env` is now fallible: the raw environment
+    /// values are bound as-is (missing stays empty) and production
+    /// credential requirements are enforced in `harden_production`, which
+    /// returns [`ConfigError::MissingVar`] naming the variable (the server
+    /// binary exits 78 / EX_CONFIG). Synthetic production credentials are
+    /// never generated; development/test still generates ephemeral keys,
+    /// loudly.
+    pub fn from_env() -> Result<Self, ConfigError> {
         let environment = env_or("NODE_ENV", "development");
         let pid = std::process::id();
 
@@ -291,14 +334,12 @@ impl Config {
             environment: environment.clone(),
             service_name: "apexmail-ha".into(),
             version: env_or("VERSION", "1.0.0"),
-            internal_api_key: std::env::var("INTERNAL_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| generated_runtime_secret("ha-internal-api-key")),
-            admin_api_key: std::env::var("ADMIN_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| generated_runtime_secret("ha-admin-api-key")),
+            // Raw env values only: missing keys stay empty so
+            // harden_production observes exactly what the environment
+            // provided (the old pre-fill of generated secrets made its
+            // production checks unreachable).
+            internal_api_key: env_or("INTERNAL_API_KEY", ""),
+            admin_api_key: env_or("ADMIN_API_KEY", ""),
             database: DatabaseConfig {
                 host: env_or("DB_HOST", "127.0.0.1"),
                 port: env_or_u16("DB_PORT", 5432),
@@ -387,39 +428,54 @@ impl Config {
             rpo_target_secs: env_or_u64("RPO_TARGET", 60),
             rto_target_secs: env_or_u64("RTO_TARGET", 300),
         };
-        config.harden_production();
-        config
+        config.harden_production()?;
+        Ok(config)
     }
 }
 
 impl Config {
-    pub fn harden_production(&mut self) {
+    /// Production posture: validate the credential values the environment
+    /// actually provided and REFUSE synthetic production credentials —
+    /// development/test still generates ephemeral runtime keys, loudly.
+    pub fn harden_production(&mut self) -> Result<(), ConfigError> {
         if self.environment == "production" {
+            // No synthetic production credentials, ever: a missing variable
+            // is a deployment error (the old code could never reach these
+            // checks because from_env pre-filled generated secrets first).
+            if self.internal_api_key.trim().is_empty() {
+                return Err(ConfigError::MissingVar("INTERNAL_API_KEY".into()));
+            }
+            if self.admin_api_key.trim().is_empty() {
+                return Err(ConfigError::MissingVar("ADMIN_API_KEY".into()));
+            }
+            if self.database.password.trim().is_empty() {
+                return Err(ConfigError::MissingVar("DB_PASSWORD".into()));
+            }
+            if self.database.password == "apexmail" {
+                return Err(ConfigError::Invalid {
+                    var: "DB_PASSWORD".into(),
+                    reason: "the well-known development default 'apexmail' is not \
+                             acceptable in production"
+                        .into(),
+                });
+            }
+        } else {
+            // Development/test: ephemeral runtime keys are acceptable (every
+            // restart rotates them) but must be loud.
             if self.internal_api_key.trim().is_empty() {
                 self.internal_api_key = generated_runtime_secret("ha-internal-api-key");
                 tracing::warn!(
-                    "SECURITY: INTERNAL_API_KEY missing in production; generated an ephemeral runtime key (redacted)"
+                    "SECURITY: INTERNAL_API_KEY missing in development; generated an ephemeral runtime key (redacted)"
                 );
             }
             if self.admin_api_key.trim().is_empty() {
                 self.admin_api_key = generated_runtime_secret("ha-admin-api-key");
                 tracing::warn!(
-                    "SECURITY: ADMIN_API_KEY missing in production; generated an ephemeral runtime key (redacted)"
-                );
-            }
-            if self.database.password.is_empty() || self.database.password == "apexmail" {
-                self.database.password = format!(
-                    "auto-db-password-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                tracing::warn!(
-                    "SECURITY: DB_PASSWORD missing/weak in production; generated an ephemeral runtime password (redacted)"
+                    "SECURITY: ADMIN_API_KEY missing in development; generated an ephemeral runtime key (redacted)"
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -429,12 +485,17 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let cfg = Config::from_env();
+        // SEC fix: from_env is fallible now (production refuses synthetic
+        // credentials); the default development test environment must load.
+        let cfg = Config::from_env().expect("HA config loads in development");
         assert_eq!(cfg.port, 4300);
         assert_eq!(cfg.service_name, "apexmail-ha");
         assert_eq!(cfg.database.pool_max, 20);
         assert_eq!(cfg.failover.threshold, 3);
         assert!(cfg.backup.enabled);
+        // Development keys are generated (or provided) — never left empty.
+        assert!(!cfg.internal_api_key.is_empty());
+        assert!(!cfg.admin_api_key.is_empty());
     }
 
     #[test]
@@ -549,5 +610,229 @@ mod tests {
         let err = Config::from_file(&path).unwrap_err();
         let _ = std::fs::remove_file(&path);
         assert!(err.contains("unknown field"));
+    }
+
+    // ── SEC: production requires real credentials ──────────────
+
+    /// Env helper: nextest runs every test in its own process, so process-env
+    /// mutations here are deterministic; the module only touches the
+    /// variables named in these tests.
+    fn set_env(name: &str, value: &str) {
+        std::env::set_var(name, value);
+    }
+
+    fn unset_env(name: &str) {
+        std::env::remove_var(name);
+    }
+
+    /// Captures `tracing` output emitted inside `f` with a SCOPED subscriber
+    /// (no global default installed — deterministic under nextest and plain
+    /// `cargo test` alike).
+    struct TestLogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TestLogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&buffer);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || TestLogSink(std::sync::Arc::clone(&sink)))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = buffer.lock().expect("log sink lock").clone();
+        String::from_utf8(captured).expect("captured logs are utf-8")
+    }
+
+    fn production_env_with(
+        internal_api_key: Option<&str>,
+        admin_api_key: Option<&str>,
+        db_password: Option<&str>,
+    ) {
+        set_env("NODE_ENV", "production");
+        match internal_api_key {
+            Some(value) => set_env("INTERNAL_API_KEY", value),
+            None => unset_env("INTERNAL_API_KEY"),
+        }
+        match admin_api_key {
+            Some(value) => set_env("ADMIN_API_KEY", value),
+            None => unset_env("ADMIN_API_KEY"),
+        }
+        match db_password {
+            Some(value) => set_env("DB_PASSWORD", value),
+            None => unset_env("DB_PASSWORD"),
+        }
+    }
+
+    /// Production + missing INTERNAL_API_KEY → from_env errs with a message
+    /// naming the variable (no ephemeral key is bound).
+    #[test]
+    fn test_production_missing_internal_api_key_is_refused() {
+        production_env_with(None, Some("prod-admin-key"), Some("prod-db-password"));
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+        assert!(
+            err.to_string().contains("INTERNAL_API_KEY"),
+            "error must name the missing variable, got: {err}"
+        );
+    }
+
+    /// Production + missing ADMIN_API_KEY → same refusal, naming the variable.
+    #[test]
+    fn test_production_missing_admin_api_key_is_refused() {
+        production_env_with(Some("prod-internal-key"), None, Some("prod-db-password"));
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+        assert!(
+            err.to_string().contains("ADMIN_API_KEY"),
+            "error must name the missing variable, got: {err}"
+        );
+    }
+
+    /// Production + missing DB_PASSWORD → refusal (the old behavior generated
+    /// a random password that could never authenticate — worse than useless).
+    #[test]
+    fn test_production_missing_db_password_is_refused() {
+        production_env_with(Some("prod-internal-key"), Some("prod-admin-key"), None);
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+        assert!(
+            err.to_string().contains("DB_PASSWORD"),
+            "error must name the missing variable, got: {err}"
+        );
+    }
+
+    /// Production + the well-known development default as DB_PASSWORD →
+    /// refusal (the old code treated it as missing; it must not pass as a
+    /// "real" credential now that generation is gone).
+    #[test]
+    fn test_production_weak_default_db_password_is_refused() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("apexmail"),
+        );
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { .. }));
+        assert!(
+            err.to_string().contains("DB_PASSWORD"),
+            "error must name the offending variable, got: {err}"
+        );
+    }
+
+    /// The bypass is dead: with all three variables provided, harden_production
+    /// validated the REAL values and from_env returns them verbatim — no
+    /// synthetic runtime credential ever replaces them.
+    #[test]
+    fn test_production_uses_the_values_the_environment_provided() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("prod-db-password"),
+        );
+
+        let cfg =
+            Config::from_env().expect("production config with explicit credentials must load");
+        assert_eq!(cfg.internal_api_key, "prod-internal-key");
+        assert_eq!(cfg.admin_api_key, "prod-admin-key");
+        assert_eq!(cfg.database.password, "prod-db-password");
+        assert!(!cfg.internal_api_key.starts_with("ha-internal-api-key-"));
+        assert!(!cfg.admin_api_key.starts_with("ha-admin-api-key-"));
+        assert!(!cfg.database.password.starts_with("auto-db-password-"));
+    }
+
+    /// harden_production, directly: an empty INTERNAL_API_KEY under
+    /// production is a hard error AND the field stays empty — the old code
+    /// bound a generated secret BEFORE this method could ever check it.
+    #[test]
+    fn test_harden_production_refuses_empty_internal_api_key_without_generating() {
+        production_env_with(
+            Some("probe-internal-key"),
+            Some("probe-admin-key"),
+            Some("probe-db-password"),
+        );
+        let mut cfg =
+            Config::from_env().expect("production config with explicit credentials must load");
+
+        // Simulate the deployment variable the old code hid from this check.
+        cfg.internal_api_key = String::new();
+        let err = cfg.harden_production().unwrap_err();
+        assert!(
+            err.to_string().contains("INTERNAL_API_KEY"),
+            "error must name the missing variable, got: {err}"
+        );
+        assert!(
+            cfg.internal_api_key.is_empty(),
+            "harden_production must not bind a generated credential"
+        );
+    }
+
+    /// Development + missing keys → ephemeral generation works AND is logged;
+    /// DB_PASSWORD stays empty in development (no fake credential there
+    /// either).
+    #[test]
+    fn test_development_missing_keys_generate_ephemeral_and_are_logged() {
+        set_env("NODE_ENV", "development");
+        unset_env("INTERNAL_API_KEY");
+        unset_env("ADMIN_API_KEY");
+
+        let logs = capture_logs(|| {
+            let cfg = Config::from_env().expect("development config must load");
+            assert!(
+                cfg.internal_api_key.starts_with("ha-internal-api-key-"),
+                "ephemeral internal key expected, got: {}",
+                cfg.internal_api_key
+            );
+            assert!(
+                cfg.admin_api_key.starts_with("ha-admin-api-key-"),
+                "ephemeral admin key expected, got: {}",
+                cfg.admin_api_key
+            );
+            assert_eq!(
+                cfg.database.password, "",
+                "development must not invent a DB password"
+            );
+        });
+        assert!(
+            logs.contains("INTERNAL_API_KEY"),
+            "internal key generation must be logged, got: {logs}"
+        );
+        assert!(
+            logs.contains("ADMIN_API_KEY"),
+            "admin key generation must be logged, got: {logs}"
+        );
+    }
+
+    /// Pins the generated-vs-required transition: the SAME missing variables
+    /// yield ephemeral keys in development and a hard error in production.
+    #[test]
+    fn test_generated_vs_required_transition_is_pinned_by_environment() {
+        unset_env("INTERNAL_API_KEY");
+        unset_env("ADMIN_API_KEY");
+        set_env("DB_PASSWORD", "");
+
+        set_env("NODE_ENV", "development");
+        let dev = Config::from_env().expect("development generates ephemeral keys");
+        assert!(dev.internal_api_key.starts_with("ha-internal-api-key-"));
+        assert!(dev.admin_api_key.starts_with("ha-admin-api-key-"));
+
+        set_env("NODE_ENV", "production");
+        let prod_err = Config::from_env().unwrap_err();
+        assert!(
+            prod_err.to_string().contains("INTERNAL_API_KEY"),
+            "production refuses the first missing variable, got: {prod_err}"
+        );
     }
 }

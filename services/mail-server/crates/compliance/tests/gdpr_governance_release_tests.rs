@@ -38,6 +38,7 @@ use uuid::Uuid;
 // ── Provisioning ────────────────────────────────────────────────────────────
 
 fn test_database_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     std::env::var("TEST_DATABASE_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -65,6 +66,7 @@ async fn canonical_pool(test_name: &str) -> Option<PgPool> {
 /// A redis URL for the few tests that exercise the erasure path end to end
 /// (which clears subject-scoped cache keys). `None` when unset.
 fn test_redis_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     std::env::var("TEST_REDIS_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -363,7 +365,10 @@ async fn compliance_boots_and_processes_with_dml_only_role() {
     // manager requires its KDF salt + master key (env contract).
     std::env::set_var("SECRETS_KDF_SALT", "dml-boot-kdf-salt-0123456789");
     std::env::set_var("SECRETS_ENCRYPTION_KEY", "dml-boot-master-key-0123456789");
-    let mut config = ComplianceConfig::from_env();
+    // SEC fix: from_env is fallible now (production refuses ephemeral
+    // secrets); this test env is development, so loading must succeed.
+    let mut config =
+        ComplianceConfig::from_env().expect("compliance config must load in the test environment");
     config.database_url = role.url.clone();
     config.redis_url = test_redis_url().unwrap_or_else(|| "redis://127.0.0.1:1/0".into());
     config.auth_token = "dml-boot-token".into();

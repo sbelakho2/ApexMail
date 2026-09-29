@@ -138,6 +138,34 @@ pub mod test_support {
     use sqlx::{postgres::PgPoolOptions, PgPool};
     use std::time::Duration;
 
+    /// Release-mode soft-skip contract (audit CI-2).
+    ///
+    /// Developer-local convenience: an infrastructure variable unset ⇒ the
+    /// suite soft-skips (`Ok(None)` → the caller's `let … else { return }`).
+    /// Release CI (Woodpecker) sets `APEXMAIL_RELEASE_TEST_MODE=1` and
+    /// provides Postgres/Redis/ClickHouse, so a missing variable there means
+    /// a broken fixture — the guard PANICS naming the variable instead of
+    /// letting a REQUIRES-INFRASTRUCTURE test degrade into a green no-op.
+    ///
+    /// Call this at every soft-skip decision point, BEFORE the
+    /// eprintln/`None` path. A variable that IS set (even to a dead server)
+    /// passes straight through: that is the caller's existing configured-
+    /// failure behavior, which this contract deliberately leaves alone.
+    pub fn assert_soft_skip_allowed(env_var: &str) {
+        if std::env::var(env_var)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
+            panic!(
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+                 release CI must not skip infrastructure tests"
+            );
+        }
+    }
+
     /// Why a canonical test database could not be provisioned (audit F01).
     ///
     /// Constructed only for CONFIGURED-infrastructure failures; an
@@ -747,6 +775,7 @@ pub mod test_support {
         db_name: &str,
     ) -> Result<Option<PgPool>, ProvisionError> {
         if base_url.trim().is_empty() {
+            assert_soft_skip_allowed("TEST_DATABASE_URL");
             return Ok(None);
         }
         let (server_part, _) = base_url
@@ -853,6 +882,7 @@ pub mod test_support {
         db_name: &str,
     ) -> Result<Option<PgPool>, ProvisionError> {
         if base_url.trim().is_empty() {
+            assert_soft_skip_allowed("TEST_DATABASE_URL");
             return Ok(None);
         }
         let (server_part, _) = base_url
@@ -914,6 +944,7 @@ pub mod test_support {
         let database_url = match database_url {
             Some(url) => url,
             None => {
+                assert_soft_skip_allowed("TEST_DATABASE_URL");
                 eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
                 return Ok(None);
             }
@@ -943,6 +974,7 @@ pub mod test_support {
         db_name: &str,
     ) -> Result<Option<PgPool>, ProvisionError> {
         if base_url.trim().is_empty() {
+            assert_soft_skip_allowed("TEST_DATABASE_URL");
             return Ok(None);
         }
         let (server_part, _) = base_url
@@ -1128,6 +1160,7 @@ pub mod test_support {
         /// `(server_part, db_only)` from TEST_DATABASE_URL; `None` when the
         /// suite is unconfigured (caller soft-skips).
         fn base_parts() -> Option<(String, String)> {
+            super::assert_soft_skip_allowed("TEST_DATABASE_URL");
             let url = std::env::var("TEST_DATABASE_URL").ok()?;
             let (server, db) = url.rsplit_once('/')?;
             let db_only = db.split('?').next().unwrap_or(db).to_string();
@@ -1149,6 +1182,7 @@ pub mod test_support {
         /// (`pg_` name rejection probes rely on CREATE attempts, not admin
         /// tricks). `None` when TEST_DATABASE_ADMIN_URL is unset.
         async fn admin_pool() -> Option<PgPool> {
+            super::assert_soft_skip_allowed("TEST_DATABASE_ADMIN_URL");
             let url = std::env::var("TEST_DATABASE_ADMIN_URL").ok()?;
             let (server, _) = url.rsplit_once('/')?;
             Some(
@@ -2554,13 +2588,23 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY-of-test: ENV_LOCK serializes every TEST_DATABASE_URL reader
         // in this binary; the value is restored before the guard is dropped.
+        // APEXMAIL_RELEASE_TEST_MODE is cleared alongside: THIS test is about
+        // the soft-skip machinery itself (unset → Ok(None)), and under the
+        // release contract that skip panics by design. Removing the marker
+        // here exercises the developer-local convenience arm deterministically.
         let saved = std::env::var("TEST_DATABASE_URL").ok();
+        let saved_release = std::env::var("APEXMAIL_RELEASE_TEST_MODE").ok();
         std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("APEXMAIL_RELEASE_TEST_MODE");
         let result = fresh_canonical_pool("f01_unset_env", "unset").await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
         if let Some(value) = saved {
             std::env::set_var("TEST_DATABASE_URL", value);
+        }
+        match saved_release {
+            Some(value) => std::env::set_var("APEXMAIL_RELEASE_TEST_MODE", value),
+            None => std::env::remove_var("APEXMAIL_RELEASE_TEST_MODE"),
         }
     }
 

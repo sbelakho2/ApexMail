@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 /// The env the child needs to boot: live infra, ephemeral port, metrics
 /// bound to an ephemeral loopback port, ClickHouse verification enabled.
 fn child_env() -> Option<Vec<(String, String)>> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let db = std::env::var("TEST_DATABASE_URL").ok()?;
     let redis = std::env::var("TEST_REDIS_URL").ok()?;
     let clickhouse =

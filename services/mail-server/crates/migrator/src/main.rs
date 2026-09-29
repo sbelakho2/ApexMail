@@ -149,6 +149,7 @@ mod tests {
     /// `cargo test -p migrator` never needs a live database.
     #[tokio::test]
     async fn applies_full_chain_to_test_database() {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
             eprintln!("skipping: TEST_DATABASE_URL not set");
             return;
@@ -174,6 +175,7 @@ mod tests {
     /// container); skipped when unset.
     #[tokio::test]
     async fn applied_count_on_a_completely_fresh_database_returns_zero() {
+        migrator::test_support::assert_soft_skip_allowed("TEST_FRESH_DATABASE_URL");
         let Ok(url) = std::env::var("TEST_FRESH_DATABASE_URL") else {
             eprintln!("skipping: TEST_FRESH_DATABASE_URL not set");
             return;

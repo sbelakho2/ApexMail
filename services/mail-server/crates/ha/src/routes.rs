@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     fn test_config() -> Arc<Config> {
-        let mut config = Config::from_env();
+        let mut config = Config::from_env().expect("HA config must load in development");
         config.internal_api_key = TEST_INTERNAL_API_KEY.into();
         config.admin_api_key = TEST_ADMIN_API_KEY.into();
         Arc::new(config)
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_check_api_key_rejects_bad_key() {
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().expect("HA config must load in development");
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", "bad-key".parse().unwrap());
         assert!(check_api_key(&headers, &cfg).is_err());
@@ -1164,7 +1164,7 @@ mod tests {
 
     #[test]
     fn test_check_api_key_accepts_internal() {
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().expect("HA config must load in development");
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", cfg.internal_api_key.parse().unwrap());
         assert!(check_api_key(&headers, &cfg).is_ok());
@@ -1236,7 +1236,7 @@ mod tests {
         }
 
         test_runtime().block_on(async move {
-            let mut config = Config::from_env();
+            let mut config = Config::from_env().expect("HA config must load in development");
             config.internal_api_key = TEST_INTERNAL_API_KEY.into();
             config.admin_api_key = TEST_ADMIN_API_KEY.into();
             config.redis.host = "127.0.0.1".into();

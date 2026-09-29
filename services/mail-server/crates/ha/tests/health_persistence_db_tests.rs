@@ -18,7 +18,7 @@ async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
 }
 
 fn service(pool: &PgPool, node: &str) -> HealthCheckService {
-    let mut config = Config::from_env();
+    let mut config = Config::from_env().expect("HA config must load in development");
     config.multi_region.node_id = node.to_string();
     config.multi_region.region = "eu-test".to_string();
     HealthCheckService::new(pool.clone(), Arc::new(config))

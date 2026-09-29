@@ -8,11 +8,13 @@
 //! * Service name: `compliance`; container port `3011` (env `COMPLIANCE_PORT`
 //!   overrides; CLI `--port` wins over both).
 //! * Required env: `DATABASE_URL` (Postgres), `REDIS_URL`,
-//!   `COMPLIANCE_AUTH_TOKEN` (bearer token every route requires; in
-//!   production `NODE_ENV=production` an ephemeral token is generated with a
-//!   warning when unset), `AUDIT_SIGNING_KEY` (or `AUDIT_SIGNING_KEY_FILE`
-//!   when `NODE_ENV=production` — the service refuses to start on an
-//!   ephemeral key), `SECRETS_ENCRYPTION_KEY`, `CONSENT_SIGNING_KEY`.
+//!   `COMPLIANCE_AUTH_TOKEN` (bearer token every route requires; when
+//!   `NODE_ENV=production` the service REFUSES to start — exit 78 — when it
+//!   is unset: no ephemeral token is ever generated in production), `AUDIT_SIGNING_KEY`
+//!   (or `AUDIT_SIGNING_KEY_FILE` when `NODE_ENV=production` — the service
+//!   refuses to start on an ephemeral key), `SECRETS_ENCRYPTION_KEY` (same
+//!   production refusal), `CONSENT_SIGNING_KEY`. In development, missing
+//!   auth/encryption values are generated ephemerally with a warning.
 //! * Optional env: `CORS_ORIGIN`, `GDPR_EXPORT_BASE_URL`,
 //!   `GDPR_VERIFY_BASE_URL`, `AUDIT_RETENTION_DAYS`, DSAR rate-limit vars,
 //!   and the ClickHouse erasure vars (`GDPR_CLICKHOUSE_ERASURE_ENABLED`,
@@ -94,7 +96,19 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    let config = ComplianceConfig::from_env();
+    // SEC fix: from_env is fallible now — production REFUSES ephemeral
+    // COMPLIANCE_AUTH_TOKEN / SECRETS_ENCRYPTION_KEY (EX_CONFIG, mirroring
+    // the isolation crate's exit-78 convention).
+    let config = match ComplianceConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            error!(
+                "SECURITY: compliance configuration refused to load: {error} — set the \
+                 required environment variables and restart (exit 78 / EX_CONFIG)"
+            );
+            std::process::exit(78); // EX_CONFIG
+        }
+    };
     let port = cli.port.unwrap_or(config.port);
 
     // One shared construction path with the DML-only release test: connect,
@@ -410,6 +424,7 @@ mod tests {
     use compliance::config::ComplianceConfig;
 
     fn test_database_url() -> Option<String> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -426,12 +441,18 @@ mod tests {
         if std::env::var("SECRETS_ENCRYPTION_KEY").is_err() {
             std::env::set_var("SECRETS_ENCRYPTION_KEY", "bin-test-master-key-0123456789");
         }
+        // SEC fix: from_env no longer fabricates a token in production mode —
+        // pin the env the test needs to load under any NODE_ENV.
+        if std::env::var("COMPLIANCE_AUTH_TOKEN").is_err() {
+            std::env::set_var("COMPLIANCE_AUTH_TOKEN", "bin-test-compliance-token");
+        }
         let db_name = format!("apexmail_ci_bin_server_{test_name}");
         let _pool = match migrator::test_support::fresh_canonical_db(&url, &db_name).await {
             Ok(pool) => pool?,
             Err(error) => panic!("{}", error.panic_message()),
         };
-        let mut config = ComplianceConfig::from_env();
+        let mut config = ComplianceConfig::from_env()
+            .expect("compliance config must load in the test environment");
         config.database_url = url;
         config.redis_url = std::env::var("TEST_REDIS_URL").unwrap_or_default();
         config.auth_token = "bin-test-token".into();

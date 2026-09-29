@@ -1205,9 +1205,30 @@ mod tests {
 
     // ── DB-gated lease fencing (skipped without TEST_DATABASE_URL) ────────
 
+    /// Release-mode soft-skip contract (audit CI-2): under
+/// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a hard
+/// panic naming the variable, never a silent skip. (This crate does not
+/// depend on `migrator`, so the workspace guard is mirrored here rather than
+/// reused; a variable that IS set passes straight through.)
+fn assert_soft_skip_allowed(env_var: &str) {
+    if std::env::var(env_var)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
+        panic!(
+            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+             release CI must not skip infrastructure tests"
+        );
+    }
+}
+
     /// Connect to the test database when TEST_DATABASE_URL is set, following
     /// the workspace convention of skipping (not failing) when absent.
     async fn optional_pool() -> Option<PgPool> {
+        assert_soft_skip_allowed("TEST_DATABASE_URL");
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
         let pool = PgPool::connect(&url).await.ok()?;
         // Ensure the table shape exists (fresh scratch databases): the base
@@ -1423,6 +1444,7 @@ mod tests {
     /// is verified and the tests proceed whenever the table is actually
     /// usable.
     async fn db_pool() -> Option<PgPool> {
+        assert_soft_skip_allowed("TEST_DATABASE_URL");
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
         let pool = match PgPool::connect(&url).await {
             Ok(pool) => pool,

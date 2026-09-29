@@ -10,6 +10,7 @@ use isolation::types::{RateLimitConfig, TokenBucketConfig};
 use uuid::Uuid;
 
 fn redis_pool() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let url = std::env::var("TEST_REDIS_URL").ok()?;
     if url.trim().is_empty() {
         return None;

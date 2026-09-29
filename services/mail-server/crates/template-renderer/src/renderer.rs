@@ -949,6 +949,7 @@ mod tests {
         use sqlx::postgres::PgPoolOptions;
         use std::time::Duration;
 
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())?;

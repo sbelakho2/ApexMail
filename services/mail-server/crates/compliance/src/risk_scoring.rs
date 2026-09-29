@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn test_risk_level_determines_limits() {
         // Low → multiplier 1.0, no forced DOI
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         let engine = RiskScoringEngine::new(
             // We only test compute_limits which doesn't touch DB.
             unsafe_dummy_pool(),
@@ -952,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_generate_flags_bounce() {
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         let engine = RiskScoringEngine::new(unsafe_dummy_pool(), cfg);
         let mut m = TenantMetrics::default();
         m.bounce_rate = 8.0;
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn test_generate_flags_blocklist() {
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         let engine = RiskScoringEngine::new(unsafe_dummy_pool(), cfg);
         let mut m = TenantMetrics::default();
         m.blocklist_available = true;
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_generate_flags_spike() {
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         let engine = RiskScoringEngine::new(unsafe_dummy_pool(), cfg);
         let mut m = TenantMetrics::default();
         m.messages_24h = 10_000;
@@ -990,7 +990,7 @@ mod tests {
 
     #[test]
     fn test_generate_flags_phishing() {
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         let engine = RiskScoringEngine::new(unsafe_dummy_pool(), cfg);
         let mut m = TenantMetrics::default();
         m.phishing_detections = 2;
@@ -1025,7 +1025,7 @@ mod tests {
     // ── Helper ─────────────────────────────────────────────────
 
     fn make_engine() -> RiskScoringEngine {
-        let cfg = ComplianceConfig::from_env();
+        let cfg = ComplianceConfig::from_env().expect("compliance config must load in development");
         RiskScoringEngine::new(unsafe_dummy_pool(), cfg)
     }
 

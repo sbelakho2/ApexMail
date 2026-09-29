@@ -136,12 +136,12 @@ async fn kmd_table_exists(db: &sqlx::PgPool) -> Result<bool, sqlx::Error> {
 /// to the seeded `system_internal_tenant01` tenant, not the literal
 /// `system` sentinel only static API keys carry — the literal comparison
 /// hard-403'd every human operator from the KMD console.
-async fn is_system_admin(state: &AppState, auth: &AuthUser) -> bool {
-    crate::routes::web::is_system_tenant(state, &auth.tenant_id).await
+async fn is_system_admin(state: &AppState, auth: &AuthUser) -> Result<bool, ApiError> {
+    Ok(crate::routes::web::is_system_tenant(state, &auth.tenant_id).await?)
 }
 
 async fn require_system_kmd_access(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
-    if is_system_admin(state, auth).await {
+    if is_system_admin(state, auth).await? {
         Ok(())
     } else {
         Err(ApiError::Forbidden(
@@ -327,7 +327,7 @@ async fn get_current_vat_summary(
             .and_utc()
     };
 
-    let tenant_scoped = !is_system_admin(&state, &auth).await;
+    let tenant_scoped = !is_system_admin(&state, &auth).await?;
     let tenant_filter = if tenant_scoped {
         "\n          AND tenant_id = $3"
     } else {

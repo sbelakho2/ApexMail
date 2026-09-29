@@ -30,6 +30,7 @@ pub async fn canonical_pool(test_name: &str, suffix: &str) -> Option<PgPool> {
 /// `None` means the test must soft-skip. Used only by tests that exercise
 /// Redis-backed flows (DSR enqueue), never by tests that merely need the type.
 pub fn configured_redis() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let url = std::env::var("TEST_REDIS_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())?;

@@ -290,6 +290,13 @@ pub struct Config {
     pub node_env: String,
     pub jwt_secret: String,
     pub jwt_public_key_pem: String,
+    /// Canonical-session signing key (`JWT_PRIVATE_KEY_PEM`). When set, a
+    /// validated SSO login resolves/provisions the canonical `users` row and
+    /// issues the same `am_session` console session the web login issues
+    /// (audit P1-3); deployments must configure the SAME key the api-server
+    /// uses. Unset: the callback still issues the enterprise session record,
+    /// but no console cookie can be minted.
+    pub jwt_private_key_pem: String,
     /// Fix J-1: optional pinned JWT audience (`JWT_AUDIENCE`). When set,
     /// tokens whose `aud` does not match are rejected.
     pub jwt_audience: Option<String>,
@@ -343,6 +350,15 @@ impl Config {
             None => String::new(),
         };
 
+        // Canonical SSO console sessions (audit P1-3): the SAME RS256 private
+        // key the api-server signs `am_session` cookies with. Optional — an
+        // unset key degrades to enterprise-session-only callbacks.
+        let jwt_private_key_pem = env::var("JWT_PRIVATE_KEY_PEM")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default();
+
         // M-02: Reject SHA-1 SAML signatures in production
         let allow_sha1 = env::var("SAML_ALLOW_SHA1")
             .map(|v| v == "true")
@@ -376,6 +392,7 @@ impl Config {
             node_env,
             jwt_secret,
             jwt_public_key_pem,
+            jwt_private_key_pem,
             jwt_audience: env::var("JWT_AUDIENCE")
                 .ok()
                 .map(|v| v.trim().to_string())

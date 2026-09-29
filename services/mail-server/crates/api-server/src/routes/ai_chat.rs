@@ -496,6 +496,7 @@ mod adversarial_tests {
             .filter(|v| !v.trim().is_empty())
             .is_none()
         {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping: TEST_REDIS_URL unset");
             return;
         }

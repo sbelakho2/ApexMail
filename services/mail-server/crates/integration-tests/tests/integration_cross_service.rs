@@ -183,7 +183,9 @@ fn enterprise_sso_types_serialize_correctly() {
         provider_type: "saml".into(),
         domain: "acme.com".into(),
         enabled: Some(true),
-        entity_id: Some("https://acme.com/saml".into()),
+        // Batch fix: the field was renamed idp_entity_id (audit: the SAML
+        // entity-id reversal — this per-tenant value identifies the IdP).
+        idp_entity_id: Some("https://acme.com/saml".into()),
         sso_url: Some("https://idp.acme.com/sso".into()),
         certificate: Some("MIIC...".into()),
         oidc_client_id: None,

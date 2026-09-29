@@ -2316,6 +2316,7 @@ mod tests {
     async fn clickhouse_roundtrip_roundtrip_through_clickhouse() {
         use chrono::TimeZone;
 
+        migrator::test_support::assert_soft_skip_allowed("CLICKHOUSE_TEST_URL");
         let url =
             std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());

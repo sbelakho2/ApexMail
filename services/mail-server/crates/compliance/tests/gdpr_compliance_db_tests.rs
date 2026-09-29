@@ -1431,6 +1431,7 @@ async fn request_stats_are_tenant_scoped_and_aggregate() {
 // ── F-3: queue reliability (requires a real Redis) ─────────────────────────
 
 async fn redis_pool() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let url = std::env::var("TEST_REDIS_URL").ok()?;
     deadpool_redis::Config::from_url(url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))

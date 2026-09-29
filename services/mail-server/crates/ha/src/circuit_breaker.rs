@@ -273,7 +273,7 @@ mod tests {
         })
     }
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_env())
+        Arc::new(Config::from_env().expect("HA config must load in development"))
     }
 
     #[test]
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn test_disabled_circuit_allows_all() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.circuit_breaker.enabled = false;
             let svc = CircuitBreakerService::new(Arc::new(cfg));
             // Even after failures, disabled circuit allows requests

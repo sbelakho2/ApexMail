@@ -90,6 +90,7 @@ fn dead_redis() -> deadpool_redis::Pool {
 /// keys are not key-prefixed: lib tests use DB 8, adversarial_routes uses 7,
 /// this outage matrix uses 9).
 async fn live_redis() -> Option<deadpool_redis::Pool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     let base = std::env::var("TEST_REDIS_URL").ok()?;
     let url = match url::Url::parse(&base) {
         Ok(mut parsed) => {

@@ -68,8 +68,16 @@ pub async fn require_sales_owner(
     };
 
     // System tenant (slug-aware — `web::is_system_tenant` resolves the
-    // system-internal slug as well as the literal sentinel).
-    if !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await {
+    // system-internal slug as well as the literal sentinel). Fail closed
+    // (audit #16): a storage failure is not evidence of ownership.
+    let system_tenant = match crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            tracing::error!(error = %error, "sales owner gate: tenant lookup failed");
+            return Err(ApiError::Internal("authentication error".into()));
+        }
+    };
+    if !system_tenant {
         return Err(ApiError::Forbidden(
             "the sales control surface is restricted to the platform owner".into(),
         ));

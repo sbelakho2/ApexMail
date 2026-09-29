@@ -46,6 +46,7 @@ fn redis_url_in_db(base: &str, db: u8) -> String {
 }
 
 fn live_redis_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
     Some(redis_url_in_db(
         &std::env::var("TEST_REDIS_URL").ok()?,
         REDIS_DB,

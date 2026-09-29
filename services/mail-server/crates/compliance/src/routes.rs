@@ -4985,12 +4985,14 @@ mod db_tests {
         let Some(pool) = test_support::canonical_pool("routes_cors", "routes_cors").await else {
             return;
         };
-        let mut cfg = crate::config::ComplianceConfig::from_env();
+        let mut cfg = crate::config::ComplianceConfig::from_env()
+            .expect("compliance config must load in development");
         cfg.auth_token = TOKEN.into();
         cfg.cors_origin = "https://app.apexmail.ee".into();
         let _router = create_router(test_support::app_state_with_config(pool.clone(), cfg));
 
-        let mut bad = crate::config::ComplianceConfig::from_env();
+        let mut bad = crate::config::ComplianceConfig::from_env()
+            .expect("compliance config must load in development");
         bad.auth_token = TOKEN.into();
         // A NUL byte cannot appear in a header value: the parse must fail and
         // the layer must deny all origins instead of falling open.

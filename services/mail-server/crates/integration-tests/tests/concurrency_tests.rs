@@ -23,6 +23,7 @@ use apexmail_lib::id;
 // ═══════════════════════════════════════════════════════════════════════════
 
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {

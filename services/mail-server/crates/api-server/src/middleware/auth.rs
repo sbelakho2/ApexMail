@@ -1412,12 +1412,22 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
 /// login gate uses (`routes::web::is_system_tenant`): the `system` literal
 /// or a tenants row whose slug is `system`. A database error fails CLOSED.
 pub async fn require_system_tenant(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
-    if auth.tenant_id != "system"
-        && !crate::routes::web::is_system_tenant(state, &auth.tenant_id).await
-    {
-        return Err(ApiError::Forbidden(
-            "control-plane access requires system tenant".into(),
-        ));
+    if auth.tenant_id != "system" {
+        // Fail closed (audit #16): a storage failure is not evidence of
+        // system-tenant membership.
+        let system_tenant =
+            match crate::routes::web::is_system_tenant(state, &auth.tenant_id).await {
+                Ok(system_tenant) => system_tenant,
+                Err(error) => {
+                    tracing::error!(error = %error, "system-tenant gate: lookup failed");
+                    return Err(ApiError::Internal("authentication error".into()));
+                }
+            };
+        if !system_tenant {
+            return Err(ApiError::Forbidden(
+                "control-plane access requires system tenant".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2545,6 +2555,7 @@ mod tests {
         let redis_url = match std::env::var("TEST_REDIS_URL") {
             Ok(url) if !url.trim().is_empty() => url,
             _ => {
+                crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 eprintln!("skipping suspended_tenant_session_is_refused: no TEST_REDIS_URL");
                 return;
             }
@@ -3191,6 +3202,7 @@ mod adversarial_tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
         else {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
             eprintln!("skipping bearer half: TEST_REDIS_URL unset");
             return;
         };
@@ -3424,6 +3436,7 @@ mod adversarial_tests {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
             else {
+                crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 eprintln!("skipping tenant_status_sentinel_short_circuits: no TEST_REDIS_URL");
                 return;
             };
@@ -3596,6 +3609,7 @@ mod adversarial_tests {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
             else {
+                crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 eprintln!("skipping api_key_cache_survives_corruption_and_vanishing_rows: no TEST_REDIS_URL");
                 return;
             };
@@ -3937,6 +3951,7 @@ mod adversarial_tests {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
             else {
+                crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 eprintln!("skipping tenant_wide_user_status_invalidation: no TEST_REDIS_URL");
                 return;
             };

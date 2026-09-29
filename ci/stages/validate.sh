@@ -164,6 +164,12 @@ validate_repo_gates() {
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
+        # Web console outage honesty (outage-honesty audit #16): the SSR
+        # console must never swallow a request-path DB failure into
+        # "invalid credentials" / "not found" / zero counts — the swallow
+        # patterns stay out of web.rs + web/data.rs production regions and
+        # the honest WebActionError surface stays wired.
+        ci_check "web error honesty" python3 tools/check_web_error_honesty.py
         # Capability claims vs production wiring (docs/development/
         # capability-registry.json — advertised == deployed, both directions).
         # IN-FLIGHT WIRING WAVE: the default (CAPABILITY_GATE_STRICT=0) prints

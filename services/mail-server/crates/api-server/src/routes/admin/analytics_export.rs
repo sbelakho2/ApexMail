@@ -93,7 +93,7 @@ async fn export_analytics(
     // `system_internal_tenant01`; the literal check wrongly scoped them. A
     // system tenant exports FLEET-WIDE (`None`), matching the analytics API's
     // system-tenant semantics.
-    let tenant_id = if crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await {
+    let tenant_id = if crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await? {
         None
     } else {
         Some(auth.tenant_id.as_str())

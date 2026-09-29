@@ -500,6 +500,7 @@ pub(crate) mod test_support {
     /// The dedicated logical Redis DB (8) for tracking-service live tests,
     /// or `None` when `TEST_REDIS_URL` is unset.
     pub(crate) fn live_test_redis_url() -> Option<String> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_REDIS_URL");
         redis_url_in_db(&std::env::var("TEST_REDIS_URL").ok()?, 8)
     }
 
@@ -700,28 +701,29 @@ pub(crate) mod test_support {
         // nextest runs each test in its own process, so removing the env
         // here cannot race any other test; restore the previous values
         // anyway so plain `cargo test` whole-process runs stay correct.
+        // This test pins the SOFT-SKIP machinery itself (unset → None + hint
+        // line), so the release contract must be suspended for the duration:
+        // under APEXMAIL_RELEASE_TEST_MODE=1 the guarded helpers panic on an
+        // unset variable by design. Saved and restored alongside the others.
         let saved_redis = std::env::var("TEST_REDIS_URL").ok();
         let saved_db = std::env::var("TEST_DATABASE_URL").ok();
+        let saved_release = std::env::var("APEXMAIL_RELEASE_TEST_MODE").ok();
         std::env::remove_var("TEST_REDIS_URL");
         std::env::remove_var("TEST_DATABASE_URL");
+        std::env::remove_var("APEXMAIL_RELEASE_TEST_MODE");
 
         let a = live_redis_or_skip(&[]).await;
         let b = live_redis_pg_or_skip(&[]).await;
 
-        match (saved_redis, saved_db) {
-            (Some(r), Some(d)) => {
-                std::env::set_var("TEST_REDIS_URL", r);
-                std::env::set_var("TEST_DATABASE_URL", d);
-            }
-            (Some(r), None) => {
-                std::env::set_var("TEST_REDIS_URL", r);
-                std::env::remove_var("TEST_DATABASE_URL");
-            }
-            (None, Some(d)) => {
-                std::env::set_var("TEST_DATABASE_URL", d);
-                std::env::remove_var("TEST_REDIS_URL");
-            }
-            (None, None) => {}
+        if let Some(r) = saved_redis {
+            std::env::set_var("TEST_REDIS_URL", r);
+        }
+        if let Some(d) = saved_db {
+            std::env::set_var("TEST_DATABASE_URL", d);
+        }
+        match saved_release {
+            Some(v) => std::env::set_var("APEXMAIL_RELEASE_TEST_MODE", v),
+            None => std::env::remove_var("APEXMAIL_RELEASE_TEST_MODE"),
         }
 
         assert!(a.is_none(), "no redis configured → None");
@@ -810,6 +812,7 @@ pub(crate) mod test_support {
     pub(crate) async fn live_redis_pg_state(
         trusted_proxies: &[&str],
     ) -> Option<(AppState, deadpool_redis::Pool, sqlx::PgPool)> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let redis_url = live_test_redis_url()?;
         let db_url = std::env::var("TEST_DATABASE_URL").ok()?;
 

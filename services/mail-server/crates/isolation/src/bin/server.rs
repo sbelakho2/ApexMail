@@ -56,7 +56,20 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    let config = Config::from_env();
+    // SEC fix: from_env is fallible now — production REFUSES missing
+    // TENANT_ENCRYPTION_KEY / ISOLATION_INTERNAL_API_KEY instead of exiting
+    // from inside the loader (EX_CONFIG; the isolation exit-78 convention,
+    // shared with the compliance/ha crates).
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            error!(
+                "SECURITY: isolation configuration refused to load: {error} — set the \
+                 required environment variables and restart (exit 78 / EX_CONFIG)"
+            );
+            std::process::exit(78); // EX_CONFIG
+        }
+    };
     run(config, cli.port, shutdown_signal()).await
 }
 
@@ -371,6 +384,7 @@ mod tests {
     fn test_database_parts() -> Option<(String, String)> {
         // TEST_DATABASE_URL:
         // postgresql://USER:PASSWORD@HOST:PORT/DATABASE
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
         let rest = url.strip_prefix("postgresql://").or_else(|| url.strip_prefix("postgres://"))?;
         let (credentials, host_db) = rest.split_once('@')?;

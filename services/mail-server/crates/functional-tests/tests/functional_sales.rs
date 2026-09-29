@@ -94,6 +94,7 @@ async fn optional_db(test_name: &str) -> Option<sqlx::PgPool> {
 }
 
 fn test_database_url() -> Option<String> {
+    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
     std::env::var("TEST_DATABASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())

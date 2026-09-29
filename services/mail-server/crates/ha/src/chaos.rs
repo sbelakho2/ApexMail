@@ -609,13 +609,13 @@ mod tests {
             .unwrap()
     }
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_env())
+        Arc::new(Config::from_env().expect("HA config must load in development"))
     }
 
     #[test]
     fn test_chaos_disabled_rejects() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.chaos.enabled = false;
             let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
             let res = svc
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn test_invalid_experiment_type() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.chaos.enabled = true;
             let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
             let res = svc
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn test_chaos_rejects_non_finite_and_absurd_safety_thresholds() {
         test_runtime().block_on(async {
-            let mut cfg = Config::from_env();
+            let mut cfg = Config::from_env().expect("HA config must load in development");
             cfg.chaos.enabled = true;
             let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
 

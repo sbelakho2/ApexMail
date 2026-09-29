@@ -920,6 +920,7 @@ mod run_tests {
     }
 
     fn test_db_url() -> Option<String> {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())

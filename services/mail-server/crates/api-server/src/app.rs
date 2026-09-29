@@ -1430,7 +1430,18 @@ async fn render_ui_response_with_state(
             Some(user) => user,
             None => return Some(login_redirect_response(uri)),
         };
-        if !routes::web::is_system_tenant(state, &auth_user.tenant_id).await {
+        // Fail closed (outage honesty, audit #16): a storage failure is not
+        // evidence of system-tenant membership, so the browser is bounced to
+        // login rather than admitted.
+        let system_tenant =
+            match routes::web::is_system_tenant(state, &auth_user.tenant_id).await {
+                Ok(system_tenant) => system_tenant,
+                Err(error) => {
+                    tracing::error!(error = %error, "control-plane gate: tenant lookup failed");
+                    false
+                }
+            };
+        if !system_tenant {
             tracing::warn!(
                 tenant_id = %auth_user.tenant_id,
                 path = %uri.path(),
@@ -2227,6 +2238,7 @@ pub(crate) mod test_support {
                 pool: sqlx::PgPool,
                 role: &str,
             ) -> Option<(AdvEnv, String, String)> {
+                crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 let redis_url = std::env::var("TEST_REDIS_URL")
                     .ok()
                     .filter(|value| !value.trim().is_empty())?;
@@ -3046,6 +3058,7 @@ mod tests {
     #[tokio::test]
     async fn verify_email_page_redirects_off_the_token_url() {
         if std::env::var("TEST_DATABASE_URL").is_err() {
+            crate::test_db::assert_soft_skip_allowed("TEST_DATABASE_URL");
             eprintln!("skipping: TEST_DATABASE_URL not set");
             return;
         }
@@ -4949,6 +4962,7 @@ mod tests {
         test_name: &str,
     ) -> Option<(Router, sqlx::PgPool, Config, deadpool_redis::Pool)> {
         let pool = crate::test_db::canonical_pool(test_name).await?;
+        crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
         let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
         let redis = deadpool_redis::Config::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

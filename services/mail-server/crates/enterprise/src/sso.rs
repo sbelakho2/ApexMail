@@ -24,11 +24,6 @@ const OIDC_SECRET_ENCRYPTION_PURPOSE: &str = "enterprise/sso/oidc-client-secret"
 /// future and may have expired up to 5 minutes ago.
 pub const SAML_CLOCK_SKEW_SECONDS: i64 = 300;
 
-/// Retention horizon for consumed SAML assertion ids in
-/// `ent_saml_assertion_replays` (bounds the replay table): 24 hours, always
-/// at least as long as the maximum assertion validity window.
-pub const SAML_REPLAY_RETENTION_HOURS: i32 = 24;
-
 fn is_missing_relation_error(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("42P01"))
 }
@@ -186,8 +181,26 @@ fn public_key_pem_from_certificate(cert: &str) -> Result<String, String> {
     )?))
 }
 
-/// Verify the XML digital signature on a SAML response using the IdP's certificate.
-fn verify_saml_signature(saml_xml: &str, cert_pem: &str) -> Result<(), String> {
+/// Verify the XML digital signature on a SAML response using the IdP's
+/// certificate, and PROVE the signed-node binding (audit P2-7).
+///
+/// xml-sec already enforces "exactly one `<ds:Signature>` per document" and
+/// digest-validity for every `<ds:Reference>`. That alone does not bind claim
+/// parsing to signed content: a Reference targeting a foreign element (or a
+/// Response whose wrapper stays unsigned while only an Assertion inside is
+/// signed) would verify while leaving Response-level claims (Status,
+/// `Destination`, `InResponseTo`, the Response Issuer) outside the signature.
+/// The SAML wrapping defense is therefore strict:
+///
+/// * exactly ONE `<ds:Reference>` in `<SignedInfo>`, and
+/// * that Reference must be the whole-document reference `URI=""` — with the
+///   enveloped-signature transform, the digest then covers every byte of the
+///   document except the `<ds:Signature>` itself, so every claim parsed
+///   below is cryptographically bound to the verified signature.
+///
+/// A signature scoped to a sub-node (`URI="#_assertion1"`, xpointer, or an
+/// external reference) is refused even when cryptographically valid.
+fn verify_saml_document_signature(saml_xml: &str, cert_pem: &str) -> Result<(), String> {
     use xml_sec::xmldsig::verify::verify_signature_with_pem_key;
     use xml_sec::xmldsig::verify::DsigStatus;
 
@@ -196,28 +209,46 @@ fn verify_saml_signature(saml_xml: &str, cert_pem: &str) -> Result<(), String> {
     // Extract the embedded public key so real IdP certificates verify.
     let verifying_pem = public_key_pem_from_certificate(cert_pem)?;
 
-    match verify_signature_with_pem_key(saml_xml, &verifying_pem, false) {
-        Ok(result) => match result.status {
-            DsigStatus::Valid => Ok(()),
-            DsigStatus::Invalid(reason) => {
-                tracing::warn!(
-                    failure_reason = ?reason,
-                    "SAML XML signature verification failed"
-                );
-                Err(format!(
-                    "SAML XML signature verification failed: {reason:?}"
-                ))
-            }
-            _ => {
-                tracing::warn!("SAML XML signature verification returned unknown status");
-                Err("SAML XML signature verification failed: unknown status".to_string())
-            }
-        },
+    let result = match verify_signature_with_pem_key(saml_xml, &verifying_pem, false) {
+        Ok(result) => result,
         Err(e) => {
             tracing::warn!(error = %e, "SAML XML signature verification error");
-            Err(format!("SAML XML signature verification error: {e}"))
+            return Err(format!("SAML XML signature verification error: {e}"));
+        }
+    };
+
+    match result.status {
+        DsigStatus::Valid => {}
+        DsigStatus::Invalid(reason) => {
+            tracing::warn!(
+                failure_reason = ?reason,
+                "SAML XML signature verification failed"
+            );
+            return Err(format!(
+                "SAML XML signature verification failed: {reason:?}"
+            ));
+        }
+        _ => {
+            tracing::warn!("SAML XML signature verification returned unknown status");
+            return Err("SAML XML signature verification failed: unknown status".to_string());
         }
     }
+
+    // Signed-node binding: the claims parsed from this document are trusted
+    // ONLY because the verified Reference covers the whole document.
+    if result.signed_info_references.len() != 1 {
+        return Err(format!(
+            "SAML signature must contain exactly one ds:Reference covering the whole document, got {}",
+            result.signed_info_references.len()
+        ));
+    }
+    let reference_uri = result.signed_info_references[0].uri.as_str();
+    if !reference_uri.is_empty() {
+        return Err(format!(
+            "SAML signature must cover the whole document (ds:Reference URI=\"\"), got URI='{reference_uri}'"
+        ));
+    }
+    Ok(())
 }
 
 fn encrypt_optional_oidc_secret(
@@ -258,6 +289,178 @@ fn decrypt_oidc_client_secret(stored: &str, config: &Config) -> Result<String, S
         .map_err(|error| format!("Decrypt OIDC client secret: {error}"))
 }
 
+// ── Outbound federation guard (audit P3-9) ──────────────────────────────
+//
+// OIDC is a tenant-configurable-issuer protocol: the discovery document,
+// token endpoint and JWKS are all fetched from URLs a tenant admin chooses,
+// which makes every one of those fetches an SSRF primitive against the
+// enterprise service's network position. Every outbound federation request
+// therefore goes through this guard, which reuses the log-streaming
+// private/reserved-address classifier:
+//
+//   1. HTTPS only,
+//   2. the host is resolved and ALL addresses must be public (a
+//      mixed/rebinding-style answer with one private address is refused),
+//   3. the resolved address is pinned into the returned client, closing the
+//      validate-then-request DNS TOCTOU,
+//   4. redirects are disabled — a guarded URL cannot bounce somewhere the
+//      policy never evaluated,
+//   5. the discovery document's `issuer` must exactly match the configured
+//      issuer, and every endpoint URL it advertises is guarded the same way.
+//
+// `SSO_FEDERATION_ALLOWLIST` (comma-separated hosts) exists purely for local
+// test infrastructure (the mock IdPs bind 127.0.0.1 over http); it never
+// weakens the address check for any other host.
+
+fn federation_allowlisted(host: &str) -> bool {
+    std::env::var("SSO_FEDERATION_ALLOWLIST")
+        .unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry == host.to_lowercase())
+}
+
+/// An outbound federation URL that passed the guard, with the resolved
+/// address the caller must pin its request to.
+#[derive(Debug, Clone)]
+pub struct FederationEndpoint {
+    pub url: reqwest::Url,
+    pub host: String,
+    pub addr: std::net::SocketAddr,
+}
+
+/// Pure half of the guard: classify an already-resolved URL. Split from DNS
+/// so the "mixed answer" case (one private address among public ones) is
+/// unit-testable without a DNS override.
+pub fn federation_guard_resolved(
+    url_str: &str,
+    ips: &[std::net::IpAddr],
+) -> Result<FederationEndpoint, String> {
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| format!("Invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "No host in URL".to_string())?
+        .trim_matches(['[', ']'])
+        .to_string();
+    let allowlisted = federation_allowlisted(&host);
+    if parsed.scheme() != "https" && !allowlisted {
+        return Err(format!(
+            "Federation URL must use HTTPS: {url_str}"
+        ));
+    }
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("No port in URL: {url_str}"))?;
+    if ips.is_empty() {
+        return Err(format!("No resolved addresses for {host}"));
+    }
+    for ip in ips {
+        if crate::log_streaming::is_private_or_reserved_ip(*ip) && !allowlisted {
+            return Err(format!(
+                "Federation URL {url_str} resolves to a blocked private/reserved address ({ip})"
+            ));
+        }
+    }
+    Ok(FederationEndpoint {
+        url: parsed,
+        host,
+        addr: std::net::SocketAddr::new(ips[0], port),
+    })
+}
+
+/// Resolving federation guard — see the module-level documentation above.
+pub async fn federation_guard_url(url: &str) -> Result<FederationEndpoint, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "No host in URL".to_string())?
+        .trim_matches(['[', ']'])
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("No port in URL: {url}"))?;
+    let ips: Vec<std::net::IpAddr> = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        vec![ip]
+    } else {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
+            .map(|socket_addr| socket_addr.ip())
+            .collect()
+    };
+    federation_guard_resolved(url, &ips)
+}
+
+/// Build the HTTP client for a guarded endpoint: DNS pinned to the validated
+/// address, redirects DISABLED (a guarded URL cannot bounce past the policy).
+pub fn federation_http_client(endpoint: &FederationEndpoint) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(&endpoint.host, endpoint.addr)
+        .build()
+        .map_err(|e| format!("Build federation client for {}: {e}", endpoint.host))
+}
+
+/// GET a JSON document through the full federation guard.
+async fn federation_get_json(url: &str, what: &str) -> Result<serde_json::Value, String> {
+    let endpoint = federation_guard_url(url)
+        .await
+        .map_err(|e| format!("{what} refused by the federation egress policy: {e}"))?;
+    let client = federation_http_client(&endpoint)?;
+    let response = client
+        .get(endpoint.url.clone())
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("{what} request to {url} failed: {error}"))?;
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{what} response from {url} was not JSON: {error}"))
+}
+
+/// POST a form body to a guarded endpoint and parse the JSON response.
+async fn federation_post_form_json(
+    url: &str,
+    what: &str,
+    form: &[(String, String)],
+) -> Result<serde_json::Value, String> {
+    let endpoint = federation_guard_url(url)
+        .await
+        .map_err(|e| format!("{what} refused by the federation egress policy: {e}"))?;
+    let client = federation_http_client(&endpoint)?;
+    let response = client
+        .post(endpoint.url.clone())
+        .form(form)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("{what} request to {url} failed: {error}"))?;
+    response
+        .json()
+        .await
+        .map_err(|error| format!("{what} response from {url} was not JSON: {error}"))
+}
+
+/// Parse a REQUIRED SAML timestamp (audit P2-8 fail-closed): a missing or
+/// malformed instant is a hard refusal, never a skip. Accepts the two shapes
+/// IdPs actually emit (RFC 3339 and `%Y-%m-%dT%H:%M:%S%:z`).
+fn parse_required_saml_time(value: &str, what: &str) -> Result<DateTime<Utc>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("SAML {what} is missing (fail-closed)"));
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| {
+            chrono::DateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%:z")
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .map_err(|_| format!("SAML {what} is malformed: '{trimmed}' (fail-closed)"))
+}
+
 /// SSO Service:SAML 2.0 + OIDC authentication
 pub struct SSOService {
     db: PgPool,
@@ -265,28 +468,194 @@ pub struct SSOService {
     config: Config,
 }
 
+/// The outcome of resolving a validated federation identity onto the
+/// canonical `users` table (audit P1-3).
+struct ResolvedSsoUser {
+    user_id: String,
+    role: String,
+    is_new_user: bool,
+}
+
+/// A validated federation identity (audit P1-3): the claim values both the
+/// SAML ACS and the OIDC callback funnel into session issuance.
+pub struct FederationIdentity<'a> {
+    pub email: &'a str,
+    pub display_name: Option<&'a str>,
+    pub external_user_id: &'a str,
+    pub groups: Option<serde_json::Value>,
+    pub attributes: Option<serde_json::Value>,
+}
+
+/// The canonical-session JWT claim shape — byte-compatible with
+/// `crate::middleware::auth::JwtClaims` in the api-server, which is what
+/// decodes `am_session` cookies.
+#[derive(Debug, serde::Serialize)]
+struct CanonicalJwtClaims {
+    sub: String,
+    tenant_id: String,
+    scopes: Vec<String>,
+    exp: i64,
+    iat: i64,
+    jti: String,
+    typ: Option<String>,
+}
+
+/// Canonical scopes per role — mirrors the api-server web login's
+/// `scopes_for_role` so an SSO session carries the same authority a password
+/// session of the same role would.
+fn canonical_scopes_for_role(role: &str) -> Vec<String> {
+    match role {
+        "admin" | "owner" => vec!["*".to_string()],
+        "developer" => vec![
+            "messages:send",
+            "messages:read",
+            "domains:read",
+            "templates:read",
+            "templates:write",
+            "events:read",
+            "analytics:read",
+            "contacts:read",
+            "contacts:write",
+            "logs:read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        "viewer" => vec![
+            "messages:send",
+            "messages:read",
+            "domains:read",
+            "templates:read",
+            "events:read",
+            "analytics:read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+        _ => vec![
+            "messages:send",
+            "messages:read",
+            "domains:read",
+            "templates:read",
+            "events:read",
+            "analytics:read",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    }
+}
+
+/// Sanitize a post-login redirect target (same rules as the console
+/// login's `safe_return_to`): relative paths only, no protocol-relative or
+/// backslash hosts, no control characters, no `..` traversal. Everything
+/// else falls back to `/dashboard`.
+fn sanitize_return_to(return_to: Option<&str>) -> String {
+    let Some(candidate) = return_to.map(str::trim).filter(|c| !c.is_empty()) else {
+        return "/dashboard".to_string();
+    };
+    if candidate.chars().any(char::is_control) {
+        return "/dashboard".to_string();
+    }
+    if !candidate.starts_with('/') {
+        return "/dashboard".to_string();
+    }
+    let second = candidate.as_bytes().get(1).copied().unwrap_or(b'\0');
+    if second == b'/' || second == b'\\' {
+        return "/dashboard".to_string();
+    }
+    if candidate.split('/').any(|segment| segment == "..") {
+        return "/dashboard".to_string();
+    }
+    candidate.to_string()
+}
+
+/// A syntactically usable OIDC email claim: exactly one `@`, non-empty local
+/// part and domain, no whitespace, bounded length. (Audit P3-12: `sub` never
+/// silently becomes the email.)
+fn valid_oidc_email(raw: &str) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 254 {
+        return false;
+    }
+    let Some((local, domain)) = raw.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    if raw.split('@').count() != 2 {
+        return false;
+    }
+    if raw.chars().any(char::is_whitespace) {
+        return false;
+    }
+    domain.contains('.')
+}
+
+/// Email-domain assurance (audit P3-12): the validated email must belong to
+/// the SSO configuration's own domain, unless the configuration carries an
+/// EXPLICIT allowed-domain mapping (`attribute_mapping.allowed_domains`).
+fn email_belongs_to_sso_domain(email: &str, config: &SSOConfiguration) -> bool {
+    let Some(domain) = email.rsplit('@').next() else {
+        return false;
+    };
+    let domain = domain.to_ascii_lowercase();
+    let configured = config.domain.trim().to_ascii_lowercase();
+    if !configured.is_empty() && domain == configured {
+        return true;
+    }
+    config
+        .attribute_mapping
+        .as_ref()
+        .and_then(|mapping| mapping.get("allowed_domains"))
+        .and_then(|value| value.as_array())
+        .map(|allowed| {
+            allowed
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .any(|value| value == domain)
+        })
+        .unwrap_or(false)
+}
+
+/// Fetch an IdP's discovery document through the outbound federation guard.
+async fn fetch_oidc_discovery(issuer: &str) -> Result<serde_json::Value, String> {
+    let discovery_url = format!("{issuer}/.well-known/openid-configuration");
+    federation_get_json(&discovery_url, "OIDC discovery").await
+}
+
 /// F7 (audit): reusable per-tenant `enforce_sso` lookup for api-server's
-/// auth gate — `SELECT enforce_sso FROM ent_sso_configurations WHERE
-/// tenant_id = $1 LIMIT 1`.
+/// auth gate.
+///
+/// `SELECT COALESCE(bool_or(enabled AND enforce_sso), FALSE) FROM
+/// ent_sso_configurations WHERE tenant_id = $1` — deterministic by
+/// construction (audit P1-2): a tenant may hold a configuration row PER
+/// DOMAIN, and the previous `LIMIT 1` pick was an arbitrary one of them. The
+/// aggregate answers the policy question directly: SSO is enforced when ANY
+/// enabled configuration row for the tenant demands it.
 ///
 /// Contract:
-/// * `Ok(true)`  — a configuration row sets `enforce_sso = true`; password
-///   logins for this tenant must be rejected.
-/// * `Ok(false)` — no row, or `enforce_sso = false`: password logins allowed.
+/// * `Ok(true)`  — an enabled configuration row sets `enforce_sso = true`;
+///   password logins for this tenant must be rejected.
+/// * `Ok(false)` — no row, or no enabled row with `enforce_sso = true`:
+///   password logins allowed.
 /// * `Ok(false)` — the table itself is absent (`42P01`, migrations not yet
 ///   applied): the gate degrades open rather than locking every tenant out.
 /// * `Err`       — any other database failure (surfaced so the caller can
 ///   fail closed on infrastructure errors).
 pub async fn tenant_enforces_sso(db: &PgPool, tenant_id: &str) -> Result<bool, String> {
     match sqlx::query_scalar::<_, bool>(
-        "SELECT enforce_sso FROM ent_sso_configurations WHERE tenant_id = $1 LIMIT 1",
+        "SELECT COALESCE(bool_or(enabled AND enforce_sso), FALSE)
+         FROM ent_sso_configurations WHERE tenant_id = $1",
     )
     .bind(tenant_id)
-    .fetch_optional(db)
+    .fetch_one(db)
     .await
     {
-        Ok(Some(enforced)) => Ok(enforced),
-        Ok(None) => Ok(false),
+        Ok(enforced) => Ok(enforced),
         Err(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("42P01") => {
             Ok(false)
         }
@@ -331,16 +700,16 @@ impl SSOService {
             encrypt_optional_oidc_secret(req.oidc_client_secret.as_deref(), &self.config)?;
 
         let row = sqlx::query_as::<_, SSOConfiguration>(
-            "INSERT INTO ent_sso_configurations (id, tenant_id, provider_type, enabled, domain, entity_id, sso_url, certificate, oidc_client_id, oidc_client_secret_encrypted, oidc_issuer, attribute_mapping, enforce_sso, session_duration_hours, created_at, updated_at, allow_idp_initiated)
+            "INSERT INTO ent_sso_configurations (id, tenant_id, provider_type, enabled, domain, idp_entity_id, sso_url, certificate, oidc_client_id, oidc_client_secret_encrypted, oidc_issuer, attribute_mapping, enforce_sso, session_duration_hours, created_at, updated_at, allow_idp_initiated)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15, false)
              ON CONFLICT (tenant_id, domain) DO UPDATE SET
-               provider_type=$3, enabled=$4, entity_id=$6, sso_url=$7, certificate=$8,
+               provider_type=$3, enabled=$4, idp_entity_id=$6, sso_url=$7, certificate=$8,
                              oidc_client_id=$9, oidc_client_secret_encrypted=COALESCE($10, ent_sso_configurations.oidc_client_secret_encrypted), oidc_issuer=$11,
                attribute_mapping=$12, enforce_sso=$13, session_duration_hours=$14, updated_at=$15
              RETURNING *"
         )
            .bind(id).bind(&req.tenant_id).bind(&req.provider_type).bind(enabled)
-        .bind(&req.domain).bind(&req.entity_id).bind(&req.sso_url).bind(&req.certificate)
+        .bind(&req.domain).bind(&req.idp_entity_id).bind(&req.sso_url).bind(&req.certificate)
                 .bind(&req.oidc_client_id).bind(&encrypted_oidc_secret).bind(&req.oidc_issuer)
         .bind(&req.attribute_mapping).bind(enforce).bind(session_hours).bind(now)
         .fetch_one(&self.db)
@@ -390,10 +759,19 @@ impl SSOService {
         }
     }
 
-    /// Initiate SAML login — returns redirect URL
+    /// Initiate SAML login — returns redirect URL.
+    ///
+    /// Audit P2-4: the AuthnRequest `<saml:Issuer>` identifies APEXMAIL (the
+    /// SP — `SAML_ENTITY_ID`), never the IdP; the configured `idp_entity_id`
+    /// is what we ACCEPT on responses, not what we send. Audit P2-6: the
+    /// freshly minted request id is durably staged in
+    /// `ent_saml_authn_requests` so the ACS can correlate (and atomically
+    /// consume) the response's `InResponseTo` — unsolicited responses are
+    /// refused unless the tenant allows IdP-initiated logins.
     pub async fn initiate_saml_login(
         &self,
         domain: &str,
+        return_to: Option<&str>,
     ) -> Result<ApiResult<SSOLoginRedirect>, String> {
         let config = self.get_config_by_domain(domain).await?;
         let config = match config {
@@ -408,10 +786,22 @@ impl SSOService {
 
         let request_id = format!("_saml_{}", Uuid::new_v4());
         let sso_url = config.sso_url.unwrap_or_default();
-        let entity_id = config
-            .entity_id
-            .unwrap_or_else(|| self.config.sso.saml.entity_id.clone());
+        // SP entity id: APEXMAIL itself. (config.idp_entity_id is the IdP's.)
+        let sp_entity_id = self.config.sso.saml.entity_id.clone();
         let acs_url = self.config.sso.saml.acs_url.clone();
+
+        // Stage the request for InResponseTo correlation (10-minute window).
+        sqlx::query(
+            "INSERT INTO ent_saml_authn_requests (request_id, tenant_id, domain, return_to, expires_at)
+             VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')",
+        )
+        .bind(&request_id)
+        .bind(&config.tenant_id)
+        .bind(domain)
+        .bind(return_to)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("Stage SAML AuthnRequest: {e}"))?;
 
         // Build a SAML AuthnRequest XML document with proper XML escaping
         // to prevent XML injection attacks. All user-controlled values are
@@ -423,7 +813,7 @@ impl SSOService {
             xml_escape(&issue_instant),
             xml_escape(&sso_url),
             xml_escape(&acs_url),
-            xml_escape(&entity_id)
+            xml_escape(&sp_entity_id)
         );
         let saml_request_b64 = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -450,32 +840,35 @@ impl SSOService {
         }))
     }
 
-    /// Handle SAML callback — validate assertion and create session
+    /// Handle SAML callback — validate assertion and create session.
+    ///
+    /// The tenant's SSO configuration row is passed in by the ACS handler
+    /// (audit P1-2): the session lifetime comes from THAT row's
+    /// `session_duration_hours`, never from a re-queried by-tenant lookup
+    /// that is nondeterministic across multiple domain rows.
     pub async fn handle_saml_callback(
         &self,
-        tenant_id: &str,
-        email: &str,
-        display_name: Option<&str>,
-        external_user_id: &str,
-        groups: Option<serde_json::Value>,
-        attributes: Option<serde_json::Value>,
+        config: &SSOConfiguration,
+        identity: FederationIdentity<'_>,
+        return_to: Option<&str>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
-        self.create_sso_session(
-            tenant_id,
-            "saml",
-            email,
-            display_name,
-            external_user_id,
-            groups,
-            attributes,
-        )
-        .await
+        self.issue_sso_session(config, "saml", identity, return_to)
+            .await
     }
 
-    /// Initiate OIDC login — returns authorization redirect URL
+    /// Initiate OIDC login — returns authorization redirect URL.
+    ///
+    /// Audit P3-10: the authorize URL comes from the IdP's DISCOVERY document
+    /// (`authorization_endpoint`), not a hardcoded `{issuer}/authorize`, and
+    /// is fetched through the outbound federation guard (audit P3-9). The
+    /// query string is assembled with the URL API's typed pair writer — never
+    /// string concatenation. A single-use `state` (with the PKCE verifier and
+    /// the post-login redirect target) is staged in Redis with GETDEL-backed
+    /// consumption, or the durable table when Redis is absent.
     pub async fn initiate_oidc_login(
         &self,
         domain: &str,
+        return_to: Option<&str>,
     ) -> Result<ApiResult<SSOLoginRedirect>, String> {
         let config = self.get_config_by_domain(domain).await?;
         let config = match config {
@@ -495,13 +888,28 @@ impl SSOService {
             }
         };
 
+        let issuer = config
+            .oidc_issuer
+            .clone()
+            .map(|issuer| issuer.trim_end_matches('/').to_string())
+            .filter(|issuer| !issuer.is_empty())
+            .ok_or_else(|| "OIDC issuer is not configured for domain".to_string())?;
+        let client_id = config.oidc_client_id.unwrap_or_default();
+
+        // Discovery: the authorization endpoint is the IdP's own metadata
+        // value, fetched through the federation egress guard.
+        let discovery = fetch_oidc_discovery(&issuer).await?;
+        let authorization_endpoint = discovery["authorization_endpoint"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!("OIDC discovery document from {issuer} has no authorization_endpoint")
+            })?
+            .to_string();
+
         let state = generate_random_token(32);
         let code_verifier = generate_pkce_verifier();
         let code_challenge = generate_pkce_challenge(&code_verifier);
-
-        let issuer = config.oidc_issuer.unwrap_or_default();
-        let client_id = config.oidc_client_id.unwrap_or_default();
-        let redirect_uri = self.config.sso.oidc.redirect_uri.clone();
 
         // Store state + code_verifier in Redis with 10-minute TTL
         if let Some(ref redis) = self.redis {
@@ -514,6 +922,7 @@ impl SSOService {
                 "code_verifier": code_verifier,
                 "domain": domain,
                 "tenant_id": config.tenant_id.to_string(),
+                "return_to": return_to,
                 "created_at": Utc::now().timestamp(),
             });
             let _: () = conn
@@ -523,27 +932,33 @@ impl SSOService {
         } else {
             // Fallback:store in DB for environments without Redis
             sqlx::query(
-                "INSERT INTO sso_oidc_state (state, code_verifier, domain, tenant_id, expires_at)
-                 VALUES ($1, $2, $3, $4, NOW() + INTERVAL '10 minutes')",
+                "INSERT INTO sso_oidc_state (state, code_verifier, domain, tenant_id, return_to, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '10 minutes')",
             )
             .bind(&state)
             .bind(&code_verifier)
             .bind(domain)
-            .bind(config.tenant_id)
+            .bind(&config.tenant_id)
+            .bind(return_to)
             .execute(&self.db)
             .await
             .map_err(|e| format!("Store OIDC state: {e}"))?;
         }
 
-        let redirect_url = format!(
-            "{}/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
-            issuer,
-            urlencoding::encode(&client_id),
-            urlencoding::encode(&redirect_uri),
-            urlencoding::encode(&self.config.sso.oidc.scopes),
-            urlencoding::encode(&state),
-            urlencoding::encode(&code_challenge),
-        );
+        // Typed query-pair assembly (never string concatenation).
+        let redirect_url = {
+            let mut url = reqwest::Url::parse(&authorization_endpoint)
+                .map_err(|error| format!("Invalid authorization_endpoint URL: {error}"))?;
+            url.query_pairs_mut()
+                .append_pair("client_id", &client_id)
+                .append_pair("redirect_uri", &self.config.sso.oidc.redirect_uri)
+                .append_pair("response_type", "code")
+                .append_pair("scope", &self.config.sso.oidc.scopes)
+                .append_pair("state", &state)
+                .append_pair("code_challenge", &code_challenge)
+                .append_pair("code_challenge_method", "S256");
+            url.to_string()
+        };
 
         info!(domain = domain, "OIDC login initiated");
         Ok(ApiResult::ok(SSOLoginRedirect {
@@ -552,7 +967,11 @@ impl SSOService {
         }))
     }
 
-    /// Validate and retrieve OIDC state for token exchange
+    /// Validate and retrieve OIDC state for token exchange.
+    ///
+    /// Audit P3-11: the Redis path consumes the state with GETDEL — the
+    /// read-and-delete is ONE atomic server operation, so two concurrent
+    /// callbacks racing the same state can never both observe it.
     pub async fn validate_oidc_state(&self, state: &str) -> Result<Option<OidcStateData>, String> {
         // Try Redis first
         if let Some(ref redis) = self.redis {
@@ -562,17 +981,11 @@ impl SSOService {
                 .map_err(|e| format!("Redis connection: {e}"))?;
             let key = format!("oidc_state:{}", state);
             let value: Option<String> = conn
-                .get(&key)
+                .get_del(&key)
                 .await
-                .map_err(|e| format!("Redis get: {e}"))?;
+                .map_err(|e| format!("Redis get_del: {e}"))?;
 
             if let Some(json) = value {
-                // Delete the state (single-use)
-                let _: () = conn
-                    .del(&key)
-                    .await
-                    .map_err(|e| format!("Redis del: {e}"))?;
-
                 let parsed: serde_json::Value =
                     serde_json::from_str(&json).map_err(|e| format!("Parse state: {e}"))?;
 
@@ -596,13 +1009,17 @@ impl SSOService {
                         .as_str()
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string()),
+                    return_to: parsed["return_to"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string()),
                 }));
             }
         }
 
-        // Fallback:check DB
+        // Fallback:check DB (single-use via DELETE..RETURNING, atomic too)
         let row = sqlx::query_as::<_, OidcStateRow>(
-            "DELETE FROM sso_oidc_state WHERE state = $1 AND expires_at > NOW() RETURNING *",
+            "DELETE FROM sso_oidc_state WHERE state = $1 AND expires_at > NOW() RETURNING state, code_verifier, domain, tenant_id, return_to, expires_at",
         )
         .bind(state)
         .fetch_optional(&self.db)
@@ -613,58 +1030,57 @@ impl SSOService {
             code_verifier: r.code_verifier,
             domain: r.domain,
             tenant_id: Some(r.tenant_id),
+            return_to: r.return_to,
         }))
     }
 
     /// Handle OIDC callback
     pub async fn handle_oidc_callback(
         &self,
-        tenant_id: &str,
-        email: &str,
-        display_name: Option<&str>,
-        external_user_id: &str,
-        groups: Option<serde_json::Value>,
+        config: &SSOConfiguration,
+        identity: FederationIdentity<'_>,
+        return_to: Option<&str>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
-        self.create_sso_session(
-            tenant_id,
-            "oidc",
-            email,
-            display_name,
-            external_user_id,
-            groups,
-            None,
-        )
-        .await
+        self.issue_sso_session(config, "oidc", identity, return_to)
+            .await
     }
 
     /// Complete the browser-facing half of [`Self::initiate_oidc_login`] and
     /// issue a session.
     ///
-    /// 1. Consume the single-use login `state` — an unknown, expired or
-    ///    replayed state refuses the flow before any network call.
+    /// 1. Consume the single-use login `state` atomically (Redis GETDEL) —
+    ///    an unknown, expired or replayed state refuses the flow before any
+    ///    network call.
     /// 2. Cross-check the state's tenant domain against the callback path's
     ///    `domain` (present on `GET /sso/callback/oidc/:domain`), so a state
     ///    minted for one tenant can never be redeemed on another domain's
     ///    callback.
-    /// 3. Discover the IdP's `token_endpoint` and `jwks_uri` from
-    ///    `{issuer}/.well-known/openid-configuration`.
+    /// 3. Discover the IdP metadata through the outbound federation guard;
+    ///    the discovery document's `issuer` must EXACTLY match the configured
+    ///    issuer, and `token_endpoint` / `jwks_uri` pass the same guard.
     /// 4. Exchange `code` for tokens at the token endpoint using the PKCE
     ///    `code_verifier` persisted at initiation (plus the decrypted client
-    ///    secret when one is configured).
+    ///    secret when one is configured). Redirects are disabled on every
+    ///    federation fetch.
     /// 5. Validate the returned `id_token` against the IdP's published JWKS:
     ///    RS256 only, with the configured issuer, the configured client id as
     ///    audience, and the standard expiry checks.
-    /// 6. Issue an SSO session via [`Self::handle_oidc_callback`].
+    /// 6. Email assurance (audit P3-12): `sub` NEVER silently becomes the
+    ///    email — a valid `email` claim is required, `email_verified` must be
+    ///    true when present, and the validated email must belong to the
+    ///    configured SSO domain (or an explicit `allowed_domains` mapping on
+    ///    the configuration's attribute_mapping).
+    /// 7. Issue an SSO session via [`Self::handle_oidc_callback`].
     ///
     /// `Ok(Ok(session))` — a session was issued. `Ok(Err(reason))` — the flow
     /// is refused (state, domain, or id_token rejected; the HTTP layer answers
     /// 401). `Err(error)` — infrastructure or upstream IdP failure (500).
     pub async fn complete_oidc_callback(
         &self,
-        http: &reqwest::Client,
         domain: Option<&str>,
         code: &str,
         state: &str,
+        return_to: Option<&str>,
     ) -> Result<Result<SSOCallbackResult, String>, String> {
         // 1. Single-use state: unknown/expired/replayed never proceeds.
         let state_data = match self.validate_oidc_state(state).await? {
@@ -695,15 +1111,21 @@ impl SSOService {
             Some(config) => config,
             None => return Ok(Err("OIDC not configured for domain".to_string())),
         };
-        let tenant_id = match state_data.tenant_id.as_deref() {
-            Some(state_tenant) if state_tenant != config.tenant_id => {
+        // The state's tenant must be the domain's tenant (a state minted for
+        // one tenant can never be redeemed on another tenant's domain).
+        if let Some(state_tenant) = state_data.tenant_id.as_deref() {
+            if state_tenant != config.tenant_id {
                 return Ok(Err(
                     "OIDC login state does not belong to this tenant".to_string()
-                ))
+                ));
             }
-            Some(state_tenant) => state_tenant.to_string(),
-            None => config.tenant_id.clone(),
-        };
+        }
+        // The state's staged redirect target wins; a direct callback (state
+        // without one) falls back to the caller's hint.
+        let return_to = state_data
+            .return_to
+            .clone()
+            .or_else(|| return_to.map(str::to_string));
 
         let issuer = config
             .oidc_issuer
@@ -733,48 +1155,76 @@ impl SSOService {
 
         // 3. Discovery: the token endpoint and JWKS location come from the
         //    IdP's own metadata, so deployments only configure the issuer.
-        let discovery_url = format!("{issuer}/.well-known/openid-configuration");
-        let discovery: serde_json::Value = http
-            .get(&discovery_url)
-            .send()
-            .await
-            .and_then(|response| response.error_for_status())
-            .map_err(|error| format!("OIDC discovery request to {discovery_url} failed: {error}"))?
-            .json()
-            .await
-            .map_err(|error| format!("OIDC discovery response from {issuer} was not JSON: {error}"))?;
-        let token_endpoint = discovery["token_endpoint"]
+        //    Every fetch below goes through the federation egress guard, and
+        //    the advertised issuer must match the configured one exactly.
+        let discovery = match fetch_oidc_discovery(&issuer).await {
+            Ok(discovery) => discovery,
+            // Infrastructure-level discovery failure surfaces as 500.
+            Err(error) => return Err(error),
+        };
+        let advertised_issuer = match discovery["issuer"]
+            .as_str()
+            .map(|value| value.trim_end_matches('/').to_string())
+        {
+            Some(advertised) => advertised,
+            None => {
+                return Ok(Err(format!(
+                    "OIDC discovery document from {issuer} has no issuer claim"
+                )))
+            }
+        };
+        if advertised_issuer != issuer {
+            return Ok(Err(format!(
+                "OIDC discovery issuer mismatch: configured '{issuer}', IdP advertises '{advertised_issuer}'"
+            )));
+        }
+        let token_endpoint = match discovery["token_endpoint"]
             .as_str()
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("OIDC discovery document from {issuer} has no token_endpoint"))?;
-        let jwks_uri = discovery["jwks_uri"]
+        {
+            Some(endpoint) => endpoint.to_string(),
+            None => {
+                return Ok(Err(format!(
+                    "OIDC discovery document from {issuer} has no token_endpoint"
+                )))
+            }
+        };
+        let jwks_uri = match discovery["jwks_uri"]
             .as_str()
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("OIDC discovery document from {issuer} has no jwks_uri"))?;
+        {
+            Some(uri) => uri.to_string(),
+            None => {
+                return Ok(Err(format!(
+                    "OIDC discovery document from {issuer} has no jwks_uri"
+                )))
+            }
+        };
 
         // 4. Authorization-code exchange with the persisted PKCE verifier.
-        let mut form: Vec<(&str, &str)> = vec![
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", &self.config.sso.oidc.redirect_uri),
-            ("client_id", &client_id),
-            ("code_verifier", &state_data.code_verifier),
+        let mut form: Vec<(String, String)> = vec![
+            (
+                "grant_type".to_string(),
+                "authorization_code".to_string(),
+            ),
+            ("code".to_string(), code.to_string()),
+            (
+                "redirect_uri".to_string(),
+                self.config.sso.oidc.redirect_uri.clone(),
+            ),
+            ("client_id".to_string(), client_id.clone()),
+            ("code_verifier".to_string(), state_data.code_verifier.clone()),
         ];
         if let Some(secret) = &client_secret {
-            form.push(("client_secret", secret));
+            form.push(("client_secret".to_string(), secret.clone()));
         }
-        let token_response: serde_json::Value = http
-            .post(token_endpoint)
-            .form(&form)
-            .send()
+        let token_response = match federation_post_form_json(&token_endpoint, "OIDC token", &form)
             .await
-            .and_then(|response| response.error_for_status())
-            .map_err(|error| format!("OIDC token request to {token_endpoint} failed: {error}"))?
-            .json()
-            .await
-            .map_err(|error| {
-                format!("OIDC token response from {token_endpoint} was not JSON: {error}")
-            })?;
+        {
+            Ok(response) => response,
+            // Upstream token-endpoint failure surfaces as 500.
+            Err(error) => return Err(error),
+        };
         let id_token = token_response["id_token"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -782,15 +1232,15 @@ impl SSOService {
                 format!("OIDC token response from {token_endpoint} has no id_token")
             })?;
 
-        // 5. Validate the id_token against the IdP's published keys.
-        let claims = match validate_oidc_id_token(id_token, &issuer, &client_id, jwks_uri, http)
-            .await
-        {
+        // 5. Validate the id_token against the IdP's published keys (the
+        //    JWKS document itself is fetched through the guard).
+        let claims = match validate_oidc_id_token(id_token, &issuer, &client_id, &jwks_uri).await {
             Ok(claims) => claims,
             Err(reason) => return Ok(Err(reason)),
         };
 
-        // 6. Session issuance from the validated identity.
+        // 6. Email assurance: `sub` is the identity; the email claim must
+        //    stand on its own.
         let external_user_id = claims
             .get("sub")
             .and_then(|value| value.as_str())
@@ -802,8 +1252,25 @@ impl SSOService {
             .get("email")
             .and_then(|value| value.as_str())
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or(external_user_id)
+            .filter(|raw| valid_oidc_email(raw))
+            .ok_or_else(|| {
+                "OIDC id_token must carry a valid email claim; the subject is never used as an email address".to_string()
+            })?
+            .trim()
             .to_string();
+        if let Some(verified) = claims.get("email_verified") {
+            let verified = verified.as_bool().unwrap_or(false);
+            if !verified {
+                return Ok(Err(
+                    "OIDC email claim is not verified by the identity provider".to_string()
+                ));
+            }
+        }
+        if !email_belongs_to_sso_domain(&email, &config) {
+            return Ok(Err(
+                "OIDC email does not belong to the configured SSO domain".to_string()
+            ));
+        }
         let display_name = claims
             .get("name")
             .and_then(|value| value.as_str())
@@ -817,11 +1284,15 @@ impl SSOService {
 
         let result = self
             .handle_oidc_callback(
-                &tenant_id,
-                &email,
-                display_name.as_deref(),
-                external_user_id,
-                groups,
+                &config,
+                FederationIdentity {
+                    email: &email,
+                    display_name: display_name.as_deref(),
+                    external_user_id,
+                    groups,
+                    attributes: None,
+                },
+                return_to.as_deref(),
             )
             .await?;
         match result.data {
@@ -834,60 +1305,84 @@ impl SSOService {
         }
     }
 
-    /// Create or update SSO session
-    #[allow(clippy::too_many_arguments)]
-    async fn create_sso_session(
+    /// Issue an SSO session for a validated federation identity.
+    ///
+    /// Audit P1-3 — canonical session integration: the federation identity is
+    /// resolved (or provisioned) onto the CANONICAL `users` table through the
+    /// durable `ent_sso_identities` binding, and the same `am_session`
+    /// JWT/cookie the web login issues is minted for it, so a successful SSO
+    /// callback produces a REAL logged-in console session instead of only an
+    /// enterprise bearer token. `ent_sso_sessions` remains as SSO audit
+    /// metadata keyed to the canonical user — and stores ONLY a SHA-256
+    /// digest of its bearer token (audit P1-3 hardening).
+    ///
+    /// `is_new_user` is identity-based: it is true exactly when no
+    /// `(sso_config_id, external_user_id)` binding existed before this login,
+    /// so the session-cleanup sweep can never resurrect a user as "new".
+    async fn issue_sso_session(
         &self,
-        tenant_id: &str,
+        config: &SSOConfiguration,
         provider_type: &str,
-        email: &str,
-        display_name: Option<&str>,
-        external_user_id: &str,
-        groups: Option<serde_json::Value>,
-        attributes: Option<serde_json::Value>,
+        identity: FederationIdentity<'_>,
+        return_to: Option<&str>,
     ) -> Result<ApiResult<SSOCallbackResult>, String> {
-        // #255:Check if user already exists to correctly report is_new_user
-        let existing_user: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM ent_sso_sessions WHERE tenant_id = $1 AND external_user_id = $2 LIMIT 1"
-        )
-        .bind(tenant_id)
-        .bind(external_user_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("Check existing user: {e}"))?;
+        let FederationIdentity {
+            email,
+            display_name,
+            external_user_id,
+            groups,
+            attributes,
+        } = identity;
+        // Identity resolution/provisioning against the canonical users table.
+        let resolved = self
+            .resolve_or_provision_sso_user(config, email, display_name, external_user_id)
+            .await?;
 
-        let is_new_user = existing_user.is_none();
-
-        // #256:Get session duration from SSO config instead of hardcoded 8h
-        let session_hours = sqlx::query_scalar::<_, i32>(
-            "SELECT session_duration_hours FROM ent_sso_configurations WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| format!("Get session config: {e}"))?
-        .unwrap_or(8); // Default to 8 hours if not configured
+        // Session lifetime from THIS configuration row (audit P1-2).
+        let session_hours = config.session_duration_hours;
 
         let session_token = generate_random_token(64);
         let session_id = Uuid::new_v4();
         let expires_at =
             Utc::now() + TimeDelta::try_hours(session_hours as i64).unwrap_or(TimeDelta::zero());
 
+        // Bearer tokens at rest: SHA-256 digest only. The raw token is
+        // returned once (to the flow that minted it) and never persisted.
+        let mut hasher = Sha256::new();
+        hasher.update(session_token.as_bytes());
+        let token_digest = hex::encode(hasher.finalize());
+
         let _session = sqlx::query_as::<_, SSOSession>(
-            "INSERT INTO ent_sso_sessions (id, tenant_id, provider_type, external_user_id, email, display_name, groups, attributes, session_token, expires_at, last_activity_at, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
-             RETURNING *"
+            "INSERT INTO ent_sso_sessions (id, tenant_id, user_id, provider_type, external_user_id, email, display_name, groups, attributes, session_token, session_token_digest, expires_at, last_activity_at, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10,$11,NOW(),NOW())
+             RETURNING *",
         )
-        .bind(session_id).bind(tenant_id).bind(provider_type)
+        .bind(session_id).bind(&config.tenant_id).bind(&resolved.user_id).bind(provider_type)
         .bind(external_user_id).bind(email).bind(display_name)
-        .bind(&groups).bind(&attributes).bind(&session_token).bind(expires_at)
+        .bind(&groups).bind(&attributes).bind(&token_digest).bind(expires_at)
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Create SSO session: {e}"))?;
 
+        // Canonical console session: the same am_session JWT the web login
+        // issues, signed with the deployment's shared RS256 key.
+        let canonical = self.mint_canonical_session(
+            &resolved.user_id,
+            &config.tenant_id,
+            &resolved.role,
+            return_to,
+        );
+
         let group_list = groups.and_then(|g| serde_json::from_value::<Vec<String>>(g).ok());
 
-        info!(tenant_id = %tenant_id, email = %mail_common::pii::redact_email(email), is_new_user = is_new_user, "SSO session created");
+        info!(
+            tenant_id = %config.tenant_id,
+            user_id = %resolved.user_id,
+            email = %mail_common::pii::redact_email(email),
+            is_new_user = resolved.is_new_user,
+            canonical_session = canonical.is_some(),
+            "SSO session created"
+        );
         Ok(ApiResult::ok(SSOCallbackResult {
             session: SSOSessionInfo {
                 session_token,
@@ -896,19 +1391,225 @@ impl SSOService {
                 groups: group_list,
                 expires_at,
             },
-            is_new_user,
+            is_new_user: resolved.is_new_user,
+            canonical,
         }))
     }
 
-    /// Validate session token
+    /// Resolve a validated federation identity onto the canonical `users`
+    /// table (audit P1-3), binding it durably in `ent_sso_identities`.
+    ///
+    /// Resolution order:
+    /// 1. the `(sso_config_id, external_user_id)` identity link — the only
+    ///    binding the IdP account holder cannot re-point,
+    /// 2. an existing canonical user with the same tenant + email
+    ///    (first-link fallback; SAML/OIDC emails are IdP-asserted),
+    /// 3. provisioning a new canonical user INSIDE the configured tenant
+    ///    (role `member`, SSO-only `$sso$` password placeholder).
+    ///
+    /// The resolved user must be `active`; suspended users never get a
+    /// session. `is_new_user` is true exactly when the identity link had to
+    /// be created on THIS login.
+    async fn resolve_or_provision_sso_user(
+        &self,
+        config: &SSOConfiguration,
+        email: &str,
+        display_name: Option<&str>,
+        external_user_id: &str,
+    ) -> Result<ResolvedSsoUser, String> {
+        // 1. Durable identity link.
+        let linked: Option<(String, String, String)> = sqlx::query_as(
+            "SELECT u.id::text, COALESCE(u.role, 'member'), u.status
+             FROM ent_sso_identities i
+             JOIN users u ON u.id = i.user_id
+             WHERE i.sso_config_id = $1 AND i.external_user_id = $2
+             LIMIT 1",
+        )
+        .bind(config.id)
+        .bind(external_user_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Resolve SSO identity: {e}"))?;
+
+        let (user_id, _linked_role, is_new_identity) = match linked {
+            Some((user_id, role, _status)) => (user_id, role, false),
+            None => {
+                // 2. First-link fallback on the (IdP-asserted) email, scoped
+                // to the configured tenant.
+                let matched: Option<(String, String)> = sqlx::query_as(
+                    "SELECT id::text, COALESCE(role, 'member') FROM users
+                     WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)
+                     LIMIT 1",
+                )
+                .bind(&config.tenant_id)
+                .bind(email)
+                .fetch_optional(&self.db)
+                .await
+                .map_err(|e| format!("Match SSO user by email: {e}"))?;
+
+                match matched {
+                    Some((user_id, role)) => (user_id, role, true),
+                    None => {
+                        // 3. Provision inside the configured tenant.
+                        let user_id = Uuid::new_v4();
+                        let placeholder_hash =
+                            format!("$sso${}$no-password-sso-login-only", config.provider_type);
+                        sqlx::query(
+                            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
+                             VALUES ($1, $2, $3, $4, $5, 'member', 'active', true, false, $6, NOW(), NOW())",
+                        )
+                        .bind(user_id)
+                        .bind(&config.tenant_id)
+                        .bind(email)
+                        .bind(display_name)
+                        .bind(&placeholder_hash)
+                        .bind(serde_json::json!({
+                            "sso_provider": config.provider_type,
+                            "sso_external_id": external_user_id,
+                        }))
+                        .execute(&self.db)
+                        .await
+                        .map_err(|error| {
+                            // users.email is UNIQUE across ALL tenants: the
+                            // IdP-asserted email may exist under a DIFFERENT
+                            // organization. That is a policy refusal, not an
+                            // infrastructure failure — fail the login with a
+                            // clear reason instead of a 500 (and never link
+                            // across tenants).
+                            if matches!(&error, sqlx::Error::Database(db_error)
+                                if db_error.code().as_deref() == Some("23505"))
+                            {
+                                format!(
+                                    "SSO provisioning refused: an account with the asserted email already exists in another organization"
+                                )
+                            } else {
+                                format!("Provision SSO user: {error}")
+                            }
+                        })?;
+                        (user_id.to_string(), "member".to_string(), true)
+                    }
+                }
+            }
+        };
+
+        // The identity binding is (re)written on every login; the conflict
+        // arm only refreshes the login stamp, so a concurrent callback cannot
+        // fail the login.
+        sqlx::query(
+            "INSERT INTO ent_sso_identities (sso_config_id, tenant_id, external_user_id, user_id, email, last_login_at)
+             VALUES ($1, $2, $3, $4::uuid, $5, NOW())
+             ON CONFLICT (sso_config_id, external_user_id)
+             DO UPDATE SET last_login_at = NOW(), email = EXCLUDED.email",
+        )
+        .bind(config.id)
+        .bind(&config.tenant_id)
+        .bind(external_user_id)
+        .bind(&user_id)
+        .bind(email)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("Bind SSO identity: {e}"))?;
+
+        // An inactive canonical user never receives a session (the identity
+        // link survives, so re-activation restores SSO logins).
+        let (role, status): (String, String) = sqlx::query_as(
+            "SELECT COALESCE(role, 'member'), status FROM users WHERE id = $1::uuid",
+        )
+        .bind(&user_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| format!("Load SSO user: {e}"))?;
+        if status != "active" {
+            return Err(format!("SSO user account is {status}"));
+        }
+
+        Ok(ResolvedSsoUser {
+            user_id,
+            role,
+            is_new_user: is_new_identity,
+        })
+    }
+
+    /// Mint the canonical console session (`am_session`) for a resolved SSO
+    /// user — the identical JWT claim shape and cookie attributes the web
+    /// login (`session_cookie_for_user`) issues, signed with the deployment's
+    /// shared RS256 key (`JWT_PRIVATE_KEY_PEM`).
+    ///
+    /// `None` when the deployment has not configured the shared signing key:
+    /// the enterprise session record still exists, but no console cookie can
+    /// be minted (logged loudly — deployments wanting console SSO must set
+    /// the key).
+    fn mint_canonical_session(
+        &self,
+        user_id: &str,
+        tenant_id: &str,
+        role: &str,
+        return_to: Option<&str>,
+    ) -> Option<CanonicalSession> {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        if self.config.jwt_private_key_pem.is_empty() {
+            tracing::warn!(
+                "JWT_PRIVATE_KEY_PEM is not configured; SSO login issued an enterprise session without a canonical console session"
+            );
+            return None;
+        }
+
+        // Session lifetime mirrors the enterprise SSO session row.
+        let expiry_secs: i64 = 8 * 3600;
+        let claims = CanonicalJwtClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            scopes: canonical_scopes_for_role(role),
+            exp: (Utc::now() + TimeDelta::seconds(expiry_secs)).timestamp(),
+            iat: Utc::now().timestamp(),
+            jti: Uuid::new_v4().to_string(),
+            typ: Some("session".to_string()),
+        };
+        let encoding_key = match EncodingKey::from_rsa_pem(self.config.jwt_private_key_pem.as_bytes())
+        {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::error!(error = %error, "JWT_PRIVATE_KEY_PEM is not a valid RSA private key");
+                return None;
+            }
+        };
+        let token = match encode(&Header::new(Algorithm::RS256), &claims, &encoding_key) {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::error!(error = %error, "failed to mint canonical SSO session JWT");
+                return None;
+            }
+        };
+        let secure = self.config.node_env == "production" || self.config.node_env == "prod";
+        Some(CanonicalSession {
+            user_id: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            cookie: format!(
+                "am_session={token}; HttpOnly; Path=/; Max-Age={expiry_secs}; SameSite=Strict{}",
+                if secure { "; Secure" } else { "" }
+            ),
+            return_to: sanitize_return_to(return_to),
+        })
+    }
+
+    /// Validate session token.
+    ///
+    /// The presented token is hashed and matched against
+    /// `session_token_digest` — the database never holds the raw bearer
+    /// value (audit P1-3), so a database read cannot leak usable tokens.
     pub async fn validate_session(
         &self,
         session_token: &str,
     ) -> Result<Option<SSOSession>, String> {
+        let mut hasher = Sha256::new();
+        hasher.update(session_token.trim().as_bytes());
+        let token_digest = hex::encode(hasher.finalize());
+
         let session = sqlx::query_as::<_, SSOSession>(
-            "SELECT * FROM ent_sso_sessions WHERE session_token = $1 AND expires_at > NOW()",
+            "SELECT * FROM ent_sso_sessions WHERE session_token_digest = $1 AND expires_at > NOW()",
         )
-        .bind(session_token)
+        .bind(&token_digest)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Validate session: {e}"))?;
@@ -926,37 +1627,59 @@ impl SSOService {
         Ok(session)
     }
 
-    /// Parse and validate a SAML response XML document.
+    /// Atomically consume a staged AuthnRequest (audit P2-6).
     ///
-    /// Performs the following security checks:
-    /// 1. XML parsing with XXE protection (external entities disabled)
-    /// 2. Validates `StatusCode` element is a success
-    /// 3. Validates `Issuer` matches the configured `entity_id` for the domain
-    /// 4. Validates `AudienceRestriction` matches the service's ACS URL
-    /// 5. Checks `NotOnOrAfter` condition to reject expired assertions
-    /// 6. Sanitizes `NameID` and `Attribute` values (rejects `<`, `>`, `&`, control chars, >256 chars)
+    /// `DELETE … WHERE request_id = $1 AND tenant_id = $2 AND expires_at >
+    /// NOW() RETURNING …` is a single atomic statement: the staged request is
+    /// consumed exactly once, expired stages are dead, and a request staged
+    /// for another tenant never matches.
+    async fn consume_saml_authn_request(
+        &self,
+        request_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, String> {
+        sqlx::query_as(
+            "DELETE FROM ent_saml_authn_requests
+             WHERE request_id = $1 AND tenant_id = $2 AND expires_at > NOW()
+             RETURNING domain, return_to",
+        )
+        .bind(request_id)
+        .bind(tenant_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Consume SAML AuthnRequest: {e}"))
+    }
+
+    /// Parse and validate a SAML response XML document (the ACS entry point).
     ///
-    /// Returns a struct with validated NameID and attributes on success.
+    /// Full validation order, all fail-closed:
+    /// 1. XML-DSig signature verification with SIGNED-NODE BINDING (audit
+    ///    P2-7): exactly one whole-document `ds:Reference` — every claim
+    ///    parsed below is cryptographically bound to the verified signature.
+    /// 2. InResponseTo CORRELATION (audit P2-6): the response's
+    ///    `InResponseTo` is atomically consumed from the staged
+    ///    `ent_saml_authn_requests`; unsolicited responses are refused unless
+    ///    the configuration explicitly allows IdP-initiated logins.
+    /// 3. Claim validation against the four independent ground truths of
+    ///    [`SamlValidationContext`] (audit P2-5): Response `Destination` and
+    ///    SubjectConfirmationData `Recipient` == ACS URL, Assertion
+    ///    `Audience` == SP entity id, Issuers == configured IdP entity id.
+    /// 4. Expiration FAIL-CLOSED (audit P2-8): `NotOnOrAfter` is required,
+    ///    must parse, and bounds are exclusive with clock skew.
+    /// 5. Per-tenant replay guard.
+    ///
+    /// Returns the validated NameID, attributes and correlation metadata.
     pub async fn parse_and_validate_saml_response(
         &self,
         saml_response_xml: &str,
         domain: &str,
     ) -> Result<ValidatedSamlResponse, String> {
-        // 1. Parse XML with XXE protection — quick_xml::Reader does not resolve
-        //    external entities by default, providing inherent XXE protection.
-        let mut reader = Reader::from_str(saml_response_xml);
-
         let config = self
             .get_config_by_domain(domain)
             .await?
             .ok_or_else(|| "SAML not configured for domain".to_string())?;
 
-        let expected_entity_id = config
-            .entity_id
-            .as_deref()
-            .unwrap_or(self.config.sso.saml.entity_id.as_str());
-        let expected_acs_url = &self.config.sso.saml.acs_url;
-        // 0. Verify XML digital signature using the IdP's certificate
+        // 1. Signature gate (before any claim is read).
         let cert_raw = config.certificate.as_deref().ok_or_else(|| {
             tracing::warn!(
                 domain = domain,
@@ -964,256 +1687,64 @@ impl SSOService {
             );
             "SAML IdP certificate is not configured; cannot verify XML signature".to_string()
         })?;
-        verify_saml_signature(saml_response_xml, cert_raw)?;
+        verify_saml_document_signature(saml_response_xml, cert_raw)?;
 
-        let mut current_path = Vec::new();
-        let mut status_code_value: Option<String> = None;
-        let mut issuer_value: Option<String> = None;
-        let mut audience_value: Option<String> = None;
-        let mut not_before: Option<chrono::DateTime<Utc>> = None;
-        let mut not_on_or_after: Option<chrono::DateTime<Utc>> = None;
-        let mut assertion_id: Option<String> = None;
-        let mut name_id_value: Option<String> = None;
-        let mut attributes: Vec<(String, String)> = Vec::new();
-        let mut in_status_code = false;
-        let mut in_issuer = false;
-        let mut in_audience = false;
-        let mut in_audience_restriction = false;
-        let mut in_conditions = false;
-        let mut in_name_id = false;
-        let mut in_attribute = false;
-        let mut in_attribute_value = false;
-        let mut current_attr_name: Option<String> = None;
-        let mut text_buf = String::new();
-
-        loop {
-            match reader.read_event() {
-                Ok(Event::Start(ref e)) => {
-                    text_buf.clear();
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let tag = xml_local_name(&name).to_string();
-                    current_path.push(name.clone());
-
-                    match tag.as_str() {
-                        "StatusCode" => in_status_code = true,
-                        "Issuer" => in_issuer = true,
-                        "Audience" => in_audience = in_conditions && in_audience_restriction,
-                        "AudienceRestriction" => in_audience_restriction = true,
-                        "Assertion" => {
-                            // The assertion id is the replay-protection key.
-                            if assertion_id.is_none() {
-                                if let Some(attr) = e
-                                    .attributes()
-                                    .filter_map(|a| a.ok())
-                                    .find(|a| a.key.as_ref() == b"ID")
-                                {
-                                    if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
-                                        assertion_id = Some(val);
-                                    }
-                                }
-                            }
-                        }
-                        "Conditions" => {
-                            in_conditions = true;
-                            // Extract the validity-window attributes from the
-                            // Conditions element.
-                            for attr in e.attributes().filter_map(|a| a.ok()) {
-                                let value = match String::from_utf8(attr.value.to_vec()) {
-                                    Ok(value) => value,
-                                    Err(_) => continue,
-                                };
-                                let parsed = chrono::DateTime::parse_from_rfc3339(&value)
-                                    .map(|dt| dt.with_timezone(&Utc))
-                                    .ok()
-                                    .or_else(|| {
-                                        chrono::DateTime::parse_from_str(
-                                            &value,
-                                            "%Y-%m-%dT%H:%M:%S%:z",
-                                        )
-                                        .map(|dt| dt.with_timezone(&Utc))
-                                        .ok()
-                                    });
-                                match attr.key.as_ref() {
-                                    b"NotBefore" => not_before = parsed,
-                                    b"NotOnOrAfter" => not_on_or_after = parsed,
-                                    _ => {}
-                                }
-                            }
-                        }
-                        "NameID" => in_name_id = true,
-                        "Attribute" => {
-                            in_attribute = true;
-                            current_attr_name = e
-                                .attributes()
-                                .filter_map(|a| a.ok())
-                                .find(|a| a.key.as_ref() == b"Name")
-                                .and_then(|a| String::from_utf8(a.value.to_vec()).ok());
-                        }
-                        "AttributeValue" => in_attribute_value = in_attribute,
-                        _ => {}
-                    }
-                }
-                Ok(Event::End(ref e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let tag = xml_local_name(&name).to_string();
-                    current_path.pop();
-
-                    match tag.as_str() {
-                        "StatusCode" => in_status_code = false,
-                        "Issuer" => in_issuer = false,
-                        "Audience" => in_audience = false,
-                        "AudienceRestriction" => in_audience_restriction = false,
-                        "Conditions" => in_conditions = false,
-                        "NameID" => in_name_id = false,
-                        "Attribute" => {
-                            in_attribute = false;
-                            current_attr_name = None;
-                        }
-                        "AttributeValue" => {
-                            if in_attribute_value && in_attribute {
-                                if let Some(attr_name) = current_attr_name.take() {
-                                    let sanitized = sanitize_saml_value(&text_buf);
-                                    attributes.push((attr_name, sanitized));
-                                    text_buf.clear();
-                                }
-                            }
-                            in_attribute_value = false;
-                        }
-                        _ => {}
-                    }
-                }
-                // quick-xml 0.41: `unescape()` is gone; Text events are decoded
-                // via `decode()`. Entity references now arrive as separate
-                // `Event::GeneralRef` events, so Text content is entity-free.
-                Ok(Event::Text(ref e)) => {
-                    if let Ok(text) = e.decode() {
-                        let text_str = text.as_ref();
-                        if in_status_code {
-                            status_code_value = Some(text_str.to_string());
-                        } else if in_issuer {
-                            issuer_value = Some(text_str.to_string());
-                        } else if in_audience && in_conditions && in_audience_restriction {
-                            audience_value = Some(text_str.to_string());
-                        } else if in_name_id {
-                            name_id_value = Some(text_str.to_string());
-                        } else if in_attribute && in_attribute_value {
-                            text_buf.push_str(text_str);
-                        }
-                    }
-                }
-                Ok(Event::Empty(ref e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                    let tag = xml_local_name(&name).to_string();
-                    if tag == "StatusCode" {
-                        // Handle self-closing StatusCode with Value attribute
-                        if let Some(attr) = e
-                            .attributes()
-                            .filter_map(|a| a.ok())
-                            .find(|a| a.key.as_ref() == b"Value")
-                        {
-                            if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
-                                status_code_value = Some(val);
-                            }
-                        }
-                    }
-                }
-                Ok(Event::Eof) => break,
-                Err(e) => {
-                    tracing::warn!(
-                        saml_parse_error = %e,
-                        domain = domain,
-                        "SAML XML parse error"
+        // 2. InResponseTo correlation against the staged request.
+        let parsed = parse_saml_document(saml_response_xml)?;
+        let (expected_request_id, return_to) = match parsed.response_in_response_to.as_deref() {
+            Some(request_id) if !request_id.trim().is_empty() => {
+                let Some((staged_domain, staged_return_to)) = self
+                    .consume_saml_authn_request(request_id.trim(), &config.tenant_id)
+                    .await?
+                else {
+                    return Err(format!(
+                        "SAML InResponseTo '{request_id}' does not match an outstanding request for this tenant (unknown, expired, or already used)"
+                    ));
+                };
+                if staged_domain != domain {
+                    return Err(
+                        "SAML InResponseTo does not belong to this domain".to_string()
                     );
-                    return Err(format!("SAML XML parse error: {e}"));
                 }
-                _ => {}
+                (Some(request_id.trim().to_string()), staged_return_to)
             }
-        }
-
-        // 2. Validate StatusCode is success
-        let status_value = status_code_value.as_deref().unwrap_or("");
-        if !status_value.ends_with(":Success")
-            && status_value != "urn:oasis:names:tc:SAML:2.0:status:Success"
-        {
-            tracing::warn!(
-                saml_status = %status_value,
-                domain = domain,
-                "SAML response StatusCode is not Success"
-            );
-            return Err(format!(
-                "SAML authentication failed: StatusCode is '{status_value}'"
-            ));
-        }
-
-        // 3. Validate Issuer matches configured entity_id
-        match issuer_value {
-            Some(ref issuer) if issuer == expected_entity_id => {}
-            Some(ref issuer) => {
-                tracing::warn!(
-                    saml_issuer = %issuer,
-                    expected_entity_id = %expected_entity_id,
-                    domain = domain,
-                    "SAML Issuer mismatch"
-                );
-                return Err("SAML Issuer does not match configured entity_id".to_string());
+            _ => {
+                if !config.allow_idp_initiated {
+                    return Err(
+                        "unsolicited SAML response refused (no InResponseTo): this tenant does not allow IdP-initiated login"
+                            .to_string(),
+                    );
+                }
+                (None, None)
             }
-            None => {
-                tracing::warn!(domain = domain, "SAML response missing Issuer");
-                return Err("SAML response missing Issuer element".to_string());
-            }
-        }
+        };
 
-        // 4. Validate AudienceRestriction matches ACS URL
-        match audience_value {
-            Some(ref audience) if audience == expected_acs_url => {}
-            Some(ref audience) => {
-                tracing::warn!(
-                    saml_audience = %audience,
-                    expected_acs_url = %expected_acs_url,
-                    domain = domain,
-                    "SAML AudienceRestriction mismatch"
-                );
-                return Err("SAML AudienceRestriction does not match ACS URL".to_string());
-            }
-            None => {
-                tracing::warn!(domain = domain, "SAML response missing AudienceRestriction");
-                return Err("SAML response missing AudienceRestriction".to_string());
-            }
-        }
+        let ctx = SamlValidationContext {
+            idp_entity_id: config.idp_entity_id.clone().filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    "SAML IdP entity id (idp_entity_id) is not configured for domain".to_string()
+                })?,
+            sp_entity_id: self.config.sso.saml.entity_id.clone(),
+            acs_url: self.config.sso.saml.acs_url.clone(),
+            expected_request_id,
+        };
+        let validated = validate_parsed_saml_document(&parsed, &ctx)?;
 
-        // 5. Validate and sanitize NameID
-        let name_id = name_id_value.ok_or_else(|| {
-            tracing::warn!(domain = domain, "SAML response missing NameID");
-            "SAML response missing NameID element".to_string()
-        })?;
-
-        let sanitized_name_id = sanitize_saml_value(&name_id);
-
-        if sanitized_name_id.is_empty() {
-            tracing::warn!(domain = domain, "SAML NameID is empty after sanitization");
-            return Err("SAML NameID is empty after sanitization".to_string());
-        }
-
-        // 6. Enforce the assertion validity window (bounded clock skew) and
-        //    the per-tenant replay guard. Only reached after every signature
-        //    and claim check above has passed, so an invalid assertion cannot
-        //    burn an assertion id.
-        let assertion_id = assertion_id.ok_or_else(|| {
-            tracing::warn!(domain = domain, "SAML response missing Assertion ID");
-            "SAML response missing Assertion ID (required for replay protection)".to_string()
-        })?;
+        // 5. Replay guard — only reached after every signature and claim
+        //    check above has passed, so an invalid assertion cannot burn an
+        //    assertion id.
         self.validate_saml_assertion_claims(
             &config.tenant_id,
-            &assertion_id,
-            not_before,
-            not_on_or_after,
+            &validated.assertion_id,
+            validated.not_before,
+            validated.not_on_or_after,
             Utc::now(),
         )
         .await?;
 
         Ok(ValidatedSamlResponse {
-            name_id: sanitized_name_id,
-            attributes,
+            return_to,
+            ..validated
         })
     }
 
@@ -1223,20 +1754,21 @@ impl SSOService {
     /// [`Self::parse_and_validate_saml_response`], kept separate so it can be
     /// tested without an IdP-signed XML fixture:
     ///
-    /// * `NotBefore`/`NotOnOrAfter` are compared against `now` with
-    ///   [`SAML_CLOCK_SKEW_SECONDS`] of tolerance on BOTH bounds, so small
-    ///   clock differences between this service and the IdP do not reject
-    ///   otherwise-valid assertions.
+    /// * `NotOnOrAfter` is REQUIRED (audit P2-8 fail-closed) and its bound is
+    ///   EXCLUSIVE with [`SAML_CLOCK_SKEW_SECONDS`] of tolerance; `NotBefore`
+    ///   is inclusive with the same skew.
     /// * `assertion_id` is consumed exactly once per `tenant_id` in
     ///   `ent_saml_assertion_replays` (idempotent `ON CONFLICT DO NOTHING`
     ///   insert); a second use of the same id is rejected as a replay. The
-    ///   table is pruned to [`SAML_REPLAY_RETENTION_HOURS`] so it stays bounded.
+    ///   replay row carries the assertion's own expiry (+ skew) and the sweep
+    ///   deletes only PAST-EXPIRY records, so retention always covers the
+    ///   assertion's lifetime (audit P2-8).
     pub async fn validate_saml_assertion_claims(
         &self,
         tenant_id: &str,
         assertion_id: &str,
         not_before: Option<DateTime<Utc>>,
-        not_on_or_after: Option<DateTime<Utc>>,
+        not_on_or_after: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
         let assertion_id = assertion_id.trim();
@@ -1263,41 +1795,38 @@ impl SSOService {
             }
         }
 
-        if let Some(expires) = not_on_or_after {
-            if now - skew > expires {
-                tracing::warn!(
-                    expires = %expires.to_rfc3339(),
-                    skew_seconds = SAML_CLOCK_SKEW_SECONDS,
-                    "SAML assertion has expired"
-                );
-                return Err(format!(
-                    "SAML assertion has expired (NotOnOrAfter {})",
-                    expires.to_rfc3339()
-                ));
-            }
+        // Exclusive bound: at `expires` itself the assertion is already over.
+        if now - skew >= not_on_or_after {
+            tracing::warn!(
+                expires = %not_on_or_after.to_rfc3339(),
+                skew_seconds = SAML_CLOCK_SKEW_SECONDS,
+                "SAML assertion has expired"
+            );
+            return Err(format!(
+                "SAML assertion has expired (NotOnOrAfter {})",
+                not_on_or_after.to_rfc3339()
+            ));
         }
 
-        // Bounded replay store: drop ids older than the retention horizon
-        // before inserting, so the table cannot grow without bound.
-        sqlx::query(
-            "DELETE FROM ent_saml_assertion_replays
-             WHERE consumed_at < NOW() - make_interval(hours => $1::int)",
-        )
-        .bind(SAML_REPLAY_RETENTION_HOURS)
-        .execute(&self.db)
-        .await
-        .map_err(|error| format!("Prune SAML replay store: {error}"))?;
+        // Expiry-driven retention: drop only records whose assertion is no
+        // longer valid, so the store stays bounded WITHOUT ever deleting a
+        // replay record that still protects a live assertion.
+        sqlx::query("DELETE FROM ent_saml_assertion_replays WHERE expires_at < NOW()")
+            .execute(&self.db)
+            .await
+            .map_err(|error| format!("Prune SAML replay store: {error}"))?;
 
         // Idempotent, bounded insert: ON CONFLICT DO NOTHING + RETURNING
         // distinguishes "fresh" from "already consumed" atomically.
         let inserted: Option<String> = sqlx::query_scalar(
-            "INSERT INTO ent_saml_assertion_replays (tenant_id, assertion_id)
-             VALUES ($1, $2)
+            "INSERT INTO ent_saml_assertion_replays (tenant_id, assertion_id, expires_at)
+             VALUES ($1, $2, $3)
              ON CONFLICT (tenant_id, assertion_id) DO NOTHING
              RETURNING assertion_id",
         )
         .bind(tenant_id)
         .bind(assertion_id)
+        .bind(not_on_or_after + skew)
         .fetch_optional(&self.db)
         .await
         .map_err(|error| format!("Record SAML assertion replay guard: {error}"))?;
@@ -1316,7 +1845,7 @@ impl SSOService {
         Ok(())
     }
 
-    /// Cleanup expired sessions
+    /// Cleanup expired sessions and the expired staged-AuthnRequest rows.
     pub async fn cleanup_expired_sessions(&self) -> Result<u64, String> {
         let result = match sqlx::query("DELETE FROM ent_sso_sessions WHERE expires_at < NOW()")
             .execute(&self.db)
@@ -1333,6 +1862,17 @@ impl SSOService {
         if count > 0 {
             info!(count = count, "Cleaned up expired SSO sessions");
         }
+        // Expired staged SAML requests are worthless once outlived; sweep
+        // them opportunistically (missing table tolerated like sessions).
+        if let Err(error) =
+            sqlx::query("DELETE FROM ent_saml_authn_requests WHERE expires_at < NOW()")
+                .execute(&self.db)
+                .await
+        {
+            if !is_missing_relation_error(&error) {
+                return Err(format!("Cleanup staged SAML requests: {error}"));
+            }
+        }
         Ok(count)
     }
 }
@@ -1344,7 +1884,8 @@ impl SSOService {
 ///
 /// Security posture: RS256 only (no `alg`-switching: an id_token declaring
 /// any other algorithm is refused before a key is selected), the signing key
-/// is chosen by `kid` from the IdP's JWKS, and the standard issuer, audience
+/// is chosen by `kid` from the IdP's JWKS, the JWKS itself is fetched
+/// through the outbound federation guard, and the standard issuer, audience
 /// and expiry checks all apply. Returns the decoded claim set, or a refusal
 /// reason for the flow to surface as a 401.
 async fn validate_oidc_id_token(
@@ -1352,7 +1893,6 @@ async fn validate_oidc_id_token(
     issuer: &str,
     client_id: &str,
     jwks_uri: &str,
-    http: &reqwest::Client,
 ) -> Result<serde_json::Value, String> {
     use jsonwebtoken::jwk::JwkSet;
 
@@ -1369,15 +1909,15 @@ async fn validate_oidc_id_token(
         .filter(|kid| !kid.trim().is_empty())
         .ok_or_else(|| "OIDC id_token header is missing kid".to_string())?;
 
-    let jwks: JwkSet = http
-        .get(jwks_uri)
-        .send()
-        .await
-        .and_then(|response| response.error_for_status())
-        .map_err(|error| format!("OIDC JWKS request to {jwks_uri} failed: {error}"))?
-        .json()
-        .await
-        .map_err(|error| format!("OIDC JWKS response from {jwks_uri} was not JSON: {error}"))?;
+    let jwks_raw = match federation_get_json(jwks_uri, "OIDC JWKS").await {
+        Ok(jwks) => jwks,
+        // JWKS fetch failures are refusals (401 surface), not 500s: the IdP
+        // advertised this URI in its discovery document, so its policy
+        // compliance is part of the login validation.
+        Err(error) => return Err(error),
+    };
+    let jwks: JwkSet = serde_json::from_value(jwks_raw)
+        .map_err(|error| format!("OIDC JWKS response from {jwks_uri} was not a valid JWK set: {error}"))?;
     let jwk = jwks
         .find(&kid)
         .ok_or_else(|| format!("OIDC JWKS from {jwks_uri} has no signing key for kid {kid}"))?;
@@ -1427,12 +1967,499 @@ pub fn generate_random_token(len: usize) -> String {
 
 // ── SAML validation types and helpers ──────────────────────────────────
 
+/// The raw content of one parsed SAML response document. The signature
+/// verification and the InResponseTo correlation both need the parse; the
+/// semantic checks run afterwards against a [`SamlValidationContext`].
+#[derive(Debug, Default)]
+pub(crate) struct ParsedSamlDocument {
+    pub response_destination: Option<String>,
+    pub response_in_response_to: Option<String>,
+    pub status_code: Option<String>,
+    pub response_issuer: Option<String>,
+    pub assertion_issuer: Option<String>,
+    pub response_issuer_count: usize,
+    pub assertion_issuer_count: usize,
+    pub assertion_count: usize,
+    pub assertion_ids: Vec<String>,
+    pub audiences: Vec<String>,
+    pub not_before_raw: Option<String>,
+    pub not_on_or_after_raw: Option<String>,
+    pub subject_confirmation_data: Vec<ParsedSubjectConfirmationData>,
+    pub name_id_count: usize,
+    pub name_id: Option<String>,
+    pub attributes: Vec<(String, String)>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ParsedSubjectConfirmationData {
+    pub recipient: Option<String>,
+    pub in_response_to: Option<String>,
+    pub not_on_or_after_raw: Option<String>,
+}
+
 /// The result of a successfully validated SAML response.
+#[derive(Debug)]
 pub struct ValidatedSamlResponse {
     /// The validated and sanitized NameID value.
     pub name_id: String,
     /// List of (attribute_name, sanitized_value) pairs.
     pub attributes: Vec<(String, String)>,
+    /// The (single) Assertion ID — the replay-protection key.
+    pub assertion_id: String,
+    /// Parsed `Conditions/@NotBefore` (optional).
+    pub not_before: Option<DateTime<Utc>>,
+    /// Parsed (required) `Conditions/@NotOnOrAfter`.
+    pub not_on_or_after: DateTime<Utc>,
+    /// The response's `InResponseTo` when it carried one.
+    pub in_response_to: Option<String>,
+    /// The consumed staged request's post-login redirect target.
+    pub return_to: Option<String>,
+}
+
+/// Stream-parse a SAML response document into its raw content.
+///
+/// quick_xml::Reader does not resolve external entities by default
+/// (inherent XXE protection); entity references arrive as separate
+/// `Event::GeneralRef` events, so Text content is entity-free.
+pub(crate) fn parse_saml_document(xml: &str) -> Result<ParsedSamlDocument, String> {
+    let mut reader = Reader::from_str(xml);
+
+    let mut parsed = ParsedSamlDocument::default();
+    let mut current_path: Vec<String> = Vec::new();
+    let mut in_status_code = false;
+    let mut in_issuer: Option<bool> = None; // Some(inside_assertion) at Start
+    let mut in_audience = false;
+    let mut in_audience_restriction = false;
+    let mut in_conditions = false;
+    let mut in_name_id = false;
+    let mut in_attribute = false;
+    let mut in_attribute_value = false;
+    let mut current_attr_name: Option<String> = None;
+    let mut text_buf = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                text_buf.clear();
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag = xml_local_name(&name).to_string();
+
+                match tag.as_str() {
+                    "Response" if current_path.is_empty() => {
+                        for attr in e.attributes().filter_map(|a| a.ok()) {
+                            let value = String::from_utf8(attr.value.to_vec()).unwrap_or_default();
+                            match attr.key.as_ref() {
+                                b"Destination" => parsed.response_destination = Some(value),
+                                b"InResponseTo" => parsed.response_in_response_to = Some(value),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "StatusCode" => in_status_code = true,
+                    "Issuer" => {
+                        let inside_assertion =
+                            current_path.iter().any(|p| xml_local_name(p) == "Assertion");
+                        in_issuer = Some(inside_assertion);
+                        if inside_assertion {
+                            parsed.assertion_issuer_count += 1;
+                        } else {
+                            parsed.response_issuer_count += 1;
+                        }
+                    }
+                    "AudienceRestriction" => in_audience_restriction = true,
+                    "Audience" => in_audience = in_conditions && in_audience_restriction,
+                    "Assertion" => {
+                        parsed.assertion_count += 1;
+                        if let Some(attr) = e
+                            .attributes()
+                            .filter_map(|a| a.ok())
+                            .find(|a| a.key.as_ref() == b"ID")
+                        {
+                            if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
+                                parsed.assertion_ids.push(val);
+                            }
+                        }
+                    }
+                    "Conditions" => {
+                        in_conditions = true;
+                        for attr in e.attributes().filter_map(|a| a.ok()) {
+                            let value = match String::from_utf8(attr.value.to_vec()) {
+                                Ok(value) => value,
+                                Err(_) => continue,
+                            };
+                            match attr.key.as_ref() {
+                                b"NotBefore" => parsed.not_before_raw = Some(value),
+                                b"NotOnOrAfter" => parsed.not_on_or_after_raw = Some(value),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "SubjectConfirmationData" => {
+                        parsed.subject_confirmation_data.push(Default::default());
+                        let entry = parsed
+                            .subject_confirmation_data
+                            .last_mut()
+                            .expect("SubjectConfirmationData just pushed");
+                        for attr in e.attributes().filter_map(|a| a.ok()) {
+                            let value = String::from_utf8(attr.value.to_vec()).unwrap_or_default();
+                            match attr.key.as_ref() {
+                                b"Recipient" => entry.recipient = Some(value),
+                                b"InResponseTo" => entry.in_response_to = Some(value),
+                                b"NotOnOrAfter" => entry.not_on_or_after_raw = Some(value),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "NameID" => {
+                        in_name_id = true;
+                        parsed.name_id_count += 1;
+                    }
+                    "Attribute" => {
+                        in_attribute = true;
+                        current_attr_name = e
+                            .attributes()
+                            .filter_map(|a| a.ok())
+                            .find(|a| a.key.as_ref() == b"Name")
+                            .and_then(|a| String::from_utf8(a.value.to_vec()).ok());
+                    }
+                    "AttributeValue" => in_attribute_value = in_attribute,
+                    _ => {}
+                }
+                current_path.push(name);
+            }
+            Ok(Event::End(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag = xml_local_name(&name).to_string();
+                current_path.pop();
+
+                match tag.as_str() {
+                    "StatusCode" => in_status_code = false,
+                    "Issuer" => in_issuer = None,
+                    "Audience" => in_audience = false,
+                    "AudienceRestriction" => in_audience_restriction = false,
+                    "Conditions" => in_conditions = false,
+                    "SubjectConfirmationData" => {}
+                    "NameID" => in_name_id = false,
+                    "Attribute" => {
+                        in_attribute = false;
+                        current_attr_name = None;
+                    }
+                    "AttributeValue" => {
+                        if in_attribute_value && in_attribute {
+                            if let Some(attr_name) = current_attr_name.take() {
+                                let sanitized = sanitize_saml_value(&text_buf);
+                                parsed.attributes.push((attr_name, sanitized));
+                                text_buf.clear();
+                            }
+                        }
+                        in_attribute_value = false;
+                    }
+                    _ => {}
+                }
+            }
+            // quick-xml 0.41: `unescape()` is gone; Text events are decoded
+            // via `decode()`. Entity references now arrive as separate
+            // `Event::GeneralRef` events, so Text content is entity-free.
+            Ok(Event::Text(ref e)) => {
+                if let Ok(text) = e.decode() {
+                    let text_str = text.as_ref();
+                    if in_status_code {
+                        parsed.status_code = Some(text_str.to_string());
+                    } else if let Some(in_assertion) = in_issuer {
+                        if in_assertion {
+                            parsed.assertion_issuer = Some(text_str.to_string());
+                        } else {
+                            parsed.response_issuer = Some(text_str.to_string());
+                        }
+                    } else if in_audience {
+                        parsed.audiences.push(text_str.to_string());
+                    } else if in_name_id {
+                        parsed.name_id = Some(text_str.to_string());
+                    } else if in_attribute && in_attribute_value {
+                        text_buf.push_str(text_str);
+                    }
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag = xml_local_name(&name).to_string();
+                if tag == "StatusCode" {
+                    // Handle self-closing StatusCode with Value attribute
+                    if let Some(attr) = e
+                        .attributes()
+                        .filter_map(|a| a.ok())
+                        .find(|a| a.key.as_ref() == b"Value")
+                    {
+                        if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
+                            parsed.status_code = Some(val);
+                        }
+                    }
+                } else if tag == "SubjectConfirmationData" {
+                    // A self-closing SubjectConfirmationData carries its
+                    // attributes identically — count and parse them.
+                    parsed.subject_confirmation_data.push(Default::default());
+                    let entry = parsed
+                        .subject_confirmation_data
+                        .last_mut()
+                        .expect("SubjectConfirmationData just pushed");
+                    for attr in e.attributes().filter_map(|a| a.ok()) {
+                        let value = String::from_utf8(attr.value.to_vec()).unwrap_or_default();
+                        match attr.key.as_ref() {
+                            b"Recipient" => entry.recipient = Some(value),
+                            b"InResponseTo" => entry.in_response_to = Some(value),
+                            b"NotOnOrAfter" => entry.not_on_or_after_raw = Some(value),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                tracing::warn!(saml_parse_error = %e, "SAML XML parse error");
+                return Err(format!("SAML XML parse error: {e}"));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(parsed)
+}
+
+/// Validate a parsed SAML response against the four independent ground
+/// truths of the [`SamlValidationContext`] (audit P2-5), plus structural
+/// hardening (audit P2-7) and fail-closed expiration (audit P2-8).
+///
+/// The caller must have ALREADY verified the XML-DSig signature with
+/// [`verify_saml_document_signature`]: the whole-document reference binding
+/// is what makes every claim below trustworthy.
+pub(crate) fn validate_parsed_saml_document(
+    parsed: &ParsedSamlDocument,
+    ctx: &SamlValidationContext,
+) -> Result<ValidatedSamlResponse, String> {
+    // 1. StatusCode is success.
+    let status_value = parsed.status_code.as_deref().unwrap_or("");
+    if !status_value.ends_with(":Success")
+        && status_value != "urn:oasis:names:tc:SAML:2.0:status:Success"
+    {
+        tracing::warn!(saml_status = %status_value, "SAML response StatusCode is not Success");
+        return Err(format!(
+            "SAML authentication failed: StatusCode is '{status_value}'"
+        ));
+    }
+
+    // 2. Response/Destination == ACS URL (deconflated from the Audience).
+    match parsed.response_destination.as_deref() {
+        Some(destination) if destination.trim() == ctx.acs_url => {}
+        Some(destination) => {
+            tracing::warn!(
+                saml_destination = %destination,
+                expected_acs_url = %ctx.acs_url,
+                "SAML Response Destination mismatch"
+            );
+            return Err("SAML Response Destination does not match the ACS URL".to_string());
+        }
+        None => return Err("SAML response is missing the Destination attribute".to_string()),
+    }
+
+    // 3. Issuer == configured IdP entity id, on BOTH the Response and the
+    //    Assertion, each present exactly once (a duplicated Issuer element
+    //    at either level is malformed and refused — issuer-confusion
+    //    defense).
+    fn clean(value: &Option<String>) -> Option<&str> {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    if parsed.response_issuer_count > 1 || parsed.assertion_issuer_count > 1 {
+        return Err("SAML response contains multiple Issuer elements".to_string());
+    }
+    let response_issuer = clean(&parsed.response_issuer)
+        .ok_or_else(|| "SAML response missing Issuer element".to_string())?;
+    let assertion_issuer = clean(&parsed.assertion_issuer)
+        .ok_or_else(|| "SAML assertion missing Issuer element".to_string())?;
+    if response_issuer != ctx.idp_entity_id || assertion_issuer != ctx.idp_entity_id {
+        tracing::warn!(
+            response_issuer = %response_issuer,
+            assertion_issuer = %assertion_issuer,
+            expected_idp_entity_id = %ctx.idp_entity_id,
+            "SAML Issuer mismatch"
+        );
+        return Err(
+            "SAML Issuer does not match the configured IdP entity id".to_string(),
+        );
+    }
+
+    // 4. Assertion Audience == SP entity id (deconflated from Destination /
+    //    Recipient). EVERY AudienceRestriction/Audience must carry it.
+    if parsed.audiences.is_empty() {
+        return Err("SAML response missing AudienceRestriction".to_string());
+    }
+    for audience in &parsed.audiences {
+        if audience.trim() != ctx.sp_entity_id {
+            tracing::warn!(
+                saml_audience = %audience,
+                expected_sp_entity_id = %ctx.sp_entity_id,
+                "SAML AudienceRestriction mismatch"
+            );
+            return Err(
+                "SAML AudienceRestriction does not match the SP entity id".to_string(),
+            );
+        }
+    }
+
+    // 5. SubjectConfirmationData: exactly one bearer confirmation, whose
+    //    Recipient is the ACS URL and whose InResponseTo matches the
+    //    correlated request.
+    if parsed.subject_confirmation_data.len() != 1 {
+        return Err(format!(
+            "SAML response must carry exactly one SubjectConfirmationData, got {}",
+            parsed.subject_confirmation_data.len()
+        ));
+    }
+    let scd = &parsed.subject_confirmation_data[0];
+    match scd.recipient.as_deref().map(str::trim) {
+        Some(recipient) if recipient == ctx.acs_url => {}
+        Some(recipient) => {
+            tracing::warn!(
+                saml_recipient = %recipient,
+                expected_acs_url = %ctx.acs_url,
+                "SAML SubjectConfirmationData Recipient mismatch"
+            );
+            return Err(
+                "SAML SubjectConfirmationData Recipient does not match the ACS URL".to_string(),
+            );
+        }
+        None => {
+            return Err(
+                "SAML SubjectConfirmationData is missing the Recipient attribute".to_string(),
+            )
+        }
+    }
+    match (&scd.in_response_to, &ctx.expected_request_id) {
+        (None, None) => {}
+        (Some(scd_request), Some(expected)) if scd_request.trim() == expected.trim() => {}
+        _ => {
+            return Err(
+                "SAML SubjectConfirmationData InResponseTo does not match the correlated request"
+                    .to_string(),
+            )
+        }
+    }
+    // A SCD validity instant, when present, is required to parse and hold.
+    let scd_expires_at = match scd.not_on_or_after_raw.as_deref() {
+        Some(raw) => {
+            let expires = parse_required_saml_time(raw, "SubjectConfirmationData NotOnOrAfter")?;
+            let skew = TimeDelta::seconds(SAML_CLOCK_SKEW_SECONDS);
+            if Utc::now() - skew >= expires {
+                return Err("SAML SubjectConfirmationData NotOnOrAfter has expired".to_string());
+            }
+            Some(expires)
+        }
+        None => None,
+    };
+    let _ = scd_expires_at;
+
+    // 6. Structural hardening: exactly ONE Assertion, exactly ONE NameID,
+    //    no duplicate Assertion IDs (XML wrapping defense).
+    if parsed.assertion_count != 1 {
+        return Err(format!(
+            "SAML response must contain exactly one Assertion, got {}",
+            parsed.assertion_count
+        ));
+    }
+    if parsed.name_id_count != 1 {
+        return Err(format!(
+            "SAML response must contain exactly one NameID, got {}",
+            parsed.name_id_count
+        ));
+    }
+
+    // 7. NameID present and sanitizable.
+    let name_id = parsed
+        .name_id
+        .as_deref()
+        .ok_or_else(|| "SAML response missing NameID element".to_string())?;
+    let sanitized_name_id = sanitize_saml_value(name_id);
+    if sanitized_name_id.is_empty() {
+        tracing::warn!("SAML NameID is empty after sanitization");
+        return Err("SAML NameID is empty after sanitization".to_string());
+    }
+
+    // 8. Expiration FAIL-CLOSED (audit P2-8): Conditions must carry a
+    //    parseable NotOnOrAfter; bounds are exclusive-with-skew.
+    if parsed.assertion_ids.iter().any(|id| id.trim().is_empty()) {
+        return Err(
+            "SAML assertion is missing an ID; it cannot be protected against replay".to_string(),
+        );
+    }
+    let assertion_id = parsed
+        .assertion_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| {
+            "SAML response missing Assertion ID (required for replay protection)".to_string()
+        })?;
+    let not_on_or_after = match parsed.not_on_or_after_raw.as_deref() {
+        Some(raw) => parse_required_saml_time(raw, "NotOnOrAfter")?,
+        None => {
+            return Err(
+                "SAML Conditions are missing NotOnOrAfter (fail-closed: an assertion without an expiry is refused)"
+                    .to_string(),
+            )
+        }
+    };
+    let skew = TimeDelta::seconds(SAML_CLOCK_SKEW_SECONDS);
+    if Utc::now() - skew >= not_on_or_after {
+        tracing::warn!(
+            expires = %not_on_or_after.to_rfc3339(),
+            skew_seconds = SAML_CLOCK_SKEW_SECONDS,
+            "SAML assertion has expired"
+        );
+        return Err(format!(
+            "SAML assertion has expired (NotOnOrAfter {})",
+            not_on_or_after.to_rfc3339()
+        ));
+    }
+    let not_before = match parsed.not_before_raw.as_deref() {
+        Some(raw) => {
+            let not_before = parse_required_saml_time(raw, "NotBefore")?;
+            if Utc::now() + skew < not_before {
+                tracing::warn!(
+                    not_before = %not_before.to_rfc3339(),
+                    skew_seconds = SAML_CLOCK_SKEW_SECONDS,
+                    "SAML assertion is not yet valid"
+                );
+                return Err(format!(
+                    "SAML assertion is not yet valid (NotBefore {})",
+                    not_before.to_rfc3339()
+                ));
+            }
+            Some(not_before)
+        }
+        None => None,
+    };
+
+    Ok(ValidatedSamlResponse {
+        name_id: sanitized_name_id,
+        attributes: parsed.attributes.clone(),
+        assertion_id,
+        not_before,
+        not_on_or_after,
+        in_response_to: parsed.response_in_response_to.clone(),
+        return_to: None,
+    })
+}
+
+/// Signature-free claim validation against an explicit context — the unit
+/// test seam for the deconflation matrix (each ground truth mutated
+/// independently; only correct semantics pass).
+pub fn validate_saml_document_claims(
+    saml_response_xml: &str,
+    ctx: &SamlValidationContext,
+) -> Result<ValidatedSamlResponse, String> {
+    let parsed = parse_saml_document(saml_response_xml)?;
+    validate_parsed_saml_document(&parsed, ctx)
 }
 
 /// Sanitize a SAML attribute or NameID value.
@@ -1647,6 +2674,7 @@ pub(crate) mod tests {
                 expires_at: Utc::now(),
             },
             is_new_user: true,
+            canonical: None,
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["is_new_user"], true);
@@ -1659,7 +2687,7 @@ pub(crate) mod tests {
             provider_type: "saml".into(),
             domain: "example.com".into(),
             enabled: Some(true),
-            entity_id: Some("urn:test".into()),
+            idp_entity_id: Some("urn:test".into()),
             sso_url: Some("https://idp.example.com/sso".into()),
             certificate: None,
             oidc_client_id: None,
@@ -1680,6 +2708,7 @@ pub(crate) mod tests {
             code_verifier: "abc123verifier".into(),
             domain: "example.com".into(),
             tenant_id: Some("tenant_01HZ".into()),
+            return_to: None,
         };
         let json = serde_json::json!({
             "code_verifier": state.code_verifier,
@@ -1691,6 +2720,7 @@ pub(crate) mod tests {
             code_verifier: json["code_verifier"].as_str().unwrap().to_string(),
             domain: json["domain"].as_str().unwrap().to_string(),
             tenant_id: json["tenant_id"].as_str().map(|s| s.to_string()),
+            return_to: None,
         };
         assert_eq!(parsed.code_verifier, "abc123verifier");
         assert_eq!(parsed.domain, "example.com");
@@ -1704,6 +2734,7 @@ pub(crate) mod tests {
             code_verifier: "verifier123".into(),
             domain: "company.com".into(),
             tenant_id: None,
+            return_to: None,
         };
         let json = serde_json::json!({
             "code_verifier": state.code_verifier,
@@ -1713,6 +2744,7 @@ pub(crate) mod tests {
             code_verifier: json["code_verifier"].as_str().unwrap().to_string(),
             domain: json["domain"].as_str().unwrap().to_string(),
             tenant_id: json["tenant_id"].as_str().map(|s| s.to_string()),
+            return_to: None,
         };
         assert!(parsed.tenant_id.is_none());
     }
@@ -2667,7 +3699,7 @@ pub(crate) mod tests {
             provider_type: "oidc".into(),
             domain: "company.com".into(),
             enabled: Some(true),
-            entity_id: Some("urn:company".into()),
+            idp_entity_id: Some("urn:company".into()),
             sso_url: Some("https://company.okta.com/sso".into()),
             certificate: Some("MIID....".into()),
             oidc_client_id: Some("client_123".into()),
@@ -3099,6 +4131,37 @@ pub(crate) mod tests {
             let signature = key.sign_pkcs1_sha256(signing_input.as_bytes());
             format!("{signing_input}.{}", b64url(&signature))
         }
+
+        /// A VALID signature whose ds:Reference targets a SUB-NODE
+        /// (`URI="#{target}"`) instead of the whole document (audit P2-7):
+        /// the signed-then-sub-node document must be refused by the
+        /// signed-node binding even though the signature itself verifies.
+        pub fn seal_with_targeted_reference(
+            document_prefix: &str,
+            document_suffix: &str,
+            key: &RsaPrivateKey,
+            target: &str,
+        ) -> String {
+            let unsigned = format!("{document_prefix}{document_suffix}");
+            let algorithm = C14nAlgorithm::new(C14nMode::Inclusive1_0, false);
+            let canonical = canonicalize_xml(unsigned.as_bytes(), &algorithm)
+                .expect("canonicalize unsigned SAML document");
+            let digest = Sha256::digest(&canonical);
+
+            let signed_info = format!(
+                r##"<ds:SignedInfo xmlns:ds="{DS_NS}"><ds:CanonicalizationMethod Algorithm="{EXC_C14N}"/><ds:SignatureMethod Algorithm="{RSA_SHA256}"/><ds:Reference URI="#{target}"><ds:Transforms><ds:Transform Algorithm="{ENVELOPED}"/></ds:Transforms><ds:DigestMethod Algorithm="{SHA256_DIGEST}"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo>"##,
+                b64(&digest)
+            );
+            let exc = C14nAlgorithm::new(C14nMode::Exclusive1_0, false);
+            let canonical_signed_info =
+                canonicalize_xml(signed_info.as_bytes(), &exc).expect("canonicalize SignedInfo");
+            let signature = key.sign_pkcs1_sha256(&canonical_signed_info);
+
+            format!(
+                "{document_prefix}<ds:Signature xmlns:ds=\"{DS_NS}\">{signed_info}<ds:SignatureValue>{}</ds:SignatureValue></ds:Signature>{document_suffix}",
+                b64(&signature)
+            )
+        }
     }
 
     pub(crate) const IDP_PRIVATE_KEY_PEM: &str = include_str!("../tests/keys/saml_idp_key.pem");
@@ -3107,8 +4170,15 @@ pub(crate) mod tests {
     /// The properties of one IdP response fixture; every refusal arm of the
     /// parser is a small mutation of this struct.
     pub(crate) struct SamlFixture {
+        /// The IdP entity id — BOTH Issuer elements.
         pub issuer: String,
+        /// The SP entity id — the Assertion Audience (audit P2-5).
         pub audience: String,
+        /// The ACS URL — the Response Destination and the
+        /// SubjectConfirmationData Recipient (audit P2-5).
+        pub acs_url: String,
+        /// The staged AuthnRequest id echoed in InResponseTo (audit P2-6).
+        pub in_response_to: Option<String>,
         pub name_id: String,
         pub status_value: String,
         pub assertion_id: String,
@@ -3118,13 +4188,24 @@ pub(crate) mod tests {
         pub include_signature: bool,
         pub include_audience: bool,
         pub include_conditions: bool,
+        pub include_scd: bool,
     }
 
     impl SamlFixture {
-        pub(crate) fn valid(expected_entity_id: &str, expected_acs_url: &str) -> SamlFixture {
+        /// A fully valid response for the deployment context: the Issuers
+        /// name the IdP, the Audience names the SP, the Destination and
+        /// Recipient are the ACS URL, and InResponseTo names a request the
+        /// test stages via [`stage_saml_authn_request`].
+        pub(crate) fn valid(
+            idp_entity_id: &str,
+            sp_entity_id: &str,
+            acs_url: &str,
+        ) -> SamlFixture {
             SamlFixture {
-                issuer: expected_entity_id.to_string(),
-                audience: expected_acs_url.to_string(),
+                issuer: idp_entity_id.to_string(),
+                audience: sp_entity_id.to_string(),
+                acs_url: acs_url.to_string(),
+                in_response_to: Some(format!("_saml_{}", Uuid::new_v4())),
                 name_id: "alice.smith@example.com".to_string(),
                 status_value: "urn:oasis:names:tc:SAML:2.0:status:Success".to_string(),
                 assertion_id: format!("_assertion_{}", Uuid::new_v4()),
@@ -3137,7 +4218,28 @@ pub(crate) mod tests {
                 include_signature: true,
                 include_audience: true,
                 include_conditions: true,
+                include_scd: true,
             }
+        }
+
+        fn subject_confirmation_data(&self) -> String {
+            if !self.include_scd {
+                return String::new();
+            }
+            let in_response_to = self
+                .in_response_to
+                .as_deref()
+                .map(|id| format!(" InResponseTo=\"{}\"", xml_escape(id)))
+                .unwrap_or_default();
+            format!(
+                "<saml:SubjectConfirmation Method=\"urn:oasis:names:tc:SAML:2.0:cm:bearer\">\
+<saml:SubjectConfirmationData Recipient=\"{}\" NotOnOrAfter=\"{}\"{in_response_to}/>\
+</saml:SubjectConfirmation>",
+                xml_escape(&self.acs_url),
+                self.not_on_or_after
+                    .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(5))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            )
         }
 
         pub(crate) fn unsigned_document(&self) -> String {
@@ -3167,7 +4269,7 @@ pub(crate) mod tests {
             let audience = if self.include_audience {
                 format!(
                     "<saml:AudienceRestriction><saml:Audience>{}</saml:Audience></saml:AudienceRestriction>",
-                    self.audience
+                    xml_escape(&self.audience)
                 )
             } else {
                 String::new()
@@ -3182,20 +4284,25 @@ pub(crate) mod tests {
                 })
                 .collect();
             format!(
-                "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_resp_cov\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\" Destination=\"{acs}\">\
+                "<samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" xmlns:saml=\"urn:oasis:names:tc:SAML:2.0:assertion\" ID=\"_resp_cov\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\" Destination=\"{}\"{}>\
 <samlp:Status><samlp:StatusCode Value=\"{status}\"/></samlp:Status>\
 <saml:Issuer>{issuer}</saml:Issuer>\
 <saml:Assertion ID=\"{assertion}\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\">\
 <saml:Issuer>{issuer}</saml:Issuer>\
-<saml:Subject><saml:NameID>{name_id}</saml:NameID></saml:Subject>\
+<saml:Subject><saml:NameID>{name_id}</saml:NameID>{scd}</saml:Subject>\
 {conditions}{audience}{conditions_close}<saml:AttributeStatement>{attributes}</saml:AttributeStatement>\
 </saml:Assertion>\
 </samlp:Response>",
-                acs = self.audience,
+                xml_escape(&self.acs_url),
+                self.in_response_to
+                    .as_deref()
+                    .map(|id| format!(" InResponseTo=\"{}\"", xml_escape(id)))
+                    .unwrap_or_default(),
                 status = self.status_value,
                 issuer = self.issuer,
                 assertion = self.assertion_id,
                 name_id = self.name_id,
+                scd = self.subject_confirmation_data(),
             )
         }
 
@@ -3252,7 +4359,7 @@ pub(crate) mod tests {
     #[test]
     fn saml_fixture_renders_the_no_conditions_and_attributeless_shapes() {
         let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
-        let mut fixture = SamlFixture::valid("https://idp.example.com", "https://acs");
+        let mut fixture = SamlFixture::valid("https://idp.example.com", "https://sp.example.com", "https://acs");
         fixture.include_conditions = false;
         let without_conditions = fixture.unsigned_document();
         assert!(!without_conditions.contains("saml:Conditions"));
@@ -3265,6 +4372,438 @@ pub(crate) mod tests {
         fixture.not_before = None;
         fixture.not_on_or_after = None;
         assert!(!fixture.unsigned_document().contains("NotBefore"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // P2-5 deconflation + P2-7 structural hardening + P2-8 fail-closed
+    // expiration: the pure claim-check matrix (signatures are a separate
+    // gate; here each ground truth is mutated INDEPENDENTLY and only the
+    // correct semantics pass).
+    // ═══════════════════════════════════════════════════════════════════
+
+    const DECONFL_IDP: &str = "https://idp.deconfl.example.com/metadata";
+    const DECONFL_SP: &str = "https://sp.apexmail.example.com/saml/metadata";
+    const DECONFL_ACS: &str = "https://acs.apexmail.example.com/sso/callback";
+
+    fn deconflation_fixture() -> SamlFixture {
+        let mut fixture = SamlFixture::valid(DECONFL_IDP, DECONFL_SP, DECONFL_ACS);
+        fixture.in_response_to = None;
+        fixture
+    }
+
+    fn deconflation_ctx() -> SamlValidationContext {
+        SamlValidationContext {
+            idp_entity_id: DECONFL_IDP.to_string(),
+            sp_entity_id: DECONFL_SP.to_string(),
+            acs_url: DECONFL_ACS.to_string(),
+            expected_request_id: None,
+        }
+    }
+
+    #[test]
+    fn deconflated_claims_only_pass_with_the_correct_semantics() {
+        // The one correct assignment of all four ground truths passes.
+        let validated = validate_saml_document_claims(
+            &deconflation_fixture().unsigned_document(),
+            &deconflation_ctx(),
+        )
+        .expect("correct Destination/Recipient/Audience/Issuer semantics validate");
+        assert_eq!(validated.name_id, "alice.smith@example.com");
+    }
+
+    #[test]
+    fn response_destination_is_checked_against_the_acs_not_the_audience() {
+        // Mutate ONLY the Response/Destination: an Audience-shaped value in
+        // the Destination must not pass (P2-5 deconflation).
+        let mut fixture = deconflation_fixture();
+        fixture.acs_url = format!("{DECONFL_SP}/wrong-acs");
+        let error = validate_saml_document_claims(
+            &fixture.unsigned_document(),
+            &deconflation_ctx(),
+        )
+        .expect_err("a wrong Destination is refused");
+        assert!(
+            error.contains("Destination does not match"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn scd_recipient_is_checked_against_the_acs_independently() {
+        // Mutate ONLY the SubjectConfirmationData/Recipient (the Destination
+        // stays correct): P2-5 deconflation treats them as separate truths.
+        let document = deconflation_fixture()
+            .unsigned_document()
+            .replace(
+                &format!("Recipient=\"{DECONFL_ACS}\""),
+                "Recipient=\"https://evil.example.com/acs\"",
+            );
+        assert!(document.contains("evil.example.com"));
+        let error =
+            validate_saml_document_claims(&document, &deconflation_ctx())
+                .expect_err("a wrong Recipient is refused");
+        assert!(
+            error.contains("Recipient does not match"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn assertion_audience_is_checked_against_the_sp_entity_not_the_acs() {
+        // Mutate ONLY the Audience: the ACS URL (the pre-fix conflation) must
+        // NOT be accepted as an Audience — the Audience names the SP entity.
+        let document = deconflation_fixture()
+            .unsigned_document()
+            .replace(
+                &format!("<saml:Audience>{DECONFL_SP}</saml:Audience>"),
+                &format!("<saml:Audience>{DECONFL_ACS}</saml:Audience>"),
+            );
+        let error =
+            validate_saml_document_claims(&document, &deconflation_ctx())
+                .expect_err("an Audience holding the ACS URL is refused");
+        assert!(
+            error.contains("AudienceRestriction does not match"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn response_and_assertion_issuers_are_checked_independently() {
+        // Mutate ONLY the RESPONSE Issuer (assertion Issuer stays correct).
+        let response_mutated = deconflation_fixture()
+            .unsigned_document()
+            .replacen(
+                &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
+                &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+                1,
+            );
+        let error = validate_saml_document_claims(&response_mutated, &deconflation_ctx())
+            .expect_err("a wrong Response Issuer is refused");
+        assert!(error.contains("Issuer does not match"), "unexpected: {error}");
+
+        // Mutate ONLY the ASSERTION Issuer (response Issuer stays correct).
+        let assertion_mutated = deconflation_fixture()
+            .unsigned_document()
+            .replacen(
+                &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
+                &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+                2,
+            )
+            .replacen(
+                &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+                &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
+                1,
+            );
+        let error = validate_saml_document_claims(&assertion_mutated, &deconflation_ctx())
+            .expect_err("a wrong Assertion Issuer is refused");
+        assert!(error.contains("Issuer does not match"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn scd_in_response_to_must_match_the_correlated_request() {
+        let ctx = SamlValidationContext {
+            expected_request_id: Some("_saml_staged".to_string()),
+            ..deconflation_ctx()
+        };
+        // Missing InResponseTo where a request was staged.
+        let error = validate_saml_document_claims(
+            &deconflation_fixture().unsigned_document(),
+            &ctx,
+        )
+        .expect_err("no InResponseTo against a staged request is refused");
+        assert!(error.contains("InResponseTo does not match"), "unexpected: {error}");
+        // A foreign InResponseTo.
+        let mut fixture = deconflation_fixture();
+        fixture.in_response_to = Some("_saml_other".to_string());
+        let error = validate_saml_document_claims(&fixture.unsigned_document(), &ctx)
+            .expect_err("a foreign InResponseTo is refused");
+        assert!(error.contains("InResponseTo does not match"), "unexpected: {error}");
+        // The matching one passes.
+        let mut fixture = deconflation_fixture();
+        fixture.in_response_to = Some("_saml_staged".to_string());
+        validate_saml_document_claims(&fixture.unsigned_document(), &ctx)
+            .expect("the matching InResponseTo passes");
+    }
+
+    #[test]
+    fn structural_wrapping_defenses_reject_adversarial_shapes() {
+        let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
+
+        // A LEGITIMATE signed response with an unsigned ATTACKER assertion
+        // appended as a sibling: any second Assertion is refused outright —
+        // unsigned at the claim layer. (The sibling carries no Issuer so the
+        // refusal demonstrably comes from the Assertion-count check, not the
+        // duplicated-Issuer defense.)
+        let attacker = r#"<saml:Assertion ID="_attacker" Version="2.0" IssueInstant="2026-01-01T00:00:00Z"><saml:Subject><saml:NameID>root@evil.example.com</saml:NameID></saml:Subject></saml:Assertion>"#;
+        let legit_unsigned = deconflation_fixture().unsigned_document();
+        let with_sibling = legit_unsigned.replace(
+            "</samlp:Response>",
+            &format!("{attacker}</samlp:Response>"),
+        );
+        let error = validate_saml_document_claims(&with_sibling, &deconflation_ctx())
+            .expect_err("a second (attacker) Assertion is refused");
+        assert!(
+            error.contains("exactly one Assertion"),
+            "unexpected: {error}"
+        );
+        // ...and SIGNED-LEGITIMATE-but-tampered: the attacker appends the
+        // sibling to a genuinely signed document AFTER signing, so the
+        // whole-document digest no longer matches — the signature gate
+        // refuses it before any claim is read.
+        let split = legit_unsigned.rfind("</samlp:Response>").expect("Response root");
+        let (prefix, suffix) = legit_unsigned.split_at(split);
+        let legit_signed = idp::seal(prefix, suffix, key);
+        let tampered_with_sibling =
+            legit_signed.replace("</samlp:Response>", &format!("{attacker}</samlp:Response>"));
+        let error = verify_saml_document_signature(&tampered_with_sibling, IDP_CERTIFICATE_PEM)
+            .expect_err("an injected assertion breaks the signature");
+        assert!(
+            error.contains("signature"),
+            "the injected sibling must fail the signature gate: {error}"
+        );
+
+        // Duplicate Assertion IDs (two Assertions sharing one ID) — refused.
+        // The injected sibling carries no Issuer element so the refusal
+        // demonstrably comes from the Assertion-count check.
+        let document = deconflation_fixture()
+            .unsigned_document()
+            .replace("</saml:Assertion>", "</saml:Assertion><saml:Assertion ID=\"_resp_cov_dup\" Version=\"2.0\" IssueInstant=\"2026-01-01T00:00:00Z\"><saml:Subject><saml:NameID>x@y.example.com</saml:NameID></saml:Subject></saml:Assertion>");
+        let error = validate_saml_document_claims(&document, &deconflation_ctx())
+            .expect_err("a second Assertion is refused");
+        assert!(error.contains("exactly one Assertion"), "unexpected: {error}");
+
+        // Two NameIDs — refused.
+        let document = deconflation_fixture().unsigned_document().replace(
+            "</saml:NameID>",
+            "</saml:NameID><saml:NameID>second@evil.example.com</saml:NameID>",
+        );
+        let error = validate_saml_document_claims(&document, &deconflation_ctx())
+            .expect_err("a second NameID is refused");
+        assert!(error.contains("exactly one NameID"), "unexpected: {error}");
+
+        // A duplicated Issuer element at the response level — refused.
+        let document = deconflation_fixture().unsigned_document().replacen(
+            "<samlp:Status>",
+            "<saml:Issuer>https://evil.example.com</saml:Issuer><samlp:Status>",
+            1,
+        );
+        let error = validate_saml_document_claims(&document, &deconflation_ctx())
+            .expect_err("a duplicated Issuer is refused");
+        assert!(
+            error.contains("multiple Issuer elements"),
+            "unexpected: {error}"
+        );
+
+        // A missing SubjectConfirmationData — refused.
+        let mut fixture = deconflation_fixture();
+        fixture.include_scd = false;
+        let error = validate_saml_document_claims(&fixture.unsigned_document(), &deconflation_ctx())
+            .expect_err("a missing SubjectConfirmationData is refused");
+        assert!(
+            error.contains("exactly one SubjectConfirmationData"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[test]
+    fn a_signature_scoped_to_a_subnode_is_refused_even_when_valid() {
+        // Audit P2-7: a VALID signature whose ds:Reference targets a
+        // sub-node (`URI="#_resp_cov"`) is refused by the signed-node
+        // binding — claims parse only from whole-document signatures.
+        let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
+        let document = deconflation_fixture().unsigned_document();
+        let split = document
+            .rfind("</samlp:Response>")
+            .expect("fixture has a Response root");
+        let (prefix, suffix) = document.split_at(split);
+        let sealed = idp::seal(prefix, suffix, key);
+        assert!(sealed.contains("URI=\"\""), "whole-document reference");
+
+        let full_document = {
+            // Re-seal with the targeted Reference so the signature is valid
+            // over its own SignedInfo.
+            idp::seal_with_targeted_reference(prefix, suffix, key, "_resp_cov")
+        };
+        let error = verify_saml_document_signature(&full_document, IDP_CERTIFICATE_PEM)
+            .expect_err("a sub-node Reference is refused");
+        assert!(
+            error.contains("whole document") || error.contains("exactly one"),
+            "unexpected: {error}"
+        );
+        // The whole-document seal still verifies (control).
+        verify_saml_document_signature(&sealed, IDP_CERTIFICATE_PEM)
+            .expect("the whole-document signature verifies");
+    }
+
+    #[test]
+    fn expiration_is_fail_closed_on_missing_and_malformed_instants() {
+        // Conditions rendered WITHOUT NotOnOrAfter: the required instant is
+        // absent → refused (fail-closed). The Audience stays rendered, so
+        // the failure demonstrably comes from the expiry check.
+        let mut fixture = deconflation_fixture();
+        fixture.not_on_or_after = None;
+        let error = validate_saml_document_claims(&fixture.unsigned_document(), &deconflation_ctx())
+            .expect_err("a missing NotOnOrAfter is refused (fail-closed)");
+        assert!(
+            error.contains("missing NotOnOrAfter"),
+            "unexpected: {error}"
+        );
+
+        // A malformed NotOnOrAfter instant → refused, never skipped. The
+        // LAST NotOnOrAfter in the rendered document is the Conditions'.
+        let document = {
+            let raw = deconflation_fixture().unsigned_document();
+            let marker = "NotOnOrAfter=\"";
+            let start = raw.rfind(marker).expect("NotOnOrAfter present") + marker.len();
+            let end = raw[start..].find('"').expect("closing quote") + start;
+            raw.replacen(&raw[start..end], "not-a-timestamp", 1)
+        };
+        let error = validate_saml_document_claims(&document, &deconflation_ctx())
+            .expect_err("a malformed NotOnOrAfter is refused (fail-closed)");
+        assert!(error.contains("malformed"), "unexpected: {error}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // P3-9 outbound federation guard (SSRF) + P3-12 email assurance.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// The guard tests read the allowlist env; clear it so no sibling's
+    /// mutation leaks into this process (nextest isolates per test).
+    fn clear_federation_allowlist() {
+        std::env::remove_var("SSO_FEDERATION_ALLOWLIST");
+    }
+
+    #[test]
+    fn federation_guard_rejects_private_and_reserved_targets() {
+        clear_federation_allowlist();
+        // Loopback, RFC1918, link-local (the cloud metadata endpoint), the
+        // unspecified address, carrier-grade NAT, IPv6 loopback / ULA /
+        // link-local, and an IPv4-mapped loopback — EVERY resolved address
+        // must be public.
+        let blocked: &[&str] = &[
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.10",
+            "169.254.169.254",
+            "0.0.0.0",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+            "fd12:3456::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+        ];
+        for ip_str in blocked {
+            let ip: std::net::IpAddr = ip_str.parse().expect("parse ip");
+            let error =
+                federation_guard_resolved("https://idp.evil.example.com", &[ip])
+                    .expect_err("a private/reserved target must be refused");
+            assert!(
+                error.contains("private/reserved"),
+                "ip {ip_str}: unexpected refusal: {error}"
+            );
+        }
+
+        // A MIXED answer — one public, one private — is refused (DNS
+        // rebinding shape).
+        let mixed = [
+            "93.184.216.34".parse::<std::net::IpAddr>().unwrap(),
+            "10.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+        ];
+        let error = federation_guard_resolved("https://idp.evil.example.com", &mixed)
+            .expect_err("a mixed answer with one private address is refused");
+        assert!(error.contains("private/reserved"), "unexpected: {error}");
+
+        // A public address passes the pure half.
+        let public = "93.184.216.34".parse::<std::net::IpAddr>().unwrap();
+        let endpoint = federation_guard_resolved("https://idp.ok.example.com", &[public])
+            .expect("a public target passes the pure guard");
+        assert_eq!(endpoint.host, "idp.ok.example.com");
+        assert_eq!(endpoint.url.scheme(), "https");
+    }
+
+    #[test]
+    fn federation_guard_requires_https_outside_the_test_allowlist() {
+        clear_federation_allowlist();
+        let public = "93.184.216.34".parse::<std::net::IpAddr>().unwrap();
+        let error = federation_guard_resolved("http://idp.ok.example.com", &[public])
+            .expect_err("plaintext federation is refused");
+        assert!(error.contains("HTTPS"), "unexpected: {error}");
+
+        // With the loopback host allowlisted, the local mock IdP shape is
+        // admitted — for THAT host only.
+        std::env::set_var("SSO_FEDERATION_ALLOWLIST", "127.0.0.1");
+        let loopback = "127.0.0.1".parse::<std::net::IpAddr>().unwrap();
+        let endpoint = federation_guard_resolved("http://127.0.0.1:8080/discovery", &[loopback])
+            .expect("the allowlisted loopback mock is admitted");
+        assert_eq!(endpoint.addr.port(), 8080);
+        // A different host stays refused even with the allowlist set.
+        let error = federation_guard_resolved("http://idp.evil.example.com", &[public])
+            .expect_err("a non-allowlisted host is still refused");
+        assert!(error.contains("HTTPS"), "unexpected: {error}");
+        clear_federation_allowlist();
+    }
+
+    #[test]
+    fn oidc_email_claim_must_stand_on_its_own() {
+        // Audit P3-12: `sub` never silently becomes the email.
+        assert!(valid_oidc_email("alice@example.com"));
+        assert!(valid_oidc_email("  alice@example.com  "));
+        assert!(valid_oidc_email("alice+tag@sub.example.co.uk"));
+        assert!(!valid_oidc_email(""), "empty");
+        assert!(!valid_oidc_email("   "), "whitespace only");
+        assert!(!valid_oidc_email("not-an-email"), "no @");
+        assert!(!valid_oidc_email("@example.com"), "no local part");
+        assert!(!valid_oidc_email("alice@"), "no domain");
+        assert!(!valid_oidc_email("alice@example"), "no dot in the domain");
+        assert!(!valid_oidc_email("a@b@c.com"), "two @ signs");
+        assert!(!valid_oidc_email("alice exa mple@example.com"), "whitespace");
+        let long = format!("a{}@example.com", "b".repeat(250));
+        assert!(!valid_oidc_email(&long), "over 254 chars");
+    }
+
+    #[test]
+    fn sso_email_must_belong_to_the_configured_domain() {
+        let mut config = SSOConfiguration {
+            id: Uuid::new_v4(),
+            tenant_id: "tenant_sso_email".into(),
+            provider_type: "oidc".into(),
+            enabled: true,
+            domain: "Example.com".into(),
+            metadata_url: None,
+            idp_entity_id: None,
+            sso_url: None,
+            slo_url: None,
+            certificate: None,
+            private_key_encrypted: None,
+            oidc_client_id: None,
+            oidc_client_secret_encrypted: None,
+            oidc_issuer: None,
+            oidc_redirect_uri: None,
+            oidc_scopes: None,
+            attribute_mapping: None,
+            enforce_sso: false,
+            allow_idp_initiated: false,
+            session_duration_hours: 8,
+            created_at: None,
+            updated_at: None,
+        };
+        // The configuration's own domain (case-insensitively).
+        assert!(email_belongs_to_sso_domain("alice@example.com", &config));
+        assert!(email_belongs_to_sso_domain("alice@EXAMPLE.com", &config));
+        // A foreign domain without an explicit mapping is refused.
+        assert!(!email_belongs_to_sso_domain(
+            "alice@partner.example.com",
+            &config
+        ));
+        // ...unless the configuration EXPLICITLY maps the domain.
+        config.attribute_mapping = Some(serde_json::json!({
+            "allowed_domains": ["Partner.Example.com"],
+        }));
+        assert!(email_belongs_to_sso_domain("alice@partner.example.com", &config));
+        // An unrelated domain stays refused even with a mapping.
+        assert!(!email_belongs_to_sso_domain("alice@evil.example.com", &config));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -3301,17 +4840,36 @@ pub(crate) mod tests {
         service.config.sso.saml.acs_url.clone()
     }
 
+    /// Seed the tenants row a generated test tenant id needs before any
+    /// canonical `users` row can reference it (`users_tenant_id_fkey`).
+    async fn seed_sso_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("SSO Coverage Tenant {tenant}"))
+        .bind(format!("sso-cov-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seed SSO tenant");
+    }
+
     async fn configure_saml_tenant(
         service: &SSOService,
         tenant: &str,
         domain: &str,
         with_certificate: bool,
-    ) -> (String, String) {
-        // The entity id must match the fixture Issuer; the ACS URL comes
-        // from the service config (the audience in the assertion).
-        let entity_id = "https://idp.coverage.example.com/metadata".to_string();
-        // The parser compares the assertion Audience against the SERVICE
-        // config's ACS URL (not anything stored on the tenant row).
+    ) -> (String, String, String) {
+        // The canonical users table carries a tenants FK: seed the tenant so
+        // the callback's user provisioning succeeds.
+        seed_sso_tenant(&service.db, tenant).await;
+        // The IdP entity id must match the fixture Issuer; the Audience is
+        // the SP entity id and the ACS URL comes from the service config
+        // (the Destination / SubjectConfirmationData Recipient).
+        let idp_entity_id = "https://idp.coverage.example.com/metadata".to_string();
+        let sp_entity_id = service.config.sso.saml.entity_id.clone();
         let acs_url = self_acs_url(service);
         service
             .configure(SSOConfigureRequest {
@@ -3319,7 +4877,7 @@ pub(crate) mod tests {
                 provider_type: "saml".to_string(),
                 domain: domain.to_string(),
                 enabled: Some(true),
-                entity_id: Some(entity_id.clone()),
+                idp_entity_id: Some(idp_entity_id.clone()),
                 sso_url: Some("https://idp.coverage.example.com/sso".to_string()),
                 certificate: if with_certificate {
                     Some(IDP_CERTIFICATE_PEM.to_string())
@@ -3337,10 +4895,52 @@ pub(crate) mod tests {
             .expect("configure SAML")
             .data
             .expect("configure returned a row");
-        (entity_id, acs_url)
+        (idp_entity_id, sp_entity_id, acs_url)
+    }
+
+    /// Stage one SP-initiated AuthnRequest for InResponseTo correlation
+    /// (audit P2-6): the ACS atomically consumes it on first use.
+    async fn stage_saml_authn_request(
+        service: &SSOService,
+        domain: &str,
+        request_id: &str,
+    ) {
+        let config = service
+            .get_config_by_domain(domain)
+            .await
+            .expect("config by domain")
+            .expect("configured domain");
+        sqlx::query(
+            "INSERT INTO ent_saml_authn_requests (request_id, tenant_id, domain, expires_at)
+             VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')
+             ON CONFLICT (request_id) DO NOTHING",
+        )
+        .bind(request_id)
+        .bind(&config.tenant_id)
+        .bind(domain)
+        .execute(&service.db)
+        .await
+        .expect("stage AuthnRequest");
     }
 
     async fn parse_fixture(
+        service: &SSOService,
+        domain: &str,
+        fixture: &SamlFixture,
+    ) -> Result<ValidatedSamlResponse, String> {
+        // The fixture's InResponseTo names a freshly staged request so the
+        // correlation gate (audit P2-6) passes; re-staging before every
+        // parse keeps replay tests reaching the replay guard instead of the
+        // correlation gate.
+        if let Some(request_id) = fixture.in_response_to.as_deref() {
+            stage_saml_authn_request(service, domain, request_id).await;
+        }
+        parse_fixture_unstaged(service, domain, fixture).await
+    }
+
+    /// Parse WITHOUT staging the fixture's InResponseTo — for the cases the
+    /// correlation gate itself is the subject (a consumed or foreign stage).
+    async fn parse_fixture_unstaged(
         service: &SSOService,
         domain: &str,
         fixture: &SamlFixture,
@@ -3360,9 +4960,10 @@ pub(crate) mod tests {
         let (service, _pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "signed-ok.coverage.example.com";
-        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+        let (idp_entity_id, sp_entity_id, acs_url) =
+            configure_saml_tenant(&service, &tenant, domain, true).await;
 
-        let fixture = SamlFixture::valid(&entity_id, &acs_url);
+        let fixture = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         let validated = parse_fixture(&service, domain, &fixture)
             .await
             .expect("a genuinely signed, correctly-formed response validates");
@@ -3385,14 +4986,14 @@ pub(crate) mod tests {
 
         // A DIFFERENT tenant cannot burn the first tenant's assertion id...
         let other_tenant = coverage_tenant("signed_ok2");
-        let (other_entity, other_acs) = configure_saml_tenant(
+        let (other_idp, other_sp, other_acs) = configure_saml_tenant(
             &service,
             &other_tenant,
             "signed-ok2.coverage.example.com",
             true,
         )
         .await;
-        let mut other_fixture = SamlFixture::valid(&other_entity, &other_acs);
+        let mut other_fixture = SamlFixture::valid(&other_idp, &other_sp, &other_acs);
         other_fixture.assertion_id = fixture.assertion_id.clone();
         // ...the replay guard is per-tenant, so this is accepted — but a
         // second use for the OTHER tenant is still a replay.
@@ -3413,7 +5014,8 @@ pub(crate) mod tests {
         let (service, _pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "refusals.coverage.example.com";
-        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+        let (idp_entity_id, sp_entity_id, acs_url) =
+            configure_saml_tenant(&service, &tenant, domain, true).await;
 
         // Each case mutates one claim; the response stays properly SIGNED so
         // the refusal demonstrably comes from the claim check, not the
@@ -3486,7 +5088,7 @@ pub(crate) mod tests {
         let _ = assert_id;
 
         for (name, mutate, expected) in cases {
-            let mut fixture = SamlFixture::valid(&entity_id, &acs_url);
+            let mut fixture = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
             mutate(&mut fixture);
             let error = parse_fixture(&service, domain, &fixture)
                 .await
@@ -3505,10 +5107,11 @@ pub(crate) mod tests {
         let (service, _pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "gate.coverage.example.com";
-        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, true).await;
+        let (idp_entity_id, sp_entity_id, acs_url) =
+            configure_saml_tenant(&service, &tenant, domain, true).await;
 
         // Unsigned: refused before any parsing.
-        let mut fixture = SamlFixture::valid(&entity_id, &acs_url);
+        let mut fixture = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         fixture.include_signature = false;
         let unsigned_error = parse_fixture(&service, domain, &fixture)
             .await
@@ -3522,7 +5125,7 @@ pub(crate) mod tests {
         // Tampered: text inserted into the digest value AFTER signing
         // breaks the reference digest — the DsigStatus::Invalid arm.
         let key = IDP_KEY.get_or_init(|| idp::RsaPrivateKey::from_pkcs8_pem(IDP_PRIVATE_KEY_PEM));
-        let mut signed_case = SamlFixture::valid(&entity_id, &acs_url);
+        let mut signed_case = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         signed_case.name_id = "tamper-check@example.com".into();
         let signed_document = signed_case.render(key);
         let marker = "<ds:DigestValue>";
@@ -3546,7 +5149,17 @@ pub(crate) mod tests {
             tampered_error.contains("signature verification failed"),
             "tampered digest must be Invalid: {tampered_error}"
         );
-        // The untouched document still validates (the gate is exact).
+        // The untouched document still validates (the gate is exact) — its
+        // InResponseTo correlates against a fresh stage (audit P2-6).
+        stage_saml_authn_request(
+            &service,
+            domain,
+            signed_case
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
+        )
+        .await;
         let valid = service
             .parse_and_validate_saml_response(&signed_document, domain)
             .await;
@@ -3570,9 +5183,10 @@ pub(crate) mod tests {
         let (service, _pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "nocert.coverage.example.com";
-        let (entity_id, acs_url) = configure_saml_tenant(&service, &tenant, domain, false).await;
+        let (idp_entity_id, sp_entity_id, acs_url) =
+            configure_saml_tenant(&service, &tenant, domain, false).await;
 
-        let fixture = SamlFixture::valid(&entity_id, &acs_url);
+        let fixture = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         let error = parse_fixture(&service, domain, &fixture)
             .await
             .err()
@@ -3584,23 +5198,133 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn in_response_to_correlation_is_enforced() {
+        let tag = "saml_irt";
+        let (service, pool) = provision_sso(tag).await;
+        let tenant = coverage_tenant(tag);
+        let domain = "irt.coverage.example.com";
+        let (idp_entity_id, sp_entity_id, acs_url) =
+            configure_saml_tenant(&service, &tenant, domain, true).await;
+
+        // 1. An unsolicited (IdP-initiated) response is refused while the
+        //    configuration does not allow it.
+        let mut unsolicited = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
+        unsolicited.in_response_to = None;
+        let error = parse_fixture(&service, domain, &unsolicited)
+            .await
+            .err()
+            .expect("unsolicited response refused");
+        assert!(error.contains("unsolicited"), "unexpected: {error}");
+
+        // 2. A response correlating against a staged request validates, and
+        //    the stage is consumed exactly once.
+        let solicited = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
+        let request_id = solicited.in_response_to.clone().expect("InResponseTo");
+        stage_saml_authn_request(&service, domain, &request_id).await;
+        parse_fixture(&service, domain, &solicited)
+            .await
+            .expect("the solicited response validates");
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ent_saml_authn_requests WHERE request_id = $1",
+        )
+        .bind(&request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count stages");
+        assert_eq!(remaining, 0, "the consumed stage is gone");
+
+        // 3. A second response re-using the CONSUMED request id is refused
+        //    (unsolicited again — the stage is gone).
+        let mut replayed_request = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
+        replayed_request.in_response_to = Some(request_id.clone());
+        replayed_request.assertion_id = format!("_assertion_{}", Uuid::new_v4());
+        let error = parse_fixture_unstaged(&service, domain, &replayed_request)
+            .await
+            .err()
+            .expect("a consumed InResponseTo is refused");
+        assert!(
+            error.contains("does not match an outstanding request"),
+            "unexpected: {error}"
+        );
+
+        // 4. An EXPIRED stage is dead.
+        let late = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
+        let late_request_id = late.in_response_to.clone().expect("InResponseTo");
+        sqlx::query(
+            "INSERT INTO ent_saml_authn_requests (request_id, tenant_id, domain, expires_at)
+             VALUES ($1, $2, $3, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(&late_request_id)
+        .bind(&tenant)
+        .bind(domain)
+        .execute(&pool)
+        .await
+        .expect("stage expired request");
+        let error = parse_fixture(&service, domain, &late)
+            .await
+            .err()
+            .expect("an expired stage is refused");
+        assert!(
+            error.contains("does not match an outstanding request"),
+            "unexpected: {error}"
+        );
+
+        // 5. A request staged for ANOTHER tenant never correlates.
+        let other_tenant = coverage_tenant(tag);
+        let other_domain = "irt-other.coverage.example.com";
+        let (other_idp, other_sp, other_acs) =
+            configure_saml_tenant(&service, &other_tenant, other_domain, true).await;
+        let cross_tenant = SamlFixture::valid(&other_idp, &other_sp, &other_acs);
+        let cross_request_id = cross_tenant.in_response_to.clone().expect("InResponseTo");
+        // Stage it for the FIRST tenant's domain; present it on the other.
+        stage_saml_authn_request(&service, domain, &cross_request_id).await;
+        let error = parse_fixture(&service, other_domain, &cross_tenant)
+            .await
+            .err()
+            .expect("a foreign-tenant stage is refused");
+        assert!(
+            error.contains("does not match an outstanding request")
+                || error.contains("does not belong to this domain"),
+            "unexpected: {error}"
+        );
+
+        // 6. An explicitly IdP-initiated configuration accepts the
+        //    unsolicited response.
+        sqlx::query("UPDATE ent_sso_configurations SET allow_idp_initiated = true WHERE tenant_id = $1")
+            .bind(&other_tenant)
+            .execute(&pool)
+            .await
+            .expect("allow IdP-initiated");
+        let mut idp_initiated = SamlFixture::valid(&other_idp, &other_sp, &other_acs);
+        idp_initiated.in_response_to = None;
+        parse_fixture(&service, other_domain, &idp_initiated)
+            .await
+            .expect("an explicitly allowed IdP-initiated response validates");
+    }
+
+    #[tokio::test]
     async fn oidc_state_machine_covers_redis_db_fallback_and_error_arms() {
         let tag = "oidc_state";
         let (service, pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "oidc.coverage.example.com";
+        // Audit P3-10: the authorize URL comes from DISCOVERY. The mock IdP
+        // advertises a NONSTANDARD authorization_endpoint, so a redirect to
+        // it proves the flow consumed discovery rather than concatenating
+        // `{issuer}/authorize`.
+        let issuer = start_mock_oidc_idp().await;
         service
             .configure(SSOConfigureRequest {
                 tenant_id: tenant.clone(),
                 provider_type: "oidc".to_string(),
                 domain: domain.to_string(),
                 enabled: Some(true),
-                entity_id: None,
+                idp_entity_id: None,
                 sso_url: None,
                 certificate: None,
                 oidc_client_id: Some("client-123".to_string()),
                 oidc_client_secret: Some("shhh".to_string()),
-                oidc_issuer: Some("https://oidp.coverage.example.com".to_string()),
+                oidc_issuer: Some(issuer.clone()),
                 attribute_mapping: None,
                 enforce_sso: Some(false),
                 session_duration_hours: None,
@@ -3616,7 +5340,7 @@ pub(crate) mod tests {
                 provider_type: "saml".to_string(),
                 domain: saml_service_domain.to_string(),
                 enabled: Some(true),
-                entity_id: None,
+                idp_entity_id: None,
                 sso_url: None,
                 certificate: None,
                 oidc_client_id: None,
@@ -3629,7 +5353,7 @@ pub(crate) mod tests {
             .await
             .expect("configure SAML-only tenant");
         let wrong_provider = service
-            .initiate_oidc_login(saml_service_domain)
+            .initiate_oidc_login(saml_service_domain, None)
             .await
             .expect("query works");
         assert!(
@@ -3637,21 +5361,25 @@ pub(crate) mod tests {
             "SAML provider is not an OIDC provider"
         );
         let unknown = service
-            .initiate_oidc_login("no-such-oidc.example.com")
+            .initiate_oidc_login("no-such-oidc.example.com", None)
             .await
             .expect("query");
         assert!(!unknown.success, "unknown domain has no OIDC config");
 
         // Without a Redis pool the state falls back to the durable table.
         let redirect = service
-            .initiate_oidc_login(domain)
+            .initiate_oidc_login(domain, None)
             .await
             .expect("initiate works")
             .data
             .expect("redirect");
-        assert!(redirect
-            .redirect_url
-            .contains("/authorize?client_id=client-123"));
+        assert!(
+            redirect
+                .redirect_url
+                .starts_with(&format!("{issuer}/oidc-auth-nonstandard?client_id=client-123")),
+            "the authorize URL is discovery's (nonstandard) authorization_endpoint: {}",
+            redirect.redirect_url
+        );
         assert!(redirect.redirect_url.contains("code_challenge_method=S256"));
         let state = redirect.request_id.clone();
         let from_db = service
@@ -3676,7 +5404,7 @@ pub(crate) mod tests {
             .expect("redis pool");
         let with_redis = SSOService::with_redis(pool.clone(), redis.clone(), new_sso_config());
         let redirect = with_redis
-            .initiate_oidc_login(domain)
+            .initiate_oidc_login(domain, None)
             .await
             .expect("initiate with redis")
             .data
@@ -3732,6 +5460,100 @@ pub(crate) mod tests {
         );
     }
 
+    /// Audit P3-11: the Redis state consumption is GETDEL — ONE atomic
+    /// server operation. Twenty concurrent callbacks race the same state:
+    /// EXACTLY ONE sees it, the other nineteen are refused.
+    #[tokio::test]
+    async fn oidc_state_consumption_is_atomic_under_concurrency() {
+        let tag = "oidc_state_barrier";
+        let (service, _pool) = provision_sso(tag).await;
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let service = SSOService::with_redis(service.db.clone(), redis.clone(), new_sso_config());
+
+        // Stage the state the way initiate_oidc_login does.
+        let state = "cov_barrier_state".to_string();
+        let staged = serde_json::json!({
+            "code_verifier": "barrier-verifier",
+            "domain": "barrier.coverage.example.com",
+            "tenant_id": "tenant_barrier",
+            "return_to": Option::<String>::None,
+            "created_at": Utc::now().timestamp(),
+        });
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: () = conn
+                .set_ex(format!("oidc_state:{state}"), staged.to_string(), 300)
+                .await
+                .expect("stage state");
+        }
+
+        // Twenty tasks race the same single-use state.
+        const RACERS: usize = 20;
+        let mut handles = Vec::with_capacity(RACERS);
+        for _ in 0..RACERS {
+            let service = SSOService::with_redis(service.db.clone(), redis.clone(), new_sso_config());
+            let state = state.clone();
+            handles.push(tokio::spawn(async move {
+                service.validate_oidc_state(&state).await
+            }));
+        }
+        let mut winners = 0usize;
+        let mut losers = 0usize;
+        for handle in handles {
+            let result = handle.await.expect("task joins");
+            match result.expect("validate") {
+                Some(_) => winners += 1,
+                None => losers += 1,
+            }
+        }
+        assert_eq!(winners, 1, "exactly one callback wins the state");
+        assert_eq!(losers, RACERS - 1, "every other callback is refused");
+    }
+
+    /// A minimal in-process OIDC discovery IdP (audit P3-10/P3-9 test
+    /// infrastructure): bound on 127.0.0.1 over plain HTTP and admitted by
+    /// the federation allowlist, advertising a NONSTANDARD
+    /// authorization_endpoint. The served document's issuer matches the
+    /// configured issuer exactly, as the guard requires.
+    async fn start_mock_oidc_idp() -> String {
+        if std::env::var("SSO_FEDERATION_ALLOWLIST").is_err() {
+            std::env::set_var("SSO_FEDERATION_ALLOWLIST", "127.0.0.1");
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock idp");
+        let port = listener.local_addr().expect("mock idp addr").port();
+        let issuer = format!("http://127.0.0.1:{port}");
+        let discovery = serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/oidc-auth-nonstandard"),
+            "token_endpoint": format!("{issuer}/oidc-token"),
+            "jwks_uri": format!("{issuer}/oidc-jwks"),
+        });
+        let body = serde_json::to_string(&discovery).expect("serialize discovery");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(stream) => stream,
+                    Err(_) => break,
+                };
+                use std::io::{Read as _, Write as _};
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        issuer
+    }
+
     fn new_sso_config() -> Config {
         Config::from_env().expect("Config::from_env in test env")
     }
@@ -3742,18 +5564,25 @@ pub(crate) mod tests {
         let (service, pool) = provision_sso(tag).await;
         let tenant = coverage_tenant(tag);
         let domain = "session.coverage.example.com";
-        let (entity_id, _acs) = configure_saml_tenant(&service, &tenant, domain, true).await;
-        let _ = entity_id;
+        let (_idp, _sp, _acs) = configure_saml_tenant(&service, &tenant, domain, true).await;
+        let config = service
+            .get_config_by_domain(domain)
+            .await
+            .expect("config by domain")
+            .expect("configured domain");
 
         // First login: a new user with a session bound to the configured
         // duration.
         let first = service
             .handle_saml_callback(
-                &tenant,
-                "carol@example.com",
-                Some("Carol"),
-                "carol-external-id",
-                Some(serde_json::json!(["admins"])),
+                &config,
+                FederationIdentity {
+                    email: "carol@example.com",
+                    display_name: Some("Carol"),
+                    external_user_id: "carol-external-id",
+                    groups: Some(serde_json::json!(["admins"])),
+                    attributes: None,
+                },
                 None,
             )
             .await
@@ -3771,14 +5600,18 @@ pub(crate) mod tests {
             .expect("live session");
         assert_eq!(session.email, "carol@example.com");
 
-        // Second login for the same external id: not a new user.
+        // Second login for the same external id: not a new user — the
+        // durable ent_sso_identities binding decides, never session history.
         let second = service
             .handle_saml_callback(
-                &tenant,
-                "carol@example.com",
-                Some("Carol"),
-                "carol-external-id",
-                None,
+                &config,
+                FederationIdentity {
+                    email: "carol@example.com",
+                    display_name: Some("Carol"),
+                    external_user_id: "carol-external-id",
+                    groups: None,
+                    attributes: None,
+                },
                 None,
             )
             .await
@@ -3810,7 +5643,17 @@ pub(crate) mod tests {
 
         // OIDC callbacks create sessions too.
         let oidc_session = service
-            .handle_oidc_callback(&tenant, "dave@example.com", None, "dave-external-id", None)
+            .handle_oidc_callback(
+                &config,
+                FederationIdentity {
+                    email: "dave@example.com",
+                    display_name: None,
+                    external_user_id: "dave-external-id",
+                    groups: None,
+                    attributes: None,
+                },
+                None,
+            )
             .await
             .expect("oidc callback")
             .data
@@ -3852,7 +5695,7 @@ pub(crate) mod tests {
                     provider_type: "saml".to_string(),
                     domain: format!("{tenant}.enforce.example.com"),
                     enabled: Some(true),
-                    entity_id: None,
+                    idp_entity_id: None,
                     sso_url: None,
                     certificate: None,
                     oidc_client_id: None,
@@ -3870,6 +5713,56 @@ pub(crate) mod tests {
             .await
             .expect("lookup"));
         assert!(!service.tenant_enforces_sso(&relaxed).await.expect("lookup"));
+
+        // Audit P1-2: MULTIPLE configuration rows per tenant (one per
+        // domain) — the bool_or aggregate is deterministic where the old
+        // `LIMIT 1` pick was arbitrary. A relaxed domain cannot hide an
+        // enforcing one, and an enforcing domain cannot hide behind a
+        // relaxed one.
+        service
+            .configure(SSOConfigureRequest {
+                tenant_id: enforcing.clone(),
+                provider_type: "saml".to_string(),
+                domain: format!("{enforcing}.enforce-second.example.com"),
+                enabled: Some(true),
+                idp_entity_id: None,
+                sso_url: None,
+                certificate: None,
+                oidc_client_id: None,
+                oidc_client_secret: None,
+                oidc_issuer: None,
+                attribute_mapping: None,
+                enforce_sso: Some(false),
+                session_duration_hours: None,
+            })
+            .await
+            .expect("configure second domain");
+        assert!(
+            service.tenant_enforces_sso(&enforcing).await.expect("lookup"),
+            "one enforcing row among several must enforce"
+        );
+        service
+            .configure(SSOConfigureRequest {
+                tenant_id: relaxed.clone(),
+                provider_type: "saml".to_string(),
+                domain: format!("{relaxed}.relaxed-second.example.com"),
+                enabled: Some(true),
+                idp_entity_id: None,
+                sso_url: None,
+                certificate: None,
+                oidc_client_id: None,
+                oidc_client_secret: None,
+                oidc_issuer: None,
+                attribute_mapping: None,
+                enforce_sso: Some(true),
+                session_duration_hours: None,
+            })
+            .await
+            .expect("configure second domain");
+        assert!(
+            service.tenant_enforces_sso(&relaxed).await.expect("lookup"),
+            "one enforcing row among several must enforce"
+        );
         // The free function agrees with the method.
         assert!(enterprise_sso_enforces(&pool, &enforcing).await);
         // No row: the gate stays open.
@@ -3966,5 +5859,125 @@ pub(crate) mod tests {
             .execute(&pool)
             .await
             .expect("restore table");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // P1-3 canonical-session plumbing: the sanitized post-login redirect
+    // target (open-redirect defense) and the am_session mint itself.
+    // ═══════════════════════════════════════════════════════════════════
+
+    const JWT_TEST_PRIVATE_PEM: &str = include_str!("../tests/keys/test_rsa_private.pem");
+    const JWT_TEST_PUBLIC_PEM: &str = include_str!("../tests/keys/test_rsa_public.pem");
+
+    #[test]
+    fn return_to_is_sanitized_to_same_origin_paths() {
+        // Same-origin absolute paths survive untouched.
+        assert_eq!(sanitize_return_to(Some("/inbox")), "/inbox");
+        assert_eq!(
+            sanitize_return_to(Some("/domains/example.com/dns?tab=records")),
+            "/domains/example.com/dns?tab=records"
+        );
+        assert_eq!(sanitize_return_to(Some("  /settings  ")), "/settings");
+
+        // EVERYTHING else falls back to /dashboard: empty, control bytes,
+        // off-origin absolute URLs, protocol-relative redirects, backslash
+        // tricks, and traversal.
+        assert_eq!(sanitize_return_to(None), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("   ")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("https://evil.example.com")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("javascript:alert(1)")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("//evil.example.com")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("/\\evil.example.com")), "/dashboard");
+        assert_eq!(sanitize_return_to(Some("/safe/../../evil")), "/dashboard");
+        assert_eq!(
+            sanitize_return_to(Some("/inbox\u{0007}")),
+            "/dashboard",
+            "control characters never ride into a Location header"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_session_mint_matches_the_console_cookie_shape() {
+        if std::env::var("SSO_ENCRYPTION_KEY").is_err() {
+            std::env::set_var("SSO_ENCRYPTION_KEY", "sso-coverage-key-0123456789");
+        }
+        // A DB-free service: minting never touches the pool.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:unused@127.0.0.1:1/mint_only")
+            .expect("lazy pool");
+        let mut config = new_sso_config();
+
+        // Without the shared signing key the mint degrades to None — the
+        // enterprise bearer session still exists, no console cookie is
+        // claimed.
+        config.jwt_private_key_pem = String::new();
+        let service = SSOService::new(pool.clone(), config);
+        assert!(service.mint_canonical_session("u", "t", "member", Some("/inbox")).is_none());
+
+        // With the key: the SAME cookie shape the console password login
+        // writes, a sanitized redirect, and a verifiable RS256 token.
+        let mut config = new_sso_config();
+        config.jwt_private_key_pem = JWT_TEST_PRIVATE_PEM.to_string();
+        let service = SSOService::new(pool, config);
+        let minted = service
+            .mint_canonical_session(
+                "018f0ac4-1111-7000-8000-000000000001",
+                "tenant_mint",
+                "admin",
+                Some("//evil.example.com"),
+            )
+            .expect("the key mints a canonical session");
+        assert_eq!(minted.user_id, "018f0ac4-1111-7000-8000-000000000001");
+        assert_eq!(minted.tenant_id, "tenant_mint");
+        assert_eq!(minted.return_to, "/dashboard", "off-origin return_to falls back");
+        assert!(
+            minted.cookie.starts_with("am_session="),
+            "the canonical cookie name: {}",
+            minted.cookie
+        );
+        for attribute in ["HttpOnly", "Path=/", "SameSite=Strict"] {
+            assert!(
+                minted.cookie.contains(attribute),
+                "cookie must carry {attribute}: {}",
+                minted.cookie
+            );
+        }
+
+        // The minted token decodes against the deployment's PUBLIC key with
+        // the canonical claim shape (sub/tenant_id/scopes/typ=session). The
+        // claims type itself is Serialize-only (it mints, it never accepts),
+        // so the test decodes into its own mirror.
+        #[derive(serde::Deserialize)]
+        struct MintedClaims {
+            sub: String,
+            tenant_id: String,
+            scopes: Vec<String>,
+            typ: Option<String>,
+        }
+        let token = minted
+            .cookie
+            .split(';')
+            .next()
+            .and_then(|pair| pair.strip_prefix("am_session="))
+            .expect("cookie carries the token");
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.required_spec_claims.clear();
+        validation.validate_exp = false;
+        let decoded = jsonwebtoken::decode::<MintedClaims>(
+            token,
+            &jsonwebtoken::DecodingKey::from_rsa_pem(JWT_TEST_PUBLIC_PEM.as_bytes())
+                .expect("public key"),
+            &validation,
+        )
+        .expect("the minted session JWT verifies");
+        assert_eq!(decoded.claims.sub, "018f0ac4-1111-7000-8000-000000000001");
+        assert_eq!(decoded.claims.tenant_id, "tenant_mint");
+        assert_eq!(decoded.claims.typ.as_deref(), Some("session"));
+        assert!(
+            decoded.claims.scopes.iter().any(|scope| scope == "*"),
+            "an admin role carries the admin scope set"
+        );
     }
 }

@@ -581,7 +581,9 @@ services:
   # DATABASE_URL / REDIS_URL from the DB_*/REDIS_* parts and bridges
   # CLICKHOUSE_PASSWORD for the (optional) GDPR erasure pass. In production
   # (NODE_ENV=production) the binary REFUSES an ephemeral AUDIT_SIGNING_KEY —
-  # the key comes from the audit_signing_key Docker secret.
+  # the key comes from the audit_signing_key Docker secret — and REFUSES
+  # missing COMPLIANCE_AUTH_TOKEN / SECRETS_ENCRYPTION_KEY (exit 78 /
+  # EX_CONFIG): both come from their Docker secrets, never ephemeral values.
   # Invoice PDF renderer — REQUIRED in production: billing-service points
   # at pdf-renderer:3004 (PDF_RENDERER_URL) and every invoice-creating path
   # (Stripe webhooks, admin invoices, the overage sweep) renders through it.
@@ -825,9 +827,10 @@ services:
   # (ha_health_checks) — the binary aborts at startup without it, so the
   # migrator MUST have run first (the pipeline guarantees this). The wrapper
   # bridges DB_PASSWORD / REDIS_PASSWORD / INTERNAL_API_KEY / ADMIN_API_KEY
-  # from the Docker secrets; without the API keys the service generates
-  # EPHEMERAL runtime keys (warned in logs) — mount the secrets for a real
-  # deployment.
+  # from the Docker secrets. All three credentials are REQUIRED in production
+  # (SEC fix): without INTERNAL_API_KEY / ADMIN_API_KEY / DB_PASSWORD the
+  # binary REFUSES to start (exit 78 / EX_CONFIG) instead of generating
+  # ephemeral runtime credentials — mount the secrets for a real deployment.
   ha:
     image: ghcr.io/sbelakho2/apexmail/ha:latest
     restart: unless-stopped
@@ -1983,8 +1986,9 @@ secrets:
   # HMAC key signing consent records/tokens.
   compliance_consent_signing_key:
     file: ${PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE:?PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE is required in production}
-  # ── HA service (crates/ha) API keys. Without them the service generates
-  # EPHEMERAL runtime keys and warns loudly; mount real ones in production.
+  # ── HA service (crates/ha) API keys. REQUIRED in production (SEC fix):
+  # under NODE_ENV=production the binary exits 78 (EX_CONFIG) without them —
+  # no ephemeral runtime keys are generated.
   ha_internal_api_key:
     file: ${PROD_HA_INTERNAL_API_KEY_FILE:-/opt/apexmail/secrets/ha_internal_api_key.txt}
   ha_admin_api_key:

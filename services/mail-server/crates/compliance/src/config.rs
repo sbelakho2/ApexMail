@@ -186,42 +186,90 @@ impl Default for DsarRateLimitConfig {
     }
 }
 
+/// Errors raised while loading [`ComplianceConfig`] from the environment.
+///
+/// Shape mirrors the workspace's audit convention (`api-server`'s
+/// `ConfigError`) so a missing production secret fails the same way in every
+/// service.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    #[error("missing required environment variable: {0}")]
+    MissingVar(String),
+    #[error("invalid value for {var}: {reason}")]
+    Invalid { var: String, reason: String },
+    #[error("production security check failed: {0}")]
+    SecurityCheck(String),
+}
+
 impl ComplianceConfig {
-    /// Load configuration from environment variables with sane defaults.
-    pub fn from_env() -> Self {
+    /// Load configuration from environment variables.
+    ///
+    /// SEC (external audit): an empty `COMPLIANCE_AUTH_TOKEN` /
+    /// `SECRETS_ENCRYPTION_KEY` used to be replaced by an ephemeral
+    /// `auto-*` value IN PRODUCTION. A regenerated encryption key made every
+    /// persisted encrypted secret unreadable after a restart, and a
+    /// regenerated auth token broke every dependent service's bearer token.
+    /// Production now REFUSES to start (this returns
+    /// [`ConfigError::MissingVar`]; the server binary exits 78 / EX_CONFIG)
+    /// when either variable is missing. Ephemeral generation happens in
+    /// development/test only, and is logged. The raw values are read BEFORE
+    /// anything is bound, so the production checks observe exactly what the
+    /// environment provided.
+    pub fn from_env() -> Result<Self, ConfigError> {
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
         let is_production =
             node_env.eq_ignore_ascii_case("production") || node_env.eq_ignore_ascii_case("prod");
 
-        let mut auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
-        let mut audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
-        let mut secrets_encryption_key = env_or("SECRETS_ENCRYPTION_KEY", "");
+        let raw_auth_token = env_or("COMPLIANCE_AUTH_TOKEN", "");
+        let raw_secrets_encryption_key = env_or("SECRETS_ENCRYPTION_KEY", "");
+        let raw_audit_signing_key = env_or("AUDIT_SIGNING_KEY", "");
 
-        if is_production {
-            if auth_token.trim().is_empty() {
-                auth_token = format!("auto-compliance-token-{}", Uuid::new_v4());
-                tracing::warn!(
-                    "SECURITY: COMPLIANCE_AUTH_TOKEN missing in production; generated an ephemeral runtime token (redacted)"
-                );
+        let (auth_token, secrets_encryption_key, audit_signing_key) = if is_production {
+            if raw_auth_token.trim().is_empty() {
+                return Err(ConfigError::MissingVar("COMPLIANCE_AUTH_TOKEN".into()));
             }
-            // I-4: an auto-generated audit signing key silently invalidates the
-            // hash-chain signatures on every restart. Either the key is
-            // provided, or it is generated ONCE and persisted to
-            // AUDIT_SIGNING_KEY_FILE; without a file path the service refuses
-            // to start in production (fail fast, documented).
-            if audit_signing_key.trim().is_empty() {
+            if raw_secrets_encryption_key.trim().is_empty() {
+                return Err(ConfigError::MissingVar("SECRETS_ENCRYPTION_KEY".into()));
+            }
+            // I-4 continuity contract (unchanged): an auto-generated audit
+            // signing key silently invalidates the hash-chain signatures on
+            // every restart. Either the key is provided, or it is generated
+            // ONCE and persisted to AUDIT_SIGNING_KEY_FILE; without a file
+            // path the service refuses to start (fail fast, documented).
+            let audit_signing_key = if raw_audit_signing_key.trim().is_empty() {
                 let key_file = env_or("AUDIT_SIGNING_KEY_FILE", "");
-                audit_signing_key = resolve_audit_signing_key(&key_file);
-            }
-            if secrets_encryption_key.trim().is_empty() {
-                secrets_encryption_key = format!("auto-secrets-key-{}", Uuid::new_v4());
+                resolve_audit_signing_key(&key_file)
+            } else {
+                raw_audit_signing_key
+            };
+            (
+                raw_auth_token,
+                raw_secrets_encryption_key,
+                audit_signing_key,
+            )
+        } else {
+            // Development/test: ephemeral values are acceptable — every
+            // restart rotates them — but they must be loud.
+            let auth_token = if raw_auth_token.trim().is_empty() {
                 tracing::warn!(
-                    "SECURITY: SECRETS_ENCRYPTION_KEY missing in production; generated an ephemeral runtime key (redacted)"
+                    "SECURITY: COMPLIANCE_AUTH_TOKEN missing in development; generated an ephemeral runtime token (redacted)"
                 );
-            }
-        }
+                format!("auto-compliance-token-{}", Uuid::new_v4())
+            } else {
+                raw_auth_token
+            };
+            let secrets_encryption_key = if raw_secrets_encryption_key.trim().is_empty() {
+                tracing::warn!(
+                    "SECURITY: SECRETS_ENCRYPTION_KEY missing in development; generated an ephemeral runtime key (redacted)"
+                );
+                format!("auto-secrets-key-{}", Uuid::new_v4())
+            } else {
+                raw_secrets_encryption_key
+            };
+            (auth_token, secrets_encryption_key, raw_audit_signing_key)
+        };
 
-        Self {
+        Ok(Self {
             port: env_or("COMPLIANCE_PORT", "3011").parse().unwrap_or(3011),
             database_url: env_or(
                 "DATABASE_URL",
@@ -337,7 +385,7 @@ impl ComplianceConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-        }
+        })
     }
 }
 
@@ -411,7 +459,9 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let cfg = ComplianceConfig::from_env();
+        // SEC fix: from_env is fallible now (production refuses ephemeral
+        // secrets); the default development test environment must still load.
+        let cfg = ComplianceConfig::from_env().expect("config loads in development");
         assert_eq!(cfg.port, 3011);
         assert_eq!(cfg.risk.weights.phishing_detection, 2.0);
         assert_eq!(cfg.risk.base_limits.max_daily_emails, 10_000);
@@ -472,5 +522,175 @@ mod tests {
     #[should_panic(expected = "AUDIT_SIGNING_KEY")]
     fn test_audit_signing_key_fails_fast_without_file() {
         let _ = resolve_audit_signing_key("");
+    }
+
+    // ── SEC: production refuses ephemeral auth/encryption secrets ──
+
+    /// Env helper: nextest runs every test in its own process, so process-env
+    /// mutations here are deterministic; the module only touches the
+    /// variables named in these tests.
+    fn set_env(name: &str, value: &str) {
+        std::env::set_var(name, value);
+    }
+
+    fn unset_env(name: &str) {
+        std::env::remove_var(name);
+    }
+
+    /// Captures `tracing` output emitted inside `f` with a SCOPED subscriber
+    /// (no global default installed — deterministic under nextest and plain
+    /// `cargo test` alike).
+    struct TestLogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for TestLogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs(f: impl FnOnce()) -> String {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&buffer);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || TestLogSink(std::sync::Arc::clone(&sink)))
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let captured = buffer.lock().expect("log sink lock").clone();
+        String::from_utf8(captured).expect("captured logs are utf-8")
+    }
+
+    /// Production + missing COMPLIANCE_AUTH_TOKEN → from_env errs with a
+    /// message naming the variable (before any ephemeral value is bound).
+    #[test]
+    fn test_production_missing_auth_token_is_refused() {
+        set_env("NODE_ENV", "production");
+        unset_env("COMPLIANCE_AUTH_TOKEN");
+        set_env(
+            "SECRETS_ENCRYPTION_KEY",
+            "prod-secrets-key-0123456789abcdef",
+        );
+        set_env(
+            "AUDIT_SIGNING_KEY",
+            "prod-audit-signing-key-0123456789abcdef",
+        );
+
+        let err = ComplianceConfig::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+        assert!(
+            err.to_string().contains("COMPLIANCE_AUTH_TOKEN"),
+            "error must name the missing variable, got: {err}"
+        );
+    }
+
+    /// Production + missing SECRETS_ENCRYPTION_KEY → same refusal, naming the
+    /// variable. A generated key here would make every persisted encrypted
+    /// secret unreadable after a restart.
+    #[test]
+    fn test_production_missing_secrets_encryption_key_is_refused() {
+        set_env("NODE_ENV", "production");
+        set_env("COMPLIANCE_AUTH_TOKEN", "prod-auth-token");
+        unset_env("SECRETS_ENCRYPTION_KEY");
+        set_env(
+            "AUDIT_SIGNING_KEY",
+            "prod-audit-signing-key-0123456789abcdef",
+        );
+
+        let err = ComplianceConfig::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::MissingVar(_)));
+        assert!(
+            err.to_string().contains("SECRETS_ENCRYPTION_KEY"),
+            "error must name the missing variable, got: {err}"
+        );
+    }
+
+    /// Whitespace-only values count as missing (the trim contract the old
+    /// generation path also used).
+    #[test]
+    fn test_production_whitespace_only_secrets_are_refused() {
+        set_env("NODE_ENV", "production");
+        set_env("COMPLIANCE_AUTH_TOKEN", "   ");
+        set_env("SECRETS_ENCRYPTION_KEY", "\t");
+        set_env(
+            "AUDIT_SIGNING_KEY",
+            "prod-audit-signing-key-0123456789abcdef",
+        );
+
+        let err = ComplianceConfig::from_env().unwrap_err();
+        assert!(
+            err.to_string().contains("COMPLIANCE_AUTH_TOKEN"),
+            "error must name the first missing variable, got: {err}"
+        );
+    }
+
+    /// Production + explicit values → loaded verbatim; nothing is generated
+    /// or replaced.
+    #[test]
+    fn test_production_explicit_secrets_are_used_verbatim() {
+        set_env("NODE_ENV", "production");
+        set_env("COMPLIANCE_AUTH_TOKEN", "explicit-prod-token");
+        set_env("SECRETS_ENCRYPTION_KEY", "explicit-prod-encryption-key");
+        set_env("AUDIT_SIGNING_KEY", "explicit-prod-audit-key");
+
+        let cfg = ComplianceConfig::from_env()
+            .expect("production config with explicit secrets must load");
+        assert_eq!(cfg.auth_token, "explicit-prod-token");
+        assert_eq!(cfg.secrets.encryption_key, "explicit-prod-encryption-key");
+        assert_eq!(cfg.audit.signing_key, "explicit-prod-audit-key");
+    }
+
+    /// Development + missing values → ephemeral generation works AND is
+    /// logged (both values, both warnings).
+    #[test]
+    fn test_development_missing_secrets_generate_ephemeral_and_are_logged() {
+        set_env("NODE_ENV", "development");
+        unset_env("COMPLIANCE_AUTH_TOKEN");
+        unset_env("SECRETS_ENCRYPTION_KEY");
+
+        let logs = capture_logs(|| {
+            let cfg = ComplianceConfig::from_env().expect("development config must load");
+            assert!(
+                cfg.auth_token.starts_with("auto-compliance-token-"),
+                "ephemeral token expected, got: {}",
+                cfg.auth_token
+            );
+            assert!(
+                cfg.secrets.encryption_key.starts_with("auto-secrets-key-"),
+                "ephemeral key expected, got: {}",
+                cfg.secrets.encryption_key
+            );
+        });
+        assert!(
+            logs.contains("COMPLIANCE_AUTH_TOKEN"),
+            "token generation must be logged, got: {logs}"
+        );
+        assert!(
+            logs.contains("SECRETS_ENCRYPTION_KEY"),
+            "key generation must be logged, got: {logs}"
+        );
+    }
+
+    /// Pins the generated-vs-required transition: the SAME missing variables
+    /// yield an ephemeral value in development and a hard error in production.
+    #[test]
+    fn test_generated_vs_required_transition_is_pinned_by_environment() {
+        unset_env("COMPLIANCE_AUTH_TOKEN");
+        unset_env("SECRETS_ENCRYPTION_KEY");
+
+        set_env("NODE_ENV", "development");
+        let dev = ComplianceConfig::from_env().expect("development generates ephemeral values");
+        assert!(dev.auth_token.starts_with("auto-compliance-token-"));
+        assert!(dev.secrets.encryption_key.starts_with("auto-secrets-key-"));
+
+        set_env("NODE_ENV", "production");
+        let prod_err = ComplianceConfig::from_env().unwrap_err();
+        assert!(
+            prod_err.to_string().contains("COMPLIANCE_AUTH_TOKEN"),
+            "production refuses the first missing variable, got: {prod_err}"
+        );
     }
 }

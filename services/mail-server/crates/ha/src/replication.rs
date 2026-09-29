@@ -351,7 +351,7 @@ mod tests {
             .unwrap()
     }
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_env())
+        Arc::new(Config::from_env().expect("HA config must load in development"))
     }
 
     #[test]

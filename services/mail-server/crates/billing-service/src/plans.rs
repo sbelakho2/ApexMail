@@ -1405,6 +1405,7 @@ mod coverage_adversarial {
     }
 
     async fn provision(test_name: &str) -> Option<Env> {
+        crate::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let url = std::env::var("TEST_DATABASE_URL")
             .ok()
             .map(|value| value.trim().to_string())

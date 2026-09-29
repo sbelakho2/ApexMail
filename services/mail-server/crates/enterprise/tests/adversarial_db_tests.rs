@@ -1998,7 +1998,7 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
                 "provider_type": "saml",
                 "domain": domain,
                 "enabled": true,
-                "entity_id": "urn:adv:idp",
+                "idp_entity_id": "urn:adv:idp",
                 "sso_url": "https://idp.example.com/sso",
                 "certificate": "not-a-certificate"
             })),
@@ -2101,13 +2101,22 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
 
         // A session created for a configured SSO config validates and then can
         // be cleaned up when expired.
+        let config = sso
+            .get_config_by_domain(&domain)
+            .await
+            .expect("config by domain")
+            .expect("configured domain");
+        let sso_email = format!("alice-{}@sso.example.com", Uuid::new_v4().simple());
         let callback = sso
             .handle_saml_callback(
-                &tenant,
-                "alice@sso.example.com",
-                Some("Alice"),
-                "ext-1",
-                None,
+                &config,
+                enterprise::sso::FederationIdentity {
+                    email: &sso_email,
+                    display_name: Some("Alice"),
+                    external_user_id: "ext-1",
+                    groups: None,
+                    attributes: None,
+                },
                 None,
             )
             .await
@@ -2123,8 +2132,8 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        sqlx::query("UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE session_token=$1")
-            .bind(&callback.session.session_token)
+        sqlx::query("UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id=$1")
+            .bind(&tenant)
             .execute(&h.db)
             .await
             .unwrap();
@@ -2481,11 +2490,11 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
 
         // Replay: the same assertion id is consumed exactly once.
         let replay_id = new_id();
-        sso.validate_saml_assertion_claims(&tenant, &replay_id, None, Some(in_5_min), now)
+        sso.validate_saml_assertion_claims(&tenant, &replay_id, None, in_5_min, now)
             .await
             .expect("first use of an assertion id is accepted");
         let error = sso
-            .validate_saml_assertion_claims(&tenant, &replay_id, None, Some(in_5_min), now)
+            .validate_saml_assertion_claims(&tenant, &replay_id, None, in_5_min, now)
             .await
             .expect_err("a replayed assertion must be refused");
         assert!(
@@ -2495,7 +2504,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
 
         // The replay store is scoped to the configured tenant: the same id is
         // still fresh for another tenant.
-        sso.validate_saml_assertion_claims(&other_tenant, &replay_id, None, Some(in_5_min), now)
+        sso.validate_saml_assertion_claims(&other_tenant, &replay_id, None, in_5_min, now)
             .await
             .expect("replay ids are tenant-scoped");
 
@@ -2504,7 +2513,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
             &tenant,
             &new_id(),
             Some(now + chrono::TimeDelta::try_seconds(60).unwrap()),
-            Some(in_5_min),
+            in_5_min,
             now,
         )
         .await
@@ -2514,7 +2523,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
                 &tenant,
                 &new_id(),
                 Some(now + chrono::TimeDelta::try_minutes(10).unwrap()),
-                Some(in_5_min),
+                in_5_min,
                 now,
             )
             .await
@@ -2529,7 +2538,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
             &tenant,
             &new_id(),
             None,
-            Some(now - chrono::TimeDelta::try_seconds(60).unwrap()),
+            now - chrono::TimeDelta::try_seconds(60).unwrap(),
             now,
         )
         .await
@@ -2539,7 +2548,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
                 &tenant,
                 &new_id(),
                 None,
-                Some(now - chrono::TimeDelta::try_minutes(10).unwrap()),
+                now - chrono::TimeDelta::try_minutes(10).unwrap(),
                 now,
             )
             .await
@@ -2551,7 +2560,7 @@ fn saml_assertion_replay_and_clock_skew_are_enforced() {
 
         // An assertion with no ID cannot be replay-protected → fail closed.
         let error = sso
-            .validate_saml_assertion_claims(&tenant, "", None, Some(in_5_min), now)
+            .validate_saml_assertion_claims(&tenant, "", None, in_5_min, now)
             .await
             .expect_err("an id-less assertion must be refused");
         assert!(

@@ -16,7 +16,8 @@
 use chrono::{TimeDelta, Utc};
 use enterprise::config::Config;
 use enterprise::sso::{
-    generate_pkce_challenge, generate_pkce_verifier, generate_random_token, SSOService,
+    generate_pkce_challenge, generate_pkce_verifier, generate_random_token, FederationIdentity,
+    SSOService,
 };
 use enterprise::types::*;
 use uuid::Uuid;
@@ -175,6 +176,7 @@ fn integration_sso_callback_result_serde() {
                 expires_at: Utc::now() + TimeDelta::try_hours(8).unwrap(),
             },
             is_new_user: is_new,
+            canonical: None,
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["is_new_user"], serde_json::Value::Bool(is_new));
@@ -191,7 +193,7 @@ fn integration_sso_configure_request_all_fields() {
         provider_type: "oidc".into(),
         domain: "company.com".into(),
         enabled: Some(true),
-        entity_id: Some("urn:company:okta".into()),
+        idp_entity_id: Some("urn:company:okta".into()),
         sso_url: Some("https://company.okta.com/sso".into()),
         certificate: Some(TEST_IDP_CERT_B64.into()),
         oidc_client_id: Some("0oa12345".into()),
@@ -223,7 +225,7 @@ fn integration_sso_configure_request_minimal() {
         provider_type: "saml".into(),
         domain: "example.com".into(),
         enabled: None,
-        entity_id: None,
+        idp_entity_id: None,
         sso_url: None,
         certificate: None,
         oidc_client_id: None,
@@ -253,7 +255,7 @@ fn integration_sso_configuration_serde() {
         enabled: true,
         domain: "mycorp.com".into(),
         metadata_url: Some("https://mycorp.com/sso/metadata".into()),
-        entity_id: Some("urn:mycorp:saml".into()),
+        idp_entity_id: Some("urn:mycorp:saml".into()),
         sso_url: Some("https://mycorp.okta.com/sso".into()),
         slo_url: Some("https://mycorp.okta.com/slo".into()),
         certificate: Some(TEST_IDP_CERT_B64.into()),
@@ -291,12 +293,14 @@ fn integration_oidc_state_data_construct() {
         code_verifier: "abc".into(),
         domain: "example.com".into(),
         tenant_id: Some("t1".into()),
+        return_to: None,
     };
     assert_eq!(with_tenant.tenant_id, Some("t1".into()));
 
     let without_tenant = OidcStateData {
         code_verifier: "xyz".into(),
         domain: "other.com".into(),
+        return_to: None,
         tenant_id: None,
     };
     assert!(without_tenant.tenant_id.is_none());
@@ -376,6 +380,22 @@ async fn setup_sso_service(test_name: &str) -> Option<(SSOService, sqlx::PgPool)
     Some((SSOService::new(pool.clone(), config), pool))
 }
 
+/// Seed the tenants row a generated test tenant id needs before the SSO
+/// callback can provision a canonical `users` row (`users_tenant_id_fkey`).
+async fn seed_sso_tenant(pool: &sqlx::PgPool, tenant: &str) {
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tenant)
+    .bind(format!("SSO Integration Tenant {tenant}"))
+    .bind(format!("sso-int-{tenant}"))
+    .execute(pool)
+    .await
+    .expect("seed SSO tenant");
+}
+
 #[tokio::test]
 async fn integration_full_saml_login_flow() {
     // Full SAML login flow:
@@ -386,12 +406,13 @@ async fn integration_full_saml_login_flow() {
     // 5. Validate session token
     //
     // Requires a running test database.
-    let Some((service, _pool)) = setup_sso_service("integration_full_saml_login_flow").await else {
+    let Some((service, pool)) = setup_sso_service("integration_full_saml_login_flow").await else {
         eprintln!("skipping integration_full_saml_login_flow: set TEST_DATABASE_URL");
         return;
     };
     let tenant_id = test_tenant("t_saml");
     let domain = "test-saml.example.com";
+    seed_sso_tenant(&pool, &tenant_id).await;
 
     // 1. Configure SAML
     let config = service
@@ -400,7 +421,7 @@ async fn integration_full_saml_login_flow() {
             provider_type: "saml".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:test".into()),
+            idp_entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
             certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
@@ -418,7 +439,7 @@ async fn integration_full_saml_login_flow() {
 
     // 2. Initiate SAML login
     let redirect = service
-        .initiate_saml_login(domain)
+        .initiate_saml_login(domain, None)
         .await
         .expect("Initiate SAML login")
         .data
@@ -469,13 +490,21 @@ async fn integration_full_saml_login_flow() {
     );
 
     // 4. Handle SAML callback (create session)
+    let config = service
+        .get_config_by_domain(domain)
+        .await
+        .expect("config by domain")
+        .expect("configured domain");
     let callback = service
         .handle_saml_callback(
-            &tenant_id,
-            "alice@test-saml.example.com",
-            Some("Alice"),
-            "ext-alice-001",
-            None,
+            &config,
+            FederationIdentity {
+                email: "alice@test-saml.example.com",
+                display_name: Some("Alice"),
+                external_user_id: "ext-alice-001",
+                groups: None,
+                attributes: None,
+            },
             None,
         )
         .await
@@ -502,33 +531,41 @@ async fn integration_full_saml_login_flow() {
 #[tokio::test]
 async fn integration_full_oidc_login_flow() {
     // Full OIDC login flow:
-    // 1. Configure OIDC for a tenant
-    // 2. Initiate OIDC login (get auth URL with PKCE params)
+    // 1. Configure OIDC for a tenant against an in-process mock IdP
+    // 2. Initiate OIDC login (the authorize URL comes from DISCOVERY's —
+    //    deliberately nonstandard — authorization_endpoint, audit P3-10)
     // 3. Validate OIDC state
     // 4. Handle OIDC callback (create session)
     // 5. Validate session token
     //
     // Requires a running test database and Redis.
-    let Some((service, _pool)) = setup_sso_service("integration_full_oidc_login_flow").await else {
+    let Some((service, pool)) = setup_sso_service("integration_full_oidc_login_flow").await else {
         eprintln!("skipping integration_full_oidc_login_flow: set TEST_DATABASE_URL");
         return;
     };
     let tenant_id = test_tenant("t_oidc");
     let domain = "test-oidc.example.com";
+    seed_sso_tenant(&pool, &tenant_id).await;
+    // The federation egress guard admits the loopback mock (audit P3-9 test
+    // infrastructure only).
+    if std::env::var("SSO_FEDERATION_ALLOWLIST").is_err() {
+        std::env::set_var("SSO_FEDERATION_ALLOWLIST", "127.0.0.1");
+    }
+    let issuer = spawn_mock_oidc_discovery().await;
 
-    // 1. Configure OIDC
+    // 1. Configure OIDC against the mock issuer
     let config = service
         .configure(SSOConfigureRequest {
             tenant_id: tenant_id.clone(),
             provider_type: "oidc".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:test".into()),
+            idp_entity_id: Some("urn:apexmail:test".into()),
             sso_url: None,
             certificate: None,
             oidc_client_id: Some("test-client-id".into()),
             oidc_client_secret: Some("test-client-secret".into()),
-            oidc_issuer: Some("https://test-idp.example.com".into()),
+            oidc_issuer: Some(issuer.clone()),
             attribute_mapping: Some(serde_json::json!({
                 "email": "email",
                 "name": "name",
@@ -541,15 +578,23 @@ async fn integration_full_oidc_login_flow() {
 
     assert!(config.success);
 
-    // 2. Initiate OIDC login (will use DB fallback since no Redis)
+    // 2. Initiate OIDC login (DB fallback since no Redis)
     let redirect = service
-        .initiate_oidc_login(domain)
+        .initiate_oidc_login(domain, None)
         .await
         .expect("Initiate OIDC login")
         .data
         .expect("Should get redirect");
 
-    assert!(redirect.redirect_url.contains("/authorize?"));
+    // The authorize URL is DISCOVERY's nonstandard authorization_endpoint —
+    // never a hardcoded `{issuer}/authorize`.
+    assert!(
+        redirect
+            .redirect_url
+            .starts_with(&format!("{issuer}/oidc-auth-nonstandard?")),
+        "the authorize URL must come from discovery's authorization_endpoint: {}",
+        redirect.redirect_url
+    );
     assert!(redirect.redirect_url.contains("client_id="));
     assert!(redirect.redirect_url.contains("response_type=code"));
     assert!(redirect.redirect_url.contains("code_challenge="));
@@ -571,13 +616,22 @@ async fn integration_full_oidc_login_flow() {
     assert!(redirect.redirect_url.contains(&expected_challenge));
 
     // 4. Handle OIDC callback (mock token exchange → create session)
+    let config = service
+        .get_config_by_domain(domain)
+        .await
+        .expect("config by domain")
+        .expect("configured domain");
     let callback = service
         .handle_oidc_callback(
-            &tenant_id,
-            "bob@test-oidc.example.com",
-            Some("Bob"),
-            "ext-bob-001",
-            Some(serde_json::json!(["admin", "users"])),
+            &config,
+            FederationIdentity {
+                email: "bob@test-oidc.example.com",
+                display_name: Some("Bob"),
+                external_user_id: "ext-bob-001",
+                groups: Some(serde_json::json!(["admin", "users"])),
+                attributes: None,
+            },
+            None,
         )
         .await
         .expect("Handle OIDC callback")
@@ -603,6 +657,42 @@ async fn integration_full_oidc_login_flow() {
     assert_eq!(session.provider_type, "oidc");
 }
 
+/// A minimal in-process OIDC discovery IdP for this test binary: bound on
+/// 127.0.0.1 over plain HTTP (admitted via `SSO_FEDERATION_ALLOWLIST`),
+/// advertising a NONSTANDARD authorization_endpoint so the tests prove the
+/// authorize URL comes from discovery (audit P3-10).
+async fn spawn_mock_oidc_discovery() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock idp");
+    let port = listener.local_addr().expect("mock idp addr").port();
+    let issuer = format!("http://127.0.0.1:{port}");
+    let discovery = serde_json::json!({
+        "issuer": issuer,
+        "authorization_endpoint": format!("{issuer}/oidc-auth-nonstandard"),
+        "token_endpoint": format!("{issuer}/oidc-token"),
+        "jwks_uri": format!("{issuer}/oidc-jwks"),
+    });
+    let body = serde_json::to_string(&discovery).expect("serialize discovery");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(_) => break,
+            };
+            use std::io::{Read as _, Write as _};
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    issuer
+}
+
 #[tokio::test]
 async fn integration_session_expiry() {
     // A session that has outlived its duration must stop validating. The test
@@ -618,6 +708,7 @@ async fn integration_session_expiry() {
     };
     let tenant_id = test_tenant("t_expiry");
     let domain = "test-expiry.example.com";
+    seed_sso_tenant(&pool, &tenant_id).await;
 
     service
         .configure(SSOConfigureRequest {
@@ -625,7 +716,7 @@ async fn integration_session_expiry() {
             provider_type: "saml".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:test".into()),
+            idp_entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
             certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
@@ -638,13 +729,21 @@ async fn integration_session_expiry() {
         .await
         .expect("Configure");
 
+    let config = service
+        .get_config_by_domain(domain)
+        .await
+        .expect("config by domain")
+        .expect("configured domain");
     let callback = service
         .handle_saml_callback(
-            &tenant_id,
-            "expired@test.com",
-            Some("Expired User"),
-            "ext-expired-001",
-            None,
+            &config,
+            FederationIdentity {
+                email: "expired@test.com",
+                display_name: Some("Expired User"),
+                external_user_id: "ext-expired-001",
+                groups: None,
+                attributes: None,
+            },
             None,
         )
         .await
@@ -665,9 +764,9 @@ async fn integration_session_expiry() {
     // Simulate the session's hour having elapsed.
     sqlx::query(
         "UPDATE ent_sso_sessions SET expires_at = NOW() - interval '1 minute' \
-         WHERE session_token = $1",
+         WHERE tenant_id = $1",
     )
-    .bind(&session_token)
+    .bind(&tenant_id)
     .execute(&pool)
     .await
     .expect("expire the session");
@@ -702,7 +801,7 @@ async fn integration_saml_rejects_expired_assertion() {
             provider_type: "saml".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:test".into()),
+            idp_entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
             certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
@@ -774,7 +873,7 @@ async fn integration_saml_rejects_issuer_mismatch() {
             provider_type: "saml".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:correct-id".into()),
+            idp_entity_id: Some("urn:apexmail:correct-id".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
             certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
@@ -847,7 +946,7 @@ async fn integration_saml_rejects_audience_mismatch() {
             provider_type: "saml".into(),
             domain: domain.into(),
             enabled: Some(true),
-            entity_id: Some("urn:apexmail:test".into()),
+            idp_entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
             certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
@@ -911,7 +1010,7 @@ async fn integration_saml_not_configured_for_domain() {
     };
     let unknown_domain = "unknown.example.com";
 
-    let result = service.initiate_saml_login(unknown_domain).await;
+    let result = service.initiate_saml_login(unknown_domain, None).await;
     assert!(
         result.is_ok(),
         "Should return OK with error result, not fail"
