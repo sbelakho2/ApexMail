@@ -1,6 +1,6 @@
 +++
 title = "E-Mail-Lösung für SaaS-Plattformen"
-description = "Multi-Tenant-E-Mail-Infrastruktur für B2B- und B2C-SaaS. Tenant-Isolation, Domain-Isolation, RBAC, SSO (in aktiver Entwicklung — noch nicht verfügbar) und White-Label-Zustellung."
+description = "Multi-Tenant-E-Mail-Infrastruktur für B2B- und B2C-SaaS. Tenant-Isolation, Domain-Isolation, RBAC, SSO und White-Label-Zustellung."
 template = "prose.html"
 +++
 
@@ -28,7 +28,7 @@ Plattformen, die für Kunden E-Mails senden, erben das Reputationsrisiko jedes e
 - **Tenant-Isolation** — Jeder Tenant erhält eigene Domains, API-Keys, Webhook-Endpunkte mit HMAC-Geheimnissen je Tenant, Suppressionslisten, dedizierte IPs und Ereignisströme.
 - **Domain-Isolation** — Domain-Verifizierung und -Authentifizierung (SPF, DKIM, DMARC) pro Tenant verhindert Reputations-Kreuzkontamination.
 - **Benutzerdefiniertes RBAC** — Admin-Rollen auf Plattform- und Tenant-Ebene sowie Nur-Lese-Rollen. SCIM-Provisioning ab Enterprise.
-- **SSO** — SAML 2.0/OIDC Single Sign-On für Plattform-Betreiber und Tenant-Administratoren ist in aktiver Entwicklung — noch nicht verfügbar.
+- **SSO** — SAML 2.0 für Plattform-Betreiber und Tenant-Administratoren.
 - **Nutzungskontingente** — Harte und weiche Limits pro Tenant für Volumen, Rate und Parallelität.
 - **White-Label** — Entfernen Sie das ApexMail-Branding aus Dashboards, E-Mail-Fußzeilen und Benachrichtigungsvorlagen.
 

@@ -28,7 +28,7 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 ### Authentication
 
 - **Password requirements**: Minimum 12 characters; must include uppercase, lowercase, digit, and special character. Passwords are hashed with Argon2id (memory=19456 KiB, iterations=2, parallelism=1). Breached-password checking via k-anonymity API.
-- **MFA availability**: TOTP-based two-factor authentication (2FA) is available for all accounts. Single sign-on via SAML/OIDC is in active development — not yet available. [roadmap] WebAuthn/FIDO2 is planned.
+- **MFA availability**: TOTP-based two-factor authentication (2FA) is available for all accounts. SSO/SAML integration is available on Enterprise plans. WebAuthn/FIDO2 is planned.
 - **Social login**: Google OAuth 2.0 and GitHub OAuth are supported for dashboard authentication.
 - **Session duration**: Dashboard sessions expire after 24 hours of inactivity. API sessions are token-based with configurable expiry. Absolute maximum session lifetime is 7 days, after which re-authentication is required.
 - **Session revocation**: Users can revoke all active sessions from the dashboard security settings page. Administrative session revocation is available to account owners. Sessions are automatically revoked on password change, role change, or account suspension.

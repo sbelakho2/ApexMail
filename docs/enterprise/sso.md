@@ -1,15 +1,14 @@
 # Single Sign-On (SSO)
 
-> **Status: in active development — NOT YET AVAILABLE.**
-> Single sign-on (SAML/OIDC) cannot be used today: the SAML and OIDC login
-> endpoints deliberately return `501 Not Implemented`
-> (`services/mail-server/crates/enterprise/src/routes.rs`, "Fix G (dead
-> ACS)") and no ACS/callback route is wired, so login cannot complete. This
-> page documents the **target-state design** — configuration storage and the
-> SCIM directory already exist, but nothing below is a usable, supported
-> workflow until this banner is removed.
-
 ApexMail supports enterprise Single Sign-On through both SAML 2.0 and OpenID Connect (OIDC) protocols.
+
+> **Status: available.** Both flows are wired end-to-end in the enterprise
+> service (`services/mail-server/crates/enterprise`): SP-initiated SAML with a
+> full Assertion Consumer Service, and OIDC authorization-code login with PKCE,
+> discovery, and JWKS-backed id_token validation. Every step is covered by
+> router-level end-to-end tests (`routes::tests::saml_sso_completes_end_to_end_through_the_router`,
+> `routes::tests::oidc_sso_completes_end_to_end_through_the_router`) and the
+> signed-assertion coverage in `crates/enterprise/src/sso.rs`.
 
 ## Overview
 
@@ -19,6 +18,14 @@ SSO allows your organization to:
 - Enforce your organization's authentication policies
 - Automatically provision and deprovision users
 - Enable Multi-Factor Authentication (MFA) through your IdP
+
+Every assertion / id_token is validated before a session is issued: XML-DSig
+signature against your IdP's configured certificate, issuer and audience
+checks, the assertion validity window with bounded clock skew, a per-tenant
+replay guard for SAML, and (for OIDC) RS256-only verification against the
+IdP's published JWKS with issuer, audience, and expiry checks. Sessions are
+stored server-side with a configurable lifetime and can be swept with the
+cleanup endpoint.
 
 ## Supported Identity Providers
 
@@ -43,95 +50,107 @@ SSO allows your organization to:
 
 ### SAML Setup
 
-1. **Get ApexMail SAML Metadata**
+1. **Get ApexMail's service-provider values**
 
-```bash
-curl https://enterprise.apexmail.ee/sso/saml/metadata/{account_id}
-```
+ApexMail acts as the SP. Give your IdP these values (the defaults are
+environment-driven — see `SAML_ENTITY_ID` / `SAML_ACS_URL` in
+`.env.production.example`):
 
-Response:
-```xml
-<?xml version="1.0"?>
-<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" 
-                  entityID="https://api.apexmail.ee/saml/{account_id}">
-  <SPSSODescriptor>
-    <AssertionConsumerService 
-      Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
-      Location="https://enterprise.apexmail.ee/sso/saml/callback"/>
-  </SPSSODescriptor>
-</EntityDescriptor>
-```
+- **SP Entity ID**: `urn:apexmail:enterprise` (the `SAML_ENTITY_ID` default)
+- **ACS URL**: `https://enterprise.apexmail.ee/sso/acs/{your-domain}`
+  (the domain you will initiate logins for; a domain-less variant at
+  `https://enterprise.apexmail.ee/sso/acs` resolves your domain from the
+  RelayState, which the login initiation sets)
+- **Binding**: HTTP-POST
 
 2. **Configure Your IdP**
 
 Add ApexMail as a SAML application in your IdP with:
-- **ACS URL**: `https://enterprise.apexmail.ee/sso/saml/callback`
-- **Entity ID**: `https://api.apexmail.ee/saml/{account_id}`
+- **Entity ID / Issuer**: your IdP's entity ID (e.g. `https://idp.yourcompany.com/metadata`)
 - **Name ID Format**: Email address
+- **Attribute statements**: `email`, `group` (optional), `displayName` (optional)
 
 3. **Upload IdP Metadata to ApexMail**
 
 ```bash
 curl -X POST https://enterprise.apexmail.ee/sso/configure \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "accountId": "acc_xxx",
-    "provider": "saml",
-    "ssoEnabled": true,
-    "samlConfig": {
-      "entryPoint": "https://your-idp.com/saml/sso",
-      "certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-      "issuer": "https://your-idp.com"
-    },
-    "allowedDomains": ["yourcompany.com"],
-    "defaultRole": "member",
-    "autoProvision": true
+    "tenant_id": "your_tenant_id",
+    "provider_type": "saml",
+    "domain": "yourcompany.com",
+    "enabled": true,
+    "entity_id": "https://idp.yourcompany.com/metadata",
+    "sso_url": "https://idp.yourcompany.com/sso",
+    "certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+    "enforce_sso": true,
+    "session_duration_hours": 8
   }'
 ```
+
+4. **Log in**
+
+Point the browser at `GET /sso/login/saml/yourcompany.com`. ApexMail builds
+the AuthnRequest and redirects to your IdP with the tenant domain in
+`RelayState`. Your IdP posts the signed response to the ACS
+(`POST /sso/acs/{domain}`), where the assertion is verified and a session is
+issued.
 
 ### OIDC Setup
 
 1. **Register ApexMail in Your IdP**
 
 Create an OIDC application with:
-- **Redirect URI**: `https://enterprise.apexmail.ee/sso/oidc/callback`
-- **Scopes**: `openid email profile`
+- **Redirect URI**: `https://enterprise.apexmail.ee/sso/callback/oidc/your-domain`
+  (a domain-less variant at `.../sso/callback/oidc` takes the domain from the
+  single-use state — set `OIDC_REDIRECT_URI` to whichever shape you register)
+- **Scopes**: `openid email profile` (the `OIDC_SCOPES` default)
 
 2. **Configure ApexMail**
 
 ```bash
 curl -X POST https://enterprise.apexmail.ee/sso/configure \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "accountId": "acc_xxx",
-    "provider": "oidc",
-    "ssoEnabled": true,
-    "oidcConfig": {
-      "issuer": "https://your-idp.com",
-      "clientId": "your-client-id",
-      "clientSecret": "your-client-secret"
-    },
-    "allowedDomains": ["yourcompany.com"],
-    "defaultRole": "member",
-    "autoProvision": true
+    "tenant_id": "your_tenant_id",
+    "provider_type": "oidc",
+    "domain": "yourcompany.com",
+    "enabled": true,
+    "oidc_client_id": "your-client-id",
+    "oidc_client_secret": "your-client-secret",
+    "oidc_issuer": "https://idp.yourcompany.com",
+    "enforce_sso": true
   }'
 ```
+
+The client secret is encrypted at rest with the deployment's
+`SSO_ENCRYPTION_KEY` and never returned by the API.
+
+3. **Log in**
+
+Point the browser at `GET /sso/login/oidc/yourcompany.com`. ApexMail stages a
+single-use `state` plus a PKCE `code_verifier` (S256 challenge) and redirects
+to your IdP's authorize endpoint. Your IdP redirects back to the callback with
+the code; ApexMail discovers the token endpoint from
+`{issuer}/.well-known/openid-configuration`, exchanges the code with the
+persisted verifier, validates the `id_token` against your IdP's JWKS, and
+issues the session.
 
 ## User Provisioning
 
 ### Auto-Provisioning
 
-When enabled, users are automatically created on first SSO login:
+Users are provisioned automatically on first SSO login: the validated
+identity (SAML NameID/attributes or the id_token's `sub`/`email`/`name`
+claims) creates the SSO session record, and the callback response reports
+`is_new_user: true` for the first login of an external user id. Subsequent
+logins for the same user are recognized as returning users.
 
-```json
-{
-  "autoProvision": true,
-  "defaultRole": "member",
-  "allowedDomains": ["yourcompany.com"]
-}
-```
+The `domain` configured on the tenant's SSO row scopes which email domain
+logs in through which IdP; the login is initiated per domain
+(`/sso/login/saml/{domain}`, `/sso/login/oidc/{domain}`).
 
 ### SCIM Provisioning
 
@@ -181,26 +200,27 @@ sequenceDiagram
 
 ### Session Lifetime
 
-Configure session settings per account:
+Sessions are stored server-side and expire after the configured per-tenant
+duration. Pass `session_duration_hours` in the `/sso/configure` body
+(the default is 8):
 
 ```json
 {
-  "sessionLifetime": 28800,
-  "requireMFA": true,
-  "allowPasswordFallback": false
+  "session_duration_hours": 8
 }
 ```
+
+Validate a session at any time with `GET /sso/validate` (bearer session
+token); expired sessions fail validation and are removed by the cleanup sweep
+(`POST /sso/cleanup`, admin token required).
 
 ### Single Logout (SLO)
 
-For SAML, ApexMail supports Single Logout:
-
-```bash
-POST /enterprise/v1/sso/logout
-{
-  "sessionId": "sess_xxx"
-}
-```
+[roadmap] SAML single logout is not part of the login flows today. A SLO
+endpoint (the `SAML_SLO_URL` deployment setting already exists) and
+per-session revocation are planned; sessions currently expire per the
+configured lifetime, and enforced tenants keep `enforce_sso` on so password
+fallback stays disabled.
 
 ## Security Best Practices
 
@@ -226,27 +246,35 @@ POST /enterprise/v1/sso/logout
 
 ### Debug Mode
 
-Enable debug logging for SSO:
+Validation refusals are logged server-side with structured fields (the
+specific check that failed: signature, issuer, audience, validity window, or
+replay) via `tracing`, so point your log sink at the enterprise service and
+reproduce the login. Verify the stored configuration with:
 
 ```bash
-curl -X PUT https://enterprise.apexmail.ee/sso/config/{account_id} \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -d '{"debugMode": true}'
+curl https://enterprise.apexmail.ee/sso/config/domain/yourcompany.com \
+  -H "Authorization: Bearer YOUR_API_TOKEN"
 ```
+
+The response is sanitized — secret material (encrypted private key, client
+secret, SAML certificate) never leaves the server.
 
 ## API Reference
 
-All Enterprise SSO endpoints are served under the `/enterprise/v1/sso` prefix.
-These endpoints are the designed surface; the login endpoints currently
-return `501 Not Implemented` (see the status banner above), so the flows
-below cannot complete today.
+All Enterprise SSO endpoints are served by the enterprise service under the
+`/sso` prefix (see `services/mail-server/crates/enterprise/src/routes.rs`).
+The login and callback endpoints are the browser-facing halves of the flows
+and are reachable without an API bearer token; configuration and maintenance
+endpoints require one.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/enterprise/v1/sso/configure` | POST | Configure SSO |
-| `/enterprise/v1/sso/config/{accountId}` | GET | Get SSO configuration |
-| `/enterprise/v1/sso/saml/login/{domain}` | GET | Initiate SAML login |
-| `/enterprise/v1/sso/saml/callback` | POST | Process SAML response |
-| `/enterprise/v1/sso/oidc/authorize/{domain}` | GET | Initiate OIDC login |
-| `/enterprise/v1/sso/oidc/callback` | GET | Process OIDC callback |
-| `/enterprise/v1/sso/logout` | POST | Single logout |
+| `/sso/configure` | POST | Configure SSO for a tenant (SAML or OIDC) |
+| `/sso/config/{tenant_id}` | GET | Get SSO configuration |
+| `/sso/config/domain/{domain}` | GET | Get SSO configuration by email domain |
+| `/sso/login/saml/{domain}` | GET | Initiate SAML login (AuthnRequest redirect) |
+| `/sso/acs/{domain}` | POST | SAML Assertion Consumer Service (issues the session); `/sso/acs` takes the domain from RelayState |
+| `/sso/login/oidc/{domain}` | GET | Initiate OIDC login (state + PKCE redirect) |
+| `/sso/callback/oidc/{domain}` | GET | OIDC callback: code exchange + id_token validation (issues the session); `/sso/callback/oidc` takes the domain from the state |
+| `/sso/validate` | GET | Validate an SSO session (bearer session token) |
+| `/sso/cleanup` | POST | Purge expired SSO sessions (admin) |

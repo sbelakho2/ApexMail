@@ -208,7 +208,7 @@ Uptime is measured per component, not as a single global number. Each component 
 | **REST API** | `api.apexmail.ee` — all API endpoints | External probe; HTTP 2xx on `/health` |
 | **SMTP Relay** | `smtp.apexmail.ee:587` — SMTP STARTTLS handshake and banner response | External probe; SMTP connection, banner, and STARTTLS negotiation |
 | **Dashboard** | `app.apexmail.ee` — web dashboard application | External probe; HTTP 2xx on login page and authenticated health endpoint |
-| **Authentication** | API auth endpoints — login, token refresh, MFA | External probe; HTTP 2xx on auth health endpoint |
+| **Authentication** | API auth endpoints — login, token refresh, SSO | External probe; HTTP 2xx on auth health endpoint |
 | **Queue Processing** | Internal message queue consumer health | Internal probe; queue depth within threshold, consumer process running |
 | **Delivery Engine** | Outbound SMTP delivery workers | Internal probe; delivery worker count above minimum, no stalled workers |
 | **Webhooks** | Outbound webhook delivery service | External probe; HTTP 2xx on webhook health endpoint |

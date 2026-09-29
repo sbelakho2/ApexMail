@@ -44,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE CONTROLS", rows = [
-    { feature = "SAML SSO", apex = 'In development — not yet available', comp = 'Foundation 100K and higher plans<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Business and Enterprise plans', comp = 'Foundation 100K and higher plans<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Enterprise plan', comp = 'Not documented as of verification date — user provisioning through Mailgun API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Audit logs", apex = 'Growth plan and above — account activity, API key usage, configuration changes; searchable, exportable', comp = 'Event logs accessible via Events API; retention varies by plan; no consolidated account-level audit trail<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},

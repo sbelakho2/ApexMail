@@ -33,7 +33,7 @@ ApexMail proporciona flujos de trabajo de seguridad y privacidad en torno a la e
 | Área | Posición actual |
 |---|---|
 | Documentación del procesamiento de datos | La DPA y la información sobre subprocesadores están disponibles para revisión |
-| Capacidades de identidad y auditoría | Funciones en tiempo de ejecución según el plan (registros de auditoría, RBAC, MFA); el inicio de sesión único (SSO) vía SAML/OIDC está en desarrollo activo — aún no disponible |
+| Capacidades de identidad y auditoría | Funciones en tiempo de ejecución según el plan; SAML SSO a partir de Scale |
 | Revisión Enterprise | Revisión contractual de seguridad, despliegue y operaciones |
 | HIPAA / BAA | No disponible actualmente |
 

@@ -29,7 +29,7 @@ last_updated = "2026-07-29"
 
 - API-Schlüssel pro Umgebung (Live/Test) mit konfigurierbaren Berechtigungen.
 - Webhook-HMAC-Signaturen (SHA-256) für die Integrität von Ereignisnutzdaten.
-- Single Sign-On (SSO) über SAML/OIDC ist in aktiver Entwicklung — noch nicht verfügbar; künftige Bereitstellungszusagen würden im jeweiligen Vertrag bestätigt. [roadmap]
+- SAML SSO für Scale- und Enterprise-Tarife; Bereitstellungszusagen werden im jeweiligen Vertrag bestätigt.
 - Rollenbasierte Zugriffskontrolle (RBAC) mit benutzerdefinierten Rollen im Enterprise-Tarif.
 - Multi-Faktor-Authentifizierung (TOTP) für den Dashboard-Zugriff.
 - Sitzungsverwaltung mit konfigurierbarem Timeout und IP-Bindung.

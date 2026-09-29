@@ -44,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE-KONTROLLEN", rows = [
-    { feature = "SAML SSO", apex = 'In Entwicklung — noch nicht verfügbar', comp = 'Ab dem Tarif Foundation 100K und darüber<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Scale- und Enterprise-Tarife', comp = 'Ab dem Tarif Foundation 100K und darüber<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Enterprise-Tarif', comp = 'Zum Verifikationsdatum nicht dokumentiert — Benutzer-Provisioning über die Mailgun-API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Audit-Logs", apex = 'Ab Growth-Tarif — Kontoaktivität, API-Schlüssel-Nutzung, Konfigurationsänderungen; durchsuchbar, exportierbar', comp = 'Ereignisprotokolle über die Events API zugänglich; Aufbewahrung je nach Tarif; kein zusammengeführter Audit-Trail auf Kontoebene<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},

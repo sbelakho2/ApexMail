@@ -346,6 +346,47 @@ Verification after setup: send one message through the platform, then check
 (flips to `delivered`), and the SNS topic's *NumberOfMessagesPublished*
 CloudWatch metric.
 
+## Enterprise SSO (SAML/OIDC) endpoints + keys
+
+The enterprise service (`enterprise.apexmail.ee`, compose service
+`enterprise`) serves the tenant SSO flows. The browser-facing routes are
+live and rate-limited by the nginx vhost like every other path:
+
+| Route | Purpose |
+|-------|---------|
+| `GET /sso/login/saml/{domain}` | Start a SAML login (AuthnRequest redirect) |
+| `POST /sso/acs/{domain}` | SAML Assertion Consumer Service (session issued); `POST /sso/acs` resolves the domain from RelayState |
+| `GET /sso/login/oidc/{domain}` | Start an OIDC login (state + PKCE redirect) |
+| `GET /sso/callback/oidc/{domain}` | OIDC callback: code exchange + id_token validation (session issued); `GET /sso/callback/oidc` takes the domain from the state |
+
+IdP material is per-tenant (configured through `POST /sso/configure` — see
+`docs/enterprise/sso.md`); the deployment only supplies the SP-side and
+crypto settings:
+
+- `SSO_ENCRYPTION_KEY` — **required before any tenant configures an OIDC
+  client secret**: `configure` encrypts the secret at rest with it and fails
+  closed when it is empty (`openssl rand -base64 36`). Set it for the
+  `enterprise` compose service the same way `LOG_STREAM_ENCRYPTION_KEY` is.
+- `SAML_ENTITY_ID` — the ApexMail SP entity ID handed to tenant IdPs
+  (default `urn:apexmail:enterprise`).
+- `SAML_ACS_URL` — the ACS endpoint embedded in AuthnRequests and enforced
+  as the assertion audience. Leave the default (`{BASE_URL}/api/sso/saml/callback`,
+  a mounted route) or point it at `https://enterprise.apexmail.ee/sso/acs`;
+  both resolve the tenant domain (path segment or RelayState).
+- `OIDC_REDIRECT_URI` — the redirect URI tenants register with their IdP.
+  The default (`{BASE_URL}/api/sso/oidc/callback`) is a mounted route;
+  `https://enterprise.apexmail.ee/sso/callback/oidc` also works. The same
+  value is used in the authorize redirect and the token exchange, and the
+  tenant domain travels in the single-use `state`.
+- `OIDC_SCOPES` — requested scopes (default `openid profile email`).
+
+Verification after setup: configure a tenant IdP
+(`POST /sso/configure`), open
+`https://enterprise.apexmail.ee/sso/login/saml/{domain}`, and confirm the
+IdP round-trip issues a session (`GET /sso/validate` with the returned
+token). Invalid assertions (unsigned, tampered, expired, replayed) are
+refused with 401 and logged with the failing check.
+
 ## Image identity (no registry)
 
 There is no registry: the pipeline builds images on the host and tags them

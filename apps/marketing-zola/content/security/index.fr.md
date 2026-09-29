@@ -29,7 +29,7 @@ last_updated = "2026-07-29"
 
 - Clés API limitées par environnement (live/test) avec permissions configurables.
 - Signatures HMAC des webhooks (SHA-256) pour l'intégrité des charges utiles d'événements.
-- Authentification unique (SSO) via SAML/OIDC : en développement actif — pas encore disponible ; tout engagement futur de provisionnement serait confirmé dans le contrat applicable. [roadmap]
+- SAML SSO sur les forfaits Business et Enterprise ; tout engagement de provisionnement est confirmé dans le contrat applicable.
 - Contrôle d'accès basé sur les rôles (RBAC) avec rôles personnalisés sur le forfait Enterprise.
 - Authentification multi-facteurs (TOTP) pour l'accès au tableau de bord.
 - Gestion des sessions avec délai d'expiration configurable et liaison IP.

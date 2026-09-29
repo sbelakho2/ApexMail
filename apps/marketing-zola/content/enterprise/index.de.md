@@ -21,7 +21,7 @@ Enterprise ist ein vertragliches E-Mail-Versandangebot für Organisationen, die 
 | Domains und Teammitglieder | Unbegrenzt |
 | Aufbewahrung | 730 Tage |
 | Dedizierte IPs | 10 enthalten |
-| Zugriffskontrollen | Audit-Logs und RBAC; Single Sign-On (SSO) über SAML/OIDC ist in aktiver Entwicklung — noch nicht verfügbar |
+| Zugriffskontrollen | SAML SSO und Audit-Logs |
 | Support-Level | Dediziert |
 | Private Cloud / BYOIP | Vorbehaltlich Vertrags- und Technikprüfung |
 

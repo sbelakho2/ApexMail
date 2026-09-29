@@ -1,6 +1,6 @@
 +++
 title = "Solución de email para plataformas SaaS"
-description = "Infraestructura de email multi-tenant para SaaS B2B y B2C. Aislamiento de tenants, aislamiento de dominios, RBAC, SSO (en desarrollo activo — aún no disponible) y entrega con marca blanca."
+description = "Infraestructura de email multi-tenant para SaaS B2B y B2C. Aislamiento de tenants, aislamiento de dominios, RBAC, SSO y entrega con marca blanca."
 template = "prose.html"
 +++
 
@@ -28,7 +28,7 @@ Las plataformas que envían email por sus clientes heredan el riesgo de reputaci
 - **Aislamiento de tenants** — Cada tenant recibe sus propios dominios, claves de API, endpoints de webhooks con un secreto HMAC por tenant, listas de supresión, IP dedicadas y flujos de eventos.
 - **Aislamiento de dominios** — La verificación y autenticación de dominios por tenant (SPF, DKIM, DMARC) evita la contaminación cruzada de reputación.
 - **RBAC personalizado** — Administrador a nivel de plataforma, administrador a nivel de tenant y roles de solo lectura. Aprovisionamiento SCIM en Enterprise.
-- **SSO** — El inicio de sesión único SAML 2.0/OIDC para operadores de plataforma y administradores de tenants está en desarrollo activo — aún no disponible.
+- **SSO** — SAML 2.0 para operadores de plataforma y administradores de tenants.
 - **Cuotas de uso** — Límites duros y blandos por tenant para volumen, velocidad y concurrencia.
 - **Marca blanca** — Elimine la marca de ApexMail de paneles, pies de email y plantillas de notificación.
 

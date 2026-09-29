@@ -15,7 +15,7 @@ Transaktions-E-Mails können Teil eines regulierten Workflows sein. ApexMail bie
 | Auftragsverarbeitungsvereinbarung | Zur Prüfung und Unterzeichnung verfügbar |
 | EU/EWR-Datenresidenz | Für den standardmäßigen gehosteten Dienst verfügbar, vorbehaltlich der anwendbaren Servicebedingungen |
 | Audit-Logs | Ab Growth enthalten; erweiterte betriebliche Kontrollen in Business und Enterprise verfügbar |
-| SAML SSO | In aktiver Entwicklung — noch nicht verfügbar |
+| SAML SSO | In Business und Enterprise enthalten |
 | Private Cloud / BYOIP | Vertragliche und technische Enterprise-Prüfung |
 | HIPAA / BAA | **Derzeit nicht angeboten** |
 

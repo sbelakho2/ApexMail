@@ -19,7 +19,7 @@ This document serves as Annex 1 to the [Data Processing Agreement (DPA)](../lega
 - API keys and SMTP credentials are scoped to minimum required permissions.
 - Session-based authentication with automatic timeout after inactivity.
 - TOTP-based two-factor authentication (2FA) supported.
-- Single sign-on via SAML/OIDC: in active development — not yet available. [roadmap]
+- SSO/SAML integration (Enterprise plans).
 - IP allowlists (Enterprise plans).
 - Audit logging of all authentication events and administrative actions.
 

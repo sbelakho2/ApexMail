@@ -21,7 +21,7 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 | Domains and team members | Unlimited |
 | Event retention | 730 days |
 | Dedicated IPs | 10 included |
-| Access controls | Audit logs and RBAC; single sign-on (SSO) via SAML/OIDC is in active development — not yet available |
+| Access controls | SAML SSO and audit logs |
 | Support level | Dedicated |
 | Private Cloud / BYOIP | Subject to contract and technical review |
 

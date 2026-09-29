@@ -29,7 +29,7 @@ last_updated = "2026-07-29"
 
 - Claves API con ámbito por entorno (live/test) con permisos configurables.
 - Firmas HMAC de webhooks (SHA-256) para integridad de carga útil de eventos.
-- Inicio de sesión único (SSO) vía SAML/OIDC: en desarrollo activo — aún no disponible; cualquier compromiso futuro de aprovisionamiento se confirmaría en el contrato aplicable. [roadmap]
+- SAML SSO en los planes Business y Enterprise; los compromisos de aprovisionamiento se confirman en el contrato aplicable.
 - Control de acceso basado en roles (RBAC) con roles personalizados en plan Enterprise.
 - Autenticación multifactor (TOTP) para acceso al panel.
 - Gestión de sesiones con tiempo de espera configurable y vinculación IP.

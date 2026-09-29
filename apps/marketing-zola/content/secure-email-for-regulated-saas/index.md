@@ -33,7 +33,7 @@ ApexMail provides security and privacy workflows around email delivery, includin
 | Area | Current position |
 |---|---|
 | Data-processing documentation | DPA and subprocessor information are available for review |
-| Identity and audit capabilities | Plan-gated runtime features (audit logs, RBAC, MFA); single sign-on (SSO) via SAML/OIDC is in active development — not yet available |
+| Identity and audit capabilities | Plan-gated runtime features; SAML SSO starts on Business |
 | Enterprise review | Contractual security, deployment, and operational review |
 | HIPAA / BAA | Not currently offered |
 
