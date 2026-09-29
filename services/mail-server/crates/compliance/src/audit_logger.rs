@@ -321,6 +321,10 @@ impl AuditLogger {
                     .await
                     .map_err(|e| format!("DB error: {e}"))?
             }
+            // coverage: justified — reached only by a live-connection fault
+            // that is NOT an undefined-table fault (e.g. a mid-flight SELECT
+            // privilege revocation); reproducing it would require runtime
+            // DDL, which this crate's governance gate forbids in src.
             Err(e) => return Err(format!("DB error: {e}")),
         };
         Ok(row)
@@ -628,6 +632,9 @@ impl AuditLogger {
             }
 
             // Verify HMAC signature
+            // coverage: justified — HMAC-SHA256 accepts EVERY key length, so
+            // `new_from_slice` on the configured signing key cannot fail; the
+            // arm only keeps the match total.
             let expected_sig = match self.compute_signature(&entry.hash) {
                 Ok(v) => v,
                 Err(e) => {
@@ -951,6 +958,10 @@ impl AuditLogger {
         if parsed.scheme() != "https" {
             return Err("webhook url must use https".into());
         }
+        // coverage: justified — `https` is a special scheme in the url crate:
+        // a successful parse ALWAYS carries a host (an empty one is an
+        // EmptyHost parse error), so this guard can never fire; it documents
+        // the invariant rather than filtering a real input class.
         if parsed.host_str().is_none() {
             return Err("webhook url must name a host".into());
         }
@@ -1011,6 +1022,9 @@ impl AuditLogger {
             "userId": user_id,
         });
 
+        // coverage: justified — `serde_json::to_string` over a
+        // `serde_json::Value` is infallible (Values carry no unserializable
+        // state); the fallback keeps the hash input total for type reasons.
         let serialized = serde_json::to_string(&obj).unwrap_or_else(|e| {
             tracing::error!(error = %e, "Failed to serialize audit log entry, using empty string");
             String::new()
@@ -1257,7 +1271,6 @@ mod tests {
         AuditLogger::new(pool, config)
     }
 
-    #[allow(dead_code)]
     fn test_context() -> LogContext {
         LogContext {
             tenant_id: Some("tenant-1".into()),
@@ -1734,6 +1747,50 @@ mod tests {
         }
     }
 
+    /// The canonical log context a chained entry is attributed to.
+    #[test]
+    fn test_context_carries_the_attribution_fields() {
+        let context = test_context();
+        assert_eq!(context.tenant_id.as_deref(), Some("tenant-1"));
+        assert_eq!(context.user_id.as_deref(), Some("user-1"));
+        assert_eq!(context.session_id.as_deref(), Some("session-1"));
+        assert_eq!(context.ip_address.as_deref(), Some("192.168.1.1"));
+        assert_eq!(context.user_agent.as_deref(), Some("TestAgent/1.0"));
+    }
+
+    /// CSV cells that could be interpreted as spreadsheet formulas (leading
+    /// =,+,--,@,tab,CR; mid-string DDE / pipe-expression shapes) are neutered
+    /// with a leading apostrophe AND quoted; cells holding CSV structure
+    /// characters are quoted; plain cells pass through untouched.
+    #[test]
+    fn csv_escape_neuters_formula_cells_and_quotes_structured_cells() {
+        for hostile in [
+            "=cmd|' /C calc'!A0",
+            "+1+1",
+            "-1",
+            "@SUM(A1)",
+            "\t=cmd|",
+            "\r=1+1",
+            "x|='payload'",
+            "link\"=HYPERLINK(\"http://evil.test\")",
+            "=DDE(\"cmd\";\"x\")",
+            "=compose|mail",
+        ] {
+            let escaped = csv_escape(hostile);
+            assert!(
+                escaped.starts_with("\"'") && escaped.ends_with('"'),
+                "formula-shaped cell {hostile:?} must be apostrophe-prefixed and quoted, got {escaped:?}"
+            );
+        }
+        // Structured (but not formula-shaped) cells are quoted without the
+        // apostrophe prefix.
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_escape("line\nbreak"), "\"line\nbreak\"");
+        // A plain cell is returned verbatim.
+        assert_eq!(csv_escape("plain"), "plain");
+    }
+
     /// E-3: entry timestamps are hashed at microsecond precision because
     /// Postgres `TIMESTAMPTZ` stores whole microseconds. On nanosecond
     /// clocks (Linux vDSO) an untruncated `Utc::now()` hashed 9 fractional
@@ -2157,5 +2214,234 @@ mod db_tests {
                 .expect("archive again"),
             0
         );
+    }
+
+    /// F12 hard-error arms: a dead database makes `initialize` and `archive`
+    /// fail LOUD (never a silent empty-chain boot), and a live database whose
+    /// audit tables cannot be resolved makes the append's chain-head read
+    /// take the live-only fallback and STILL refuse — a refused append
+    /// writes nothing instead of forking the chain.
+    #[tokio::test]
+    async fn audit_integrity_fails_loud_when_the_store_is_unreadable() {
+        // A pool wired to a port with nothing listening: every query errors
+        // with a connection fault (NOT an undefined-table fault).
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        let dead_logger = AuditLogger::new(
+            dead,
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "unit-audit-key-0123456789abcdef".into(),
+            },
+        );
+        let err = dead_logger.initialize().await.expect_err("loud boot");
+        assert!(err.contains("DB error"), "{err}");
+
+        let err = dead_logger
+            .archive(Utc::now())
+            .await
+            .expect_err("loud archive");
+        assert!(
+            err.contains("legal hold lookup"),
+            "the failing stage is named, got {err}"
+        );
+
+        // A LIVE pool whose sessions resolve tables in a missing schema
+        // (session state via SET — never schema DDL, which this crate's
+        // governance gate rightly keeps out of runtime code): the archive
+        // read errors as undefined-table, the head read falls back to the
+        // live-only query, that errors too, and the append is refused.
+        let Some((pool, _logger)) = logger("headfault").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        let sabotaged = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("SET search_path TO audit_sabotaged_missing_schema")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .expect("sabotaged pool connects fine (only the schema is wrong)");
+        let sabotaged_logger = AuditLogger::new(
+            sabotaged,
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "unit-audit-key-0123456789abcdef".into(),
+            },
+        );
+        let result = sabotaged_logger
+            .log(
+                AuditAction::Create,
+                AuditResource::ApiKey,
+                None,
+                json!({"probe": "head-fault"}),
+                AuditOutcome::Success,
+                None,
+                &ctx(&test_support::unique_tenant()),
+            )
+            .await;
+        let err = result.expect_err("an unreadable chain head must refuse the append");
+        assert!(err.contains("DB error"), "{err}");
+        pool.close().await;
+    }
+
+    /// P1-SECURITY history clause: `initialize` must still be able to load
+    /// pre-existing NULL-tenant rows — they map onto the frozen "global"
+    /// chain key (appends there are refused, but the chain stays loadable
+    /// and verifiable), while attributed rows map onto their own chains.
+    #[tokio::test]
+    async fn initialize_maps_legacy_null_tenant_rows_to_the_frozen_global_chain() {
+        let Some((pool, _)) = logger("globalmap").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        let legacy_hash = "legacy-null-tenant-head";
+        let tenant = test_support::unique_tenant();
+        let tenant_hash = "attributed-tenant-head";
+        for (tenant_id, hash) in [
+            (None, legacy_hash),
+            (Some(tenant.as_str()), tenant_hash),
+        ] {
+            sqlx::query(
+                "INSERT INTO audit_logs (id, tenant_id, action, resource, outcome, timestamp, hash, signature)
+                 VALUES ($1, $2, 'create', 'api_key', 'success', NOW(), $3, 'sig')",
+            )
+            .bind(test_support::short_id("aud"))
+            .bind(tenant_id)
+            .bind(hash)
+            .execute(&pool)
+            .await
+            .expect("seed row");
+        }
+        // A FRESH logger warms its cache from the live ∪ archive heads.
+        let fresh = AuditLogger::new(
+            pool.clone(),
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "unit-audit-key-0123456789abcdef".into(),
+            },
+        );
+        fresh.initialize().await.expect("initialize");
+        let heads = fresh.last_hashes.try_read().expect("cache lock");
+        assert_eq!(
+            heads.get("global"),
+            Some(&legacy_hash.to_string()),
+            "the NULL-tenant head loads under the frozen global key"
+        );
+        assert_eq!(
+            heads.get(&tenant),
+            Some(&tenant_hash.to_string()),
+            "the attributed head loads under its own chain key"
+        );
+        pool.close().await;
+    }
+
+    /// A head dated in the future (restored backup, clock skew) must not be
+    /// overwritten: the next append is bumped to head + 1µs and chains onto
+    /// the future head, keeping timestamp order == chain order.
+    #[tokio::test]
+    async fn future_dated_head_bumps_the_next_append_timestamp() {
+        let Some((pool, logger)) = logger("futurehead").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let future = Utc::now() + Duration::hours(1);
+        sqlx::query(
+            "INSERT INTO audit_logs (id, tenant_id, action, resource, outcome, timestamp, hash, signature)
+             VALUES ('future-head-row', $1, 'create', 'api_key', 'success', $2, 'future-head-hash', 'sig')",
+        )
+        .bind(&tenant)
+        .bind(future)
+        .execute(&pool)
+        .await
+        .expect("seed future head");
+
+        let entry = logger
+            .log(
+                AuditAction::Create,
+                AuditResource::ApiKey,
+                None,
+                json!({"probe": "future"}),
+                AuditOutcome::Success,
+                None,
+                &ctx(&tenant),
+            )
+            .await
+            .expect("append after a future head");
+        assert!(
+            entry.timestamp > future,
+            "the append must be bumped past the future head, got {:?} vs {future:?}",
+            entry.timestamp
+        );
+        assert_eq!(
+            entry.previous_hash.as_deref(),
+            Some("future-head-hash"),
+            "the append chains onto the authoritative head"
+        );
+        pool.close().await;
+    }
+
+    /// Archive round-trip: a fully archived entry is still READABLE (the
+    /// by-id read spans live ∪ archive) and feeding a signature-forged copy
+    /// to the chain validator is rejected as the FIRST invalid entry.
+    #[tokio::test]
+    async fn archived_entries_stay_readable_and_signature_forgery_breaks_verification() {
+        let Some((pool, logger)) = logger("sigforge").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let entry = logger
+            .log_create(AuditResource::ApiKey, "k-1", json!({"probe": "archive"}), &ctx(&tenant))
+            .await
+            .expect("log");
+        assert_eq!(
+            logger
+                .archive(Utc::now() + Duration::seconds(1))
+                .await
+                .expect("archive"),
+            1
+        );
+        // The live table is empty now; the read falls through to the archive.
+        let from_archive = logger
+            .get_entry(&entry.id)
+            .await
+            .expect("read")
+            .expect("archived entry is still readable");
+        assert_eq!(from_archive.hash, entry.hash);
+        assert!(
+            logger.verify_chain_entries(std::slice::from_ref(&from_archive)).valid,
+            "the archive round-trip preserves verifiability"
+        );
+
+        // A forged signature is caught even when the hash itself is intact.
+        let mut forged = from_archive.clone();
+        forged.signature = "0".repeat(64);
+        let verdict = logger.verify_chain_entries(&[forged.clone()]);
+        assert!(!verdict.valid, "signature forgery must not verify");
+        assert_eq!(verdict.first_invalid_entry.as_deref(), Some(forged.id.as_str()));
+        assert!(
+            verdict.error.as_deref().unwrap_or_default().contains("Signature mismatch"),
+            "{verdict:?}"
+        );
+        pool.close().await;
     }
 }

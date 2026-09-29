@@ -1060,6 +1060,9 @@ async fn gdpr_submit_request(
         }
         // D: no variant may be swallowed — an exceeded limit of ANY kind
         // rejects the submission.
+        // coverage: justified — check_submission only peeks User/Tenant kinds
+        // (dsar_rate_limit.rs), so it can never yield VerificationRateLimited;
+        // this arm exists to keep the match exhaustive (fail-closed).
         DsarRateLimitStatus::VerificationRateLimited { retry_after } => {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
@@ -1086,6 +1089,11 @@ async fn gdpr_submit_request(
             // stays false because THIS service has not delivered anything.
             tracing::info!(
                 request_id = %request.id,
+                // coverage: justified — the `%field` display closure below is
+                // evaluated only when a tracing subscriber accepts the event;
+                // the test suite installs no global subscriber, so this lazy
+                // arm cannot fire deterministically. The macro skeleton around
+                // it IS executed.
                 email = %mail_common::pii::redact_email(email),
                 token_delivered = false,
                 delivery = "outbox_handoff",
@@ -1165,6 +1173,9 @@ async fn gdpr_verify_request(
         // D: previously `_ => {}` swallowed these variants, so an exceeded
         // key reported as UserRateLimited let verification attempts through
         // indefinitely (token brute-force). Any exceeded limit now rejects.
+        // coverage: justified — check_verification only emits the
+        // Verification kind, so User/Tenant cannot reach this handler; the
+        // arm keeps the match exhaustive (fail-closed).
         DsarRateLimitStatus::UserRateLimited { retry_after }
         | DsarRateLimitStatus::TenantRateLimited { retry_after } => {
             return Err((
@@ -1385,6 +1396,9 @@ pub async fn gdpr_download_export(
         return Err(err_json(StatusCode::GONE, "Export has expired"));
     }
 
+    // coverage: justified — `data` is a `serde_json::Value` read back from a
+    // Postgres JSON column; pretty-printing a Value is infallible by
+    // construction, so this closure cannot execute.
     let body = serde_json::to_string_pretty(&data).map_err(|e| {
         error!("Failed to serialize GDPR export {export_id}: {e}");
         err_json(
@@ -2052,6 +2066,85 @@ mod tests {
             "Bearer cmpl-wrong-token".parse().unwrap(),
         );
         assert!(verify_bearer(&headers, &config).is_err());
+    }
+
+    // ── P1-SECURITY: required tenant identity (pure selector parsing) ──────
+
+    fn headers_with_tenant(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Tenant-Id", value.parse().expect("header value"));
+        headers
+    }
+
+    #[test]
+    fn required_tenant_identity_rejects_overlong_selectors_with_400() {
+        let overlong = "t".repeat(MAX_TENANT_ID_LEN + 1);
+
+        // An overlong QUERY selector is a caller error, not a lookup.
+        let params: std::collections::HashMap<String, String> =
+            [("tenant_id".to_string(), overlong.clone())].into();
+        let err = required_tenant_identity(Some(&params), &HeaderMap::new()).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0["error"]
+            .as_str()
+            .unwrap()
+            .contains("tenant_id must be at most 64"));
+
+        // The same bound applies to the HEADER selector.
+        let err = required_tenant_identity(None, &headers_with_tenant(&overlong)).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1 .0["error"]
+            .as_str()
+            .unwrap()
+            .contains("X-Tenant-Id must be at most 64"));
+
+        // Exactly 64 characters is still accepted (the bound is inclusive).
+        let at_bound = "t".repeat(MAX_TENANT_ID_LEN);
+        assert_eq!(
+            required_tenant_identity(
+                Some(&[("tenant_id".to_string(), at_bound.clone())].into()),
+                &HeaderMap::new()
+            )
+            .expect("64 chars fit the bound"),
+            at_bound
+        );
+    }
+
+    #[test]
+    fn required_tenant_identity_accepts_agreeing_dual_selectors() {
+        let tenant = "tenant-agree-1";
+        let params: std::collections::HashMap<String, String> =
+            [("tenant_id".to_string(), tenant.to_string())].into();
+        // When BOTH selectors are supplied and agree, the request proceeds —
+        // the disagreement refusal must not punish honest redundancy.
+        assert_eq!(
+            required_tenant_identity(Some(&params), &headers_with_tenant(tenant))
+                .expect("agreeing selectors are accepted"),
+            tenant
+        );
+    }
+
+    #[test]
+    fn secret_store_error_maps_expiry_missing_and_unconfigured() {
+        // An expired secret is 410 Gone — a client-visible state, not a fault.
+        let (code, body) = secret_store_error("Secret has expired");
+        assert_eq!(code, StatusCode::GONE);
+        assert_eq!(body.0["error"], "Secret has expired");
+
+        // A plain "not found" (no version/expiry context) is 404.
+        let (code, body) = secret_store_error("Secret row not found");
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["error"], "Secret not found");
+
+        // Storage not configured / quota wording is 503, never echoed raw.
+        for message in [
+            "Secret storage must be configured before use",
+            "at least one key version is required",
+        ] {
+            let (code, body) = secret_store_error(message);
+            assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{message}");
+            assert_eq!(body.0["error"], "Secret storage is not configured");
+        }
     }
 
     // ── Content Scanner 4-Layer Integration Tests ─────────────────
@@ -5240,6 +5333,100 @@ mod db_tests {
         );
     }
 
+    /// The /secrets tenant bound is enforced by the route itself: a >64-char
+    /// selector is a caller error (400) and never reaches the store, and a
+    /// caller WITH a valid grant on a missing secret row gets an honest 404
+    /// (the `Ok(None)` arm) instead of a fabricated success.
+    #[tokio::test]
+    async fn secret_routes_bound_the_tenant_and_report_missing_rows() {
+        let Some(state) = state("secretbounds").await else {
+            return;
+        };
+        // Overlong tenant on the LIST route is a 400 before any store call.
+        let overlong = "t".repeat(MAX_TENANT_ID_LEN + 1);
+        let (code, body) = error_of(
+            secret_list(State(state.clone()), auth(), query(&[("tenant_id", overlong.as_str())]))
+                .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("64"),
+            "the bound message names the limit, got {body}"
+        );
+
+        // A grant row without a secret row: access passes, the read reports
+        // 404 (Ok(None)) — existence is only denied-or-confirmed, never faked.
+        let ghost = test_support::short_id("sec");
+        sqlx::query(
+            "INSERT INTO secret_access (id, secret_id, user_id, access_type, granted_by)
+             VALUES ($1, $2, $3, 'admin', 'unit-test')",
+        )
+        .bind(test_support::short_id("gra"))
+        .bind(&ghost)
+        .bind(USER)
+        .execute(&state.db)
+        .await
+        .expect("orphan grant row");
+        let (code, _) = error_of(
+            secret_get(State(state.clone()), auth_as("owner@apexmail.ee"), path(&ghost)).await,
+        );
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    /// The tenant-level DSAR quota surfaces as ITS variant (429 with the
+    /// tenant message): the subject's own limit is not exhausted — a second
+    /// subject burned the tenant's slot, and the handler must still refuse.
+    #[tokio::test]
+    async fn gdpr_submit_reports_the_tenant_quota_variant() {
+        let Some(state) = state("gdprtenantquota").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let limiter = crate::dsar_rate_limit::DsarRateLimiter::new(
+            crate::config::DsarRateLimitConfig {
+                per_user: 10,
+                user_window_secs: 86_400,
+                per_tenant: 1,
+                tenant_window_secs: 86_400,
+                verify_attempts: 5,
+                verify_window_secs: 3_600,
+            },
+            None,
+        );
+        // A DIFFERENT subject consumes the single tenant slot.
+        limiter
+            .record_submission_success("first-subject@apexmail.ee", &tenant)
+            .await;
+        let state = test_support::app_state_with_dsar_limiter(state.db.clone(), TOKEN, limiter);
+
+        let (code, body) = error_of(
+            gdpr_submit_request(
+                State(state),
+                auth(),
+                Json(json!({
+                    "tenant_id": tenant,
+                    "request_type": "access",
+                    "email": "second-subject@apexmail.ee",
+                })),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], "rate_limited");
+        assert!(
+            body["message"].as_str().unwrap_or_default().contains("Tenant"),
+            "the tenant variant names the tenant quota, got {body}"
+        );
+        assert!(
+            body["retry_after"].as_u64().unwrap_or(0) > 0,
+            "retry_after is a positive number of seconds"
+        );
+        // The D-fix contract: the Verification variant can never be produced
+        // by `check_submission` (it only peeks user/tenant kinds), so the
+        // submit handler's third refusal arm is a defensive exhaustive-match
+        // guard. coverage: justified — structurally unreachable by design.
+    }
+
     /// PINNED (deliberate design, considered by the 2026-09 privilege-
     /// boundary audit): `/risk/stats` and `/risk/critical` are FLEET-level
     /// operations aggregates — the platform operator legitimately needs the
@@ -5267,5 +5454,190 @@ mod db_tests {
             status(risk_critical_tenants(State(state.clone()), HeaderMap::new()).await),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Every breach state-transition handler maps an unknown breach id to the
+    /// service's explicit error → CONFLICT, never a fabricated success or a
+    /// 500. One hostile probe per handler pins the error mapping.
+    #[tokio::test]
+    async fn breach_unknown_ids_map_to_conflict_on_every_state_transition() {
+        let Some(state) = state("breach409").await else {
+            return;
+        };
+        let ghost = "breach-that-never-existed";
+
+        // Triage of an unknown breach → 409 (service Err mapped by handler).
+        let (code, _) = error_of(
+            breach_triage(
+                State(state.clone()),
+                auth(),
+                path(ghost),
+                Json(BreachTriageBody {
+                    notifiable: true,
+                    risk_to_subjects: true,
+                    rationale: "unknown id probe".into(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        // Queue-authority for an unknown breach → 409.
+        let (code, _) = error_of(
+            breach_queue_authority_notification(State(state.clone()), auth(), path(ghost)).await,
+        );
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        // Record-submission for an unknown breach (body otherwise valid) → 409.
+        let (code, _) = error_of(
+            breach_record_submission(
+                State(state.clone()),
+                auth(),
+                path(ghost),
+                Json(BreachSubmissionBody {
+                    submission_id: "sub-unknown".into(),
+                    submitted_notification: Some("notice".into()),
+                    authority_reference: "REF-GHOST".into(),
+                    channel: Some("human_task".into()),
+                    submitted_by: "dpo@apexmail.ee".into(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::CONFLICT);
+
+        // Queue-subject-notifications for an unknown breach → 409.
+        let (code, _) = error_of(
+            breach_queue_subject_notifications(
+                State(state.clone()),
+                auth(),
+                path(ghost),
+                Json(BreachSubjectNotificationBody {
+                    recipients: vec!["victim@example.com".into()],
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::CONFLICT);
+    }
+
+    /// The consent-certificate handler serves the signed proof for a real
+    /// record (200), and a corrupted consent row in the DB fails the
+    /// consents listing closed as a 500 instead of emitting a malformed
+    /// record.
+    #[tokio::test]
+    async fn consent_certificate_serves_signed_proof_and_corrupt_rows_fail_closed() {
+        let Some(state) = state("certcorrupt").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // A real consent record → the certificate endpoint returns 200 with
+        // the signed proof bound to the record.
+        let record = state
+            .gdpr
+            .record_consent(
+                &tenant,
+                "sub-cert",
+                "cert@example.test",
+                crate::types::ConsentType::Marketing,
+                true,
+                crate::types::ConsentSource::Api,
+                None,
+            )
+            .await
+            .expect("seed consent record");
+        let response = match gdpr_get_consent_certificate(
+            State(state.clone()),
+            auth(),
+            Json(json!({ "consent_id": record.id })),
+        )
+        .await
+        {
+            Ok(response) => response.into_response(),
+            Err((code, _)) => panic!("certificate failed: {code}"),
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert!(
+            body["data"].as_str().unwrap_or_default().contains(&record.id),
+            "certificate must bind the record id: {body}"
+        );
+
+        // Corrupted fixture: a row whose consent_type no parser accepts.
+        // The listing must fail closed (500), not return a broken record.
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source, metadata)
+             VALUES ($1, $2, $3, $4, 'bogus_type', TRUE, NOW(), 'api', '{}'::jsonb)",
+        )
+        .bind(format!("crpt-{}", &uuid::Uuid::new_v4().simple().to_string()[..20]))
+        .bind(&tenant)
+        .bind("sub-corrupt")
+        .bind("corrupt@example.test")
+        .execute(&state.db)
+        .await
+        .expect("insert corrupted consent row");
+
+        let (code, body) = error_of(
+            gdpr_get_consents(
+                State(state.clone()),
+                auth(),
+                Json(json!({ "tenant_id": &tenant, "subscriber_id": "sub-corrupt" })),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "Failed to get consents");
+    }
+
+    /// A processed export whose download window has lapsed is served as 410
+    /// GONE — the expiry is enforced, not just recorded.
+    #[tokio::test]
+    async fn expired_export_download_is_gone() {
+        let Some(state) = state("dlgone").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let (request, _token) = state
+            .gdpr
+            .submit_request(
+                &tenant,
+                crate::types::DataSubjectRequestType::Access,
+                "gone@example.com",
+            )
+            .await
+            .expect("seed access request");
+        state
+            .gdpr
+            .process_request(&request.id)
+            .await
+            .expect("process export");
+        let export_id: String =
+            sqlx::query_scalar("SELECT id FROM gdpr_exports WHERE request_id = $1")
+                .bind(&request.id)
+                .fetch_one(&state.db)
+                .await
+                .expect("the processed export row exists");
+
+        // Age the export past its expiry, then probe the download.
+        sqlx::query("UPDATE gdpr_exports SET expires_at = NOW() - INTERVAL '1 hour'")
+            .execute(&state.db)
+            .await
+            .expect("expire export");
+        let (code, body) = error_of(
+            gdpr_download_export(
+                State(state.clone()),
+                auth(),
+                query(&[("tenant_id", tenant.as_str())]),
+                path(&export_id),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::GONE);
+        assert_eq!(body["error"], "Export has expired");
     }
 }

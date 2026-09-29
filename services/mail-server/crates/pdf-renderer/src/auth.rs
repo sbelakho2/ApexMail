@@ -182,4 +182,140 @@ mod tests {
         assert!(auth.authorize("same"));
         assert!(!auth.is_refused_universal_attempt("same"));
     }
+
+    // ── environment-resolution seam (from_env / is_production_mode) ──────
+
+    /// Serializes the env-mutating tests below (they share one process under
+    /// plain `cargo test`; under nextest each test is its own process).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets env vars for its lifetime and restores the previous values
+    /// (including "unset") on drop — the same pattern as ai-service's
+    /// `test_support::EnvGuard`.
+    struct EnvGuard {
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn with<'a>(vars: &[(&'a str, Option<&'a str>)]) -> Self {
+            let mut saved = Vec::new();
+            for (key, value) in vars {
+                saved.push((key.to_string(), std::env::var(key).ok()));
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_detection_follows_app_env_and_fails_closed() {
+        let _lock = lock_env();
+
+        // An UNSET APP_ENV counts as production (fail closed).
+        {
+            let _guard = EnvGuard::with(&[("APP_ENV", None)]);
+            assert!(is_production_mode(), "unset APP_ENV must fail closed");
+        }
+        for value in ["production", "PRODUCTION", "Production"] {
+            let _guard = EnvGuard::with(&[("APP_ENV", Some(value))]);
+            assert!(is_production_mode(), "{value} must count as production");
+        }
+        {
+            let _guard = EnvGuard::with(&[("APP_ENV", Some("development"))]);
+            assert!(!is_production_mode(), "development is not production");
+        }
+
+        // A guard created while a var IS SET must restore that value on
+        // drop: the inner guard removes it (fail-closed again), and its own
+        // drop undoes the removal.
+        {
+            let outer = EnvGuard::with(&[("APP_ENV", Some("staging"))]);
+            {
+                let inner = EnvGuard::with(&[("APP_ENV", None)]);
+                assert!(is_production_mode(), "a removed APP_ENV fails closed");
+            }
+            assert!(
+                !is_production_mode(),
+                "the inner guard's drop must restore the outer value"
+            );
+        }
+    }
+
+    #[test]
+    fn from_env_resolves_credentials_and_refuses_production_gaps() {
+        let _lock = lock_env();
+
+        // Dedicated token configured: the only accepted credential, whatever
+        // APP_ENV says.
+        {
+            let _guard = EnvGuard::with(&[
+                (DEDICATED_TOKEN_ENV, Some("dedicated-secret")),
+                ("INTERNAL_SERVICE_TOKEN", Some("universal")),
+                ("APP_ENV", Some("production")),
+            ]);
+            let auth = ServiceAuth::from_env().expect("the dedicated token boots everywhere");
+            assert!(auth.authorize("dedicated-secret"));
+            assert!(!auth.authorize("universal"));
+            assert!(auth.dedicated_configured());
+        }
+
+        // Legacy fallback outside production: the universal token still
+        // authorizes.
+        {
+            let _guard = EnvGuard::with(&[
+                (DEDICATED_TOKEN_ENV, None),
+                ("INTERNAL_SERVICE_TOKEN", Some("universal")),
+                ("APP_ENV", Some("development")),
+            ]);
+            let auth =
+                ServiceAuth::from_env().expect("legacy fallback resolves outside production");
+            assert!(auth.authorize("universal"));
+            assert!(!auth.dedicated_configured());
+        }
+
+        // Production — explicit AND fail-closed-unset — without the
+        // dedicated token refuses to boot, naming the env to set.
+        for app_env in [Some("production"), None] {
+            let _guard = EnvGuard::with(&[
+                (DEDICATED_TOKEN_ENV, None),
+                ("INTERNAL_SERVICE_TOKEN", Some("universal")),
+                ("APP_ENV", app_env),
+            ]);
+            let error = ServiceAuth::from_env()
+                .expect_err("production without the dedicated token must refuse");
+            assert!(error.contains(DEDICATED_TOKEN_ENV), "{error}");
+        }
+
+        // Nothing configured at all: boots (outside production) but every
+        // authenticated route denies.
+        {
+            let _guard = EnvGuard::with(&[
+                (DEDICATED_TOKEN_ENV, None),
+                ("INTERNAL_SERVICE_TOKEN", None),
+                ("APP_ENV", Some("development")),
+            ]);
+            let auth = ServiceAuth::from_env().expect("deny-all resolves");
+            assert!(!auth.authorize(""));
+            assert!(!auth.authorize("anything"));
+            assert!(!auth.dedicated_configured());
+        }
+    }
 }

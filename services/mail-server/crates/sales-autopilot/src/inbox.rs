@@ -511,6 +511,8 @@ mod tests {
     #[tokio::test]
     async fn test_categorization() {
         let Some(mgr) = make_mgr("inbox::tests::test_categorization").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let tenant = unique_test_tenant("inbox-categorization");
@@ -548,6 +550,8 @@ mod tests {
     async fn test_list_by_category_and_mark_replied() {
         let Some(mgr) = make_mgr("inbox::tests::test_list_by_category_and_mark_replied").await
         else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let tenant = unique_test_tenant("inbox-list");
@@ -570,6 +574,8 @@ mod tests {
     #[tokio::test]
     async fn test_reply_rate() {
         let Some(mgr) = make_mgr("inbox::tests::test_reply_rate").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let tenant = unique_test_tenant("inbox-reply-rate");

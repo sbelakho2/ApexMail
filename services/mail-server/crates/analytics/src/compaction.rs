@@ -111,6 +111,10 @@ impl CompactionWorker {
             // migration batch (the early return used to skip it).
             if self.config.cold_retention_days > 0 {
                 self.cleanup_cold_storage().await?;
+                // coverage: justified — llvm-cov closing-brace region
+                // artifact: this arm executed six times in the measured run
+                // (the call above carries 6 hits) and the block cannot be
+                // exited except through the brace.
             }
             return Ok(CompactionStatus {
                 rows_migrated: 0,
@@ -151,6 +155,14 @@ impl CompactionWorker {
                 )
                 .await
                 .map_err(|_| {
+                    // coverage: justified — the 30 s bound fires only when
+                    // PostgreSQL stalls mid-query AFTER the un-timeout'd
+                    // tenant-distinct query above already answered. No
+                    // deterministic injection point exists: an ACCESS
+                    // EXCLUSIVE table lock would stall the first query too
+                    // (the worker would hang outside the guard), and the
+                    // SELECT itself cannot be stalled externally. The arm is
+                    // a bounded-failure conversion — plain `?` propagation.
                     anyhow::anyhow!(
                         "Timed out fetching compaction batch for tenant {}",
                         tenant_id
@@ -239,6 +251,10 @@ impl CompactionWorker {
         // Cold retention cleanup
         if self.config.cold_retention_days > 0 {
             self.cleanup_cold_storage().await?;
+            // coverage: justified — llvm-cov closing-brace region artifact:
+            // this arm executed five times in the measured run (the call
+            // above carries 5 hits — both the prune and migrate tests) and
+            // the block cannot be exited except through the brace.
         }
 
         Ok(CompactionStatus {
@@ -339,6 +355,11 @@ impl CompactionWorker {
                 for entry in entries.flatten() {
                     if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                         cleanup_tenant_dir_sync(&entry.path(), &cutoff_year_month)?;
+                        // coverage: justified — llvm-cov closing-brace region
+                        // artifact: the body executed eleven times in the
+                        // measured run (all lines above carry 11 hits) and
+                        // the block cannot be exited except through the
+                        // brace.
                     }
                 }
             }
@@ -514,6 +535,12 @@ fn write_object_atomically_sync(dir: &std::path::Path, file: &str, bytes: &[u8])
             // simply leaves an orphan/pending object, never lost data.
             if let Ok(d) = std::fs::File::open(dir) {
                 if let Err(e) = d.sync_all() {
+                    // coverage: justified — platform-dependent failure arm:
+                    // on macOS and Linux, sync_all on a successfully OPENED
+                    // directory fd does not fail deterministically (verified
+                    // empirically — fsync succeeds even after unlink). This
+                    // is exactly the documented non-portable path above; the
+                    // ledger row, not this fsync, is the commit point.
                     debug!("directory fsync not effective on this platform: {e}");
                 }
             }
@@ -666,6 +693,12 @@ fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> any
                     let month_name = month_entry.file_name().to_string_lossy().to_string();
                     let ym = format!("{year_name}/{month_name}");
                     if ym.as_str() < cutoff_ym {
+                        // coverage: justified — llvm-cov region-counter
+                        // artifact: the removal arm EXECUTES (run_prunes_
+                        // cold_storage_even_when_migration_is_empty proves
+                        // the aged directory was removed by this very arm)
+                        // but the tracing macro's argument region is never
+                        // counted.
                         info!(
                             "Removing old cold storage: {}",
                             month_entry.path().display()
@@ -674,6 +707,10 @@ fn cleanup_tenant_dir_sync(tenant_dir: &std::path::Path, cutoff_ym: &str) -> any
                     }
                 }
             }
+            // coverage: justified — llvm-cov closing-brace region artifacts:
+            // these loop braces executed on the proven removal path (the
+            // prune test's aged directory was removed by exactly this code)
+            // and the regions cannot be exited except through them.
         }
     }
     Ok(())
@@ -892,5 +929,307 @@ mod tests {
         assert!(serde_json::to_string(&none_row)
             .unwrap()
             .contains("\"ip_address\":null"));
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Gap-closure tests:the lock-held skip, the F83 retention-on-empty path, the
+// full migration commit protocol, and the direct error arms. Each test owns a
+// PRIVATE Redis logical DB (nextest runs tests as separate processes, so a
+// per-test DB number removes all cross-process lock contention).
+// ═════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod gap_tests {
+    use super::*;
+    use crate::config::CompactionConfig;
+
+    /// Redis pool pinned to a PRIVATE logical DB so the distributed
+    /// compaction lock (`compaction:lock:{date}`) never collides across
+    /// parallel nextest processes.
+    fn private_redis(db: u32) -> Option<deadpool_redis::Pool> {
+        let base = std::env::var("TEST_REDIS_URL").ok()?;
+        let url = format!("{}/{}", base.trim_end_matches('/'), db);
+        deadpool_redis::Config::from_url(url)
+            .builder()
+            .ok()?
+            .max_size(2)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .ok()
+    }
+
+    fn config(hot_days: u32, cold_days: u32, batch: usize) -> CompactionConfig {
+        CompactionConfig {
+            enabled: true,
+            schedule_hour: 2,
+            hot_retention_days: hot_days,
+            cold_retention_days: cold_days,
+            batch_size: batch,
+        }
+    }
+
+    fn storage_root(tag: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "apexmail_compaction_gap_{}_{}_{tag}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        ));
+        dir.to_string_lossy().to_string()
+    }
+
+    async fn canonical_pool(name: &str) -> Option<PgPool> {
+        migrator::test_support::fresh_canonical_pool(name, name)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Lock-held:the daily lock is already owned by another worker, so run()
+    /// must return the "skipped" status WITHOUT touching Postgres at all.
+    #[tokio::test]
+    async fn run_skips_without_touching_the_db_when_the_lock_is_held() {
+        let Some(redis) = private_redis(12) else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which the whole DB/Redis
+            // suite skips); a coverage run has them configured.
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+            .expect("lazy pool");
+        let worker = CompactionWorker::new(
+            pool,
+            redis.clone(),
+            config(90, 730, 100),
+            storage_root("lock"),
+        );
+        let lock_key = format!("compaction:lock:{}", Utc::now().format("%Y-%m-%d"));
+        {
+            let mut conn = redis.get().await.expect("redis conn");
+            let _: Result<(), _> = redis::cmd("SET")
+                .arg(&lock_key)
+                .arg("another-worker")
+                .query_async(&mut *conn)
+                .await;
+        }
+        let status = worker.run().await.expect("run with a held lock skips");
+        assert_eq!(status.checksum, "skipped-lock-held");
+        assert!(!status.completed);
+        assert_eq!(status.rows_migrated, 0);
+        // The foreign lock is NOT released by the loser.
+        let still: Option<String> = {
+            let mut conn = redis.get().await.unwrap();
+            redis::cmd("GET")
+                .arg(&lock_key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(still.as_deref(), Some("another-worker"));
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(&lock_key)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    /// F83:with nothing to migrate the cold tier is STILL pruned on schedule.
+    /// The storage root holds an aged-out tenant directory that must be
+    /// removed by the retention pass.
+    #[tokio::test]
+    async fn run_prunes_cold_storage_even_when_migration_is_empty() {
+        let (Some(redis), Some(pool)) = (private_redis(13), canonical_pool("compaction_empty").await)
+        else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which the whole DB/Redis
+            // suite skips); a coverage run has them configured.
+            eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+            return;
+        };
+        let root = storage_root("prune");
+        let aged = std::path::Path::new(&root).join("tenant_old/2020/01");
+        std::fs::create_dir_all(&aged).expect("create aged dir");
+        std::fs::write(aged.join("events_old.jsonl"), b"{}\n").expect("seed object");
+
+        let worker = CompactionWorker::new(pool, redis.clone(), config(90, 730, 100), root.clone());
+        let status = worker.run().await.expect("empty migration run");
+        assert!(status.completed);
+        assert_eq!(status.rows_migrated, 0);
+        assert_eq!(status.rows_deleted, 0);
+        assert!(!aged.exists(), "the aged-out month directory must be pruned");
+        assert!(
+            !aged.join("events_old.jsonl").exists(),
+            "the aged-out object is gone with its directory"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The full commit protocol:old events are written to cold storage,
+    /// committed to the LEDGER (batch + covered ids), and only then deleted
+    /// from `events` — after which the retention pass still runs.
+    #[tokio::test]
+    async fn run_migrates_commits_and_deletes_old_events() {
+        let (Some(redis), Some(pool)) = (private_redis(14), canonical_pool("compaction_migrate").await)
+        else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which the whole DB/Redis
+            // suite skips); a coverage run has them configured.
+            eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+            return;
+        };
+        let root = storage_root("migrate");
+        let tenant = format!("t{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let old_ts = Utc::now() - Duration::days(200);
+        for i in 0..2 {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp, metadata, ip_address) \
+                 VALUES ($1, $2, $3, 'opened', $4, $5, '{}', '203.0.113.9')",
+            )
+            .bind(format!("evt_gap_{tenant}_{i}"))
+            .bind(&tenant)
+            .bind(format!("msg_gap_{i}"))
+            .bind("migrator@example.com")
+            .bind(old_ts)
+            .execute(&pool)
+            .await
+            .expect("seed old event");
+        }
+
+        let worker = CompactionWorker::new(pool.clone(), redis.clone(), config(90, 730, 100), root.clone());
+        let status = worker.run().await.expect("migration run");
+        assert!(status.completed);
+        assert_eq!(status.rows_migrated, 2, "both old events migrated");
+        assert_eq!(status.rows_deleted, 2);
+        assert!(status.bytes_written > 0);
+
+        // The commit point:ledger batch + covered-id rows exist.
+        let batches: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM analytics_compaction_batches WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(batches >= 1, "the batch is committed to the ledger");
+        let covered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM analytics_compaction_batch_event_ids WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(covered, 2, "every migrated id is covered by the ledger");
+
+        // The hot rows are gone; the cold copy exists with a MASKED ip.
+        let hot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(hot, 0, "migrated rows are deleted from the hot tier");
+        let tenant_dir = std::path::Path::new(&root)
+            .join(&tenant)
+            .join(old_ts.format("%Y").to_string())
+            .join(old_ts.format("%m").to_string());
+        let jsonl: Vec<std::path::PathBuf> = std::fs::read_dir(&tenant_dir)
+            .expect("cold tenant dir")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(".jsonl"))
+            .collect();
+        assert_eq!(jsonl.len(), 1, "one JSONL object per batch");
+        let bytes = std::fs::read(&jsonl[0]).expect("cold object");
+        let text = String::from_utf8(bytes).expect("utf8 jsonl");
+        assert!(text.contains("203.0.113.0"), "IP masked in cold copy: {text}");
+        assert!(!text.contains("203.0.113.9"), "full IP never in cold copy");
+
+        // A SECOND run is idempotent: nothing left to migrate.
+        let second = worker.run().await.expect("second run");
+        assert_eq!(second.rows_migrated, 0);
+
+        sqlx::query("DELETE FROM analytics_compaction_batch_event_ids WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM analytics_compaction_batches WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `write_cold_objects` refuses an empty batch loudly (a programming
+    /// error, not a data condition).
+    #[tokio::test]
+    async fn write_cold_objects_rejects_an_empty_batch() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+            .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .builder()
+            .expect("builder")
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .expect("pool");
+        let worker = CompactionWorker::new(pool, redis, config(90, 730, 100), storage_root("empty"));
+        let err = worker
+            .write_cold_objects(&[], Uuid::new_v4())
+            .await
+            .expect_err("empty batch must be an error");
+        assert!(
+            err.to_string().contains("empty batch"),
+            "the error names the defect: {err}"
+        );
+    }
+
+    /// `release_lock` without a prior acquisition is a silent no-op — the
+    /// owner slot is empty, so nothing is deleted (a loser never evicts a
+    /// winner's lock).
+    #[tokio::test]
+    async fn release_lock_without_ownership_is_a_noop() {
+        let Some(redis) = private_redis(15) else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which the whole DB/Redis
+            // suite skips); a coverage run has them configured.
+            eprintln!("skipping: set TEST_REDIS_URL");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+            .expect("lazy pool");
+        let worker = CompactionWorker::new(pool, redis.clone(), config(90, 730, 100), storage_root("nolock"));
+        let lock_key = format!("compaction:lock:{}", Utc::now().format("%Y-%m-%d"));
+        // Someone else owns the lock.
+        {
+            let mut conn = redis.get().await.unwrap();
+            let _: Result<(), _> = redis::cmd("SET")
+                .arg(&lock_key)
+                .arg("owner-elsewhere")
+                .query_async(&mut *conn)
+                .await;
+        }
+        worker.release_lock(&lock_key).await.expect("no-op release");
+        let still: Option<String> = {
+            let mut conn = redis.get().await.unwrap();
+            redis::cmd("GET").arg(&lock_key).query_async(&mut *conn).await.unwrap()
+        };
+        assert_eq!(still.as_deref(), Some("owner-elsewhere"), "foreign lock untouched");
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL").arg(&lock_key).query_async(&mut *conn).await;
+    }
+
+    /// Empty candidate lists short-circuit to an empty coverage set without
+    /// touching the database.
+    #[tokio::test]
+    async fn load_committed_event_ids_short_circuits_on_empty_candidates() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+            .expect("lazy pool");
+        let covered = load_committed_event_ids(&pool, "tn_any", &[]).await;
+        assert!(covered.is_empty());
     }
 }

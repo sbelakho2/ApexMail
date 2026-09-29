@@ -149,8 +149,11 @@ pub fn app_state(pool: PgPool, auth_token: &str) -> Arc<AppState> {
     app_state_with_config(pool, config(auth_token))
 }
 
-/// [`Self::app_state`] with a caller-supplied config (CORS arms etc.).
-pub fn app_state_with_config(pool: PgPool, cfg: crate::config::ComplianceConfig) -> Arc<AppState> {
+fn assemble_app_state(
+    pool: PgPool,
+    cfg: crate::config::ComplianceConfig,
+    dsar_rate_limiter: crate::dsar_rate_limit::DsarRateLimiter,
+) -> Arc<AppState> {
     ensure_kdf_salt();
     let logger = audit_logger(&pool);
     Arc::new(AppState {
@@ -184,11 +187,29 @@ pub fn app_state_with_config(pool: PgPool, cfg: crate::config::ComplianceConfig)
         db: pool.clone(),
         redis: redis_pool(),
         http_client: reqwest::Client::new(),
-        dsar_rate_limiter: crate::dsar_rate_limit::DsarRateLimiter::new(
-            DsarRateLimitConfig::default(),
-            None,
-        ),
+        dsar_rate_limiter,
     })
+}
+
+/// [`Self::app_state`] with a caller-supplied DSAR rate limiter — the
+/// tenant-quota arm of the submit handler is only reachable with a
+/// purpose-built limiter configuration (per-tenant cap hit before the
+/// per-user cap, and quota pre-consumed by a DIFFERENT subject).
+pub fn app_state_with_dsar_limiter(
+    pool: PgPool,
+    auth_token: &str,
+    limiter: crate::dsar_rate_limit::DsarRateLimiter,
+) -> Arc<AppState> {
+    assemble_app_state(pool, config(auth_token), limiter)
+}
+
+/// [`Self::app_state`] with a caller-supplied config (CORS arms etc.).
+pub fn app_state_with_config(pool: PgPool, cfg: crate::config::ComplianceConfig) -> Arc<AppState> {
+    assemble_app_state(
+        pool,
+        cfg,
+        crate::dsar_rate_limit::DsarRateLimiter::new(DsarRateLimitConfig::default(), None),
+    )
 }
 
 pub fn bearer(token: &str) -> HeaderMap {

@@ -173,6 +173,10 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
         // stateless so rotation is invisible. Atomic here: within this
         // transaction there is never a moment where the sandbox tenant has
         // ONLY revoked keys visible to a committed read.
+        // coverage: justified — the rotation UPDATE below can only fail on a
+        // database error inside the provision transaction; no test can fail a
+        // healthy in-transaction UPDATE, so the error-mapping closure's
+        // region (through the closing brace) stays at zero by design.
         sqlx::query(
             "UPDATE api_keys SET revoked_at = $2 WHERE tenant_id = $1 AND revoked_at IS NULL",
         )
@@ -336,6 +340,9 @@ async fn dispatch(
     let request = builder.body(body).expect("valid request");
     let response = match api_router(state).clone().oneshot(request).await {
         Ok(r) => r,
+        // coverage: justified — axum `Router`'s `Service::Error` is
+        // `Infallible`, so `oneshot` can never produce `Err`; the arm pins
+        // the honest public response shape should that ever change.
         Err(e) => {
             // Public endpoint: log the detail, return a generic message —
             // the raw in-process dispatch error can carry internal routes
@@ -737,6 +744,10 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
                 false,
             ));
         }
+        // coverage: justified — `default_plans()` is a static table that
+        // always contains "scale" (and "free"), so `chosen` can never be
+        // `None`; this arm is the defensive fallback should the plan table
+        // ever drift into an empty/enterprise-only state.
     } else {
         rows.push((
             "Plan".to_string(),
@@ -893,7 +904,9 @@ fn grader_error_page(status: StatusCode, domain: &str, code: &str, message: &str
         .into_response()
 }
 
-// A HeaderName import keeps clippy from flagging the unused-headers path.
+// coverage: justified — intentionally dead: exists only so the `HeaderName`
+// import stays used (keeps clippy quiet about the unused-headers path); it is
+// never called at runtime or from tests.
 #[allow(unused)]
 fn _header_guard(n: HeaderName) -> HeaderValue {
     HeaderValue::from_static("x")
@@ -955,6 +968,9 @@ mod tests {
         assert!(all_recipients_example_com(&bad_cc).is_err());
         let missing = serde_json::json!({"subject": "hi"});
         assert!(all_recipients_example_com(&missing).is_ok()); // real handler rejects missing to
+        // A bare STRING (not an array) is checked by the same policy.
+        assert!(all_recipients_example_com(&serde_json::json!({"to": "solo@example.com"})).is_ok());
+        assert!(all_recipients_example_com(&serde_json::json!({"to": "solo@evil.com"})).is_err());
     }
 
     #[test]
@@ -989,6 +1005,52 @@ mod tests {
         assert_eq!(f.domains, 1);
         assert_eq!(f.team_users, 5_000);
         assert_eq!(format_int(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn dedicated_ip_addon_labels_one_many_and_the_pro_gate() {
+        // Pro plan (volume 100k fits pro's 150k, not starter's 50k):
+        // exactly ONE dedicated IP gets its single-IP label.
+        let pro_one = CalculatorForm {
+            volume: 100_000,
+            dedicated_ips: 1,
+            ..Default::default()
+        };
+        let rows = compute_calculator(&pro_one);
+        let ip_row = rows
+            .iter()
+            .find(|r| r.0.contains("Dedicated IP"))
+            .expect("dedicated ip row");
+        assert_eq!(ip_row.0, "Dedicated IP (1× €49)");
+        assert_eq!(ip_row.1, "€49.00");
+
+        // Several IPs itemise the first + additional pricing.
+        let pro_many = CalculatorForm {
+            volume: 100_000,
+            dedicated_ips: 3,
+            ..Default::default()
+        };
+        let rows = compute_calculator(&pro_many);
+        let ip_row = rows
+            .iter()
+            .find(|r| r.0.starts_with("Dedicated IPs"))
+            .expect("dedicated ips row");
+        assert!(ip_row.0.contains("2× €69"), "{:?}", ip_row.0);
+        assert_eq!(ip_row.1, "€187.00");
+
+        // On free/starter plans the add-on is explicitly unavailable —
+        // never silently priced.
+        let free_with_ip = CalculatorForm {
+            volume: 1_000,
+            dedicated_ips: 1,
+            ..Default::default()
+        };
+        let rows = compute_calculator(&free_with_ip);
+        assert!(
+            rows.iter()
+                .any(|r| r.0 == "Dedicated IPs" && r.1 == "available on Pro+"),
+            "{rows:?}"
+        );
     }
 
     #[test]
@@ -1032,6 +1094,15 @@ mod tests {
         // Empty stays empty — the handler rejects it with INVALID_INPUT.
         assert_eq!(clean_domain_input("   "), "");
     }
+
+    #[test]
+    fn title_capitalises_names_and_handles_the_empty_string() {
+        assert_eq!(title("pro"), "Pro");
+        assert_eq!(title("free"), "Free");
+        // Degenerate input stays a valid empty label (plan names are never
+        // empty in billing_service::plans, but the helper is total).
+        assert_eq!(title(""), "");
+    }
 }
 
 // ─── Adversarial sandbox / calculator / grader tests ───────────
@@ -1067,6 +1138,9 @@ mod adversarial_tests {
                 .enable_all()
                 .build()
                 .expect("shared test runtime");
+            // coverage: justified — the `?` fires only when TEST_DATABASE_URL
+            // is unset (soft-skip contract); coverage runs are always
+            // database-provisioned, so the skip arm stays unmeasured here.
             let pool = runtime.block_on(crate::test_db::optional_pg_pool(
                 "adv_explorer_shared_state",
             ))?;
@@ -1092,6 +1166,8 @@ mod adversarial_tests {
                 let state = shared.state.clone();
                 shared.runtime.block_on(body(state));
             }
+            // coverage: justified — same soft-skip contract as `shared()`:
+            // only reachable when TEST_DATABASE_URL is unset.
             None => eprintln!("skipping explorer test: set TEST_DATABASE_URL"),
         }
         match previous {
@@ -1270,6 +1346,9 @@ mod adversarial_tests {
                 let key = format!("adv_explorer_rl:{}", uuid::Uuid::new_v4());
                 for _ in 0..RATE_LIMIT_PER_MINUTE {
                     assert!(
+                        // coverage: justified — the closure fires only if
+                        // Redis fails during a test asserting Redis health;
+                        // a healthy test Redis keeps it at zero.
                         redis_rate_limit(&state, &key).await.unwrap_or_else(
                             |_| panic!("redis is healthy: requests within the budget pass")
                         ),
@@ -1362,6 +1441,8 @@ mod adversarial_tests {
         let map = EMERGENCY_LIMITER.get().expect("limiter initialized").lock();
         assert!(
             map.len() <= 2,
+            // coverage: justified — the format argument is evaluated only
+            // when the assertion FAILS; a passing run never measures it.
             "stale buckets must be pruned once the map grows large, got {}",
             map.len()
         );
@@ -1569,5 +1650,507 @@ mod adversarial_tests {
         ] {
             assert_eq!(is_example_com_domain(&json), expected, "{json}");
         }
+    }
+
+    /// The fresh-domain branch of provisioning: with the sandbox's
+    /// example.com row removed (under the same advisory lock the
+    /// provisioner takes, so no racing process re-inserts it first), a
+    /// provision generates a REAL DKIM keypair and re-inserts the verified
+    /// domain. The immediately following provision finds the live key and
+    /// ROTATES it — still exactly one live key, and the survivor is the
+    /// newest provision's plaintext.
+    #[test]
+    fn provision_inserts_a_missing_domain_and_rotates_a_live_key() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let mut tx = state.db.begin().await.expect("delete tx");
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                    .bind(SANDBOX_PROVISION_LOCK)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("provision lock");
+                sqlx::query("DELETE FROM domains WHERE tenant_id = $1 AND name = 'example.com'")
+                    .bind(SANDBOX_TENANT_ID)
+                    .execute(&mut *tx)
+                    .await
+                    .expect("delete sandbox domain");
+                tx.commit().await.expect("commit delete");
+
+                let first = provision_sandbox(&state).await.expect("first provision");
+                let domain: Option<String> = sqlx::query_scalar(
+                    "SELECT name FROM domains WHERE tenant_id = $1 AND name = 'example.com' LIMIT 1",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_optional(&state.db)
+                .await
+                .expect("domain query");
+                assert_eq!(
+                    domain.as_deref(),
+                    Some("example.com"),
+                    "the provision must re-insert the DKIM-encrypted sandbox domain"
+                );
+                let dkim_enabled: bool = sqlx::query_scalar(
+                    "SELECT dkim_enabled FROM domains WHERE tenant_id = $1 AND name = 'example.com'",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_one(&state.db)
+                .await
+                .expect("dkim flag");
+                assert!(dkim_enabled, "the real send path requires dkim_enabled");
+
+                // Second provision: the first left a live key, so this one
+                // rotates instead of minting blindly.
+                let second = provision_sandbox(&state).await.expect("second provision");
+                let live: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*)::bigint FROM api_keys
+                     WHERE tenant_id = $1 AND revoked_at IS NULL",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_one(&state.db)
+                .await
+                .expect("count live keys");
+                assert_eq!(live, 1, "rotation must leave exactly one live key");
+                let stored_hash: String = sqlx::query_scalar(
+                    "SELECT key_hash FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL",
+                )
+                .bind(SANDBOX_TENANT_ID)
+                .fetch_one(&state.db)
+                .await
+                .expect("live key hash");
+                assert_ne!(
+                    first.api_key, second.api_key,
+                    "rotation mints a fresh credential"
+                );
+                assert_eq!(
+                    apexmail_lib::hash_api_key_with_secret(
+                        &second.api_key,
+                        &state.config.api_key_hash_secret
+                    ),
+                    stored_hash,
+                    "the surviving live key must be the newest provision's"
+                );
+            })
+        });
+    }
+
+    /// A Redis peer that accepts TCP but ERRORS every data command: the
+    /// pool's connect AND its recycle PING both succeed (PING args are
+    /// echoed, as Redis does) while the INCR fails — the limiter must
+    /// surface `Err(())` (never a fabricated allow) and the caller must
+    /// engage the stricter in-process emergency limiter.
+    /// Byte substring search for the RESP-lite stub below.
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    /// RESP-lite: answer EVERY command in the chunk — clients pipeline
+    /// (deadpool's recycle PING and the INCR can share one TCP write),
+    /// so replying to only the first command strands the second and the
+    /// client hangs forever. PING echoes its argument (what a real
+    /// Redis does and what deadpool's recycle check verifies); every
+    /// other command errors.
+    fn reply_for(chunk: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut rest = chunk;
+        while let Some(dollar) = find(rest, b"$") {
+            let after = &rest[dollar + 1..];
+            let Some(crlf) = find(after, b"\r\n") else { break };
+            let Ok(len) = std::str::from_utf8(&after[..crlf]).unwrap_or("x").parse::<usize>() else {
+                break;
+            };
+            if after.len() < crlf + 2 + len {
+                break;
+            }
+            let arg = &after[crlf + 2..crlf + 2 + len];
+            if arg == b"PING" {
+                out.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+                out.extend_from_slice(arg);
+                out.extend_from_slice(b"\r\n");
+            } else {
+                out.extend_from_slice(b"-ERR fake redis: data commands disabled\r\n");
+            }
+            rest = &after[crlf + 2 + len..];
+        }
+        if out.is_empty() {
+            out.extend_from_slice(b"-ERR fake redis: data commands disabled\r\n");
+        }
+        out
+    }
+
+    /// Spawn the fake Redis stub on an ephemeral port; returns the port.
+    /// Every connection is served on its own thread until the process ends.
+    fn spawn_fake_redis() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake redis");
+        let port = listener.local_addr().expect("local addr").port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut sock = stream;
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = sock.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        if sock.write_all(&reply_for(&buf[..n])).is_err() {
+                            // coverage: justified — fires only when the
+                            // client resets the connection between its last
+                            // read and this write (a disconnect race); the
+                            // deterministic clients below always drain the
+                            // reply first.
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn redis_increment_failure_degrades_to_the_emergency_limiter() {
+        let port = spawn_fake_redis();
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let erroring = crate::app::test_support::test_state_over_with_config_and_redis(
+                    state.db.clone(),
+                    crate::app::test_support::test_config(),
+                    &format!("redis://127.0.0.1:{port}"),
+                )
+                .await;
+                assert!(
+                    redis_rate_limit(&erroring, "adv_explorer_erroring_incr")
+                        .await
+                        .is_err(),
+                    "a failing INCR is Err(()) — never an accidental allow"
+                );
+                let ip = format!("adv-erroring-{}", uuid::Uuid::new_v4());
+                for _ in 0..EMERGENCY_RATE_LIMIT_PER_MINUTE {
+                    assert!(
+                        rate_limit(&erroring, &ip).await,
+                        "the emergency limiter engages while Redis errors"
+                    );
+                }
+                assert!(
+                    !rate_limit(&erroring, &ip).await,
+                    "the emergency ceiling holds while Redis errors"
+                );
+            })
+        });
+    }
+
+    /// The DKIM env-var RESTORE arm of `with_dkim_env`: a value that was set
+    /// before the helper runs is captured and put back verbatim (not
+    /// removed). The env mutation is serialised on the module's mutex, so
+    /// the capture always observes the value this test planted: any sibling
+    /// capture/restore section either completed before the mutex let this
+    /// test set it, or runs after and itself restores the planted value.
+    #[test]
+    fn with_dkim_env_restores_a_previously_set_encryption_key() {
+        let planted = "previous-key-planted-by-restore-test";
+        {
+            let _guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, planted);
+        }
+        with_dkim_env(|_state| Box::pin(async move {}));
+        let current = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV)
+            .expect("a previously set key must be restored, never removed");
+        assert_eq!(current, planted);
+        // Leave later tests the pristine (unset) environment.
+        {
+            let _guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV);
+        }
+    }
+
+    /// Malformed and truncated RESP chunks against the fake Redis stub: a
+    /// non-numeric bulk-length prefix and a bulk string cut off mid-payload
+    /// must degrade to the stub's error reply — never hang or panic.
+    #[test]
+    fn fake_redis_stub_degrades_malformed_and_truncated_resp_to_errors() {
+        let port = spawn_fake_redis();
+        use std::io::{Read, Write};
+
+        // (a) A bulk-string header with a NON-NUMERIC length ($zz): nothing
+        // parseable precedes the bail-out, so the stub's generic error reply
+        // is all the client gets.
+        let mut bad = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        bad.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("read timeout");
+        bad.write_all(b"*1\r\n$zz\r\n").expect("write bad header");
+        let mut reply = [0u8; 128];
+        let n = bad.read(&mut reply).expect("read stub error reply");
+        assert!(
+            reply[..n].starts_with(b"-ERR"),
+            // coverage: justified — the format argument is evaluated only
+            // when the assertion FAILS; a passing run never measures it.
+            "a non-numeric RESP length must error, got {:?}",
+            &reply[..n]
+        );
+
+        // (b) A parseable command prefix followed by a bulk string whose
+        // declared length (5000) far exceeds what was actually sent: the
+        // stub errors for the prefix instead of waiting forever.
+        let mut partial = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        partial
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut truncated = b"*1\r\n$4\r\nINCR\r\n$5000\r\n".to_vec();
+        truncated.extend_from_slice(&[b'x'; 64]);
+        partial.write_all(&truncated).expect("write truncated bulk");
+        let n = partial
+            .read(&mut reply)
+            .expect("read truncated-bulk error reply");
+        assert!(
+            reply[..n].starts_with(b"-ERR"),
+            // coverage: justified — the format argument is evaluated only
+            // when the assertion FAILS; a passing run never measures it.
+            "a truncated bulk string must still produce an error reply, got {:?}",
+            &reply[..n]
+        );
+    }
+
+    /// An AppState with the Email Grader ENABLED (real DNS resolver; DNS
+    /// failures degrade to low scores, never errors — GraderEngine
+    /// assembles a response either way). `rate_limit_max = 0` refuses every
+    /// check at the engine's per-IP limiter, deterministically and with no
+    /// network at all.
+    async fn grader_enabled_state(pool: sqlx::PgPool, engine_rate_limit_max: u32) -> AppState {
+        crate::test_db::ensure_aws_test_env();
+        let grader_config = email_grader::GraderConfig {
+            enabled: true,
+            rate_limit_max: engine_rate_limit_max,
+            rate_limit_window_seconds: 60,
+            cache_ttl_seconds: 0,
+            network_timeout_seconds: 1,
+            ..email_grader::GraderConfig::default()
+        };
+        let engine = email_grader::GraderEngine::new(grader_config.clone(), None)
+            .expect("grader engine");
+        let gs = std::sync::Arc::new(
+            email_grader::GraderState::new(std::sync::Arc::new(engine), grader_config, pool.clone())
+                .expect("grader state"),
+        );
+        let config = crate::app::test_support::test_config();
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = std::sync::Arc::new(crate::ses_provider::SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            pool.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        ));
+        crate::state::AppStateInner::with_ddos_protector(
+            pool.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: pool.clone(),
+                ro: pool,
+            },
+            redis,
+            config.clone(),
+            reqwest::Client::new(),
+            (*ses_provider).clone(),
+            None,
+            std::sync::Arc::new(
+                ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+                    .await
+                    .expect("ddos protector"),
+            ),
+            Some(gs),
+            None,
+            crate::resilience::ResilientClient::new_from_config(&config),
+        )
+    }
+
+    /// The grader-delegated ERROR branch: the engine's per-IP rate limit
+    /// (max = 0) refuses the check, and the explorer must map the JSON error
+    /// envelope onto its honest error page — code AND message extracted from
+    /// the envelope, never raw engine internals.
+    #[test]
+    fn grader_engine_refusal_maps_to_the_explorer_error_page() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let grader = grader_enabled_state(state.db.clone(), 0).await;
+                let resp = grade_domain(
+                    State(grader),
+                    unique_peer(),
+                    axum::http::HeaderMap::new(),
+                    Form(GradeDomainForm {
+                        domain: "Example.COM".into(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+                let page = html(resp).await;
+                assert!(page.contains("RATE_LIMITED"), "{page}");
+                assert!(!page.contains("internal_error"), "{page}");
+            })
+        });
+    }
+
+    /// The grader-delegated SUCCESS branch: a clean domain really reaches
+    /// the engine and the scored report is rendered as the zero-JS grade
+    /// page (the pasted-URL noise has been stripped on the way in).
+    #[test]
+    fn grader_check_renders_the_scored_report_page() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let grader = grader_enabled_state(state.db.clone(), 100).await;
+                let resp = grade_domain(
+                    State(grader),
+                    unique_peer(),
+                    axum::http::HeaderMap::new(),
+                    Form(GradeDomainForm {
+                        domain: "https://Example.COM".into(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(page.contains("DOMAIN CHECK"), "grade page: {page}");
+                assert!(page.contains("example.com"), "cleaned domain: {page}");
+            })
+        });
+    }
+
+    /// A non-JSON upstream response (an HTML page, an empty 404) is passed
+    /// through verbatim in the `raw` field instead of being fabricated
+    /// into JSON.
+    #[test]
+    fn non_json_upstream_responses_render_raw() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let (status, body) =
+                    dispatch(&state, Method::GET, "/verify-email", "am_probe_key", None).await;
+                assert!(
+                    body.get("raw").is_some(),
+                    "non-JSON body must fall back to the raw string: {status} {body}"
+                );
+            })
+        });
+    }
+
+    /// A request with NO peer address buckets on "unknown": once that
+    /// shared bucket is exhausted the exec endpoint answers the 429 page;
+    /// once freed the very same request flows through the sandbox.
+    #[test]
+    fn exec_buckets_unknown_peers_and_enforces_the_ceiling_on_them() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let no_peer = |state: &AppState| {
+                    let state = state.clone();
+                    async move {
+                        exec(
+                            State(state),
+                            None,
+                            axum::http::HeaderMap::new(),
+                            Form(ExplorerForm {
+                                lane: "messages".to_string(),
+                                body: String::new(),
+                            }),
+                        )
+                        .await
+                    }
+                };
+
+                del_redis_key(&state, "explorer_rl:unknown").await;
+                for _ in 0..RATE_LIMIT_PER_MINUTE {
+                    assert!(rate_limit(&state, "unknown").await, "bucket fill");
+                }
+                let limited = no_peer(&state).await;
+                assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+                let page = html(limited).await;
+                assert!(page.contains("Too many sandbox requests"), "{page}");
+
+                del_redis_key(&state, "explorer_rl:unknown").await;
+                let allowed = no_peer(&state).await;
+                assert_eq!(allowed.status(), StatusCode::OK);
+                let page = html(allowed).await;
+                assert!(page.contains("200"), "{page}");
+                // Leave the shared bucket clean for sibling processes.
+                del_redis_key(&state, "explorer_rl:unknown").await;
+            })
+        });
+    }
+
+    async fn del_redis_key(state: &AppState, key: &str) {
+        let mut conn = state.redis.get().await.expect("redis");
+        let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    /// The FIRST sandbox provision failing (unreachable database) is a
+    /// generic 500 page: the provisioning error carries database detail,
+    /// which is logged, never rendered.
+    #[test]
+    fn sandbox_provisioning_failure_is_a_generic_500_page() {
+        with_dkim_env(|_state| {
+            Box::pin(async move {
+                let dead = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(std::time::Duration::from_millis(300))
+                    .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+                    .expect("lazy dead pool");
+                let dead_state = crate::app::test_support::test_state_over(dead).await;
+                let resp = exec(
+                    State(dead_state),
+                    unique_peer(),
+                    axum::http::HeaderMap::new(),
+                    Form(ExplorerForm {
+                        lane: "messages".to_string(),
+                        body: String::new(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let page = html(resp).await;
+                assert!(page.contains("temporarily unavailable"), "{page}");
+                assert!(
+                    !page.contains("sandbox provision"),
+                    "the raw provisioning error must not reach the page: {page}"
+                );
+            })
+        });
+    }
+
+    /// A grader request with no peer address still buckets and validates
+    /// (the "unknown" bucket path through grade_domain).
+    #[test]
+    fn grader_without_connect_info_still_validates_input() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                del_redis_key(&state, "explorer_rl:unknown").await;
+                let resp = grade_domain(
+                    State(state.clone()),
+                    None,
+                    axum::http::HeaderMap::new(),
+                    Form(GradeDomainForm {
+                        domain: "nodot".to_string(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+                let page = html(resp).await;
+                assert!(page.contains("INVALID_INPUT"), "{page}");
+                del_redis_key(&state, "explorer_rl:unknown").await;
+            })
+        });
     }
 }

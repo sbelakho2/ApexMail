@@ -2045,6 +2045,559 @@ fn fnv1a64_known_answer_vectors() {
     assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Residual fault-window arms:ACK/DLQ/drain/publish/dedup failure paths that
+// the live-server tests cannot reach. The shared scripted RESP server
+// (`test_support::ScriptedRedis`) supplies the fault ("Redis answers, then
+// says no") so every arm is deterministic.
+// ═════════════════════════════════════════════════════════════════════════════
+
+use crate::routes::test_support::ScriptedRedis;
+
+/// A Redis that answers the handshake and then rejects EVERY real command
+/// with `-ERR` — the "server answers but says no" fault.
+fn err_redis() -> ScriptedRedis {
+    ScriptedRedis::start(Vec::new(), b"-ERR injected fault\r\n")
+}
+
+fn lazy_dead_db() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy("postgres://offline@127.0.0.1:1/offline")
+        .expect("lazy pool")
+}
+
+/// `ack_committed_batch` — all three structural arms: the empty-claim guard,
+/// the answering-but-failing Redis (release script error), and the dead pool.
+#[tokio::test]
+async fn ack_arms_empty_claim_script_failure_and_dead_pool() {
+    test_log_subscriber();
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let lazy_db = lazy_dead_db();
+
+    // (1) Empty claim list → early return without touching Redis.
+    let live = processor(lazy_db.clone(), redis.clone());
+    live.ack_committed_batch(&[]).await;
+
+    // (2) Redis answers but the release script fails → swallowed with a warn;
+    //     the leases stay in `processing` for reclamation.
+    let err = err_redis();
+    let broken = processor(lazy_db.clone(), err.pool.clone());
+    broken
+        .ack_committed_batch(&["{\"v\":2,\"cs\":\"ab\"}".to_string()])
+        .await;
+
+    // (3) Dead pool → the connection arm, same swallow-with-a-warn contract.
+    let dead = processor(lazy_db, dead_redis());
+    dead.ack_committed_batch(&["{\"v\":2,\"cs\":\"ab\"}".to_string()])
+        .await;
+}
+
+/// `dead_letter_entries` — the RPUSH-pipeline failure, the post-push lease
+/// release failure, and the dead-pool arm. Order matters in the contract:
+/// the DLQ copy lands FIRST, so a failure after it leaves the entry leased
+/// (at-least-once), never lost.
+#[tokio::test]
+async fn dead_letter_entries_failure_arms_are_swallowed() {
+    test_log_subscriber();
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    clear_dlq(&redis).await;
+    let lazy_db = lazy_dead_db();
+    let proc = processor(lazy_db.clone(), redis.clone());
+    let poison = "{\"v\":2,\"cs\":\"ab\",\"d\":{}}".to_string();
+
+    // (1) DLQ key holds a STRING → the RPUSH pipeline fails (WRONGTYPE) and
+    //     the entries stay leased.
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_DEAD_LETTER_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+    }
+    proc.dead_letter_entries(&[poison.clone()], "unparsable_envelope", 0)
+        .await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_DEAD_LETTER_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    // (2) DLQ push succeeds; the lease release FAILS (the processing key
+    //     holds a STRING, so the script's LREM errors) → at-least-once into
+    //     the DLQ. (The release's RPUSH half is skipped for the plain-ACK
+    //     shape, so the WAL key being wrong-typed would NOT fail it.)
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_WAL_PROCESSING_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+    }
+    proc.dead_letter_entries(&[poison], "unparsable_envelope", 0)
+        .await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_WAL_PROCESSING_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+    clear_dlq(&redis).await;
+
+    // (3) Dead pool → the connection arm; the lease simply survives.
+    let dead = processor(lazy_db, dead_redis());
+    dead.dead_letter_entries(&["{}".to_string()], "unparsable_envelope", 0)
+        .await;
+}
+
+/// `drain_all` — both LLEN failure arms (answered-then-erroring server) and
+/// the pathological round bound where every flush "succeeds" but a lease can
+/// never be released (unparsable lease + failing DLQ push).
+#[tokio::test]
+async fn drain_all_llen_arms_and_round_bound() {
+    test_log_subscriber();
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let lazy_db = lazy_dead_db();
+
+    // (1) Every real command errors: the first LLEN (pending) fails.
+    let err = err_redis();
+    let a = processor(lazy_db.clone(), err.pool.clone());
+    a.drain_all().await;
+
+    // (2) First LLEN answers :0 (pending), the second (processing) errors.
+    let seq = ScriptedRedis::start(vec![b":0\r\n"], b"-ERR injected fault\r\n");
+    let b = processor(lazy_db.clone(), seq.pool.clone());
+    b.drain_all().await;
+
+    // (3) Round bound: an unparsable lease whose DLQ push always fails makes
+    //     every flush return Ok while `processing` never drains — the loop
+    //     must give up at the round bound leaving the entry durable.
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_DEAD_LETTER_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+        let _: Result<(), _> = redis::cmd("RPUSH")
+            .arg(REDIS_WAL_PROCESSING_KEY)
+            .arg("definitely-not-an-envelope")
+            .query_async(&mut *conn)
+            .await;
+    }
+    let c = processor(lazy_db, redis.clone());
+    c.drain_all().await;
+    assert_eq!(
+        processing_len(&redis).await,
+        1,
+        "the unwedgeable lease stays durable in `processing`"
+    );
+    assert!(
+        processing_entries(&redis)
+            .await
+            .iter()
+            .all(|e| e.contains("definitely-not-an-envelope")),
+        "the lease holds the original poison envelope verbatim"
+    );
+    {
+        let mut conn = redis.get().await.unwrap();
+        for key in [
+            REDIS_DEAD_LETTER_KEY,
+            REDIS_WAL_PROCESSING_KEY,
+            REDIS_WAL_KEY,
+        ] {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+}
+
+/// Empty batches are explicit no-ops in both writers (the flush loop never
+/// calls them empty, but the guards bound the public contract).
+#[tokio::test]
+async fn empty_batch_writes_are_noops() {
+    let Some(db) = canonical_pool("tracking_empty_writes").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let proc = processor(db, redis);
+    proc.write_events(&[]).await.expect("empty PG write is Ok");
+    proc.write_clickhouse(&[])
+        .await
+        .expect("empty ClickHouse write is Ok");
+}
+
+/// The fire-and-forget SSE Pub/Sub fan-out must not panic (and must not be
+/// reported as a flush failure) when Redis is unreachable after the commit.
+#[tokio::test]
+async fn pubsub_fanout_survives_a_dead_redis() {
+    let Some(db) = canonical_pool("tracking_pubsub_dead").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let proc = processor(db, dead_redis());
+    let event = wal_event("tn_pubsub", "msg_pubsub", EventType::Opened);
+    proc.write_events(&[event]).await.expect("committed in PG");
+    // Give the spawned PUBLISH task its bounded moment to fail `get()`.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}
+
+/// A categorized unsubscribe persists a `subscription_preferences` row (the
+/// per-category consent surface), not a tenant-wide suppression.
+#[tokio::test]
+async fn categorized_unsubscribe_persists_subscription_preference() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_pref_cat").await)
+    else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    let tenant = unique("tn_prefcat");
+    seed_tenant(&db, &tenant).await;
+    let proc = processor(db.clone(), redis.clone());
+    let recipient = "prefcat@example.com";
+
+    for subscribed in [false, true] {
+        proc.record_unsubscribe(UnsubscribeData {
+            tenant_id: tenant.clone(),
+            message_id: unique("msg"),
+            recipient: recipient.into(),
+            reason: Some("preference center".into()),
+            category: Some("marketing".into()),
+            user_agent: None,
+            ip_address: None,
+        })
+        .await
+        .unwrap_or_else(|e| panic!("categorized unsubscribe must land (subscribed={subscribed}): {e}"));
+        // record_unsubscribe always unsubscribes (subscribed=false row).
+        let row: (bool, String) = sqlx::query_as(
+            "SELECT subscribed, category FROM subscription_preferences \
+             WHERE tenant_id = $1 AND email = $2 AND category = 'marketing'",
+        )
+        .bind(&tenant)
+        .bind(recipient)
+        .fetch_one(&db)
+        .await
+        .expect("preference row");
+        assert!(!row.0, "one-click unsubscribes the category");
+        assert_eq!(row.1, "marketing");
+    }
+    clear_wal(&redis).await;
+}
+
+/// The suppression fan-out must survive (and log) a Redis that answers but
+/// rejects the PUBLISH.
+#[tokio::test]
+async fn suppression_publish_failure_is_logged_not_panicking() {
+    test_log_subscriber();
+    let err = err_redis();
+    let proc = processor(lazy_dead_db(), err.pool.clone());
+    proc.publish_suppression_added("tn_pubfail", "u@example.com", None);
+    proc.publish_suppression_removed("tn_pubfail", "u@example.com");
+    proc.publish_preference_changed("tn_pubfail", "u@example.com", "marketing", false);
+    // Give the spawned PUBLISH tasks their bounded moment to fail.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}
+
+/// The suppression-retry drain: every error arm of the
+/// reclaim → LLEN → claim pipeline, the poison drop, the success fan-out,
+/// and the release failure — each forced deterministically.
+#[tokio::test]
+async fn suppression_retry_drain_pipeline_error_arms() {
+    test_log_subscriber();
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let lazy_db = lazy_dead_db();
+    let proc = processor(lazy_db.clone(), redis.clone());
+    let good = build_suppression_retry_entry("tn_drain_arms", "drainarms@example.com", None);
+    // Poison MUST use the wire (camelCase) field names — a snake_case record
+    // is an UNPARSEABLE entry, a different arm entirely.
+    let poison = r#"{"tenantId":"tn_drain_arms","email":"poisonarms@example.com","retries":10}"#
+        .to_string();
+
+    // (1) Reclaim fails: the processing key holds a STRING, so the reclaim
+    //     script's RPOPLPUSH errors.
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .query_async(&mut *conn)
+            .await;
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+    }
+    proc.drain_suppression_retries().await;
+
+    // (2) LLEN fails: the retry key holds a STRING (the reclaim is a no-op
+    //     because `processing` is empty).
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .query_async(&mut *conn)
+            .await;
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+    }
+    proc.drain_suppression_retries().await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    // (3) Claim fails AFTER a successful LLEN: the scripted server answers
+    //     the reclaim (*0), the LLEN (:1), then errors the claim EVALSHA.
+    let empty_arr: &'static [u8] = b"*0\r\n";
+    let one: &'static [u8] = b":1\r\n";
+    let seq_claim_err = ScriptedRedis::start(vec![empty_arr, one], b"-ERR injected fault\r\n");
+    let c = processor(lazy_db.clone(), seq_claim_err.pool.clone());
+    c.drain_suppression_retries().await;
+
+    // (4) Claim "succeeds" EMPTY while LLEN said 1 (a racing consumer) —
+    //     the drain returns without touching Postgres.
+    let seq_claim_empty = ScriptedRedis::start(vec![empty_arr, one, empty_arr], empty_arr);
+    let d = processor(lazy_db.clone(), seq_claim_empty.pool.clone());
+    d.drain_suppression_retries().await;
+
+    // (5) Unparseable entries (incl. wrong-case field names) are skipped.
+    {
+        let mut conn = redis.get().await.unwrap();
+        for junk in ["totally-not-json", r#"{"tenant_id":"t","email":"e","retries":0}"#] {
+            let _: Result<(), _> = redis::cmd("RPUSH")
+                .arg(REDIS_SUPPRESSION_RETRY_KEY)
+                .arg(junk)
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+    proc.drain_suppression_retries().await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    // (6) Success against the LIVE database: the row lands, the fan-out
+    //     fires, the lease is ACKed.
+    let Some(db) = canonical_pool("tracking_drain_success").await else {
+        eprintln!("skipping success arm: set TEST_DATABASE_URL");
+        return;
+    };
+    seed_tenant(&db, "tn_drain_arms").await;
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("RPUSH")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg(&good)
+            .query_async(&mut *conn)
+            .await;
+    }
+    let healthy = processor(db.clone(), redis.clone());
+    healthy.drain_suppression_retries().await;
+    let landed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind("tn_drain_arms")
+            .bind("drainarms@example.com")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(landed, 1, "the retry landed the suppression row");
+
+    // (7) Failure against the dead database: the good entry is re-queued
+    //     with a bumped counter; the poison (budget exhausted) is dropped
+    //     with the CRITICAL log — never silently.
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .query_async(&mut *conn)
+            .await;
+        for entry in [&good, &poison] {
+            let _: Result<(), _> = redis::cmd("RPUSH")
+                .arg(REDIS_SUPPRESSION_RETRY_KEY)
+                .arg(entry)
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+    proc.drain_suppression_retries().await;
+    let left: Vec<String> = {
+        let mut conn = redis.get().await.unwrap();
+        redis::cmd("LRANGE")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut *conn)
+            .await
+            .unwrap()
+    };
+    assert_eq!(left.len(), 1, "only the re-queued good entry remains");
+    assert!(left[0].contains("\"retries\":1"), "{left:?}");
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+}
+
+/// `release_lease` swallows (but logs) a failing release script: with the
+/// processing key holding a STRING, the LREM inside the script errors and
+/// the entry stays leased for reclamation.
+#[tokio::test]
+async fn suppression_lease_release_failure_is_swallowed() {
+    test_log_subscriber();
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let proc = processor(lazy_dead_db(), redis.clone());
+    {
+        let mut conn = redis.get().await.unwrap();
+        let _: Result<(), _> = redis::cmd("SET")
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .arg("not-a-list")
+            .query_async(&mut *conn)
+            .await;
+        proc.release_lease(&mut conn, "some-entry", Some("replacement".into()))
+            .await;
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(REDIS_SUPPRESSION_PROCESSING_KEY)
+            .query_async(&mut *conn)
+            .await;
+    }
+}
+
+/// Counter pipelines and dedup rollbacks must survive a Redis that rejects
+/// every command (fire-and-forget paths stay fire-and-forget) — and a Redis
+/// that cannot even hand out a connection.
+#[tokio::test]
+async fn counters_and_dedup_rollback_survive_err_redis() {
+    test_log_subscriber();
+    let err = err_redis();
+    let proc = processor(lazy_dead_db(), err.pool.clone());
+    proc.incr_counters("tn_counter_err", "2026-09-28", "10", "opens")
+        .await;
+    proc.clear_dedup("open:msg:rcpt").await;
+
+    // The spawned tasks must also survive a DEAD pool (`get()` itself fails).
+    let dead = processor(lazy_dead_db(), dead_redis());
+    dead.incr_counters("tn_counter_dead", "2026-09-28", "10", "opens")
+        .await;
+    dead.clear_dedup("open:msg:rcpt").await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}
+
+/// A LEGACY bare-event WAL entry (no versioned envelope) still parses and
+/// flushes through the modern pipeline — the backward-compatibility arm.
+#[tokio::test]
+async fn legacy_bare_wal_entries_still_flush() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_legacy_wal").await)
+    else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    clear_processing(&redis).await;
+    let tenant = unique("tn_legacy");
+    seed_tenant(&db, &tenant).await;
+    let event = TrackingEvent {
+        id: new_id("evt"),
+        event_type: EventType::Opened,
+        tenant_id: tenant.clone(),
+        message_id: unique("msg_legacy"),
+        recipient: "legacy@example.com".into(),
+        link_id: None,
+        link_url: None,
+        unsubscribe_reason: None,
+        user_agent: None,
+        ip_address: None,
+        timestamp: Utc::now(),
+        metadata: None,
+    };
+    // Deliberately NOT wrapped in build_wal_envelope — the pre-envelope shape.
+    let bare = serde_json::to_string(&event).unwrap();
+    seed_wal(&redis, &[bare]).await;
+
+    let proc = processor(db.clone(), redis.clone());
+    proc.flush().await.expect("legacy entry flushes");
+    let persisted: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND id = $2")
+            .bind(&tenant)
+            .bind(&event.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(persisted, 1, "legacy bare event committed");
+    assert_eq!(wal_len(&redis).await, 0);
+    assert_eq!(processing_len(&redis).await, 0);
+    clear_wal(&redis).await;
+}
+
+/// `dedup_key` scopes by link id when one is present — a click on link A
+/// never dedupes a click on link B of the same message.
+#[test]
+fn dedup_key_with_link_id_is_distinct_and_deterministic() {
+    let with_a = dedup_key("click", "msg", "r@x.com", Some("lnk_a"));
+    let with_a_again = dedup_key("click", "msg", "r@x.com", Some("lnk_a"));
+    let with_b = dedup_key("click", "msg", "r@x.com", Some("lnk_b"));
+    let without = dedup_key("click", "msg", "r@x.com", None);
+    assert_eq!(with_a, with_a_again, "deterministic for the same link");
+    assert_ne!(with_a, with_b, "distinct link ids are distinct keys");
+    assert_ne!(with_a, without, "a link-scoped key differs from the bare key");
+}
+
 /// The DLQ envelope builder:field-for-field shape contract.
 #[test]
 fn dead_letter_entry_shape_contract() {

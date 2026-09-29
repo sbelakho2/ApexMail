@@ -352,6 +352,125 @@ pub(crate) mod test_support {
 
     pub(crate) const TEST_SECRET: &str = "test-secret-key-32-bytes-minimum!!";
 
+    /// Parse as many COMPLETE RESP-array commands as possible out of `buf`.
+    /// Returns the command names (upper-cased) and how many bytes they
+    /// consumed; incomplete tails are left for the next read.
+    pub(crate) fn parse_resp_commands(buf: &[u8]) -> (Vec<String>, usize) {
+        let mut cmds = Vec::new();
+        let mut i = 0usize;
+        'outer: while i < buf.len() {
+            if buf[i] != b'*' {
+                break;
+            }
+            let Some(nl) = buf[i..].windows(2).position(|w| w == b"\r\n") else {
+                break;
+            };
+            let Ok(nargs) = std::str::from_utf8(&buf[i + 1..i + nl])
+                .map(|s| s.parse::<usize>())
+                .unwrap_or(Ok(0))
+            else {
+                break;
+            };
+            let mut j = i + nl + 2;
+            let mut name: Option<String> = None;
+            for k in 0..nargs {
+                if j >= buf.len() || buf[j] != b'$' {
+                    break 'outer;
+                }
+                let Some(nl2) = buf[j..].windows(2).position(|w| w == b"\r\n") else {
+                    break 'outer;
+                };
+                let Ok(len) = std::str::from_utf8(&buf[j + 1..j + nl2])
+                    .map(|s| s.parse::<usize>())
+                    .unwrap_or(Ok(0))
+                else {
+                    break 'outer;
+                };
+                let arg_start = j + nl2 + 2;
+                let arg_end = arg_start + len + 2; // payload + trailing CRLF
+                if arg_end > buf.len() {
+                    break 'outer;
+                }
+                if k == 0 {
+                    name = Some(
+                        String::from_utf8_lossy(&buf[arg_start..arg_start + len])
+                            .to_ascii_uppercase(),
+                    );
+                }
+                j = arg_end;
+            }
+            i = j;
+            cmds.push(name.unwrap_or_default());
+        }
+        (cmds, i)
+    }
+
+    /// A scripted TCP stand-in for Redis: the connection handshake
+    /// (redis-rs's CLIENT SETINFO commands) is always answered with `+OK`;
+    /// every subsequent complete command is answered from `replies` IN ORDER,
+    /// then with `fallback` forever. The socket never closes, so every
+    /// failure the caller sees is a real RESP-level `-ERR`, not a transport
+    /// fault.
+    pub(crate) struct ScriptedRedis {
+        pub pool: deadpool_redis::Pool,
+    }
+
+    impl ScriptedRedis {
+        pub(crate) fn start(replies: Vec<&'static [u8]>, fallback: &'static [u8]) -> Self {
+            use std::io::{Read, Write};
+            use std::net::TcpListener;
+            use std::sync::Arc;
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted redis");
+            let local_addr = listener.local_addr().expect("local addr");
+            let replies = Arc::new(replies);
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let replies = Arc::clone(&replies);
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 4096];
+                        let mut pending: Vec<u8> = Vec::new();
+                        let index = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => {
+                                    pending.extend_from_slice(&buf[..n]);
+                                    let (cmds, consumed) = parse_resp_commands(&pending);
+                                    pending.drain(..consumed);
+                                    for cmd in cmds {
+                                        let reply: &[u8] = if cmd == "CLIENT" {
+                                            b"+OK\r\n"
+                                        } else {
+                                            let i = index
+                                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                            replies.get(i).copied().unwrap_or(fallback)
+                                        };
+                                        if stream.write_all(reply).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            let pool = deadpool_redis::Config::from_url(format!("redis://{local_addr}"))
+                .builder()
+                .expect("scripted redis builder")
+                .max_size(2)
+                .runtime(deadpool_redis::Runtime::Tokio1)
+                .create_timeout(Some(std::time::Duration::from_secs(2)))
+                .wait_timeout(Some(std::time::Duration::from_secs(2)))
+                .recycle_timeout(Some(std::time::Duration::from_secs(2)))
+                .build()
+                .expect("scripted redis pool");
+            Self { pool }
+        }
+    }
+
     /// Unique tenant discriminator: unique per process AND per call so tests
     /// never collide on shared Redis keys (domain cache, dedup, WAL search).
     pub(crate) fn unique_tenant(label: &str) -> String {

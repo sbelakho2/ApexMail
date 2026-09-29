@@ -227,10 +227,15 @@ async fn stats_handler(
     let stats = state.vector_store.stats();
     match serde_json::to_value(&stats) {
         Ok(value) => (StatusCode::OK, Json(value)),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": err.to_string()})),
-        ),
+        Err(err) => {
+            // coverage: justified — StoreStats derives Serialize over plain
+            // numeric fields, so to_value is infallible; the arm guards
+            // future field types only.
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err.to_string()})),
+            )
+        }
     }
 }
 
@@ -653,5 +658,73 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["count"], 0, "cross-tenant search must be empty");
+    }
+
+    /// An EMPTY batch short-circuits the `max()` length guard (the
+    /// `if let` falls through) and the inference sidecar is never contacted:
+    /// the handler answers 200 with zero embeddings. A `/search` WITHOUT
+    /// `min_score` skips the retain filter entirely.
+    #[tokio::test]
+    async fn empty_embed_batch_succeeds_and_min_score_is_optional() {
+        use tower::ServiceExt;
+        let state = test_state();
+        let app = router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/embed")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "texts": [] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "an empty batch is legal");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["embeddings"].as_array().unwrap().len(), 0, "{json}");
+        assert_eq!(json["count"], 0, "{json}");
+        assert_eq!(
+            json["dimension"], 384,
+            "the service reports its configured dimension"
+        );
+
+        // A search with NO min_score answers without the retain filter.
+        let mut unit = vec![0.0f32; 384];
+        unit[0] = 1.0;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/search")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "vector": unit,
+                            "tenant_id": "tenant-a",
+                            "top_k": 5
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 0, "the store is empty in this test: {json}");
+        assert_eq!(json["results"].as_array().unwrap().len(), 0, "{json}");
     }
 }

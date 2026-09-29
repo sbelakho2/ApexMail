@@ -734,6 +734,17 @@ mod tests {
         assert!(validate_cidr_allowed("192.168.1.1".parse().unwrap(), &[]));
     }
 
+    /// A token with no signature separator is rejected before any crypto
+    /// or base64 work — there is nothing to verify.
+    #[test]
+    fn token_without_a_separator_is_rejected_before_crypto() {
+        let err = verify_cp_session_token_for_tests("no-dot-token", &test_secret()).unwrap_err();
+        assert!(
+            matches!(err, ApiError::Unauthorized(ref m) if m.contains("format")),
+            "{err:?}"
+        );
+    }
+
     // ─── Middleware behaviour (DB-gated; soft-skip without infra) ───
 
     mod middleware_tests {
@@ -762,6 +773,9 @@ mod tests {
                 .await;
             if ping.is_err() {
                 eprintln!("skipping {test_name}: TEST_REDIS_URL unreachable");
+                // coverage: justified — soft-skip guard: reachable only
+                // when TEST_REDIS_URL is unreachable, which never happens
+                // in the coverage harness.
                 return None;
             }
 
@@ -912,6 +926,9 @@ mod tests {
             let Some((state, db)) =
                 gate_state("cp_ip_outside_allowlist", vec!["10.0.0.0/8".to_string()]).await
             else {
+                // coverage: justified — soft-skip guard: reachable only
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
                 return;
             };
             let (user_id, email) = seed_operator(&db, true).await;
@@ -952,6 +969,9 @@ mod tests {
             let Some((state, db)) =
                 gate_state("cp_ip_missing_connect_info", vec!["10.0.0.0/8".to_string()]).await
             else {
+                // coverage: justified — soft-skip guard: reachable only
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
                 return;
             };
             let (user_id, email) = seed_operator(&db, true).await;
@@ -1251,6 +1271,318 @@ mod tests {
                 body["error"]["message"],
                 "MFA is required for control-plane access"
             );
+        }
+
+        /// The activity refresher refuses BOTH hard boundaries: a session
+        /// past its absolute expiry, and a session idle beyond the idle
+        /// window — even when the other clock is fresh.
+        #[tokio::test]
+        async fn refresh_refuses_absolute_expiry_and_idle_stale_sessions() {
+            let Some((state, _db)) = gate_state("cp_refresh_refusals", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let now = Utc::now().timestamp();
+            let base = CpSessionClaims {
+                sub: "usr_refresh".into(),
+                tenant_id: "ten_refresh".into(),
+                email: "op@apexmail.ee".into(),
+                role: "admin".into(),
+                mfa_enabled: true,
+                iat: now,
+                last_active: now,
+                exp: now + 3_600,
+            };
+            // Absolute expiry: iat so far in the past that
+            // iat + session_absolute_timeout_secs <= now.
+            let expired = CpSessionClaims {
+                iat: now - 100_000,
+                ..base.clone()
+            };
+            let err = refresh_cp_session_activity(&state, &expired)
+                .await
+                .expect_err("absolute expiry refuses");
+            assert!(
+                matches!(err, ApiError::Unauthorized(ref m) if m.contains("expired")),
+                "{err:?}"
+            );
+
+            // Idle timeout: fresh iat/exp, but last_active far beyond the
+            // idle window.
+            let idle = CpSessionClaims {
+                last_active: now - 100_000,
+                ..base
+            };
+            let err = refresh_cp_session_activity(&state, &idle)
+                .await
+                .expect_err("idle timeout refuses");
+            assert!(
+                matches!(err, ApiError::Unauthorized(ref m) if m.contains("idle")),
+                "{err:?}"
+            );
+        }
+
+        /// A syntactically garbage CP session cookie is an audited 401
+        /// (`cp_invalid_token`), never a pass-through.
+        #[tokio::test]
+        async fn garbage_cp_session_token_is_an_audited_401() {
+            let Some((state, db)) = gate_state("cp_garbage_token", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let (user_id, _email) = seed_operator(&db, true).await;
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", "apexmail_cp_session=garbage-token-no-signature")
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+            let outcome: Option<String> = sqlx::query_scalar(
+                "SELECT outcome FROM cp_access_log
+                 WHERE path = '/v1/admin/probe'
+                   AND outcome = 'cp_invalid_token'
+                   AND created_at > NOW() - INTERVAL '2 minutes'
+                 LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap()
+            .flatten();
+            assert_eq!(
+                outcome.as_deref(),
+                Some("cp_invalid_token"),
+                "the invalid token must be auditable"
+            );
+        }
+
+        /// Signed claims naming a non-admin role are refused at the gate —
+        /// the signature only authenticates the claims, it does not confer
+        /// authority.
+        #[tokio::test]
+        async fn non_admin_role_claims_are_refused_at_the_gate() {
+            let Some((state, db)) = gate_state("cp_viewer_role", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header_with_role(&state, &user_id, &email, "viewer", true);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        /// Claims whose `exp` has passed are refused before any database
+        /// work (an absolute-expiry session cannot ride on a valid role).
+        #[tokio::test]
+        async fn expired_claims_are_refused_before_the_database() {
+            let Some((state, db)) = gate_state("cp_expired_claims", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let now = Utc::now().timestamp();
+            let claims = CpSessionClaims {
+                sub: user_id.clone(),
+                tenant_id: "system".into(),
+                email,
+                role: "admin".into(),
+                mfa_enabled: true,
+                iat: now - 3_600,
+                last_active: now,
+                exp: now - 60,
+            };
+            let token = create_cp_session_token(&claims, &state.config.cp_auth.session_secret);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", format!("{CP_SESSION_COOKIE_NAME}={token}"))
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// A subject that is not a UUID detonates the recheck query's cast:
+        /// the failure is a loud 500 (Internal), never an authentication
+        /// bypass and never a silent allow.
+        #[tokio::test]
+        async fn malformed_subject_fails_the_live_recheck_loud() {
+            let Some((state, _db)) = gate_state("cp_recheck_cast_error", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let cookie = cp_cookie_header(&state, "not-a-uuid", "cast@apexmail.ee", true);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user("not-a-uuid"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a recheck failure must fail closed as an internal error"
+            );
+        }
+
+        /// An operator deleted AFTER the cookie was minted is refused on
+        /// the live recheck (the signed claims outlive nothing).
+        #[tokio::test]
+        async fn deleted_operator_is_refused_on_recheck() {
+            let Some((state, db)) = gate_state("cp_user_missing", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            sqlx::query("DELETE FROM users WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&db)
+                .await
+                .expect("delete operator");
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+            let outcome: Option<String> = sqlx::query_scalar(
+                "SELECT outcome FROM cp_access_log
+                 WHERE path = '/v1/admin/probe'
+                   AND outcome = 'cp_user_missing'
+                   AND created_at > NOW() - INTERVAL '2 minutes'
+                 LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap()
+            .flatten();
+            assert_eq!(outcome.as_deref(), Some("cp_user_missing"));
+        }
+
+        /// Without the ordinary authenticated identity (require_auth runs
+        /// before this gate in production) the CP gate fails CLOSED — bare
+        /// CP claims are never trusted on their own.
+        #[tokio::test]
+        async fn missing_bearer_identity_fails_closed() {
+            let Some((state, db)) = gate_state("cp_missing_bearer", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            let app = gate_router(state);
+
+            // No AuthUser extension at all.
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), 16 * 1024)
+                    .await
+                    .expect("body readable")
+                    .to_vec(),
+            )
+            .expect("utf-8");
+            assert!(
+                body.contains("authentication required for control-plane access"),
+                "{body}"
+            );
+        }
+
+        /// The request extractor for `CpAuthUser` yields the middleware's
+        /// identity when present — and a hard 401 when the gate never ran.
+        #[tokio::test]
+        async fn cp_user_extractor_reads_the_gate_extension() {
+            let Some((state, _db)) = gate_state("cp_user_extractor", vec![]).await else {
+                // coverage: justified — soft-skip guard: only reachable
+                // without TEST_DATABASE_URL/TEST_REDIS_URL, which the
+                // coverage harness always provides.
+                return;
+            };
+
+            // Without the extension: rejected.
+            let (mut parts, _) = Request::builder()
+                .body(())
+                .expect("request")
+                .into_parts();
+            let err = CpAuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .expect_err("no extension is a rejection");
+            assert!(matches!(err, ApiError::Unauthorized(_)), "{err:?}");
+
+            // With the extension: the same identity comes back out.
+            let gate_user = CpAuthUser {
+                user_id: "usr_ext".into(),
+                tenant_id: "ten_ext".into(),
+                email: "ext@apexmail.ee".into(),
+                role: "admin".into(),
+            };
+            parts.extensions.insert(gate_user.clone());
+            let extracted = CpAuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .expect("extension present");
+            assert_eq!(extracted.user_id, gate_user.user_id);
+            assert_eq!(extracted.tenant_id, gate_user.tenant_id);
+            assert_eq!(extracted.role, gate_user.role);
         }
     }
 }

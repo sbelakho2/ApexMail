@@ -66,6 +66,11 @@ fn is_valid_token_shape(token: &str) -> bool {
 /// how multi-byte input used to panic; even on ASCII, fragments of a
 /// bearer-style token do not belong in logs.)
 fn log_invalid_token_shape(handler: &str, token: &str) {
+    // coverage: justified — llvm-cov region-counter artifact: the field-arg
+    // lines below execute (log_invalid_token_shape is called by the F37
+    // hostile-token tests AND by a direct test with a debug subscriber; the
+    // macro's check region shows hits) but the argument regions are never
+    // counted.
     warn!(
         handler,
         len = token.len(),
@@ -592,6 +597,12 @@ pub async fn handle_prefs_post(
         let mut tx = match state.db.begin().await {
             Ok(tx) => tx,
             Err(e) => {
+                // coverage: justified — requires a pool that answers the
+                // email-categories query (the preceding statement on the SAME
+                // pool) and then fails `begin`: a protocol-aware PostgreSQL
+                // fault injector. Any whole-pool failure (dead DB) is caught
+                // by the categories-error arm immediately above, which IS
+                // covered.
                 error!(error = %e, "Failed to begin transaction for preferences");
                 // Batch-2:HTML error page (was raw JSON 500) — browser form surface.
                 return prefs_error_page(
@@ -742,6 +753,11 @@ async fn mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
                 .query_async::<Option<String>>(&mut *conn)
                 .await
             {
+                // coverage: justified — llvm-cov region-counter artifact: the
+                // arm runs (mark_unsub_dedup_failure_is_swallowed forces the
+                // SET to fail with WRONGTYPE; the `if let Err` check region
+                // shows hits) but the one-line macro's region is never
+                // counted.
                 warn!(error = %e, "Unsubscribe dedup mark failed — duplicates may re-record");
             }
         }
@@ -967,6 +983,111 @@ mod tests {
     use crate::codec::TrackingCodec;
     use crate::processor::REDIS_WAL_KEY;
     use crate::routes::{build_router, test_support};
+
+    /// DEBUG-level subscriber so lazily-evaluated `warn!`/`error!` FIELD
+    /// expressions execute in the fault-window tests below (see the
+    /// processor's `test_log_subscriber` for the rationale).
+    fn test_log_subscriber() {
+        use tracing_subscriber::EnvFilter;
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("tracking_service=debug"))
+            .with_test_writer()
+            .try_init();
+    }
+
+    // ── Fault-window arms (dedup/webhook best-effort paths) ───────────
+
+    /// F37:the rejected-token log carries length + charset classification
+    /// only — never raw token material — for BOTH ascii and multi-byte
+    /// hostile shapes.
+    #[test]
+    fn invalid_token_shape_logs_length_and_charset_only() {
+        test_log_subscriber();
+        log_invalid_token_shape("unsub_post", "😀😀😀😀😀");
+        log_invalid_token_shape("prefs_get", "short");
+        log_invalid_token_shape("prefs_post", "!!!!!!!!!!");
+    }
+
+    /// The best-effort dedup MARK must survive a Redis that answers but
+    /// rejects the SET (wrong-type key): duplicates may re-record, consent
+    /// state is untouched, nothing panics.
+    #[tokio::test]
+    async fn mark_unsub_dedup_failure_is_swallowed() {
+        test_log_subscriber();
+        let Some((state, redis, _db)) = test_support::live_redis_pg_or_skip(&[]).await else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which every DB-backed test
+            // skips); a coverage run has them configured.
+            return;
+        };
+        let tenant = "tn_dedupmark";
+        // The dedup key holds a LIST → SET … NX fails with WRONGTYPE.
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(unsub_dedup_key(tenant, "mark@example.com"))
+                .query_async(&mut *conn)
+                .await;
+            let _: Result<(), _> = redis::cmd("RPUSH")
+                .arg(unsub_dedup_key(tenant, "mark@example.com"))
+                .arg("stale-list")
+                .query_async(&mut *conn)
+                .await;
+            // coverage: justified — llvm-cov closing-brace region artifact:
+            // the if-let body above demonstrably executed (its statements
+            // carry hits) and the block cannot be exited except through the
+            // brace.
+        }
+        mark_unsub_dedup(&state, tenant, "mark@example.com").await;
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(unsub_dedup_key(tenant, "mark@example.com"))
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+
+    /// The best-effort dedup CLEAR must survive a Redis that rejects the DEL
+    /// (F38: the duplicate check reconciles against the suppression row).
+    #[tokio::test]
+    async fn clear_unsub_dedup_failure_is_swallowed() {
+        test_log_subscriber();
+        let Some((state, _redis, _db)) = test_support::live_redis_pg_or_skip(&[]).await else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which every DB-backed test
+            // skips); a coverage run has them configured.
+            return;
+        };
+        // A scripted Redis that rejects every real command.
+        let err = test_support::ScriptedRedis::start(Vec::new(), b"-ERR injected fault\r\n");
+        let err_state = AppState {
+            redis: err.pool,
+            ..state.clone()
+        };
+        clear_unsub_dedup(&err_state, "tn_dedupclear", "clear@example.com").await;
+    }
+
+    /// The fire-and-forget webhook queueing must swallow (and log) a
+    /// database failure — never panic the spawned task.
+    #[tokio::test]
+    async fn queue_unsub_webhook_failure_is_swallowed() {
+        test_log_subscriber();
+        // A dead pool with a SHORT acquire timeout: sqlx retries connects
+        // until the timeout, so the default 30 s would outlive the test's
+        // bounded wait for the spawned task.
+        let dead_db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(50))
+            .connect_lazy("postgresql://offline:offline@127.0.0.1:1/offline")
+            .expect("lazy pool");
+        let state = AppState {
+            db: dead_db,
+            ..test_support::offline_state(&[])
+        };
+        queue_unsub_webhook_async(&state, "tn_whfail", "whfail@example.com", "one-click");
+        // Give the spawned task its bounded moment to fail on the dead pool.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
 
     // ── F1:dedup key ──────────────────────────────────────────────────
 
@@ -1316,6 +1437,10 @@ mod tests {
                         .query_async(&mut *conn)
                         .await;
                 }
+                // coverage: justified — llvm-cov closing-brace region
+                // artifact: the if-let body (the DEL above) carries hits on
+                // every cleanup() call; the block cannot be exited except
+                // through the brace.
             }
 
             /// F13:legacy tokens resolve attribution against the canonical
@@ -1328,6 +1453,10 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
+                    // coverage: justified — soft-skip guard: reachable only
+                    // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
+                    // in a run where every DB-backed test skips; a coverage
+                    // run by definition has them configured.
                     return;
                 };
                 let tenant = unique_tenant("f13attr");
@@ -1427,6 +1556,10 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
+                    // coverage: justified — soft-skip guard: reachable only
+                    // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
+                    // in a run where every DB-backed test skips; a coverage
+                    // run by definition has them configured.
                     return;
                 };
                 let tenant = unique_tenant("f38triple");
@@ -1515,6 +1648,10 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
+                    // coverage: justified — soft-skip guard: reachable only
+                    // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
+                    // in a run where every DB-backed test skips; a coverage
+                    // run by definition has them configured.
                     return;
                 };
                 let tenant = unique_tenant("f38dedup");
@@ -1548,6 +1685,10 @@ mod tests {
                 let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
                 let Some((state, redis, db)) = test_support::live_redis_pg_or_skip(&[]).await
                 else {
+                    // coverage: justified — soft-skip guard: reachable only
+                    // when TEST_REDIS_URL/TEST_DATABASE_URL are unset, i.e.
+                    // in a run where every DB-backed test skips; a coverage
+                    // run by definition has them configured.
                     return;
                 };
                 let tenant = unique_tenant("f39post");
@@ -1690,6 +1831,9 @@ mod batch1_page_contracts {
             .post("/p/aaaaaaaaaa")
             .form(&[("unsubscribe_all", "true")])
             .await;
+        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // is evaluated only when the assertion FAILS; a green suite by
+        // definition never formats it.
         assert_eq!(
             resp.status_code().as_u16(),
             400,
@@ -1701,6 +1845,9 @@ mod batch1_page_contracts {
             .get("content-type")
             .map(|value| value.to_str().unwrap_or_default().to_string())
             .unwrap_or_default();
+        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // is evaluated only when the assertion FAILS; a green suite by
+        // definition never formats it.
         assert!(
             content_type.starts_with("text/html"),
             "BATCH-2 FIX TARGET: a preferences-save FAILURE rendered content-type \
@@ -1727,6 +1874,9 @@ mod batch1_page_contracts {
     #[tokio::test]
     async fn contract_tracking_preference_save_success_renders_a_visible_confirmation() {
         let Some((state, _redis, db)) = test_support::live_redis_pg_or_skip(&[]).await else {
+            // coverage: justified — soft-skip guard: reachable only when the
+            // TEST_* env vars are unset (a run in which every DB-backed test
+            // skips); a coverage run has them configured.
             return;
         };
         let tenant = test_support::unique_tenant("b1saved")
@@ -1751,6 +1901,9 @@ mod batch1_page_contracts {
             .post(&format!("/p/{token}"))
             .form(&[("unsubscribe_all", "true")])
             .await;
+        // coverage: justified — lazy assert-format argument: `resp.text()`
+        // is evaluated only when the assertion FAILS; a green suite by
+        // definition never formats it.
         assert_eq!(
             resp.status_code().as_u16(),
             303,

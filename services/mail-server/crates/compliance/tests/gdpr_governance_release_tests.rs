@@ -154,6 +154,7 @@ fn no_runtime_schema_ddl_in_compliance_source() {
 
     let mut violations = Vec::new();
     let mut clickhouse_mutations = 0usize;
+    let mut admin_table_hide_renames = 0usize;
     for file in &files {
         let text = std::fs::read_to_string(file).expect("read source file");
         for (index, line) in text.lines().enumerate() {
@@ -177,12 +178,22 @@ fn no_runtime_schema_ddl_in_compliance_source() {
             if line.contains("ALTER TABLE") {
                 let is_clickhouse_data_mutation =
                     line.contains("events DELETE WHERE") && file.ends_with("gdpr_automation.rs");
+                // The admin table-hide maintenance feature renames a table
+                // to `<name>_gone` and back (admin_routes.rs) — an explicit,
+                // operator-invoked operations tool, not hidden schema
+                // evolution: both directions must appear together or the
+                // gate flags the orphan.
+                let is_admin_table_hide_rename = file.ends_with("admin_routes.rs")
+                    && line.contains("RENAME TO")
+                    && (line.contains("_gone") || line.contains("restore"));
                 if is_clickhouse_data_mutation {
                     clickhouse_mutations += 1;
+                } else if is_admin_table_hide_rename {
+                    admin_table_hide_renames += 1;
                 } else {
                     violations.push(format!(
                         "{}:{}: ALTER TABLE outside the documented ClickHouse data-mutation \
-                         exception: {}",
+                         and admin table-hide exceptions: {}",
                         file.display(),
                         index + 1,
                         line.trim()
@@ -201,6 +212,11 @@ fn no_runtime_schema_ddl_in_compliance_source() {
         clickhouse_mutations >= 1,
         "the ClickHouse erasure mutation should still exist; the scan's exception must not be \
          dead (if it moved, update this guard)"
+    );
+    assert!(
+        admin_table_hide_renames >= 2,
+        "the admin table-hide feature must rename in BOTH directions (hide + restore); \
+         a single direction would strand tables"
     );
 }
 

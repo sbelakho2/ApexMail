@@ -564,7 +564,7 @@ mod tests {
                             // Serialized recompute: hold the winner here
                             // until every other client is queued behind the
                             // refresh lock.
-                            gate.acquire().await.expect("gate opened");
+                            let _permit = gate.acquire().await.expect("gate opened");
                             Ok(42u64)
                         }
                     },
@@ -731,12 +731,20 @@ mod tests {
 #[cfg(test)]
 mod adversarial_tests {
     use super::{
-        cached_dashboard_snapshot, query_dashboard_snapshot, query_new_alerts,
+        build_alerts_stream, cached_dashboard_snapshot, query_dashboard_snapshot,
+        query_new_alerts, sse_alerts, sse_dashboard, AlertPollFn, AlertSsePayload,
+        ALERTS_POLL_INTERVAL, MAX_CONSECUTIVE_POLL_ERRORS, MAX_STREAM_DURATION,
         SNAPSHOT_COMPUTATIONS,
     };
+    use crate::middleware::auth::AuthUser;
+    use axum::extract::State;
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use chrono::Utc;
     use futures::StreamExt;
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
     use tower::ServiceExt;
 
     use crate::app::test_support::adv::AdvEnv;
@@ -995,6 +1003,401 @@ mod adversarial_tests {
             SNAPSHOT_COMPUTATIONS.load(std::sync::atomic::Ordering::SeqCst) - before,
             1,
             "the aggregation must be computed once for the platform, not once per client"
+        );
+    }
+
+    // ── Degraded-schema arms (dedicated clone; destructive DDL is safe) ──
+
+    /// A canonical clone with the OPTIONAL tables and columns removed: the
+    /// snapshot must honestly degrade (queue 0, MRR 0, health unknown) and
+    /// the alerts query an empty backlog — table absence is `Ok`, never a
+    /// fabricated reading, and never an error.
+    #[tokio::test]
+    async fn snapshot_degrades_honestly_when_optional_tables_are_absent() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_sparse_schema").await else {
+            return;
+        };
+
+        // Phase 1: stripe_subscriptions WITHOUT the billing_interval column
+        // — the 'monthly' literal branch — with a paid subscription so the
+        // MRR join still computes through the fallback expression.
+        sqlx::query("ALTER TABLE stripe_subscriptions DROP COLUMN IF EXISTS billing_interval")
+            .execute(&pool)
+            .await
+            .expect("drop billing_interval");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order)
+             VALUES ('plan_sparse_probe', 'sparse-probe', 'Sparse Probe', '', 9000, 90000, 0, 0,
+                     '{}'::jsonb, true, 0)
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        sqlx::query("UPDATE tenants SET plan = 'sparse-probe' WHERE id = 'system_internal_tenant01'")
+            .execute(&pool)
+            .await
+            .expect("set plan");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                (id, tenant_id, stripe_subscription_id, status)
+             VALUES ($1, 'system_internal_tenant01', 'sub_sparse_probe', 'active')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed subscription");
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert_eq!(
+            snapshot.mrr, 90.0,
+            "monthly price applies through the 'monthly' literal branch"
+        );
+
+        // The component mapping: an explicit empty component falls back to
+        // None in the payload; a populated one is carried through.
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, component, message, acknowledged, created_at)
+             VALUES ($1, 'warning', 'backup', '', 'empty component', false, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed empty-component alert");
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, component, message, acknowledged, created_at)
+             VALUES ($1, 'info', 'legacy', 'network', 'filled component', false, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed filled-component alert");
+        let alerts = query_new_alerts(&pool, Utc::now() - chrono::Duration::hours(24))
+            .await
+            .expect("alerts");
+        let empty = alerts
+            .iter()
+            .find(|a| a.message == "empty component")
+            .expect("empty-component alert");
+        assert!(empty.component.is_none(), "{:?}", empty.component);
+        let filled = alerts
+            .iter()
+            .find(|a| a.message == "filled component")
+            .expect("filled-component alert");
+        assert_eq!(filled.component.as_deref(), Some("network"));
+
+        // Phase 2: drop the optional tables. The documented contract (P2):
+        // snapshot errors PROPAGATE — a broken dependency must never render
+        // as a healthy all-zero dashboard, and the capability memo is
+        // deliberately per-process (tables do not vanish under a running
+        // production binary; a stale memo mid-migration fails LOUDLY, which
+        // is the honest outcome). The stream layer converts that Err into
+        // the degraded comment event; here we pin the propagation itself.
+        sqlx::raw_sql("DROP TABLE IF EXISTS queue_jobs; DROP TABLE IF EXISTS stripe_subscriptions; DROP TABLE IF EXISTS system_alerts;")
+            .execute(&pool)
+            .await
+            .expect("drop optional tables");
+        let snapshot = query_dashboard_snapshot(&pool).await;
+        let Err(error) = snapshot else {
+            panic!("a dropped table must propagate as an error, never a healthy-looking zero");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("does not exist"),
+            "the propagated error names the real cause: {message}"
+        );
+        let alerts = query_new_alerts(&pool, Utc::now() - chrono::Duration::hours(24))
+            .await;
+        assert!(
+            alerts.is_err(),
+            "the dropped alert table must propagate, never fabricate an empty feed"
+        );
+    }
+
+    // ── The dashboard stream: shared snapshots, honest errors, hard cap ──
+
+    fn wildcard_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("sse-probe".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Drain a handler-built SSE response to its end and return the raw
+    /// frame text (the stream ends only at its 30-minute cap or repeated
+    /// failures, which is exactly the contract under test).
+    async fn drain_sse(
+        sse: axum::response::sse::Sse<
+            impl futures::Stream<
+                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+                > + Send
+                + 'static,
+        >,
+    ) -> String {
+        let response = sse.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("body readable");
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Drive a real `sse_dashboard` stream: the FIRST frames prove the
+    /// shared-snapshot path emits `dashboard` events; draining to the end
+    /// proves the hard 30-minute lifetime cap closes the stream. Paused
+    /// time makes every 5 s tick instantaneous; the pool is warmed BEFORE
+    /// the pause so no connection setup races the auto-advanced timers.
+    #[tokio::test]
+    async fn dashboard_stream_emits_shared_snapshots_and_closes_at_its_cap() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_stream_live").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        // Warm the pool + capability probes in real time.
+        let warm = query_dashboard_snapshot(&state.db).await.expect("warm snapshot");
+        let _ = warm;
+
+        tokio::time::pause();
+        let sse = sse_dashboard(State(state.clone()), wildcard_auth())
+            .await
+            .expect("stream");
+        let frames = drain_sse(sse).await;
+        assert!(
+            frames.contains("event: dashboard"),
+            "the stream must emit dashboard snapshot events: {frames}"
+        );
+        // The properties that ARE deterministic: real snapshot emissions
+        // happen, the stream stays alive across many ticks, and drain_sse
+        // terminates (the 30-minute cap closed it — drain_sse returning at
+        // all IS the cap proof). An EXACT tick count is not deterministic:
+        // each pool acquire under the paused clock lets virtual time jump
+        // by environment-dependent amounts (real query latency vs the
+        // runtime's auto-advance), so cycles can consume more than the
+        // 5 s interval. Sustainment floor: at least a third of the ideal
+        // tick count proves the loop ran across the window.
+        let snapshots = frames.matches("event: dashboard").count();
+        assert!(
+            snapshots >= 1,
+            "the stream must emit dashboard snapshot events: {frames}"
+        );
+        let unavailable = frames.matches("dashboard-unavailable").count();
+        let total_ticks = snapshots + unavailable;
+        let ideal = (MAX_STREAM_DURATION.as_secs() / Duration::from_secs(5).as_secs()) as usize - 1;
+        // Floor, not ideal: a live dashboard snapshot performs several real
+        // pool acquires, and every acquire await under the paused clock lets
+        // virtual time jump (observed 76-99 ticks across runs vs ideal 359).
+        // The sustainment floor proves the loop ran across the window; the
+        // DEAD-POOL test above proves the exact per-interval accounting.
+        assert!(
+            total_ticks >= 20,
+            "sustained snapshots across the window: {total_ticks} ticks (ideal {ideal})"
+        );
+        assert!(
+            total_ticks <= ideal,
+            "the cap bounds the stream: {total_ticks} ticks cannot exceed the window ({ideal})"
+        );
+    }
+
+    /// A dead database: every poll fails, the stream degrades to comment
+    /// events (never fabricated zeros), closes after the tolerated
+    /// consecutive failures, and the connection still ends at its cap.
+    #[tokio::test]
+    async fn dashboard_stream_degrades_to_comments_and_closes_after_repeated_failures() {
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        let state = crate::app::test_support::test_state_over(dead).await;
+
+        tokio::time::pause();
+        let sse = sse_dashboard(State(state), wildcard_auth())
+            .await
+            .expect("stream");
+        let frames = drain_sse(sse).await;
+        let unavailable = frames.matches("dashboard-unavailable").count();
+        let closing = frames.matches("dashboard-unavailable-stream-closing").count();
+        assert_eq!(
+            frames.matches("event: dashboard").count(),
+            0,
+            "a dead database must never fabricate a dashboard event: {frames}"
+        );
+        assert_eq!(
+            unavailable - closing,
+            (MAX_CONSECUTIVE_POLL_ERRORS - 1) as usize,
+            "the failures before the cap degrade to plain comments"
+        );
+        assert!(
+            closing >= 1,
+            "after {MAX_CONSECUTIVE_POLL_ERRORS} consecutive failures the stream signals closing"
+        );
+    }
+
+    /// The live alerts stream: initial backlog, then real polls through the
+    /// handler's own poll closure every 10 s — and the 30-minute cap.
+    #[tokio::test]
+    async fn alerts_stream_polls_live_and_closes_at_its_cap() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_alerts_stream").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        // Warm the pool + capability probes in real time.
+        let _ = query_new_alerts(&state.db, Utc::now() - chrono::Duration::hours(24))
+            .await
+            .expect("warm alerts");
+
+        tokio::time::pause();
+        let sse = sse_alerts(State(state), wildcard_auth()).await.expect("stream");
+        let frames = drain_sse(sse).await;
+        let successful = frames.matches("no-new-alerts").count();
+        assert!(
+            successful >= 1,
+            "live polls must run through the handler's poll closure after the backlog"
+        );
+        // Same virtual-time reasoning as the dashboard test: pool-acquire
+        // awaits let the paused clock jump by environment-dependent amounts,
+        // so an exact per-interval count is not deterministic. The
+        // deterministic properties: polling is SUSTAINED across the window
+        // (successes + degraded comments together) and the cap terminates
+        // the stream (drain_sse completing is that proof).
+        let failed = frames.matches("alerts-unavailable").count();
+        let total_polls = successful + failed;
+        let ideal = (MAX_STREAM_DURATION.as_secs() / ALERTS_POLL_INTERVAL.as_secs()) as usize - 1;
+        assert!(
+            total_polls >= 60,
+            "sustained polls across the window: {total_polls} (ideal {ideal}; observed 145)"
+        );
+        assert!(
+            total_polls <= ideal,
+            "the cap bounds the stream: {total_polls} polls cannot exceed the window ({ideal})"
+        );
+    }
+
+    // ── build_alerts_stream: poll-outcome arms over an injectable poll ──
+
+    /// A poll that returns the same ALERTS every tick (fresh clones; the
+    /// shared Arc only counts invocations).
+    fn alerting_poll(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        alerts: Vec<AlertSsePayload>,
+    ) -> AlertPollFn {
+        Arc::new(move |_since| {
+            let calls = Arc::clone(&calls);
+            let alerts = alerts.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(alerts)
+            })
+        })
+    }
+
+    /// A poll that fails every tick (sqlx::Error is not Clone — the error
+    /// is constructed fresh per call).
+    fn failing_poll(calls: Arc<std::sync::atomic::AtomicUsize>) -> AlertPollFn {
+        Arc::new(move |_since| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(sqlx::Error::RowNotFound)
+            })
+        })
+    }
+
+    fn payload(id: &str, timestamp: &str) -> AlertSsePayload {
+        AlertSsePayload {
+            id: id.to_string(),
+            severity: "high".into(),
+            message: id.to_string(),
+            component: Some("probe".into()),
+            timestamp: timestamp.to_string(),
+            acknowledged: false,
+        }
+    }
+
+    /// A poll returning ALERTS: alert events are emitted, the newest
+    /// parseable timestamp advances the dedup watermark, and an
+    /// unparseable timestamp is skipped instead of poisoning the stream.
+    #[tokio::test(start_paused = true)]
+    async fn alert_events_stream_and_advance_the_watermark() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let alerts = vec![
+            payload("a-old", "2026-09-28T10:00:00Z"),
+            // Unparseable: the watermark filter must skip it silently.
+            payload("a-bad", "not-a-timestamp"),
+            payload("a-new", "2026-09-28T11:00:00+00:00"),
+        ];
+        let poll = alerting_poll(Arc::clone(&calls), alerts);
+        let watermark = Arc::new(Mutex::new(Utc::now() - chrono::Duration::hours(1)));
+        let mut stream = Box::pin(build_alerts_stream(Vec::new(), Arc::clone(&watermark), poll));
+
+        // The stream emits one SSE Event per alert (the unparseable one is
+        // skipped for the watermark but still streamed? No: it is filtered
+        // before emission — drain bounded until a-old and a-new both seen;
+        // start_paused advances the tick interval across awaits).
+        let mut seen_old = false;
+        let mut seen_new = false;
+        let mut saw_component = false;
+        for _ in 0..16 {
+            let item = stream.next().await.expect("tick").expect("infallible");
+            let frame = format!("{item:?}");
+            if frame.contains("a-old") {
+                seen_old = true;
+                saw_component |= frame.contains("component");
+            }
+            if frame.contains("a-new") {
+                seen_new = true;
+                break;
+            }
+        }
+        assert!(seen_old, "the old alert streams");
+        assert!(seen_new, "the new alert streams after the watermark check");
+        assert!(saw_component, "the component field rides the payload");
+
+        // Second tick: the watermark advanced to the newest PARSEABLE
+        // timestamp, so a fresh alert after it is streamed onward.
+        let later = chrono::DateTime::parse_from_rfc3339("2026-09-28T11:00:00+00:00")
+            .expect("parse watermark")
+            .with_timezone(&Utc);
+        assert_eq!(*watermark.lock().await, later, "watermark advanced");
+        let second = stream.next().await.expect("second tick").expect("infallible");
+        assert!(format!("{second:?}").contains("a-old"), "{second:?}");
+    }
+
+    /// A failing poll degrades to comment events and, after the tolerated
+    /// consecutive failures, signals stream closing.
+    #[tokio::test(start_paused = true)]
+    async fn alert_poll_failures_degrade_then_close_the_stream() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let poll = failing_poll(Arc::clone(&calls));
+        let mut stream = Box::pin(build_alerts_stream(
+            Vec::new(),
+            Arc::new(Mutex::new(Utc::now())),
+            poll,
+        ));
+
+        let mut plain = 0usize;
+        let mut closing = false;
+        while let Some(item) = stream.next().await {
+            let frame = format!("{:?}", item.expect("infallible"));
+            if frame.contains("alerts-unavailable-stream-closing") {
+                closing = true;
+                break;
+            }
+            assert!(frame.contains("alerts-unavailable"), "{frame}");
+            plain += 1;
+        }
+        assert!(closing, "the stream must signal closing after repeated failures");
+        assert_eq!(
+            plain,
+            (MAX_CONSECUTIVE_POLL_ERRORS - 1) as usize,
+            "the failures before the cap degrade to plain comments"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_CONSECUTIVE_POLL_ERRORS as usize,
+            "exactly one poll per failure event"
         );
     }
 }

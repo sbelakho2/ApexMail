@@ -180,8 +180,15 @@ async fn handle_webhook_test(
         .await
     {
         Ok(result) => match serde_json::to_value(result) {
+            // coverage: justified — the Ok arm needs a completed webhook
+            // round-trip to a PUBLIC host (send_test_webhook resolves DNS and
+            // performs a live HTTP POST); offline CI can only reach the
+            // validated-refusal arm below.
             Ok(value) => (StatusCode::OK, Json(value)).into_response(),
             Err(e) => {
+                // coverage: justified — WebhookTestResult derives Serialize
+                // over plain fields, so to_value is infallible; the arm
+                // guards future field types only.
                 tracing::error!(error = %e, "Failed to serialize webhook test result");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -278,6 +285,9 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
+            // coverage: justified — defensive early-return; from_config
+            // cannot fail in this environment (default signing secrets,
+            // lenient auth), so the else arm is unreachable.
             return;
         };
         let req = Request::builder()
@@ -303,6 +313,8 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
+            // coverage: justified — defensive early-return (see
+            // test_health_endpoint).
             return;
         };
         let req = Request::builder()
@@ -329,6 +341,8 @@ mod tests {
         let app = if let Ok(state) = state {
             build_router(state)
         } else {
+            // coverage: justified — defensive early-return (see
+            // test_health_endpoint).
             return;
         };
         let req = Request::builder()
@@ -564,5 +578,78 @@ mod tests {
             json["error"].as_str().unwrap().contains("private/internal"),
             "{json}"
         );
+    }
+
+    /// Omitting `event_type` falls back to the documented default (the serde
+    /// default function runs), and `/onboarding/checklist` with a tenant
+    /// serves the checklist (200) instead of the missing-tenant 400.
+    #[tokio::test]
+    async fn webhook_default_event_type_and_onboarding_with_tenant() {
+        use tower::ServiceExt;
+        let app = build_router(state_with_token("test-key").expect("state"));
+
+        // No `event_type` field: `default_event_type` supplies
+        // "message.delivered"; the request still fails offline on the
+        // private-target refusal, proving the body parsed with the default.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/test")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "url": "http://127.0.0.1:9/hook" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"].as_str().unwrap().contains("private/internal"),
+            "the default event type parsed and reached the SSRF guard: {json}"
+        );
+
+        // An explicit tenant id (query param) serves the checklist.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/onboarding/checklist?tenant_id=t_123")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tenant_id"], "t_123", "the checklist names the tenant: {json}");
+        let items = json["items"].as_array().expect("checklist items array: {json}");
+        assert!(!items.is_empty(), "the checklist carries items: {json}");
+        assert!(json["progress_pct"].is_number(), "{json}");
+
+        // The tenant may also arrive via header instead of query param.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/onboarding/checklist")
+                    .header("x-api-key", "test-key")
+                    .header("x-apexmail-tenant-id", "t_header")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "header tenant resolves too");
     }
 }

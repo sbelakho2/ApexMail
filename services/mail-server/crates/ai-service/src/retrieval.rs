@@ -521,9 +521,13 @@ mod tests {
     #[tokio::test]
     async fn reindex_search_and_tenant_scoping_are_version_and_scope_exact() {
         let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return; // no test database configured
         };
         let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         // Own the table for the whole scenario.
@@ -617,6 +621,8 @@ mod tests {
         assert!(
             !scoped.iter().any(|c| c.path == "secret.md"),
             "search is fixed to the public scope, got {:?}",
+            // coverage: justified — the closure only runs when the assertion
+            // FAILS (lazy format argument); a passing test never evaluates it.
             scoped.iter().map(|c| &c.path).collect::<Vec<_>>()
         );
 
@@ -672,5 +678,37 @@ mod tests {
             .await
             .unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Fix #17, version side: an indexed-but-empty table reports `Empty`
+    /// (evidence of absence) with NO version — never `Unavailable` and never
+    /// a fabricated version string.
+    #[tokio::test]
+    async fn empty_index_reports_empty_not_unavailable() {
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return; // no test database configured
+        };
+        let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let version = current_version(&pool).await;
+        assert!(
+            matches!(version.state, RetrievalState::Empty),
+            "an empty table is Empty, got {:?}",
+            version.state
+        );
+        assert_eq!(
+            version.version, None,
+            "an empty index has no docs version — never a silent \"\""
+        );
     }
 }

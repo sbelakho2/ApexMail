@@ -429,6 +429,10 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_runtime_fails_closed() {
+        // `InferenceConfig::default()` consults AI_MODEL_* environment state:
+        // serialize against EnvGuard users so a parallel test's guard cannot
+        // flip the runtime to enabled mid-assert.
+        let _env = crate::test_support::ENV_SERIAL.lock().await;
         let client = LlmClient::new(InferenceConfig::default());
         let result = client.generate("system", "user", 16).await;
         assert!(matches!(result, Err(AiError::ModelUnavailable(_))));
@@ -707,8 +711,12 @@ mod tests {
     }
 
     /// Accessors report the deployment configuration honestly.
+    // `InferenceConfig::default()` consults AI_MODEL_* environment state, so
+    // the read is serialized against the EnvGuard users (see ENV_SERIAL) —
+    // otherwise a parallel test's guard flips the default mid-assert.
     #[test]
     fn accessors_report_configuration() {
+        let _env = crate::test_support::ENV_SERIAL.blocking_lock();
         let client = LlmClient::new(InferenceConfig::default());
         assert!(!client.is_enabled(), "default runtime is disabled");
         assert_eq!(client.configured_model(), "apexmail-assistant");

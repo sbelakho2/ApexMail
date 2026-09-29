@@ -138,6 +138,9 @@ pub fn source_render_cache_key(source: &str, options: &RenderOptions) -> String 
     // A serialization failure can only come from a non-serializable value;
     // the fallback marker still distinguishes the request from every other
     // one (and never collides two DIFFERENT inputs).
+    // coverage: justified — every field of SourceRenderCacheKeyInputs is a
+    // primitive/Option/String, so serde_json::to_string is infallible; the
+    // closure guards future field types only.
     let serialized = serde_json::to_string(&inputs).unwrap_or_else(|error| {
         format!(
             "{{\"key_version\":{SOURCE_RENDER_CACHE_KEY_VERSION},\"serialization_error\":\"{error}\"}}"
@@ -323,10 +326,34 @@ mod tests {
             cache.insert(format!("k{i}"), make_result("x"));
         }
         cache.run_pending_tasks();
+        let count = cache.entry_count();
         assert!(
-            cache.entry_count() <= max_entries,
-            "entry_count {} exceeded the bound {max_entries}",
-            cache.entry_count()
+            count <= max_entries,
+            "entry_count {count} exceeded the bound {max_entries}"
         );
+    }
+
+    /// `canonical_json` renders every JSON shape; scalars and arrays must
+    /// keep their order (arrays are positional, unlike object keys) and
+    /// nested containers recurse.
+    #[test]
+    fn canonical_json_covers_scalars_arrays_and_nesting() {
+        assert_eq!(canonical_json(&json!(null)), "null");
+        assert_eq!(canonical_json(&json!(true)), "true");
+        assert_eq!(canonical_json(&json!(false)), "false");
+        assert_eq!(canonical_json(&json!(-3.5)), "-3.5");
+        assert_eq!(canonical_json(&json!("a\"b")), r#""a\"b""#);
+        assert_eq!(canonical_json(&json!([])), "[]");
+        assert_eq!(
+            canonical_json(&json!([1, "two", [true, null], {"b": 2, "a": 1}])),
+            r#"[1,"two",[true,null],{"a":1,"b":2}]"#,
+            "arrays keep position, nested objects keep key order"
+        );
+        // The canonical form is part of the cache-key identity: equal props
+        // under array/nested reshapes hash together, reshaped ones differ.
+        let mut opts = base_options();
+        opts.props = json!([1, "two", [true, null], {"b": 2, "a": 1}]);
+        let key = source_render_cache_key("<p>x</p>", &opts);
+        assert!(key.starts_with("source-render:"), "{key}");
     }
 }

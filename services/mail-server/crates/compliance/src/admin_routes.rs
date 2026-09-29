@@ -711,6 +711,9 @@ async fn build_questionnaire_context(
             err_json(StatusCode::INTERNAL_SERVER_ERROR, "control seed failed")
         })?;
         controls = state.soc2.list_controls().await.map_err(|e| {
+            // coverage: justified — the relist runs milliseconds after a
+            // successful SELECT + seed on the same pool; no deterministic
+            // seam can fail one and not the other. Defensive total-match arm.
             error!("questionnaire relist controls: {e}");
             err_json(StatusCode::INTERNAL_SERVER_ERROR, "control list failed")
         })?;
@@ -879,6 +882,9 @@ mod db_tests {
         r: Result<R, (StatusCode, Json<serde_json::Value>)>,
     ) -> (StatusCode, serde_json::Value) {
         match r {
+            // coverage: justified — this arm fires only when a handler that a
+            // test expected to fail unexpectedly succeeds; it is the panic
+            // guard itself, exercised by no passing run by construction.
             Ok(_) => panic!("expected an error response"),
             Err((code, body)) => (code, body.0),
         }
@@ -1979,5 +1985,190 @@ mod db_tests {
     /// Build the app state on an already-CLOSED pool (the outage matrix).
     fn state_with_closed(pool: sqlx::PgPool) -> Arc<AppState> {
         test_support::app_state(pool, TOKEN)
+    }
+
+    /// The ANONYMOUS trust routes and the questionnaire generator answer
+    /// their explicit 5xx arms when the store is gone too — public does not
+    /// mean fabricated: an unreadable portal is an error, never an empty
+    /// success. (An unknown framework stays a caller 400 even in an outage.)
+    #[tokio::test]
+    async fn public_trust_routes_answer_their_error_arm_when_the_pool_is_closed() {
+        let Some(pool) =
+            test_support::canonical_pool("admin_broken_public", "admin_broken_public").await
+        else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        pool.close().await;
+        let state = state_with_closed(pool);
+
+        for code in [
+            status(public_trust_overview(State(state.clone())).await),
+            status(public_trust_documents(State(state.clone())).await),
+            status(
+                public_trust_document_by_slug(State(state.clone()), Path("any-slug".into())).await,
+            ),
+            status(public_trust_subprocessors(State(state.clone())).await),
+            status(
+                public_trust_incidents(State(state.clone()), Query(LimitQuery { limit: None }))
+                    .await,
+            ),
+        ] {
+            assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        // An unsupported framework is refused before the store is touched.
+        let (code, _) = error_of(
+            trust_generate_questionnaire(
+                State(state.clone()),
+                auth(),
+                Path("not-a-framework".into()),
+                None,
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        // A real framework over the closed pool hits the control-list fault.
+        let (code, _) = error_of(
+            trust_generate_questionnaire(State(state.clone()), auth(), Path("sig".into()), None)
+                .await,
+        );
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A generation request that names a tenant reaches the HIPAA BAA probe
+    /// (`is_active_for_tenant`) instead of the `None => false` shortcut, and
+    /// the questionnaire still renders. Pins the tenant-scoped context arm.
+    #[tokio::test]
+    async fn questionnaire_generation_carries_tenant_into_baa_probe() {
+        let Some(state) = state("qtenant").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let response = match trust_generate_questionnaire(
+            State(state.clone()),
+            auth(),
+            Path("sig".into()),
+            Some(Json(QuestionnaireGenerationRequest {
+                tenant_id: Some(tenant),
+                requester_company: None,
+                include_private_documents: None,
+                include_markdown_report: None,
+            })),
+        )
+        .await
+        {
+            Ok(response) => response.into_response(),
+            Err((code, body)) => panic!("generation failed: {code}: {}", body.0),
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The questionnaire context is assembled store-section by store-section;
+    /// a partial outage (one section's table missing while the rest is fine)
+    /// must surface as the section's explicit 5xx arm, never as fabricated
+    /// content. Uses throwaway-DDL sabotage (rename one table at a time) on
+    /// this test's private database clone.
+    #[tokio::test]
+    async fn questionnaire_context_maps_partial_store_outages_to_5xx() {
+        let Some(pool) = test_support::canonical_pool("admin_qctx_outage", "admin_qctx_outage")
+            .await
+        else {
+            return;
+        };
+        let state = test_support::app_state(pool.clone(), TOKEN);
+
+        // Phase D — the seed itself fails: soc2_controls is readable and
+        // EMPTY, but every INSERT is rejected by a sabotaging trigger. The
+        // handler must answer the seed fault arm, not silently continue.
+        sqlx::query(
+            "CREATE FUNCTION qctx_deny_seed() RETURNS trigger AS $$
+             BEGIN RAISE EXCEPTION 'sabotaged: seed inserts are denied';
+             END $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create sabotage function");
+        sqlx::query(
+            "CREATE TRIGGER qctx_deny_seed_trg BEFORE INSERT ON soc2_controls
+             FOR EACH ROW EXECUTE FUNCTION qctx_deny_seed()",
+        )
+        .execute(&pool)
+        .await
+        .expect("create sabotage trigger");
+        let (code, _) = error_of(
+            trust_generate_questionnaire(State(state.clone()), auth(), Path("sig".into()), None)
+                .await,
+        );
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "seed denial");
+        sqlx::query("DROP TRIGGER qctx_deny_seed_trg ON soc2_controls")
+            .execute(&pool)
+            .await
+            .expect("drop sabotage trigger");
+        sqlx::query("DROP FUNCTION qctx_deny_seed()")
+            .execute(&pool)
+            .await
+            .expect("drop sabotage function");
+
+        // Phase 0 — with the sabotage gone, generation succeeds and seeds
+        // the (still empty) controls, so the later phases exercise the
+        // document/subprocessor/incident faults against a POPULATED store.
+        assert_eq!(
+            status(
+                trust_generate_questionnaire(
+                    State(state.clone()),
+                    auth(),
+                    Path("sig".into()),
+                    None
+                )
+                .await
+            ),
+            StatusCode::OK,
+            "clean generation must succeed"
+        );
+
+        // Phases A–C — rename ONE portal table at a time; its list fault
+        // must map to the section's 5xx arm while the earlier sections stay
+        // readable.
+        for (table, phase) in [
+            ("trust_portal_documents", "documents"),
+            ("trust_portal_subprocessors", "subprocessors"),
+            ("trust_portal_incidents", "incidents"),
+        ] {
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_gone"))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{phase}: rename failed: {e}"));
+            let (code, _) = error_of(
+                trust_generate_questionnaire(
+                    State(state.clone()),
+                    auth(),
+                    Path("sig".into()),
+                    None,
+                )
+                .await,
+            );
+            assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{phase} outage");
+            sqlx::query(&format!("ALTER TABLE {table}_gone RENAME TO {table}"))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{phase}: restore failed: {e}"));
+        }
+
+        // After every table is restored the store serves generation again.
+        assert_eq!(
+            status(
+                trust_generate_questionnaire(
+                    State(state.clone()),
+                    auth(),
+                    Path("sig".into()),
+                    None
+                )
+                .await
+            ),
+            StatusCode::OK,
+            "restored store must serve generation again"
+        );
     }
 }

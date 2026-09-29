@@ -402,4 +402,77 @@ mod tests {
         );
         assert_eq!(recipient_domain_of("not-an-address"), None);
     }
+
+    /// `Default` must be exactly the production constructor (same policy).
+    #[test]
+    fn default_scanner_is_the_production_scanner() {
+        let scanner = EngineDlpScanner::default();
+        let verdict = scanner
+            .scan_prepared(&prepared(
+                "Monthly note",
+                Some("Nothing sensitive here, just a note."),
+                None,
+            ))
+            .expect("engine is infallible");
+        assert_eq!(verdict.action, DlpAction::Allow);
+        assert!(verdict.rule_classes.is_empty());
+    }
+
+    /// Every `PiiType` slugs to a stable rule class — including
+    /// `EmailAddress`, which the DEFAULT production policy never emits
+    /// (`detect_email_addresses` is false) but a configured policy can,
+    /// so the audit trail must still name it.
+    #[test]
+    fn rule_classes_slug_every_pii_type() {
+        let verdict = DlpVerdict {
+            risk_score: 2.0,
+            action: DlpAction::Audit,
+            pii_findings: vec![dlp_engine::pii::PiiMatch {
+                pii_type: PiiType::EmailAddress,
+                redacted: "xxx@xxx.xxx".into(),
+                risk: 2.0,
+                base_risk: 2.0,
+                offset: 0,
+                context_modifier: None,
+            }],
+            entropy_findings: vec![],
+            policy_matches: vec![],
+            summary: String::new(),
+        };
+        assert_eq!(rule_classes_of(&verdict), vec!["pii:email_address"]);
+    }
+
+    /// High-entropy tokens and content-policy keyword hits slug to their
+    /// own rule classes (the multi-word keyword slug keeps its underscore).
+    #[test]
+    fn entropy_and_policy_findings_slug_to_rule_classes() {
+        let scanner = EngineDlpScanner::new();
+        // 28 distinct mixed-case alphanumeric characters: Shannon entropy
+        // ~4.8 >= the 4.5 default threshold, base64-shaped per the
+        // engine's looks_like_secret heuristic.
+        let verdict = scanner.engine.scan(
+            "INTERNAL ONLY — bearer Zk9mQ2vR7tL4pW8xYbN3cJ5fD6hG — confidential payroll",
+            None,
+        );
+        assert!(
+            !verdict.entropy_findings.is_empty(),
+            "the token must trip the entropy scanner: {:?}",
+            verdict.summary
+        );
+        assert!(
+            !verdict.policy_matches.is_empty(),
+            "the keywords must trip the content policy: {:?}",
+            verdict.summary
+        );
+        let classes = rule_classes_of(&verdict);
+        assert!(
+            classes.contains(&"secret:high_entropy_token".to_string()),
+            "{classes:?}"
+        );
+        assert!(
+            classes.contains(&"policy:internal_only".to_string()),
+            "multi-word keyword slugs lowercase and underscore: {classes:?}"
+        );
+        assert!(classes.contains(&"policy:confidential".to_string()), "{classes:?}");
+    }
 }

@@ -250,6 +250,14 @@ mod tests {
 
     static CONSECUTIVE_DRAIN_ERRORS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The streak counter is process-global: the per-call lock inside
+    /// `monitored_drain_pending_events` cannot span a test's whole
+    /// drive-then-assert sequence, so the scenarios that observe the counter
+    /// additionally serialize THEMSELVES with this async mutex (never a
+    /// std guard held across await — see `reset_error_streak`).
+    static MONITORED_DRAIN_TEST_SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     // ─── Constant validation ──────────────────────────────────────
 
     #[test]
@@ -493,6 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn monitored_drain_counts_a_real_recovery_and_resets_the_error_streak() {
+        let _serial = MONITORED_DRAIN_TEST_SERIAL.lock().await;
         reset_error_streak();
         let owned = provision_env("monitored_drain_success").await;
         let env = &owned;
@@ -542,6 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn monitored_drain_error_streak_reaches_the_alert_threshold() {
+        let _serial = MONITORED_DRAIN_TEST_SERIAL.lock().await;
         reset_error_streak();
         let owned = provision_env("monitored_drain_errors").await;
         let env = &owned;
@@ -567,6 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn monitored_drain_zero_events_records_success_without_counter_increments() {
+        let _serial = MONITORED_DRAIN_TEST_SERIAL.lock().await;
         reset_error_streak();
         let owned = provision_env("monitored_drain_empty").await;
         // A PRIVATE redis guarantees the empty-keyspace precondition even

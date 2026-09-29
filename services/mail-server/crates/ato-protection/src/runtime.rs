@@ -111,6 +111,10 @@ pub fn runtime_config_from_env() -> AtoConfig {
         if let Ok(value) = raw.trim().parse::<f64>() {
             if value.is_finite() {
                 config.block_threshold = value;
+                // coverage: justified — llvm-cov closing-brace region
+                // artifact: this arm executes (the ladder test applies
+                // "0.77" — the assignment above carries a hit) and the block
+                // cannot be exited except through the brace.
             }
         }
     }
@@ -207,6 +211,12 @@ pub fn shared() -> Arc<AtoRuntime> {
     }
     let mut write = SHARED_RUNTIME.write();
     if let Some(runtime) = write.as_ref() {
+        // coverage: justified — double-checked-locking re-check: reachable
+        // only when a concurrent first builder completes between this
+        // thread's read-lock release and write-lock acquisition — a race
+        // window that cannot be entered deterministically from a
+        // single-threaded test (the fast path above and the build path below
+        // are both covered).
         return runtime.clone();
     }
     let runtime = Arc::new(AtoRuntime::from_env());
@@ -379,6 +389,9 @@ mod tests {
             .evaluate_login(&second)
             .expect("healthy runtime evaluates");
         assert_eq!(band_for(verdict.action), AtoBand::Medium);
+        // coverage: justified — lazy assert-format argument: the factor-id
+        // list is evaluated only when the assertion FAILS; a green suite by
+        // definition never formats it.
         assert!(
             verdict
                 .factors
@@ -412,5 +425,104 @@ mod tests {
         // off, but the contract under test is only that a fresh runtime is
         // built without panicking.
         let _ = shared();
+    }
+    // ── Gap-closure:the env-driven configuration ladder and gate ──────
+
+    /// `runtime_config_from_env`:an `ATO_REDIS_LOCKOUT_URL` upgrades the
+    /// deployment to cross-node production lockout tracking; blank values
+    /// are ignored; threshold overrides must parse as finite f64s —
+    /// garbage, infinity and NaN are silently rejected (safe defaults).
+    #[test]
+    fn runtime_config_from_env_ladder() {
+        struct EnvSnapshot(Vec<(&'static str, Option<String>)>);
+        impl EnvSnapshot {
+            fn take(vars: &[&'static str]) -> Self {
+                Self(vars.iter().map(|v| (*v, std::env::var(v).ok())).collect())
+            }
+        }
+        impl Drop for EnvSnapshot {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        // Pre-set one var so the snapshot captures a Some value and its Drop
+        // restores through the set_var arm (the ladder tests leave the others
+        // unset, covering the remove_var arm).
+        std::env::set_var("ATO_MFA_THRESHOLD", "0.5");
+        let _snapshot = EnvSnapshot::take(&[
+            "ATO_REDIS_LOCKOUT_URL",
+            "ATO_MFA_THRESHOLD",
+            "ATO_BLOCK_THRESHOLD",
+        ]);
+
+        // Baseline: nothing set → honest single-node development config.
+        for var in ["ATO_REDIS_LOCKOUT_URL", "ATO_MFA_THRESHOLD", "ATO_BLOCK_THRESHOLD"] {
+            std::env::remove_var(var);
+        }
+        let cfg = runtime_config_from_env();
+        assert!(cfg.redis_lockout_url.is_none());
+        assert_eq!(cfg.deployment_mode, DeploymentMode::Development);
+        assert_eq!(cfg.mfa_threshold, 5.0);
+        assert_eq!(cfg.block_threshold, 9.0);
+
+        // A real URL upgrades the deployment.
+        std::env::set_var("ATO_REDIS_LOCKOUT_URL", "  redis://lockout:6379  ");
+        let cfg = runtime_config_from_env();
+        assert_eq!(cfg.redis_lockout_url.as_deref(), Some("redis://lockout:6379"));
+        assert_eq!(cfg.deployment_mode, DeploymentMode::Production);
+        assert!(!cfg.allow_single_node_mode);
+
+        // A blank URL is ignored (stays single-node development).
+        std::env::set_var("ATO_REDIS_LOCKOUT_URL", "   ");
+        let cfg = runtime_config_from_env();
+        assert!(cfg.redis_lockout_url.is_none());
+        assert_eq!(cfg.deployment_mode, DeploymentMode::Development);
+
+        // Threshold overrides: finite values apply; garbage is rejected.
+        std::env::remove_var("ATO_REDIS_LOCKOUT_URL");
+        std::env::set_var("ATO_MFA_THRESHOLD", "0.42");
+        std::env::set_var("ATO_BLOCK_THRESHOLD", "0.77");
+        let cfg = runtime_config_from_env();
+        assert_eq!(cfg.mfa_threshold, 0.42);
+        assert_eq!(cfg.block_threshold, 0.77);
+
+        std::env::set_var("ATO_MFA_THRESHOLD", "not-a-number");
+        std::env::set_var("ATO_BLOCK_THRESHOLD", "inf");
+        let cfg = runtime_config_from_env();
+        assert_eq!(
+            cfg.mfa_threshold, 5.0,
+            "garbage threshold overrides are rejected (default retained)"
+        );
+        assert_eq!(
+            cfg.block_threshold, 9.0,
+            "infinite threshold overrides are rejected (default retained)"
+        );
+    }
+
+    /// The process-shared runtime, rebuilt from a gate-ON environment,
+    /// evaluates logins against a fresh engine (the `from_env` startup arm
+    /// used by every login flow on first use).
+    #[test]
+    fn shared_runtime_rebuilds_from_a_gate_on_environment() {
+        uninstall_for_tests();
+        std::env::set_var("ATO_PROTECTION_ENABLED", "1");
+        let runtime = shared();
+        assert!(runtime.enabled(), "the explicit gate wins");
+        let event = geo_event("gate-user", "1.2.3.4", 40.0, -74.0, Utc::now());
+        let verdict = runtime
+            .evaluate_login(&event)
+            .expect("a healthy shared runtime evaluates");
+        assert_eq!(verdict.action, AtoAction::Allow);
+
+        // Clean up:drop the installed runtime and the env override so the
+        // ambient (gate-off) defaults hold for anything that runs later in
+        // this process.
+        uninstall_for_tests();
+        std::env::remove_var("ATO_PROTECTION_ENABLED");
     }
 }

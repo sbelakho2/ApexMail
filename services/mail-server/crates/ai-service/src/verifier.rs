@@ -523,6 +523,8 @@ impl ResponseVerifier {
                 let end = without_fragment.find('/').unwrap_or(without_fragment.len());
                 &without_fragment[..end]
             } else {
+                // coverage: justified — the URL regex only admits http(s)
+                // URLs, so one of the two prefixes above always strips.
                 url
             };
             // Strip userinfo (user:password@) so that
@@ -1303,6 +1305,41 @@ mod tests {
         let v = ResponseVerifier::new();
         let verdict = v.verify("We guarantee 99.99% uptime on all plans.");
         assert!(!verdict.passed);
+        // The remediation hint names the SLA rule, not a generic "Fix:".
+        let hint = verdict
+            .correction_hint
+            .as_deref()
+            .expect("a failing verdict carries a hint");
+        assert!(
+            hint.contains("Do not quote specific uptime percentages"),
+            "the SLA violation must ride its dedicated hint arm: {hint}"
+        );
+    }
+
+    /// A response past the 4000-char cap is flagged as TooLong and its
+    /// remediation hint tells the model exactly what to do (summarize).
+    #[test]
+    fn test_too_long_response_carries_summarize_hint() {
+        let v = ResponseVerifier::new();
+        let bloated = format!("We help teams send better email. {}", "word ".repeat(1200));
+        assert!(bloated.chars().count() > 4000);
+        let verdict = v.verify(&bloated);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::TooLong { length } if *length > 4000)),
+            "{:?}",
+            verdict.violations
+        );
+        let hint = verdict
+            .correction_hint
+            .as_deref()
+            .expect("a failing verdict carries a hint");
+        assert!(
+            hint.contains("Summarize to under 4000 characters"),
+            "the TooLong violation must ride its dedicated hint arm: {hint}"
+        );
     }
 
     #[test]
@@ -1416,6 +1453,243 @@ mod tests {
             verdict.passed,
             "status.apexmail.ee must verify: {:?}",
             verdict.violations
+        );
+    }
+
+    /// Every violation variant renders an actionable, self-describing
+    /// message — including the grounded-evidence variants the audit added.
+    #[test]
+    fn violation_display_is_actionable_for_every_variant() {
+        let cases: Vec<(Violation, &str)> = vec![
+            (
+                Violation::ForbiddenPrice {
+                    found: 49.0,
+                    context: "per month".into(),
+                },
+                "forbidden price \u{20ac}49",
+            ),
+            (
+                Violation::PriceNotFound {
+                    plan: "pro".into(),
+                    expected: 65,
+                },
+                "pro price $65 not found",
+            ),
+            (
+                Violation::WrongEmailLimit { found: 15_000 },
+                "non-canonical email limit: 15000",
+            ),
+            (
+                Violation::WrongTeamLimit { found: 99 },
+                "non-canonical team limit: 99",
+            ),
+            (
+                Violation::ForbiddenDomain {
+                    domain: "https://evil.test/x".into(),
+                },
+                "forbidden domain: https://evil.test/x",
+            ),
+            (
+                Violation::PromptInjection {
+                    pattern: "ignore previous".into(),
+                },
+                "prompt injection",
+            ),
+            (Violation::TooShort { length: 3 }, "too short: 3 chars"),
+            (Violation::TooLong { length: 5000 }, "too long: 5000 chars"),
+            (
+                Violation::Repetition {
+                    phrase: "the same phrase again".into(),
+                },
+                "repetition: 'the same phrase again'",
+            ),
+            (
+                Violation::PiiPattern {
+                    pii_type: "credit_card_number".into(),
+                },
+                "PII pattern: credit_card_number",
+            ),
+            (
+                Violation::InternalInfo {
+                    keyword: "postgres".into(),
+                },
+                "internal info: postgres",
+            ),
+            (
+                Violation::UptimeSlaClaim {
+                    text: "99.99%".into(),
+                },
+                "SLA claim: 99.99%",
+            ),
+            (
+                Violation::CompetitorBashing {
+                    competitor: "mailgun".into(),
+                },
+                "competitor bashing: mailgun",
+            ),
+            (
+                Violation::UnsupportedClaim {
+                    claim: "support replies take 72 hours".into(),
+                },
+                "unsupported factual claim",
+            ),
+            (
+                Violation::UnavailableCitation {
+                    claim: "see [1]".into(),
+                },
+                "retrieval is unavailable",
+            ),
+        ];
+        for (violation, needle) in cases {
+            let rendered = violation.to_string();
+            assert!(
+                rendered.contains(needle),
+                "display of {violation:?} must mention {needle:?}, got {rendered:?}"
+            );
+        }
+    }
+
+    /// A plan-context euro amount that is not a canonical price AND not a
+    /// canonical email limit is flagged as both — the catch-all tier of the
+    /// volume check never mints a fake limit.
+    #[test]
+    fn non_canonical_round_email_volume_in_plan_context_is_flagged() {
+        let v = ResponseVerifier::new();
+        let verdict = v.verify("The Enterprise plan costs \u{20ac}15,000 per month.");
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::ForbiddenPrice { found, .. } if *found == 15_000.0)),
+            "{:?}",
+            verdict.violations
+        );
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::WrongEmailLimit { found } if *found == 15_000)),
+            "{:?}",
+            verdict.violations
+        );
+        // The correction hint covers every violation via its catch-all arm.
+        let hint = verdict.correction_hint.as_deref().expect("a failing verdict carries a hint");
+        assert!(hint.contains("Remove \u{20ac}15000"), "{hint}");
+        assert!(hint.contains("Fix: "), "WrongEmailLimit rides the catch-all hint: {hint}");
+    }
+
+    /// Allowed hosts are examined URL-wise: fragments (`#…`) are stripped
+    /// before host comparison, and plain-http ApexMail links are checked by
+    /// the same ladder — none of these shapes slip past or are misflagged.
+    #[test]
+    fn allowed_hosts_with_fragments_and_plain_http_are_examined_not_flagged() {
+        let v = ResponseVerifier::new();
+        let verdict = v.verify(
+            "Read https://apexmail.ee/docs/bounces#retry-logic and http://apexmail.ee/status#history \
+             and http://apexmail.ee/pricing/overview for the full pipeline details today.",
+        );
+        assert!(
+            verdict.passed,
+            "allowed hosts with fragments/plain http must verify: {:?}",
+            verdict.violations
+        );
+    }
+
+    /// The same trigram three times is a Repetition violation, and the retry
+    /// hint tells the model to rephrase.
+    #[test]
+    fn repeated_phrases_are_flagged_with_a_rephrase_hint() {
+        let v = ResponseVerifier::new();
+        let phrase = "ApexMail handles bounces automatically.";
+        let verdict = v.verify(&format!("{phrase} {phrase} {phrase}"));
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::Repetition { .. })),
+            "{:?}",
+            verdict.violations
+        );
+        assert!(
+            verdict
+                .correction_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("repeating")),
+            "{:?}",
+            verdict.correction_hint
+        );
+    }
+
+    /// Four distinct email addresses in one answer trip the PII guard.
+    #[test]
+    fn more_than_three_email_addresses_are_flagged_as_pii() {
+        let v = ResponseVerifier::new();
+        let verdict = v.verify(
+            "Please contact alice@example.com, bob@example.com, carol@example.com, \
+             dave@example.com right away for support assistance with delivery today.",
+        );
+        assert!(!verdict.passed);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::PiiPattern { pii_type }
+                if pii_type.contains("email"))),
+            "{:?}",
+            verdict.violations
+        );
+    }
+
+    /// Uptime/availability over-promises are caught in the CJK wording too:
+    /// zh (availability), ja (uptime rate) and ko (operation rate) each name
+    /// the same SLA-context violation.
+    #[test]
+    fn cjk_availability_wording_is_flagged_as_sla_claims() {
+        let v = ResponseVerifier::new();
+        for answer in [
+            "\u{6211}\u{4eec}\u{7684}\u{670d}\u{52a1}\u{53ef}\u{7528}\u{6027}\u{8fbe}\u{5230} 99.99%\u{ff0c}\u{975e}\u{5e38}\u{7a33}\u{5b9a}\u{53ef}\u{9760}\u{ff0c}\u{503c}\u{5f97}\u{4fe1}\u{8d56}\u{3001}",
+            "\u{7a3c}\u{50cd}\u{7387}\u{306f}99.99%\u{3067}\u{3001}\u{975e}\u{5e38}\u{306b}\u{5b89}\u{5b9a}\u{3057}\u{3066}\u{3044}\u{307e}\u{3059}\u{3002}",
+            "\u{ac00}\u{b3d9}\u{b960}\u{c774} 99.99%\u{b85c} \u{b9e4}\u{c6b0} \u{c548}\u{c815}\u{c801}\u{c785}\u{b2c8}\u{b2e4}. \u{c11c}\u{be44}\u{c2a4} \u{c2e0}\u{b8b0}\u{c131}\u{c774} \u{b6f0}\u{c5b4}\u{b0a9}\u{b2c8}\u{b2e4}.",
+        ] {
+            let verdict = v.verify(answer);
+            assert!(
+                verdict
+                    .violations
+                    .iter()
+                    .any(|viol| matches!(viol, Violation::UptimeSlaClaim { .. })),
+                "CJK availability claim must be flagged: {answer:?} → {:?}",
+                verdict.violations
+            );
+        }
+    }
+
+    /// Number normalization is total: thousands separators, K/M suffixes,
+    /// decimal-zero trimming, trailing-dot trimming, dot-only tokens and
+    /// version-shaped tokens all normalize without panicking.
+    #[test]
+    fn normalize_number_handles_versions_suffixes_and_degenerate_tokens() {
+        assert_eq!(normalize_number("150,000"), "150000");
+        assert_eq!(normalize_number("69.00"), "69");
+        assert_eq!(normalize_number("10K"), "10000");
+        assert_eq!(normalize_number("1.5M"), "1500000");
+        assert_eq!(normalize_number("5."), "5", "a trailing dot is trimmed");
+        assert_eq!(normalize_number("."), "", "a dot-only token is no quantity");
+        assert_eq!(
+            normalize_number("1.25"),
+            "1.25",
+            "a fractional quantity survives with its decimals"
+        );
+        assert_eq!(
+            normalize_number("1.2.3"),
+            "1.2.3",
+            "a version token is kept verbatim (it is not a quantity)"
+        );
+        assert_eq!(
+            normalize_number(&"9".repeat(400)),
+            "9".repeat(400),
+            "an overflow-sized token is kept verbatim (it is not a finite quantity)"
         );
     }
 }
@@ -1777,6 +2051,38 @@ mod grounding_tests {
             }),
             "the retry hint must steer away from citations: {:?}",
             v.correction_hint
+        );
+    }
+
+    /// The atomic-claim check composes with the policy checks: a verdict can
+    /// carry BOTH policy violations and an unsupported claim, and callers
+    /// probing for the unsupported claim walk past the policy variants.
+    #[test]
+    fn unsupported_claims_are_reported_alongside_policy_violations() {
+        let canonical = canonical();
+        let grounding = grounded(&canonical, &[], "", "");
+        let v = ResponseVerifier::new().verify_grounded(
+            "Soft bounces clear within 72 hours. The Enterprise plan costs \u{20ac}15,000 per month.",
+            &[],
+            &grounding,
+        );
+        assert!(!v.passed, "{:?}", v.violations);
+        let unsupported = v
+            .violations
+            .iter()
+            .find_map(|viol| match viol {
+                Violation::UnsupportedClaim { claim } => Some(claim.as_str()),
+                _ => None,
+            })
+            .expect("the fabricated 72-hours claim is unsupported");
+        assert!(unsupported.contains("72"), "{unsupported}");
+        // The policy violations from the same answer are still present.
+        assert!(
+            v.violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::ForbiddenPrice { .. })),
+            "{:?}",
+            v.violations
         );
     }
 }

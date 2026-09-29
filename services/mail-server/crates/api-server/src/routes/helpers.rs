@@ -396,9 +396,166 @@ mod tests {
     }
 
     #[test]
+    fn offset_pagination_meta_reports_total_limit_and_offset() {
+        let meta = offset_pagination_meta(120, 25, 50);
+        assert_eq!(meta["total"], 120);
+        assert_eq!(meta["limit"], 25);
+        assert_eq!(meta["offset"], 50);
+    }
+
+    #[test]
+    fn with_cache_control_sets_public_max_age() {
+        let mut response = axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .body(axum::body::Body::empty())
+            .expect("static response");
+        with_cache_control(&mut response, 300);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .expect("cache-control header"),
+            "public, max-age=300"
+        );
+    }
+
+    #[test]
+    fn response_cache_round_trips_and_overwrites() {
+        let cache = ResponseCache::new();
+        assert!(cache.get("missing").is_none(), "empty cache misses");
+
+        cache.set("key", "etag-1".to_string(), b"body-1".to_vec());
+        let (etag, body) = cache.get("key").expect("hit");
+        assert_eq!(etag, "etag-1");
+        assert_eq!(body, b"body-1");
+
+        cache.set("key", "etag-2".to_string(), b"body-2".to_vec());
+        let (etag, body) = cache.get("key").expect("hit after overwrite");
+        assert_eq!(etag, "etag-2");
+        assert_eq!(body, b"body-2");
+
+        // `Default` builds the same empty cache — never a shared global.
+        let default: ResponseCache = ResponseCache::default();
+        assert!(default.get("key").is_none());
+    }
+
+    // tokio::test: sqlx 0.8's Pool::connect_options spawns its maintenance
+    // machinery, which requires a runtime context even for a lazy pool.
+    #[tokio::test]
+    async fn pool_identity_distinguishes_unix_sockets_and_defaulted_databases() {
+        // A unix-socket endpoint with NO database configured exercises the
+        // socket arm AND the `unwrap_or_default()` database fallback.
+        let options = sqlx::postgres::PgConnectOptions::new()
+            .socket("/tmp/apexmail-capability-probe.sock")
+            .username("probe_user");
+        let socket_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options.clone());
+        let identity = pool_identity(&socket_pool);
+        assert_eq!(
+            identity,
+            "unix:/tmp/apexmail-capability-probe.sock|probe_user|",
+            "socket path, username and (defaulted) database name the identity"
+        );
+
+        // The same socket with a database is a DIFFERENT identity.
+        let with_db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options.database("probe_db"));
+        assert_eq!(
+            pool_identity(&with_db),
+            "unix:/tmp/apexmail-capability-probe.sock|probe_user|probe_db"
+        );
+        assert_ne!(pool_identity(&with_db), identity);
+
+        // A TCP endpoint never produces a unix-socket identity.
+        let tcp = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://probe_user:pw@127.0.0.1:1/probe_db")
+            .expect("lazy tcp pool");
+        assert!(
+            !pool_identity(&tcp).starts_with("unix:"),
+            "{}",
+            pool_identity(&tcp)
+        );
+    }
+
+    #[test]
     fn cursor_round_trip_is_lossless() {
         let original = "2026-08-08T18:00:00.000Z";
         assert_eq!(decode_cursor(&encode_cursor(original)).unwrap(), original);
+    }
+
+    #[test]
+    fn decode_cursor_rejects_odd_length_and_non_hex_input() {
+        // An odd-length string can never be split into byte-sized hex pairs.
+        assert_eq!(decode_cursor("abc"), None, "odd length is malformed");
+        // Even length but not valid hex is refused too — never a panic.
+        assert_eq!(decode_cursor("zz"), None, "non-hex pairs are rejected");
+        // The empty cursor decodes to the empty string (first page).
+        assert_eq!(decode_cursor(""), Some(String::new()));
+    }
+
+    #[test]
+    fn has_more_truncates_only_when_an_extra_row_arrives() {
+        // limit + 1 rows: the last row is the next-page cursor and must be
+        // removed before the batch is returned.
+        let mut rows = vec![1, 2, 3];
+        assert!(has_more(&mut rows, 2), "an extra row signals a next page");
+        assert_eq!(rows, vec![1, 2], "the cursor row is truncated away");
+
+        // Exactly `limit` rows: no next page, nothing removed.
+        let mut exact = vec![1, 2];
+        assert!(!has_more(&mut exact, 2));
+        assert_eq!(exact, vec![1, 2], "an exact batch is left untouched");
+
+        // Degenerate shapes stay honest: an empty batch is never "more".
+        let mut empty: Vec<u8> = Vec::new();
+        assert!(!has_more(&mut empty, 0));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn extract_cookie_handles_multiple_headers_pairs_and_missing_equals() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append(
+            "cookie",
+            axum::http::HeaderValue::from_static("theme=dark; session = abc123 "),
+        );
+        // A second Cookie header (RFC 6265 allows several) containing a
+        // pair with NO `=` at all — it must be skipped, never panic.
+        headers.append("cookie", axum::http::HeaderValue::from_static("junk-noequals"));
+
+        assert_eq!(
+            extract_cookie(&headers, "theme").as_deref(),
+            Some("dark"),
+            "first pair matches; whitespace around key/value is trimmed"
+        );
+        assert_eq!(
+            extract_cookie(&headers, "session").as_deref(),
+            Some("abc123"),
+            "the matching pair wins across separators"
+        );
+        // "missing" walks every pair: the two named pairs miss (per-pair
+        // None arm) and "junk-noequals" has no `=` (skip arm) — still a
+        // clean absence, never a panic.
+        assert_eq!(extract_cookie(&headers, "missing"), None);
+        assert_eq!(extract_cookie(&headers, "junk-noequals"), None);
+    }
+
+    #[test]
+    fn html_escape_encodes_every_special_char_and_keeps_plain_text() {
+        assert_eq!(
+            html_escape("a&b<c>\"d'e"),
+            "a&amp;b&lt;c&gt;&quot;d&#x27;e",
+            "every HTML-special character is entity-encoded"
+        );
+        assert_eq!(
+            html_escape("plain-text_1.2 (ok)"),
+            "plain-text_1.2 (ok)",
+            "ordinary characters pass through untouched"
+        );
+        assert_eq!(html_escape(""), "", "the empty string escapes to itself");
     }
 
     // tokio::test: sqlx 0.8's Pool::connect_options spawns its maintenance
@@ -432,7 +589,22 @@ mod tests {
     /// database stays detectable on every call.
     #[tokio::test]
     async fn capability_probes_cache_ok_and_never_cache_errors() {
-        let Some(pool) = crate::test_db::optional_pg_pool("helpers_capability_cache").await else {
+        capability_probe_cache_assertions(
+            crate::test_db::optional_pg_pool("helpers_capability_cache").await,
+        )
+        .await;
+    }
+
+    /// The soft-skip contract holds without a database too: the probe suite
+    /// is a clean skip, never a panic. Exercised directly so the guard arm
+    /// stays measured in database-provisioned environments.
+    #[tokio::test]
+    async fn capability_probe_suite_skips_cleanly_without_a_database() {
+        capability_probe_cache_assertions(None).await;
+    }
+
+    async fn capability_probe_cache_assertions(pool: Option<sqlx::PgPool>) {
+        let Some(pool) = pool else {
             return;
         };
         let unique_table = format!(
@@ -450,6 +622,25 @@ mod tests {
         );
         assert!(!table_exists(&pool, &unique_table).await.expect("cached"));
         assert!(table_exists(&pool, "tenants").await.expect("probe"));
+
+        // Same contract for the COLUMN probe: a live-pool verdict is a
+        // definitive Ok (and memoized), and the second call is served from
+        // the capability cache instead of re-querying the catalog.
+        let before_columns = capability_cache_len();
+        assert!(
+            column_exists(&pool, "tenants", "id").await.expect("column probe"),
+            "tenants.id exists in the canonical schema"
+        );
+        assert!(
+            capability_cache_len() >= before_columns + 1,
+            "the Ok column verdict must be memoized"
+        );
+        assert!(
+            column_exists(&pool, "tenants", "id")
+                .await
+                .expect("cached column probe"),
+            "the cached verdict is served verbatim"
+        );
 
         // A dead (lazy) pool probes to Err, and the error is not cached:
         // both calls re-attempt the catalog query.

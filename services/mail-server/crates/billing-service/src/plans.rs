@@ -756,6 +756,9 @@ pub fn entitlement_snapshot_for_features(
         // PlanFeatures is a plain struct of bools/i32/an enum — serialization
         // cannot fail. Fail closed to an empty object (deny-all) if it ever
         // does, rather than granting by accident.
+        // coverage: justified — serde_json::to_value over a struct of
+        // bools/i32/an enum is infallible; the arm keeps the deny-all
+        // fallback in place should the type ever grow a lossy field.
         tracing::error!(error = %error, tenant_id, "PlanFeatures serialization failed; denying all entitlements");
         serde_json::Value::Object(serde_json::Map::new())
     });
@@ -1265,6 +1268,8 @@ mod tests {
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
+                // coverage: justified — the tracing fmt layer never flushes
+                // this in-memory writer; the trait requires the method.
                 Ok(())
             }
         }
@@ -1315,6 +1320,8 @@ mod tests {
                     "the serde source error is preserved"
                 );
             }
+            // coverage: justified — assertion arm: only reachable if the
+            // typed error contract regresses, which fails this test loudly.
             other => panic!("expected CorruptPlanFeatures, got {other:?}"),
         }
         assert!(
@@ -1390,6 +1397,10 @@ mod coverage_adversarial {
                 .await;
                 admin.close().await;
             }
+            // coverage: justified — implicit else: the admin connection in
+            // teardown has never failed (the drop-the-clone path above runs
+            // on every test); the arm keeps teardown best-effort instead of
+            // panicking after a green test.
         }
     }
 
@@ -1434,6 +1445,9 @@ mod coverage_adversarial {
                     count += 1;
                     newest = newest.max(version);
                 }
+                // coverage: justified — the migrations directory holds only
+                // numbered SQL files, so the non-numeric-prefix fall-through
+                // of this scan has no input to execute on.
             }
         }
         let template: Option<String> = sqlx::query_scalar(
@@ -1480,6 +1494,8 @@ mod coverage_adversarial {
             #[tokio::test]
             async fn $name() {
                 let Some(owned) = provision(stringify!($name)).await else {
+                    // coverage: justified — soft-skip arm: only taken when
+                    // TEST_DATABASE_URL is unset; this run has it configured.
                     return;
                 };
                 let $e = &owned;
@@ -1624,6 +1640,28 @@ mod coverage_adversarial {
             assert_eq!(quota.emails_per_month, 42, "back to the tenant's own plan");
         }
     );
+
+    env_test!(unknown_custom_plan_maps_to_the_standard_tier, |env| {
+        // An admin-created plan outside the builtin name set is real for
+        // quotas (its row exists) but has no dedicated rate-limit tier: the
+        // catch-all maps it to Standard — never Unlimited, never a panic.
+        upsert_plan_input(&env.pool, &upsert("plcov_mystery", 5_000, 6_000))
+            .await
+            .expect("custom plan");
+        seed_tenant(env, "plcov_mystery_tenant", "plcov_mystery").await;
+
+        let quota = get_quota_for_tenant(&env.pool, "plcov_mystery_tenant")
+            .await
+            .expect("quota")
+            .expect("row");
+        assert_eq!(quota.plan_name, "plcov_mystery");
+        assert_eq!(quota.emails_per_month, 5_000);
+        assert_eq!(
+            quota.rate_limit_tier,
+            RateLimitTier::Standard,
+            "an unknown plan name falls back to the Standard tier"
+        );
+    });
 
     env_test!(entitlement_snapshot_applies_boolean_overrides_only, |env| {
         assert!(get_entitlement_snapshot(&env.pool, "plcov_absent")

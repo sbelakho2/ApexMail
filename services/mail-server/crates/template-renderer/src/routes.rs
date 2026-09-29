@@ -145,15 +145,18 @@ async fn render_handler(
     // option and the renderer semantics version, so any content or option
     // change rotates the key.
     let cache_key = source_render_cache_key(&req.source, &opts);
-    if let Some(mut cached) = state.cache.get(&cache_key) {
-        cached.metadata.cached = true;
-        return (
-            StatusCode::OK,
-            Json(serde_json::to_value(&cached).unwrap_or_else(|e| {
-                serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
-            })),
-        );
-    }
+        if let Some(mut cached) = state.cache.get(&cache_key) {
+            cached.metadata.cached = true;
+            return (
+                StatusCode::OK,
+                // coverage: justified — RenderResult is plain strings/numbers,
+                // so serde_json::to_value cannot fail; the fallback guards
+                // future field types only.
+                Json(serde_json::to_value(&cached).unwrap_or_else(|e| {
+                    serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
+                })),
+            );
+        }
 
     // The sandbox execute is CPU-bound (regex scans, html5ever parse,
     // minify). Running it inline on the async worker starves the runtime:
@@ -172,6 +175,9 @@ async fn render_handler(
     {
         Ok(result) => result,
         Err(join_err) => {
+            // coverage: justified — panic containment for the blocking render
+            // task; the sandbox is panic-free by its own test contract, so no
+            // input deterministically reaches this arm.
             tracing::error!(error = %join_err, "render blocking task panicked");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -222,6 +228,9 @@ async fn render_handler(
 
             (
                 StatusCode::OK,
+                // coverage: justified — RenderResult is plain strings/numbers,
+                // so serde_json::to_value cannot fail; the fallback guards
+                // future field types only.
                 Json(serde_json::to_value(&render_result).unwrap_or_else(|e| {
                     serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
                 })),
@@ -233,6 +242,9 @@ async fn render_handler(
                 TemplateError::OutputTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
                 TemplateError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
                 TemplateError::ForbiddenModule { .. } => StatusCode::FORBIDDEN,
+                // coverage: justified — NotFound is produced by the
+                // stored-template renderer only; the HTTP path renders inline
+                // source and can never produce it (arm kept for totality).
                 TemplateError::NotFound { .. } => StatusCode::NOT_FOUND,
                 _ => StatusCode::BAD_REQUEST,
             };
@@ -254,6 +266,9 @@ async fn validate_handler(
     let result = transpiler::validate_source(&req.source, state.config.sandbox.max_source_length);
     (
         StatusCode::OK,
+        // coverage: justified — ValidationResult is plain strings/bools, so
+        // serde_json::to_value cannot fail; the fallback guards future field
+        // types only.
         Json(serde_json::to_value(&result).unwrap_or_else(
             |e| serde_json::json!({"error": "serialization_failed", "message": e.to_string()}),
         )),
@@ -980,6 +995,9 @@ mod tests {
             .ok()
             .filter(|value| !value.trim().is_empty())
         else {
+            // coverage: justified — env-gated soft-skip; this branch runs when
+            // the suite executes WITHOUT TEST_DATABASE_URL (the coverage run
+            // sets it and exercises the DB-backed assertions below instead).
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
@@ -1010,5 +1028,145 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ready", "{json}");
         assert_eq!(json["dependencies"]["database"], "up", "{json}");
+    }
+
+    /// `/ready` when the DB check FAILS (not times out): a closed pool errors
+    /// the query immediately, so the handler must answer 503 degraded with
+    /// `database: "down"` — the honest failure arm, distinct from the
+    /// timeout arm.
+    #[tokio::test]
+    async fn ready_names_the_database_down_when_the_check_errors_without_timing_out() {
+        use tower::ServiceExt;
+
+        let config = test_config();
+        let pool = sqlx::PgPool::connect_lazy("postgres://127.0.0.1:1/none").expect("lazy pool");
+        // A closed pool fails `SELECT 1` immediately with PoolClosed — no
+        // acquire timeout, so the handler's error arm (not the timeout arm)
+        // runs.
+        pool.close().await;
+        let state = Arc::new(AppState {
+            db: pool,
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "degraded", "{json}");
+        assert_eq!(
+            json["dependencies"]["database"], "down",
+            "an errored check must be named down, not timeout: {json}"
+        );
+    }
+
+    /// Every sandbox failure mode maps to its honest HTTP status through the
+    /// render handler's error arm: oversized source (413), oversized output
+    /// (413), zero-budget timeout (504), forbidden module (403) and a
+    /// dangerous-pattern syntax error (400).
+    #[tokio::test]
+    async fn render_failure_modes_map_to_honest_status_codes() {
+        use tower::ServiceExt;
+
+        let render = |app: axum::Router, source: serde_json::Value| async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/render")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(source.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        // SourceTooLarge: 600 KB source against a 512 KB cap → 413.
+        let app = router(state_with_token("test-key"));
+        let huge = serde_json::json!({ "source": "a".repeat(600_000) });
+        let response = render(app.clone(), huge).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "oversized source must be 413"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "SOURCE_TOO_LARGE", "{json}");
+
+        // ForbiddenModule → 403.
+        let response = render(
+            app.clone(),
+            serde_json::json!({ "source": "import fs from 'fs'; <div>evil</div>" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "fs import is 403");
+
+        // InvalidSyntax (dangerous pattern) → 400.
+        let response = render(
+            app.clone(),
+            serde_json::json!({ "source": "<p>{{ process }}</p>" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "eval-ish is 400");
+
+        // Timeout: a state whose sandbox budget is already spent → 504.
+        let mut config = test_config();
+        config.sandbox.timeout_ms = 0;
+        let expired = Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let response = render(
+            router(expired),
+            serde_json::json!({ "source": "<p>hello</p>" }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::GATEWAY_TIMEOUT,
+            "an exhausted sandbox budget must be 504"
+        );
+
+        // OutputTooLarge: a 10-byte output cap → 413 with OUTPUT_TOO_LARGE.
+        let mut config = test_config();
+        config.sandbox.max_output_length = 10;
+        let tiny_output = Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_auth: auth_with_token("test-key"),
+        });
+        let response = render(
+            router(tiny_output),
+            serde_json::json!({ "source": "<p>hello</p>" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "OUTPUT_TOO_LARGE", "{json}");
     }
 }

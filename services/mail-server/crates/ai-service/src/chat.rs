@@ -948,10 +948,14 @@ mod tests {
     #[tokio::test]
     async fn chat_rejects_cited_claims_the_passage_does_not_support() {
         let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let _serial = ENV_SERIAL.lock().await;
         let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         sqlx::query("DELETE FROM ai_docs_chunks")
@@ -1024,16 +1028,60 @@ mod tests {
         svc.persist_audit(&audit).await;
     }
 
+    /// Fix #17, chat side: an index that genuinely holds nothing answers
+    /// through the Empty state — no citations, an empty docs_version — which
+    /// is evidence of absence, never the Unavailable degradation.
+    #[tokio::test]
+    async fn chat_with_an_empty_docs_index_answers_without_citations() {
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        let _serial = ENV_SERIAL.lock().await;
+        let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
+            return;
+        };
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(CHAT_ANSWER)]).await;
+        let svc = enabled_service(&mock.endpoint(), Some(pool.clone()));
+        let (resp, audit) = svc
+            .chat(&chat_request("What does the Pro plan cost?", vec![]))
+            .await
+            .expect("chat succeeds over an empty index");
+        assert!(!resp.escalated, "{}", resp.answer);
+        assert!(resp.passed_policy_verification);
+        assert!(
+            resp.citations.is_empty(),
+            "an empty index has nothing to cite: {:?}",
+            resp.citations
+        );
+        assert_eq!(
+            audit.docs_version, "",
+            "an empty index reports no docs version — the honest empty"
+        );
+    }
+
     /// Audit persistence writes the tenant-scoped user+assistant pair and the
     /// hourly retention gate stays within its window across calls; a
     /// non-numeric retention env degrades to the 90-day default.
     #[tokio::test]
     async fn persist_audit_writes_tenant_scoped_rows_and_tolerates_bad_retention_env() {
         let Some(_lock) = crate::test_support::serial_lock("chat-audit-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let _serial = ENV_SERIAL.lock().await;
         let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let tenant = crate::test_support::unique("chat_t");
@@ -1091,9 +1139,13 @@ mod tests {
     #[tokio::test]
     async fn persist_audit_survives_an_unwritable_row() {
         let Some(_lock) = crate::test_support::serial_lock("chat-audit-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let cfg = AiConfig::default();
@@ -1115,12 +1167,17 @@ mod tests {
     #[tokio::test]
     async fn citations_are_filtered_to_referenced_passages() {
         let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
         let _serial = ENV_SERIAL.lock().await;
         let Some(pool) = crate::test_support::shared_pool().await else {
+            // coverage: justified — soft-skip arm: only taken when the shared
+            // test database is not configured; this run has it configured.
             return;
         };
+
         sqlx::query("DELETE FROM ai_docs_chunks")
             .execute(&pool)
             .await

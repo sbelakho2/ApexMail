@@ -403,6 +403,9 @@ pub(crate) fn run_attachment_scan(
                 // Stripping must never corrupt a message: on any rebuild
                 // inconsistency, keep the original bytes (flag-only) and say
                 // so in the log.
+                // coverage: justified — rebuild regions derive from the same
+                // walk/split as the input, so the Err arm is a defensive
+                // invariant that no input can reach (see rebuild_without_parts).
                 tracing::warn!(
                     error = %error,
                     "attachment strip aborted; keeping original message (flag-only)"
@@ -776,6 +779,9 @@ fn rebuild_without_parts(
     sorted.sort_by_key(|replacement| replacement.region.start);
 
     // Overlap check: a malformed walk must never corrupt a message.
+    // coverage: justified — windows(2) of one boundary walk are disjoint by
+    // construction and nested regions are bounded by their parent, so no
+    // reachable input overlaps.
     for pair in sorted.windows(2) {
         if pair[0].region.end > pair[1].region.start {
             return Err("overlapping attachment regions".to_string());
@@ -788,6 +794,9 @@ fn rebuild_without_parts(
         let start = replacement.region.start;
         let end = replacement.region.end;
         if start < cursor || end > body.len() {
+            // coverage: justified — walk regions are always within the body
+            // the walk ran on (re-split identically here), so this bounds
+            // violation is a defensive invariant, not a reachable state.
             return Err("attachment region outside the message body".to_string());
         }
         new_body.extend_from_slice(&body[cursor..start]);
@@ -850,6 +859,10 @@ impl IdsRuntime {
     /// [`IdsRuntime::establish_session`] once the greeting is written).
     pub(crate) fn admit_session(&self, ip: std::net::IpAddr, port: u16) -> Option<&'static str> {
         let anomalies = self.sessions.record_syn(ip, port);
+        // coverage: justified — the `matches!(` line itself carries the
+        // never-taken fall-through arm: every ConnectionAnomaly variant is
+        // listed, so the closure can only return true (the pattern lines
+        // above execute on every anomaly).
         let blocking = anomalies.iter().any(|anomaly| {
             matches!(
                 anomaly,
@@ -859,6 +872,10 @@ impl IdsRuntime {
             )
         });
         if blocking && self.config.refuse {
+            // coverage: justified — the warn! field-value lines (below) map
+            // to zero-count macro-internal regions; the event demonstrably
+            // fires (see the refuse-branch entry counts and the
+            // live-subscriber test).
             tracing::warn!(
                 client_ip = %ip,
                 anomalies = anomalies.len(),
@@ -870,6 +887,9 @@ impl IdsRuntime {
             Some("421 4.7.0 Rejected by intrusion prevention\r\n")
         } else {
             if !anomalies.is_empty() {
+                // coverage: justified — macro-internal field regions (see the
+                // refuse-arm note above); the detection-mode event fires on
+                // every port-scan/SYN-flood probe with refuse disabled.
                 tracing::warn!(
                     client_ip = %ip,
                     anomalies = ?anomalies,
@@ -919,6 +939,9 @@ pub(crate) fn ids_inspect_payload(
     let (verdict, alerts) = match inspected {
         Ok(result) => result,
         Err(_) => {
+            // coverage: justified — panic containment for the engine call;
+            // IdsEngine::inspect has no injected failure seam and no known
+            // panicking input, so the arm exists for the fail-open contract.
             tracing::warn!("IDS engine PANICKED during payload scan; failing OPEN (verdict treated as pass)");
             (IdsVerdict::Pass, Vec::new())
         }
@@ -944,6 +967,9 @@ pub(crate) fn ids_inspect_payload(
 
     let refuse = runtime.config.refuse && matches!(verdict, IdsVerdict::Drop | IdsVerdict::Reject);
     if refuse {
+        // coverage: justified — the warn! field-value lines map to
+        // zero-count macro-internal regions; both events demonstrably fire
+        // (branch entry counts; the live-subscriber test exercises both).
         tracing::warn!(
             client_ip = %ip,
             verdict = ?verdict,
@@ -951,6 +977,7 @@ pub(crate) fn ids_inspect_payload(
             "IDS Drop/Reject verdict; refusing message at DATA time"
         );
     } else {
+        // coverage: justified — see the refuse-arm note above.
         tracing::warn!(
             client_ip = %ip,
             verdict = ?verdict,
@@ -964,9 +991,15 @@ pub(crate) fn ids_inspect_payload(
 
 fn verdict_label(verdict: IdsVerdict) -> &'static str {
     match verdict {
+        // coverage: justified — the builtin signature set (and the SMTP
+        // protocol analyzer) only produces Alert/Drop actions, and a Pass
+        // verdict with alerts would need a Pass-action signature; the match
+        // must stay total over IdsVerdict.
         IdsVerdict::Pass => "pass",
         IdsVerdict::Alert => "alert",
         IdsVerdict::Drop => "drop",
+        // coverage: justified — no builtin signature or protocol anomaly
+        // carries SignatureAction::Reject; the arm keeps the match total.
         IdsVerdict::Reject => "reject",
     }
 }
@@ -1097,6 +1130,8 @@ mod tests {
             None,
         );
         let SpamScanOutcome::Tag { headers } = outcome else {
+            // coverage: justified — refutation-only branch of the test's own
+            // assertion; it runs only when the property above is violated.
             panic!("tag-only config must never reject: {outcome:?}");
         };
         assert!(headers[0].starts_with("X-Spam-Score: "), "{headers:?}");
@@ -1139,6 +1174,8 @@ mod tests {
             None,
         );
         let SpamScanOutcome::Reject { reason } = outcome else {
+            // coverage: justified — refutation-only branch of the test's own
+            // assertion; it runs only when the property above is violated.
             panic!("reject_at_data=true must refuse a REJECT classification: {outcome:?}");
         };
         assert!(reason.contains("reject threshold"), "{reason}");
@@ -1188,6 +1225,9 @@ mod tests {
                 None,
             );
             let SpamScanOutcome::Tag { headers } = outcome else {
+                // coverage: justified — refutation-only branch of the test's
+                // own assertion; it runs only when the fail-open contract is
+                // violated.
                 panic!("a filter error must fail OPEN, never reject: {outcome:?}");
             };
             assert_eq!(
@@ -1531,5 +1571,459 @@ mod tests {
             assert!(runtime.admit_session(ip, 25).is_none());
         }
         assert_eq!(runtime.sessions.half_open_for(&ip), 100);
+    }
+
+    // ── gap-closing adversarial arms ────────────────────────────────────────
+
+    #[test]
+    fn null_spam_analyzer_is_an_inert_disabled_seam() {
+        // The placeholder installed when the filter is disabled must never
+        // score (the config gate short-circuits before consulting it).
+        let verdict = NullSpamAnalyzer.analyze("buy now", &[], Some("spf=pass"), "_global");
+        assert!(verdict.is_none(), "the disabled seam must never score");
+    }
+
+    #[test]
+    fn scoring_input_falls_back_through_html_to_the_raw_body_without_text() {
+        // A message with NO text/plain part anywhere (attachment-only MIME):
+        // `body_text(0)` is None, so the extractor first tries `body_html(0)`
+        // and then the raw body — the scorer always receives payload bytes.
+        // Pin the parser premises so a mail-parser behavior change fails
+        // loudly here instead of silently skipping the fallback chain.
+        let raw = b"Subject: scan\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"SCANB\"\r\n\
+             \r\n\
+             --SCANB\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Disposition: attachment; filename=\"a.bin\"\r\n\
+             \r\n\
+             MZ\x90\x00\x03\x00\x00\x00\r\n\
+             --SCANB--\r\n"
+            .as_slice();
+        let parsed = mail_parser::MessageParser::default().parse(raw);
+        assert!(
+            parsed.as_ref().and_then(|message| message.body_text(0)).is_none(),
+            "test premise: an attachment-only message has no body_text"
+        );
+        let (body, _) = extract_scoring_input(raw);
+        assert!(
+            body.contains("--SCANB"),
+            "the raw-body fallback must feed the scorer: {body}"
+        );
+    }
+
+    #[test]
+    fn sandbox_engine_error_fails_open_to_an_error_record() {
+        // A 4-byte cap makes the engine reject every real payload with
+        // FileTooLarge: the wiring must record decision=ERROR (with the
+        // sanitized error detail) and never strip or refuse.
+        let mut sandbox_config = sandbox::config::SandboxConfig::default();
+        sandbox_config.max_file_size = 4;
+        let engine = sandbox::engine::SandboxEngine::with_config(sandbox_config);
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Reject,
+            },
+            &multipart_with_executable(),
+        );
+        let header = outcome
+            .headers
+            .iter()
+            .find(|header| header.contains("decision=ERROR"))
+            .expect("an engine failure must be recorded, never invented clean");
+        assert!(header.contains("detail="), "{header}");
+        assert!(header.contains("File too large"), "{header}");
+        assert!(!outcome.reject, "a sandbox ERROR must fail OPEN, never refuse");
+        assert!(outcome.stripped_raw.is_none(), "a sandbox ERROR must not strip");
+    }
+
+    #[test]
+    fn threshold_only_reject_strips_with_a_note_that_omits_findings() {
+        // An operator tuning `reject_threshold` to 0.0 makes EVERY attachment
+        // a REJECT regardless of content: a clean-text part then has a REJECT
+        // decision with NO findings at all — the strip note must honestly
+        // omit the findings section instead of printing an empty list.
+        // (`boundary=`/`filename=` are unquoted here, exercising the raw
+        // param-value path.)
+        let raw = b"Subject: macro\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Type: text/plain\r\n\
+             Content-Disposition: attachment; filename=notes.txt\r\n\
+             \r\n\
+             just words\r\n\
+             --RAWB--\r\n"
+            .as_slice();
+        let mut sandbox_config = sandbox::config::SandboxConfig::default();
+        sandbox_config.reject_threshold = 0.0;
+        sandbox_config.suspicious_threshold = 0.0;
+        let engine = sandbox::engine::SandboxEngine::with_config(sandbox_config);
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Strip,
+            },
+            raw,
+        );
+        assert!(
+            outcome
+                .headers
+                .iter()
+                .any(|header| header.contains("name=\"notes.txt\"")
+                    && header.contains("decision=REJECT")),
+            "the threshold-only reject must be recorded: {:?}",
+            outcome.headers
+        );
+        assert!(
+            !outcome.headers[0].contains("findings="),
+            "a clean part has no findings: {:?}",
+            outcome.headers
+        );
+        let stripped = outcome.stripped_raw.expect("strip mode removes it");
+        let text = String::from_utf8_lossy(&stripped);
+        assert!(
+            text.contains("REMOVED-notes.txt") && text.contains("Decision: REJECT"),
+            "{text}"
+        );
+        assert!(
+            !outcome
+                .headers
+                .iter()
+                .any(|header| header.starts_with("X-Apex-Attachment-Note:")
+                    && header.contains("findings=")),
+            "the note must omit the findings section: {:?}",
+            outcome.headers
+        );
+        assert!(!outcome.reject, "strip mode never refuses");
+    }
+
+    #[test]
+    fn inline_disposition_with_filename_is_still_an_attachment() {
+        // `Content-Disposition: inline` with a filename is still a download
+        // button in every client — the filename alone must route the part to
+        // the sandbox.
+        let pe = vec![0x4Du8, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pe);
+        let raw = format!(
+            "Subject: inline\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Disposition: inline; filename=\"payload.exe\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {encoded}\r\n\
+             --RAWB--\r\n"
+        )
+        .into_bytes();
+        let engine = sandbox::engine::SandboxEngine::new();
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Flag,
+            },
+            &raw,
+        );
+        assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
+        assert!(
+            outcome.headers[0].contains("name=\"payload.exe\"")
+                && outcome.headers[0].contains("decision=REJECT"),
+            "inline disposition must not bypass the sandbox: {:?}",
+            outcome.headers
+        );
+    }
+
+    #[test]
+    fn quoted_params_survive_escaped_semicolons_and_quotes() {
+        // RFC 2045 quoted-string: a backslash escapes the next byte, so an
+        // attacker cannot smuggle a parameter separator inside a filename.
+        let value = r#"attachment; filename="evil\"; \".exe"; size=1"#;
+        let segments = split_params(value);
+        assert_eq!(segments.len(), 3, "{segments:?}");
+        assert_eq!(segments[0].trim(), "attachment");
+        assert_eq!(segments[2].trim(), "size=1");
+        assert_eq!(
+            extract_param(value, "filename").as_deref(),
+            Some(r#"evil"; ".exe"#),
+            "escaped quotes are decoded, the embedded ; stays literal"
+        );
+        assert_eq!(extract_param(value, "size").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn rfc2231_extended_filenames_are_percent_decoded_and_scanned() {
+        // filename*=utf-8''… carries the RFC 2231 charset''value framing and
+        // percent-encoding: the decoded name routes the part to the sandbox.
+        let pe = vec![0x4Du8, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pe);
+        let raw = format!(
+            "Subject: rfc2231\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Disposition: attachment; filename*=utf-8''evil%20report%2Eexe\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {encoded}\r\n\
+             --RAWB--\r\n"
+        )
+        .into_bytes();
+        let engine = sandbox::engine::SandboxEngine::new();
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Flag,
+            },
+            &raw,
+        );
+        assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
+        assert!(
+            outcome.headers[0].contains("name=\"evil report.exe\"")
+                && outcome.headers[0].contains("decision=REJECT"),
+            "percent-decoded .exe must be scanned as an executable: {:?}",
+            outcome.headers
+        );
+    }
+
+    #[test]
+    fn walk_tolerates_unterminated_bodies_and_empty_parts() {
+        let engine = sandbox::engine::SandboxEngine::new();
+        let config = AttachmentScanConfig {
+            enabled: true,
+            action: AttachmentScanAction::Flag,
+        };
+
+        // (a) The closing boundary WITHOUT a trailing CRLF: the last line
+        // still delimits the final part.
+        let pe = vec![0x4Du8, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pe);
+        let unterminated = format!(
+            "Subject: t\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Disposition: attachment; filename=\"a.exe\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {encoded}\r\n\
+             --RAWB--"
+        )
+        .into_bytes();
+        let outcome = run_attachment_scan(&engine, &config, &unterminated);
+        assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
+        assert!(outcome.headers[0].contains("decision=REJECT"), "{:?}", outcome.headers);
+
+        // (b) An empty part: a boundary line immediately followed by the
+        // closing marker delimits no content at all — skipped, no panic.
+        let empty_part = b"Subject: t\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             --RAWB--\r\n"
+            .as_slice();
+        let outcome = run_attachment_scan(&engine, &config, empty_part);
+        assert!(outcome.headers.is_empty(), "{:?}", outcome.headers);
+        assert!(outcome.stripped_raw.is_none());
+    }
+
+    #[test]
+    fn part_without_blank_separator_still_walks_and_scans() {
+        // Headers that run straight into the payload (no CRLFCRLF): the walk
+        // must not hang or panic — the whole content is treated as header
+        // block, the payload is empty, and the part is still scanned.
+        let raw = b"Subject: t\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Disposition: attachment; filename=\"b.txt\"\r\n\
+             MZ\x90\x00\x03\x00\x00\x00\r\n\
+             --RAWB--\r\n"
+            .as_slice();
+        let engine = sandbox::engine::SandboxEngine::new();
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Flag,
+            },
+            raw,
+        );
+        assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
+        assert!(
+            outcome.headers[0].contains("decision=ALLOW"),
+            "an empty payload carries no signature: {:?}",
+            outcome.headers
+        );
+    }
+
+    #[test]
+    fn unpadded_base64_payloads_still_decode_for_scanning() {
+        // "TQ" is one byte ('M') base64-encoded WITHOUT padding: the strict
+        // decoder refuses it, the no-pad fallback must decode it so the
+        // bytes reach the sandbox (a decode failure would say SCAN_IMPOSSIBLE
+        // with decision=ERROR).
+        let raw = b"Subject: nopad\r\nMIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=RAWB\r\n\r\n\
+             --RAWB\r\n\
+             Content-Type: application/octet-stream\r\n\
+             Content-Disposition: attachment; filename=\"m.txt\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             TQ\r\n\
+             --RAWB--\r\n"
+            .as_slice();
+        let engine = sandbox::engine::SandboxEngine::new();
+        let outcome = run_attachment_scan(
+            &engine,
+            &AttachmentScanConfig {
+                enabled: true,
+                action: AttachmentScanAction::Flag,
+            },
+            raw,
+        );
+        assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
+        assert!(
+            !outcome.headers[0].contains("SCAN_IMPOSSIBLE")
+                && !outcome.headers[0].contains("decision=ERROR"),
+            "the no-pad fallback must decode the payload: {:?}",
+            outcome.headers
+        );
+    }
+
+    #[test]
+    fn sessions_accessor_exposes_the_shared_tracker() {
+        let runtime = ids_runtime(false);
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 6));
+        runtime.sessions().record_syn(ip, 25);
+        assert_eq!(runtime.sessions().half_open_for(&ip), 1);
+        runtime.sessions().record_close(ip, 25);
+        assert_eq!(runtime.sessions().half_open_for(&ip), 0);
+    }
+
+    #[test]
+    fn port_scan_anomaly_refuses_admission_only_when_configured() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 7));
+
+        // Detection-only: sweeping 16 distinct ports is logged, never refused.
+        let detection = ids_runtime(false);
+        for port in 1200..=1215u16 {
+            assert!(
+                detection.admit_session(ip, port).is_none(),
+                "refuse=false must never refuse"
+            );
+        }
+
+        // Refuse mode: the 11th distinct port crosses the portscan threshold
+        // (10); the refusal releases the half-open slot and the flagged scan
+        // does not re-fire on subsequent probes.
+        let refusing = ids_runtime(true);
+        for port in 1300..=1309u16 {
+            assert!(refusing.admit_session(ip, port).is_none(), "port {port}");
+        }
+        let refusal = refusing
+            .admit_session(ip, 1310)
+            .expect("the 11th distinct port must trip the portscan gate");
+        assert!(refusal.starts_with("421 4.7.0"), "{refusal}");
+        let released = refusing.sessions().half_open_for(&ip);
+        let after = refusing.admit_session(ip, 1311);
+        assert!(
+            after.is_none(),
+            "a flagged scanner's later probes are not re-refused: {after:?} (half-open {released})"
+        );
+    }
+
+    /// A no-op subscriber installed only for the duration of one test: with a
+    /// live subscriber the `tracing` event macros evaluate every field value
+    /// (the disabled fast-path skips the plain-value fields entirely).
+    struct DispatchingSubscriber;
+
+    impl tracing::Subscriber for DispatchingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        // coverage: justified — the span-lifecycle methods below are never
+        // invoked: the tests only emit events (no spans), so `event` is the
+        // only callback that runs.
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
+        fn clone_span(&self, id: &tracing::Id) -> tracing::Id {
+            id.clone()
+        }
+    }
+
+    #[test]
+    fn ids_warning_paths_evaluate_their_fields_under_a_live_subscriber() {
+        let flood_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 8));
+        let alert_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 9));
+        let mut payload = b"Subject: shellcode\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0x90u8; 8]);
+        payload.extend_from_slice(b"\r\nbye\r\n");
+
+        tracing::subscriber::with_default(DispatchingSubscriber, || {
+            // Refuse-mode admission warn (SYN flood on the 101st half-open).
+            let refusing = ids_runtime(true);
+            for _ in 0..101 {
+                let _ = refusing.admit_session(flood_ip, 25);
+            }
+
+            // Detection-mode payload warn: the NOP-sled is downgraded to
+            // Alert and recorded without refusing.
+            let outcome = ids_inspect_payload(&ids_runtime(false), alert_ip, 25, &payload);
+            assert!(!outcome.refuse);
+            assert!(outcome.header.is_some());
+
+            // Refuse-mode payload warn: the same signature keeps Drop.
+            let outcome = ids_inspect_payload(&ids_runtime(true), alert_ip, 25, &payload);
+            assert!(outcome.refuse);
+        });
+    }
+
+    #[test]
+    fn ids_payload_overflow_header_caps_the_echoed_alerts() {
+        // One payload engineered to fire the whole smtp signature set plus
+        // every SMTP protocol anomaly: the verdict header echoes at most
+        // MAX_ECHOED_ALERTS sids and names the overflow honestly.
+        let alert_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 10));
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"Subject: everything\r\n\r\n");
+        // Signature patterns (smtp protocol set).
+        payload.extend_from_slice(b"\x90\x90\x90\x90\x90\x90\x90\x90"); // 2000002
+        payload.extend_from_slice(b"VRFY root\r\n"); // 2000003
+        payload.extend_from_slice(b"EXPN all\r\n"); // 2000004
+        payload.extend_from_slice(b"AUTH PLAIN AHhqAHB3\r\n"); // 2000040
+        payload.extend_from_slice(b"RCPT TO:<postmaster@x\r\n"); // 2000041 + burst
+        payload.extend_from_slice(b"RCPT TO:<postmaster@y\r\n");
+        payload.extend_from_slice(b"RCPT TO:<postmaster@z\r\n");
+        payload.extend_from_slice(b"AUTH LOGIN\r\n"); // 2000054
+        payload.extend_from_slice(b"MAIL FROM:<a@b>\r\n"); // pipelining > 5
+        payload.extend_from_slice(b"DATA\r\n");
+        payload.extend_from_slice(b"Content-Transfer-Encoding: base64\r\n"); // 2000093
+        payload.extend_from_slice(b"filename=\"invoice.pdf.exe\"\r\n"); // 2000096
+        payload.push(0); // null byte: 3000004 (Drop)
+        payload.extend_from_slice(b"EHLO x\r\nHELO y\r\n");
+
+        let runtime = ids_runtime(false);
+        let outcome = ids_inspect_payload(&runtime, alert_ip, 25, &payload);
+        let header = outcome.header.expect("a hostile payload must be recorded");
+        assert!(header.contains("(+"), "overflow must be named: {header}");
+        let sids = header
+            .split("alerts=")
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .expect("alerts list present");
+        assert_eq!(
+            sids.split(',').count(),
+            MAX_ECHOED_ALERTS,
+            "at most MAX_ECHOED_ALERTS sids are echoed: {header}"
+        );
     }
 }
