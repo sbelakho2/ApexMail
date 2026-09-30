@@ -66,6 +66,17 @@ services:
   - name: clickhouse
     image: clickhouse/clickhouse-server:24.8-alpine
 
+# OPTIONAL secret for the SHA-bound commit status (external audit item 6 —
+# ci/README.md §12). required: false: without the secret the notify-github
+# steps SKIP LOUDLY instead of failing, so local/manual/secret-less runs stay
+# green. Branch protection on main requires the "woodpecker" status context;
+# the token needs only the classic `repo:status` (or fine-grained
+# "commit statuses: read & write") permission.
+secrets:
+  - source: github_token
+    target: GITHUB_TOKEN
+    required: false
+
 steps:
   # --- first-stage assertion: print and check the exact toolchain ----------
   - name: toolchain
@@ -160,3 +171,44 @@ steps:
       CLICKHOUSE_TEST_URL: http://clickhouse:8123
     commands:
       - ./ci/woodpecker/stage.sh security
+
+  # --- SHA-bound GitHub commit status (external audit item 6) --------------
+  # Branch protection on main requires the commit-status context
+  # "woodpecker" (exact string — see ci/README.md §12); Woodpecker's own
+  # built-in status may be absent or configured under a different name, so
+  # the required context is posted EXPLICITLY via tools/post_github_status.sh
+  # (curl-only). Two steps so the state is explicit and doesn't depend on
+  # executor-internal status variables; `failure: ignore` keeps a GitHub API
+  # outage from flipping a green pipeline red (the missing status then blocks
+  # the branch VISIBLY instead of lying about a red gate). Without the
+  # GITHUB_TOKEN secret (required: false above) the script skips loudly.
+  - name: notify-github-success
+    image: ghcr.io/sbelakho2/apexmail-ci:1
+    failure: ignore
+    when:
+      - status: [success]
+    commands:
+      # Stage results + check counts come from the per-stage logs the
+      # ci/woodpecker/stage.sh wrapper wrote under ci/runs/ (shared workspace).
+      - |
+        _p=$(grep -h 'PASS: ' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        _f=$(grep -h 'FAIL:' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        GITHUB_STATUS_STATE=success \
+        GITHUB_STATUS_CONTEXT=woodpecker \
+        STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \
+        STATUS_DESCRIPTION="woodpecker release gates GREEN (${CI_REPO:-repo} ${CI_COMMIT_SHA:-${CI_SHA:-unknown}}): $_p checks passed, $_f failed" \
+        tools/post_github_status.sh
+
+  - name: notify-github-failure
+    image: ghcr.io/sbelakho2/apexmail-ci:1
+    failure: ignore
+    when:
+      - status: [failure]
+    commands:
+      - |
+        _f=$(grep -h 'FAIL:' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        GITHUB_STATUS_STATE=failure \
+        GITHUB_STATUS_CONTEXT=woodpecker \
+        STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \
+        STATUS_DESCRIPTION="woodpecker release gates RED: $_f failing checks in validate/ui/test/security — open the run log" \
+        tools/post_github_status.sh

@@ -1,0 +1,21 @@
+{
+  "name": "apexmail",
+  "_comment": [
+    "Fixture for tools/check_image_pinning.py (external audit item 5).",
+    "MUST PASS: the no-registry fallback form. On daemons without the",
+    "containerd image store a locally built image has no repo digest, so the",
+    "override pins the FULL 40-hex git-SHA rollback tag (ci/stages/images.sh",
+    "creates :<CI_SHA>; release-manifest.json + the deploy-stage digest",
+    "verification are the tamper evidence). Short SHAs / version tags must",
+    "NOT pass — see fail-tag-only.json.",
+    "Wire-up: ci/stages/validate.sh asserts this file exits 0."
+  ],
+  "services": {
+    "api-server": {
+      "image": "ghcr.io/sbelakho2/apexmail/api-server:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+    },
+    "worker": {
+      "image": "ghcr.io/sbelakho2/apexmail/worker:0f1e2d3c4b5a69788796a5b4c3d2e1f00f9e8d7c"
+    }
+  }
+}

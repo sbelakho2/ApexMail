@@ -1,0 +1,18 @@
+{
+  "name": "apexmail",
+  "_comment": [
+    "Fixture for tools/check_image_pinning.py (external audit item 5).",
+    "MUST FAIL (exit 1): tag-only forms that are NOT content pins — a",
+    "version tag and a short SHA both resolve to whatever a registry or the",
+    "local daemon currently points them at. Only the FULL 40-hex git-sha",
+    "rollback tag (pass-sha-tag-pin.json) or a repo@sha256: digest passes."
+  ],
+  "services": {
+    "worker": {
+      "image": "ghcr.io/sbelakho2/apexmail/worker:1.2.3"
+    },
+    "billing-service": {
+      "image": "ghcr.io/sbelakho2/apexmail/billing-service:1a2b3c4"
+    }
+  }
+}

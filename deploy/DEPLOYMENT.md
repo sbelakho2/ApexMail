@@ -401,6 +401,76 @@ with `ghcr.io/...` NAMES for compatibility, but nothing is pushed or pulled.
   `docker compose pull` cannot work in this model and must not be used).
 - **Never** pin services to external `vX.Y.Z` tags.
 
+## Immutable deployment artifacts (digest-pinned compose overrides)
+
+External audit item 5: `docker-compose.prod.yml` references mutable
+`:latest` tags, so a manual `docker compose up` resolves whatever the tag
+currently points at — not necessarily the content the pipeline built, gated
+and deployed. The pipeline therefore renders two release artifacts per run
+(both in `ci/runs/<ts>/`, signed together in `SHA256SUMS.images`):
+
+1. **`release-manifest.json`** — the release evidence:
+
+   ```json
+   [
+     {
+       "service": "api-server",
+       "image_repository": "ghcr.io/sbelakho2/apexmail/api-server",
+       "git_sha": "<40-hex commit sha>",
+       "oci_digest": "sha256:<64-hex image digest>",
+       "sbom_digest": "sha256:<64-hex digest of the Trivy SPDX SBOM> | null",
+       "provenance_digest": null
+     }
+   ]
+   ```
+
+   One entry per canonical + extra image. `oci_digest` is the OCI repo
+   digest the daemon recorded (`RepoDigests`; present with the containerd
+   image store and after any registry push) or, when none exists, the image
+   ID — the exact content the deploy stage's tamper guard re-verifies.
+   `sbom_digest` points at the Trivy SPDX SBOM the images stage generated
+   for that image (null for images outside the blocking gate, e.g. the
+   backup sidecars). Nothing in this pipeline produces provenance
+   attestations, so `provenance_digest` is always null.
+
+2. **`docker-compose.digest-override.yml`** — a GENERATED compose override
+   mapping every first-party service to pinned content, `repo@sha256:<digest>`
+   where a repo digest exists locally, else the full `:<git-sha>` rollback
+   tag (a daemon without local repo digests cannot resolve a digest ref for a
+   locally built image; the tag plus the deploy-stage digest verification are
+   the tamper evidence there). Do not edit it; do not commit it.
+
+**Manual compose invocations MUST append the override** — base + prod alone
+still resolve `:latest`:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  -f <run-dir>/docker-compose.digest-override.yml \
+  --env-file .env --profile monitoring up -d
+```
+
+Enforcement:
+
+- The canonical deploy stage (`ci/stages/deploy.sh`) applies the override to
+  every `compose` call and runs `tools/check_image_pinning.py` over the LIVE
+  `docker compose config` rendering before `up`: every first-party image must
+  be digest- or full-git-sha-pinned, third-party images must be on the
+  checker's explicit allowlist. A violation fails the deploy before any
+  container is recreated.
+- The validate stage proves the checker itself on committed fixtures
+  (`tools/fixtures/compose_pinning/`) — a `:latest` first-party image must be
+  REJECTED without needing docker.
+- The manual path (`deploy/scripts/deploy.sh`) renders the same pair into
+  `ci/runs/<UTC-ts>_manual/` right after its builds and appends the override
+  to its own compose invocations.
+- Known gap (deliberate): `ha`, `isolation` and `outbound-mta` are first-party
+  services in `docker-compose.prod.yml` that the pipeline does NOT build and
+  the deploy stage's canonical service set does NOT bring up — they are not in
+  the manifest/override and stay on `:latest`. Do not add them to a manual
+  `up` without pinning their images first. The `migrate` stage likewise runs
+  the migrator before the deploy stage's override exists; pinning it is
+  follow-up work for `ci/stages/migrate.sh`.
+
 ## Drift guard
 
 The CI job `deploy-image-name-guard` (in `deploy.yml`) asserts that every

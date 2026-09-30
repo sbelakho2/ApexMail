@@ -133,6 +133,20 @@ _SELF_TEST_CASES = [
     ('skipping: no live Redis at redis://127.0.0.1:6379/9', True),
     ('skipping: could not create isolated test database xyz_foo', True),
     ('skipping: CLICKHOUSE_TEST_URL is not configured', True),
+    # Coverage for the remaining marker families (every MARKER_FRAGMENTS
+    # family must have at least one proving case, or a reworded helper could
+    # silently drop out of the gate's protection).
+    ('skipping redis_roundtrip: set REDIS_TEST_URL to run', True),
+    ('skipping fresh_db_case: set TEST_FRESH_DATABASE_URL to run', True),
+    ('skipping sales_flow: set SALES_TEST_DATABASE_URL to run', True),
+    ('skipping enterprise_flow: set ENTERPRISE_TEST_DATABASE_URL to run', True),
+    ('skipping both_fixtures: set TEST_DATABASE_URL (+ TEST_REDIS_URL) to run', True),
+    ('skipping tenant_query: TEST_DATABASE_URL not set', True),
+    ('skipping outage_case: TEST_REDIS_URL not set', True),
+    ('skipping cache_case: TEST_REDIS_URL unset', True),
+    ('skipping: REDIS_TEST_URL unset', True),
+    ('skipping api_case: TEST_REDIS_URL is not configured', True),
+    ('skipping: Redis unreachable: connection refused', True),
     ('skipping: marketing site not built (placeholder pages embedded)', False),
     ('skipping: redis-server not available', False),
     ('skipping: redis-server did not become ready', False),

@@ -176,11 +176,14 @@ mod tests {
         // baseline manifest now carries their canonical patterns.
         // Deferred-feature 4: /settings/suppressions joins the web manifest
         // (data-backed list page, nav entry under Settings) — web 35 → 36.
+        // Data-locations fix: the footer-linked /data-locations page joined
+        // the marketing-zola baseline (its MARKETING_DEAD_LINK_ALLOWLIST
+        // entry is emptied) — marketing-zola 36 → 37.
         assert_eq!(declared_route_count("web"), Some(36));
         assert_eq!(declared_route_count("control-plane"), Some(30));
         assert_eq!(declared_route_count("marketing"), Some(18));
-        assert_eq!(declared_route_count("marketing-zola"), Some(36));
-        assert_eq!(total_route_count(), 120);
+        assert_eq!(declared_route_count("marketing-zola"), Some(37));
+        assert_eq!(total_route_count(), 121);
     }
 
     #[test]

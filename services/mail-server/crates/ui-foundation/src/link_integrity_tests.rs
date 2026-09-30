@@ -42,14 +42,11 @@ const DEAD_LINK_ALLOWLIST: &[(&str, &str, &str)] = &[];
 
 /// Allowlisted dead links in the marketing-zola documents, as
 /// (document path or "*", unresolvable target path).
-const MARKETING_DEAD_LINK_ALLOWLIST: &[(&str, &str)] = &[
-    // TODO(batch-2): /data-locations IS served by the static document map
-    // (axum_router::marketing_static_document) and linked from the /de /es
-    // /fr locale footers, but the route is missing from
-    // docs/development/ui-baseline-manifest.json (marketing-zola surface).
-    // Reconcile the manifest or the footer, then delete this entry.
-    ("*", "/data-locations"),
-];
+/// Data-locations fix: /data-locations now lives in the marketing-zola
+/// surface of docs/development/ui-baseline-manifest.json (pinned counts in
+/// routing.rs updated to 37/121), so the footer links resolve and the
+/// former ("*", "/data-locations") entry is gone.
+const MARKETING_DEAD_LINK_ALLOWLIST: &[(&str, &str)] = &[];
 
 /// Collect every `href` and form `action`/`formaction` target in a document.
 fn link_targets(html: &str) -> Vec<String> {

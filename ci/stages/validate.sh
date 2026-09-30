@@ -137,6 +137,12 @@ validate_pipeline_config() {
             || { ci_err ".woodpecker.yml does not invoke ci/woodpecker/stage.sh — gates must not be reimplemented in YAML"; _vp_err=1; }
         grep -q '^services:' "$_wp" \
             || { ci_err ".woodpecker.yml declares no services: — the DB-gated tests would self-skip"; _vp_err=1; }
+        # The SHA-bound commit status (external audit item 6): branch
+        # protection requires the "woodpecker" context, and the ONLY thing
+        # guaranteed to post it is the notify-github step — a guard so the
+        # wiring cannot silently disappear (see ci/README.md §12).
+        grep -q 'tools/post_github_status.sh' "$_wp" \
+            || { ci_err ".woodpecker.yml lost the notify-github step (tools/post_github_status.sh) — the branch-protection commit status would never be posted"; _vp_err=1; }
     fi
     [ -f "$CI_ROOT/woodpecker/stage.sh" ] \
         || { ci_err "missing ci/woodpecker/stage.sh (the executor's stage wrapper)"; _vp_err=1; }
@@ -164,24 +170,52 @@ validate_repo_gates() {
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
+        ci_check "security posture (managed-cloud baseline)" python3 tools/check_security_posture.py
         # Web console outage honesty (outage-honesty audit #16): the SSR
         # console must never swallow a request-path DB failure into
         # "invalid credentials" / "not found" / zero counts — the swallow
         # patterns stay out of web.rs + web/data.rs production regions and
         # the honest WebActionError surface stays wired.
         ci_check "web error honesty" python3 tools/check_web_error_honesty.py
+        # Immutable image pins (external audit item 5): the checker gates the
+        # deploy-time live rendering (ci/stages/deploy.sh); here CI proves its
+        # TEETH on committed fixtures, no docker needed — the digest/git-sha
+        # pinned renderings must PASS and the mutable :latest / tag-only
+        # renderings must be REJECTED (a checker that accepts everything is
+        # the failure mode this assertion pair prevents).
+        ci_check "image pinning checker (committed fixtures)" bash -c '
+            set -eu
+            python3 tools/check_image_pinning.py tools/fixtures/compose_pinning/pass-digest-pinned.json --quiet
+            python3 tools/check_image_pinning.py tools/fixtures/compose_pinning/pass-sha-tag-pin.json --quiet
+            if python3 tools/check_image_pinning.py tools/fixtures/compose_pinning/fail-latest.json --quiet >/dev/null 2>&1; then
+                echo "FAIL: pinning checker accepted a :latest apexmail image" >&2
+                exit 1
+            fi
+            if python3 tools/check_image_pinning.py tools/fixtures/compose_pinning/fail-tag-only.json --quiet >/dev/null 2>&1; then
+                echo "FAIL: pinning checker accepted a tag-only (non-git-sha) apexmail reference" >&2
+                exit 1
+            fi
+        '
         # Capability claims vs production wiring (docs/development/
         # capability-registry.json — advertised == deployed, both directions).
-        # IN-FLIGHT WIRING WAVE: the default (CAPABILITY_GATE_STRICT=0) prints
-        # not-yet-landed items (env gate missing from the tree, README status
-        # lagging the registry) as WARN and exits 0. FLIP to 1 — or export
-        # CAPABILITY_GATE_STRICT=1 — once the in_flight_wiring items in the
-        # registry have landed and been re-triaged; structural failures
-        # (sub-advertised claims outside [roadmap], missing deploy surface for
-        # a claimed stage) fail in BOTH modes.
+        # The 2026-09 in-flight wiring wave has landed (the registry's
+        # in_flight_wiring list is empty and the checker now FAILS on a
+        # listed item whose env gate is already in the tree, so the list
+        # cannot quietly go stale). The default (CAPABILITY_GATE_STRICT=0)
+        # still prints genuinely-unlanded in-flight items as WARN; export
+        # CAPABILITY_GATE_STRICT=1 to fail on those. Structural failures
+        # (sub-advertised claims outside [roadmap], missing deploy surface
+        # for a claimed stage, registry self-consistency violations) fail in
+        # BOTH modes.
         ci_check "capability claims vs production wiring" \
             env CAPABILITY_GATE_STRICT="${CAPABILITY_GATE_STRICT:-0}" \
             python3 tools/check_capability_claims.py
+        # Repo-map drift guard (the coverage-catalog pattern):
+        # tools/repo-map.md is GENERATED from the source manifests (workspace
+        # members, Dockerfile targets, compose services, capability stages,
+        # migration tail, UI route baseline). Regenerate to a temp file and
+        # fail when the committed map lags the tree.
+        ci_check "repo-map up to date" python3 tools/generate_repo_map.py --check
         # Generated-binary guard: coverage artifacts and retired training
         # outputs were accidentally committed once (~290 MiB of .profraw).
         # `.gitignore` prevents new ones; this proves nothing slipped back.

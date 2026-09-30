@@ -1,0 +1,29 @@
+{
+  "name": "apexmail",
+  "_comment": [
+    "Fixture for tools/check_image_pinning.py (external audit item 5).",
+    "Shape == `docker compose config --format json`. MUST PASS: every",
+    "first-party image is digest-pinned repo@sha256:<64-hex> exactly the way",
+    "the deploy-time docker-compose.digest-override.yml renders it; the two",
+    "allowlisted entries cover a stock third-party image and the date-pinned",
+    "apexmail/ monitoring sidecar the pipeline pulls but never builds.",
+    "Wire-up: ci/stages/validate.sh asserts this file exits 0."
+  ],
+  "services": {
+    "api-server": {
+      "image": "ghcr.io/sbelakho2/apexmail/api-server@sha256:1447d41727a2a014628b1edef1cac53c4fd000bb90f59fa4e051ef251e52c4ef"
+    },
+    "mta": {
+      "image": "ghcr.io/sbelakho2/apexmail/mta@sha256:b1abb223595c5beda79bb6a306e336970907095e5f109e942b88ce32db9b2710"
+    },
+    "nginx": {
+      "image": "nginx:1.27-alpine"
+    },
+    "postgres": {
+      "image": "postgres:16.8-alpine"
+    },
+    "synthetic-monitor": {
+      "image": "apexmail/synthetic-monitor:2026.04.30"
+    }
+  }
+}

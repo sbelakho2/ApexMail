@@ -530,7 +530,7 @@
     },
     {
       "id": "marketing-zola",
-      "routeCount": 36,
+      "routeCount": 37,
       "routes": [
         {
           "path": "/",
@@ -637,6 +637,12 @@
         {
           "path": "/cookies",
           "name": "Cookies",
+          "category": "marketing",
+          "authRequired": false
+        },
+        {
+          "path": "/data-locations",
+          "name": "Data Locations",
           "category": "marketing",
           "authRequired": false
         },

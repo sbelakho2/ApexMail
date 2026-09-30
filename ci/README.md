@@ -268,7 +268,7 @@ The substitutes, in enforcement order:
 | GitHub feature | Status | Substitute |
 |---|---|---|
 | PR status checks / check runs UI | gone with GitHub | §4: pre-push hook + `check-pr.sh` + host-enforced gating |
-| Branch protection rules | gone | same — plus the fetch stage's pushed-HEAD guarantee |
+| Branch protection rules | **ACTIVE on `main`** | the branch requires the commit-status context `woodpecker` (exact string; set via the GitHub API in the 24234a5e era) — the `.woodpecker.yml` `notify-github` steps post exactly that context (§12), and the fetch stage's pushed-HEAD guarantee plus the host gate cover what a status alone cannot |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
 | GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
 | Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; the retired GitHub workflows that used to trip `run-shell-injection` were removed from the tree on 2026-09-13). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
@@ -660,3 +660,66 @@ Woodpecker pipeline. They act on the deploy host (its compose project, its
 nginx, its secrets, its docker images) and the owner's directive is that CI
 never deploys. Woodpecker answers "is this commit good?"; the host pipeline
 answers "is production on that commit?".
+
+---
+
+## 12. The SHA-bound GitHub commit status (`woodpecker` context)
+
+**Why.** Branch protection on `main` requires a commit-status context named —
+exactly — `woodpecker` (configured through the GitHub API in the 24234a5e
+era). Without a status on a SHA, GitHub shows NO evidence that the mandatory
+gates ran, and protected branches cannot be updated. Woodpecker's own
+built-in commit status is not relied on: it may be absent, and its default
+context (`ci/woodpecker`, server-level `WOODPECKER_STATUS_CONTEXT`) does not
+match the required string. **The required context must be the one that
+actually arrives** — so the pipeline posts it explicitly:
+
+* `.woodpecker.yml` ends with two steps, `notify-github-success` and
+  `notify-github-failure`, gated `when: status: [success]` / `[failure]` —
+  together they run ALWAYS. Both call `tools/post_github_status.sh`
+  (curl-only, no new dependencies), which POSTs
+  `{state, context, description, target_url}` to
+  `repos/{owner}/{repo}/statuses/{sha}`.
+* **Context: `woodpecker`** (`GITHUB_STATUS_CONTEXT`, default in the script)
+  — deliberately the exact string branch protection requires. If the
+  required context is ever renamed, change it in ONE place (the step env or
+  the script default). Any `ci/woodpecker` built-in status is a bonus, never
+  the gate.
+* **Description**: summarised from this run's stage logs in the shared
+  workspace (`ci/runs/*/stages/*.log`) — "…N checks passed, M failed" — plus
+  the short gate verdict, capped at GitHub's 140 chars.
+* **target_url**: `CI_PIPELINE_URL` (legacy `CI_PIPELINE_LINK` /
+  `CI_BUILD_LINK` fallbacks) — the Woodpecker run that produced the verdict.
+* **Commit SHA / owner/repo**: `CI_COMMIT_SHA` / `CI_REPO_OWNER` +
+  `CI_REPO_NAME` (Woodpecker), with `git rev-parse HEAD` and git-remote
+  parsing fallbacks so the script also works from a dev machine.
+* **`failure: ignore` on both steps**: a GitHub API outage must never flip a
+  green pipeline red (a lying status is worse than a missing one — a missing
+  status blocks the branch VISIBLY, which is the correct failure direction).
+  The script still retries transient failures 3× before giving up.
+* **Secrets are optional by design**: the pipeline declares `github_token`
+  with `required: false`; without the secret the script prints a loud SKIP
+  line and exits 0, so local, manual and secret-less executor runs never
+  fail on this step.
+
+### Operator setup (one-time, to make the status go live)
+
+1. Create a token that may write commit statuses: a classic PAT with
+   `repo:status` (or a fine-grained token scoped to THIS repository with
+   "Commit statuses — Read and write").
+2. Add it as a Woodpecker repository secret named `github_token`
+   (Repository Settings → Secrets). The pipeline maps it to `GITHUB_TOKEN`.
+3. That is all — the next push posts
+   `woodpecker = success/failure` on the pushed SHA, and branch protection
+   sees its required context. While the secret is absent the context never
+   arrives and protected-branch updates stay blocked (the loud skip lines in
+   the step logs name the fix).
+
+Caveat: Woodpecker does not expose secrets to fork pull-request events by
+default — fork PR runs skip the status loudly. Same-repository branches and
+pushes (what branch protection actually gates) always have it.
+
+The host pipeline (`ci/pipeline.sh`) deliberately does NOT post statuses: it
+holds no GitHub token (GitHub-free by directive). Woodpecker is the
+push/PR-facing evidence carrier; the deploy-host timer remains the deploy
+gate (§4).

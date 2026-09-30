@@ -29,13 +29,28 @@ Checks (each prints PASS/FAIL/WARN; any FAIL exits 1):
      'wiring in flight' statement.
   4. Advertised-stage entries with aliases must actually be claimed somewhere
      (registry -> surface direction); drift is a WARN.
+  5. Registry self-consistency: every entry carries exactly ONE lifecycle
+     state — its `stage`. Retired-state language ("not landed", "unlanded",
+     "wiring in flight", "not wired", "no caller") anywhere in an entry's own
+     text FAILS, as does wording contradicting the stage (library-only /
+     unwired language on a stage >= runtime-wired entry; "not landed" on an
+     `implemented` entry, which asserts the code IS in the tree).
+  6. in_flight_wiring items stay honest: an item whose env gate is already
+     greppable in the wiring crate's Rust sources has LANDED and FAILS in
+     both modes — remove it and raise the entry's stage in the same change.
 
-Strictness (the wiring-wave contract): in-flight items — an env gate not yet
-greppable in the tree, a README not yet updated to the new status — print as
-WARN and exit 0 by default. Set CAPABILITY_GATE_STRICT=1 to fail on them
-(flip this in ci/stages/validate.sh once the in-flight wiring has landed).
-Structural failures (missing docker target for a claimed-deployed entry,
-sub-advertised naming outside [roadmap], broken needles) fail in BOTH modes.
+Self-test: `check_capability_claims.py --self-test` builds a hermetic
+fixture tree in a temp dir, copies this checker into it, and proves the
+gate FAILS when its evidence disappears (nonexistent docker target, a
+demoted advertised stage still named on a claim surface, retired-state
+text, a landed in-flight item) and passes on the unmutated fixture. The
+real registry is never touched.
+
+Strictness (the wiring-wave contract): genuinely-unlanded in-flight items
+print as WARN and exit 0 by default; CAPABILITY_GATE_STRICT=1 fails on
+them. Structural failures (missing docker target for a claimed-deployed
+entry, sub-advertised naming outside [roadmap], broken needles,
+self-consistency violations) fail in BOTH modes.
 """
 from __future__ import annotations
 
@@ -79,6 +94,179 @@ def soft(name: str, ok: bool, detail: str = "") -> None:
         print(f"WARN {name} — {detail} (in-flight wiring; CAPABILITY_GATE_STRICT=1 would fail)")
         warnings.append(name)
 
+
+def _self_test() -> int:
+    """Meta-test: prove this gate FAILS when its evidence disappears.
+
+    Builds a hermetic fixture tree in a temp dir (minimal registry, topology
+    manifest, Dockerfile, compose files, wiring crate, claim surfaces), copies
+    THIS script into it so ROOT resolves inside the sandbox, and runs the
+    gate against mutated copies of the fixture registry. The real registry
+    and tree are never touched.
+    """
+    import subprocess
+    import tempfile
+
+    runner = Path(__file__).resolve()
+    ok = True
+
+    def fixture_registry() -> dict:
+        return {
+            "$comment": "hermetic self-test fixture for check_capability_claims.py",
+            "lifecycle_ladder": [
+                "implemented",
+                "integration-tested",
+                "runtime-wired",
+                "deployed",
+                "monitored",
+                "advertised",
+            ],
+            "scan": {
+                "surfaces": [
+                    "apps/marketing-zola/content/security/index.md",
+                    "templates/compliance/trust-center.md",
+                ],
+                "marker": "[roadmap]",
+                "marker_close": "[/roadmap]",
+            },
+            "in_flight_wiring": {"items": []},
+            "capabilities": [
+                {
+                    "capability": "fixture-cap",
+                    "crate": "crates/fixture",
+                    "stage": "advertised",
+                    "evidence": {
+                        "docker_target": "mta",
+                        "compose_service": "mta",
+                        "env_gate": {
+                            "name": "FIXTURE_GATE_ENABLED",
+                            "crate": "crates/fixture",
+                        },
+                        "call_path": "crates/fixture/src/lib.rs mounts the widget "
+                        "in the live request path",
+                        "metrics": None,
+                        "explanation": "Stage advertised: the fixture widget is "
+                        "wired, deployed and truthfully claimed.",
+                    },
+                    "scan_aliases": ["fixture widget"],
+                }
+            ],
+        }
+
+    def build_sandbox(root: Path) -> Path:
+        (root / "tools").mkdir(parents=True)
+        (root / "tools" / "check_capability_claims.py").write_text(runner.read_text())
+        for rel in (
+            "docs/development",
+            "services/mail-server/crates/fixture/src",
+            "apps/marketing-zola/content/security",
+            "templates/compliance",
+        ):
+            (root / rel).mkdir(parents=True, exist_ok=True)
+        (root / "docs/development/topology-manifest.json").write_text(
+            json.dumps({"services": [{"name": "mta", "docker_target": "mta"}]})
+        )
+        (root / "services/mail-server/Dockerfile").write_text(
+            "FROM scratch AS runtime-base\nFROM runtime-base AS mta\n"
+        )
+        (root / "services/mail-server/crates/fixture/src/lib.rs").write_text(
+            'pub const WIRING_GATE: &str = "FIXTURE_GATE_ENABLED";\n'
+        )
+        (root / "docker-compose.yml").write_text("services:\n  mta:\n    image: fixture\n")
+        (root / "docker-compose.prod.yml").write_text("services:\n  mta:\n    image: fixture\n")
+        (root / "apps/marketing-zola/content/security/index.md").write_text(
+            "# Security\n\n[roadmap] future plans only [/roadmap]\n"
+            "The fixture widget ships in the running product.\n"
+        )
+        (root / "templates/compliance/trust-center.md").write_text("# Trust Center\n")
+        return root / "docs/development/capability-registry.json"
+
+    # (label, mutation or None, expected exit code, expected needle in output)
+    cases = [
+        ("unmutated fixture passes", None, 0, None),
+        (
+            "nonexistent docker target fails the gate",
+            lambda reg: reg["capabilities"][0]["evidence"].__setitem__(
+                "docker_target", "ghost-target"
+            ),
+            1,
+            "docker-target:fixture-cap:ghost-target",
+        ),
+        (
+            "advertised demoted to implemented while still claimed fails",
+            lambda reg: reg["capabilities"][0].__setitem__("stage", "implemented"),
+            1,
+            "claim-vs-stage:fixture-cap",
+        ),
+        (
+            "retired-state language in entry text fails",
+            lambda reg: reg["capabilities"][0]["evidence"].__setitem__(
+                "explanation",
+                reg["capabilities"][0]["evidence"]["explanation"]
+                + " The remaining work has not yet landed.",
+            ),
+            1,
+            "registry-lifecycle-language:fixture-cap",
+        ),
+        (
+            "implemented entry carrying not-landed text fails",
+            lambda reg: (
+                reg["capabilities"][0].__setitem__("stage", "implemented"),
+                reg["capabilities"][0]["evidence"].__setitem__(
+                    "explanation",
+                    "Stage implemented: the code exists in the crate; the wiring "
+                    "has not landed.",
+                ),
+            ),
+            1,
+            "registry-stage-contradiction:fixture-cap",
+        ),
+        (
+            "in-flight item whose env gate already landed fails",
+            lambda reg: reg["in_flight_wiring"]["items"].append(
+                {
+                    "capability": "fixture-cap",
+                    "wiring_target": "crates/fixture",
+                    "env_gate": "FIXTURE_GATE_ENABLED",
+                    "status": "self-test fixture contract",
+                }
+            ),
+            1,
+            "in-flight-unlanded:fixture-cap",
+        ),
+    ]
+
+    with tempfile.TemporaryDirectory(prefix="capability-gate-selftest-") as tmp:
+        registry_path = build_sandbox(Path(tmp))
+        env = dict(os.environ, CAPABILITY_GATE_STRICT="0")
+        for label, mutate, expected, needle in cases:
+            reg = fixture_registry()
+            if mutate is not None:
+                mutate(reg)
+            registry_path.write_text(json.dumps(reg, indent=2))
+            proc = subprocess.run(
+                [sys.executable, str(registry_path.parent.parent.parent / "tools" / "check_capability_claims.py")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            output = proc.stdout + proc.stderr
+            passed = proc.returncode == expected and (needle is None or needle in output)
+            if passed:
+                print(f"SELF-TEST PASS {label}")
+            else:
+                ok = False
+                print(
+                    f"SELF-TEST FAIL {label}: exit={proc.returncode} "
+                    f"(expected {expected}), needle={needle!r}"
+                )
+                print("\n".join(output.strip().splitlines()[-10:]))
+    print(f"capability-gate self-test: {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
+if "--self-test" in sys.argv[1:]:
+    sys.exit(_self_test())
 
 REGISTRY = json.loads(REGISTRY_PATH.read_text())
 MANIFEST = json.loads(MANIFEST_PATH.read_text())
@@ -125,6 +313,7 @@ for entry in CAPABILITIES:
         continue  # sub-runtime-wired entries carry no deploy-surface duty
 
     ev = entry.get("evidence") or {}
+    compose_service = ev.get("compose_service")
 
     target = ev.get("docker_target")
     if target:
@@ -153,7 +342,6 @@ for entry in CAPABILITIES:
             "(or a compose-level property justified in the explanation)".format(stage),
         )
 
-    compose_service = ev.get("compose_service")
     if compose_service:
         check(
             f"compose-service:{cap}:{compose_service}",
@@ -321,6 +509,67 @@ for entry in CAPABILITIES:
             "banner nor a 'wiring in flight' statement — update the status line",
         )
 
+# ── 3b. Registry self-consistency: exactly ONE lifecycle state per entry ────
+#
+# The registry is the truth surface; history belongs to git. Retired-state
+# language from a past audit wave must never survive in an entry's own text:
+# the entry's `stage` is its single lifecycle statement, and wording that
+# contradicts that stage is a claim-surface lie in the source of truth itself.
+RETIRED_STATE_RE = re.compile(
+    r"not\s+wired|not\s+(?:yet\s+)?landed|unlanded|wiring\s+in\s+flight|no\s+caller",
+    re.IGNORECASE,
+)
+# Wording that contradicts a stage >= runtime-wired entry (the wiring EXISTS).
+WIRED_CONTRADICTION_RE = re.compile(
+    r"not\s+wired|unwired|not\s+(?:yet\s+)?landed|unlanded|wiring\s+in\s+flight"
+    r"|no\s+caller|do\s+not\s+represent\s+it\s+as\s+an\s+active\s+control",
+    re.IGNORECASE,
+)
+# `implemented` asserts the code IS in the tree — "not landed" contradicts it.
+LANDED_CONTRADICTION_RE = re.compile(r"not\s+(?:yet\s+)?landed|unlanded", re.IGNORECASE)
+
+for entry in CAPABILITIES:
+    cap = entry.get("capability", "<unnamed>")
+    stage = entry.get("stage")
+    if stage not in STAGE_INDEX:
+        continue  # already reported by the sanity check in section 1
+    blob = json.dumps(entry, ensure_ascii=False)
+    retired = RETIRED_STATE_RE.search(blob)
+    if retired is None:
+        check(f"registry-lifecycle-language:{cap}", True)
+    else:
+        check(
+            f"registry-lifecycle-language:{cap}",
+            False,
+            f"retired-state language {retired.group(0)!r} — the entry's single lifecycle "
+            f"statement is its stage (`{stage}`); rewrite the text to match it "
+            "(history belongs to git, not the registry)",
+        )
+    if STAGE_INDEX[stage] >= RUNTIME_WIRED:
+        contradiction = WIRED_CONTRADICTION_RE.search(blob)
+        if contradiction is None:
+            check(f"registry-stage-contradiction:{cap}", True)
+        else:
+            check(
+                f"registry-stage-contradiction:{cap}",
+                False,
+                f"stage `{stage}` but the entry text says {contradiction.group(0)!r} — "
+                "the wiring exists in the tree; rewrite the wording to the lifecycle "
+                "statement matching the stage",
+            )
+    else:
+        contradiction = LANDED_CONTRADICTION_RE.search(blob)
+        if contradiction is None:
+            check(f"registry-stage-contradiction:{cap}", True)
+        else:
+            check(
+                f"registry-stage-contradiction:{cap}",
+                False,
+                f"stage `{stage}` asserts the code IS in the tree, but the entry text "
+                f"says {contradiction.group(0)!r} — drop the contradiction or move the "
+                "stage to the truth",
+            )
+
 # ── 4. Registry -> surface direction (advisory drift) ───────────────────────
 for entry in CAPABILITIES:
     cap = entry.get("capability")
@@ -333,13 +582,34 @@ for entry in CAPABILITIES:
 for w in [w for w in warnings if w.startswith("registry-stage-drift")]:
     print(f"WARN {w}")
 
-# ── In-flight wiring notice ─────────────────────────────────────────────────
+# ── In-flight wiring contract ───────────────────────────────────────────────
 in_flight = (REGISTRY.get("in_flight_wiring") or {}).get("items") or []
+known_capabilities = {e.get("capability") for e in CAPABILITIES}
 for item in in_flight:
+    cap = item.get("capability", "<unnamed>")
     gate_name = item.get("env_gate")
+    check(
+        f"in-flight-known-capability:{cap}",
+        cap in known_capabilities,
+        "in_flight_wiring item names a capability that has no registry entry",
+    )
     landed = bool(rust_sources_mention(gate_name)) if gate_name else False
-    state = "LANDED (re-triage the registry stage)" if landed else "not landed yet"
-    print(f"INFO in-flight wiring: {item.get('capability')} via {gate_name} — {state}")
+    if landed:
+        check(
+            f"in-flight-unlanded:{cap}",
+            False,
+            f"env gate {gate_name} is already greppable in the tree — the item has "
+            "LANDED: remove it from in_flight_wiring in the same change that keeps "
+            "the capability entry's raised stage (one lifecycle state per capability)",
+        )
+    else:
+        soft(
+            f"in-flight-unlanded:{cap}",
+            False,
+            f"wiring contract for {gate_name} has not arrived in the tree yet"
+            if gate_name
+            else "in-flight item declares no env gate to verify against",
+        )
 
 print()
 if failures:

@@ -1,5 +1,7 @@
 # DDoS Protection System Analysis Report
 
+> **HISTORICAL ANALYSIS (2026-09).** This report is preserved as a point-in-time design analysis. Several engines characterized below as unwired or dead code have since been wired into the production binaries (WAF middleware, IDS, spam filter, attachment sandbox, DLP pre-send gate, ATO protection); the authoritative, gate-enforced state of every capability is [docs/development/capability-registry.json](development/capability-registry.json) (enforced by `tools/check_capability_claims.py`). Do not cite this report for current wiring status.
+
 > **Implementation Status (updated 2026-09-05):** The systems below exist as Rust crates in `services/mail-server/crates/` (8 security crates, 230 passing tests). **However, most are not wired into any production binary** — the 2026-09-05 full-repo audit (section 1.2) found that `waf-engine`, `ids-engine`, `ato-protection`, `dlp-engine`, `sandbox`, `isolation`, `ha`, `rate-limiter`, and `pattern-matcher` are dead code with no consumer in the deployed services. Read this report as a design analysis, not a description of live runtime protection. See [Security Systems Reference](security/Security_Systems.md) and [the audit](audit/full-repo-audit-2026-09-05.md).
 
 ## 1. Quality and Architecture Analysis

@@ -358,6 +358,10 @@ services:
       PORT: 3000
       BASE_URL: ${BASE_URL:?BASE_URL is required in production}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:?OAUTH_REDIRECT_BASE_URL is required in production}
+      # Security-policy decisions (audit-3 #1): production has no implicit
+      # WAF defaults — the managed baseline is enabled-and-enforcing.
+      WAF_ENABLED: ${WAF_ENABLED:?production must define the WAF policy (managed baseline — true)}
+      WAF_ENFORCE: ${WAF_ENFORCE:?production must define the WAF enforcement policy (managed baseline — true)}
       # Audit B — the dev default (`dev-api-key-change-me` in the base file)
       # must NEVER reach production: fail the deployment instead.
       APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:?APEXMAIL_API_KEY must be set in production}
@@ -1127,10 +1131,10 @@ services:
       # the flags in the deployment .env — refusal/strip actions are separate
       # opt-ins (MTA_SPAM_REJECT_ENABLED, MTA_ATTACHMENT_SCAN_MODE,
       # MTA_IDS_REFUSE); a filter error always fails OPEN to tag-only.
-      MTA_SPAM_FILTER_ENABLED: "${MTA_SPAM_FILTER_ENABLED:-false}"
-      MTA_ATTACHMENT_SCAN_ENABLED: "${MTA_ATTACHMENT_SCAN_ENABLED:-false}"
-      MTA_IDS_ENABLED: "${MTA_IDS_ENABLED:-false}"
-      MTA_ATTACHMENT_SCAN_MODE: "${MTA_ATTACHMENT_SCAN_MODE:-flag}"
+      MTA_SPAM_FILTER_ENABLED: "${MTA_SPAM_FILTER_ENABLED:?production must define the spam-filter policy (managed baseline — true)}"
+      MTA_ATTACHMENT_SCAN_ENABLED: "${MTA_ATTACHMENT_SCAN_ENABLED:?production must define the attachment-scan policy (managed baseline — true)}"
+      MTA_IDS_ENABLED: "${MTA_IDS_ENABLED:?production must define the IDS policy (managed baseline — true)}"
+      MTA_ATTACHMENT_SCAN_MODE: "${MTA_ATTACHMENT_SCAN_MODE:?production must define the attachment-scan action (flag | strip | reject — no default)}"
     secrets:
       - postgres_password
       - redis_password
@@ -1448,7 +1452,7 @@ services:
       # .env to enforce the global policy (Quarantine → deferred hold,
       # Block → bounced refusal; engine error fails OPEN, detection fails
       # CLOSED).
-      WORKER_DLP_ENABLED: "${WORKER_DLP_ENABLED:-false}"
+      WORKER_DLP_ENABLED: "${WORKER_DLP_ENABLED:?production must define the outbound DLP policy (managed baseline — true)}"
       # ── VERP bounce routing (SMTP transport) ──────────────────────────────
       # Envelope Return-Path domain for bounces+{message_id}=... addresses.
       # MUST equal the MTA bounce server's VERP_DOMAIN so generated addresses

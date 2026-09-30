@@ -33,6 +33,11 @@ matrix tests legitimately drive dead pools there.
 
 Any FAIL exits 1. Allowlist entries must still match (a stale entry is a
 failure) and each carries a justification.
+
+Self-test: `check_web_error_honesty.py --self-test` runs the gate against a
+sandboxed copy of the real web sources and proves it FAILS when a
+`.ok().flatten()` swallow or a database-result `.unwrap_or` default is
+injected into production code (the real files are never touched).
 """
 from __future__ import annotations
 
@@ -265,6 +270,101 @@ ALLOWLIST: list[tuple[str, str, str]] = [
     # Example shape:
     # ("web.rs", ".unwrap_or(0)", "audit #16 exception: <why this swallow is honest>"),
 ]
+
+def _self_test() -> int:
+    """Meta-test: prove this gate FAILS when its evidence disappears.
+
+    Copies the real web-console sources and THIS checker into a temp
+    sandbox and runs the copied gate there. Control: the unmutated sandbox
+    stays green. Then swallows are injected into the SANDBOX copy of web.rs
+    (a production region — appended after the trailing test module):
+
+      1. an `.ok().flatten()` collapse (Result<Option<_>> -> bare Option);
+      2. an `.unwrap_or(0)` defaulting a fetched database row's tail.
+
+    The real sources are never touched.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    checker = Path(__file__).resolve()
+    routes_dir = WEB_DIR.parent  # .../api-server/src/routes
+    ok = True
+
+    with tempfile.TemporaryDirectory(prefix="web-honesty-selftest-") as tmp:
+        root = Path(tmp)
+        sandbox_routes = root / "services/mail-server/crates/api-server/src/routes"
+        (sandbox_routes / "web").mkdir(parents=True)
+        (root / "tools").mkdir()
+        shutil.copyfile(checker, root / "tools" / "check_web_error_honesty.py")
+        shutil.copyfile(routes_dir / "web.rs", sandbox_routes / "web.rs")
+        for path in sorted(WEB_DIR.glob("*.rs")):
+            shutil.copyfile(path, sandbox_routes / "web" / path.name)
+
+        def run_gate() -> tuple[int, str]:
+            proc = subprocess.run(
+                [sys.executable, str(root / "tools" / "check_web_error_honesty.py")],
+                capture_output=True,
+                text=True,
+            )
+            return proc.returncode, proc.stdout + proc.stderr
+
+        def injected_case(label: str, injection: str, needle: str) -> None:
+            nonlocal ok
+            web_rs = sandbox_routes / "web.rs"
+            web_rs.write_text(web_rs.read_text() + injection)
+            code, output = run_gate()
+            if code == 1 and needle in output:
+                print(f"SELF-TEST PASS {label}")
+            else:
+                ok = False
+                print(f"SELF-TEST FAIL {label}: exit={code}, needle={needle!r}")
+                print("\n".join(output.strip().splitlines()[-10:]))
+            web_rs.write_text(SANDBOX_BASELINE[0])
+
+        # Baseline for restoring between mutations.
+        SANDBOX_BASELINE.clear()
+        SANDBOX_BASELINE.append((sandbox_routes / "web.rs").read_text())
+
+        code, output = run_gate()
+        if code == 0:
+            print("SELF-TEST PASS unmutated sandbox copy stays green")
+        else:
+            ok = False
+            print("SELF-TEST FAIL unmutated sandbox copy must stay green:")
+            print("\n".join(output.strip().splitlines()[-10:]))
+
+        injected_case(
+            "injected .ok().flatten() swallow fails the gate",
+            "\n\n// self-test injection: production swallow\n"
+            "fn __selftest_injected_ok_flatten(\n"
+            "    result: Result<Option<String>, sqlx::Error>,\n"
+            ") -> Option<String> {\n"
+            "    result.ok().flatten()\n"
+            "}\n",
+            "ok-flatten swallow",
+        )
+        injected_case(
+            "injected db-result .unwrap_or default fails the gate",
+            "\n\n// self-test injection: production swallow\n"
+            "async fn __selftest_injected_db_default(row_id: i64) -> i64 {\n"
+            '    sqlx::query_scalar::<_, i64>("select 1")\n'
+            "        .fetch_one(&pool)\n"
+            "        .await\n"
+            "        .unwrap_or(0)\n"
+            "}\n",
+            "db-swallow",
+        )
+
+    print(f"web-error-honesty self-test: {'PASS' if ok else 'FAIL'}")
+    return 0 if ok else 1
+
+
+SANDBOX_BASELINE: list[str] = []
+
+if "--self-test" in sys.argv[1:]:
+    sys.exit(_self_test())
 
 # ── Scan ──────────────────────────────────────────────────────────────
 

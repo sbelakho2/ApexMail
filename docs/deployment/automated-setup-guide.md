@@ -495,12 +495,22 @@ dedicated_ip_id, source_ip }` from the selected warming `dedicated_ips` row
 (`services/mail-server/crates/worker-processors/src/email/processor.rs:938`),
 and `check_warmup_limit` reserves that IP's daily capacity.
 
-> **Known gap:** the actual recipient-facing source-IP binding is a contract
-> with the relay MTA (`X-ApexMail-Route`), and that MTA component is not
-> implemented in this repository (`TODO(mta-owner)`). Until it reports the
-> bound source IP back, the transport returns `actual_source_ip: None` and the
-> worker treats the dedicated route as unverified. See
-> [delivery-transport.md](../architecture/delivery-transport.md).
+> **Recipient-facing relay (implemented):** the source-IP binding contract is
+> owned by `crates/outbound-mta` (the `outbound-mta` compose service). It
+> parses the internal `X-ApexMail-Route: v1 dedicated <id> <ip>` submission
+> header on the authenticated internal listener, binds the recipient-facing
+> socket to the requested source IP (a bind failure is a refusal — never a
+> silent fallback), verifies the kernel-reported bound address, reports it
+> back to the worker in the `X-ApexMail-Source-IP` end-of-DATA reply header,
+> strips every reserved `X-ApexMail-*` header before delivery, retries
+> transient failures with bounded backoff, emits RFC 3464 DSNs for permanent
+> failures, and records every acceptance durably and idempotently by
+> `send_unit` in the `outbound_relay_ledger` table (migration
+> `212_outbound_relay_ledger.sql`). The legacy external-smarthost
+> `SmtpTransport` (`EMAIL_TRANSPORT_TYPE=smtp`) still reports
+> `actual_source_ip: None`; the processor refuses a dedicated route through
+> that transport pre-DATA (fail-closed) and never treats unverified as
+> success. See [delivery-transport.md](../architecture/delivery-transport.md).
 
 #### Step 5: Warmup Admission Begins
 
@@ -657,11 +667,15 @@ IP and limit) rather than fixed message strings; inspect the worker logs for
    correct behaviour, not a fault.
 
 2. **Check the worker logs** for `dispatch route resolved`: the `dedicated_ip`
-   field names the IP selected for the send. If the route is dedicated but the
-   log then shows `dedicated route/source-IP unverified`, the relay MTA did not
-   report the bound source IP — see the known gap in
-   [delivery-transport.md](../architecture/delivery-transport.md). Every
-   dedicated send fails closed until that relay contract is implemented.
+   field names the IP selected for the send. A later
+   `dedicated route/source-IP unverified` line means the send ran through a
+   transport that cannot prove the bound source IP (the legacy external
+   smarthost path, or an outbound-mta relay that refused the bind) — the
+   processor fails such sends closed BEFORE DATA, never counting unverified
+   sends against warmup capacity. For dedicated delivery, confirm the
+   `outbound-mta` service is running and reachable; it reports the verified
+   bound IP in its acceptance record — see
+   [delivery-transport.md](../architecture/delivery-transport.md).
 
 3. **Do not look for a routing cache entry or a cache-refresh endpoint** —
    neither the `transport_routing_cache` table nor the removed

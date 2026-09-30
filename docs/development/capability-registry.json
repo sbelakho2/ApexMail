@@ -1,5 +1,5 @@
 {
-  "$comment": "Capability registry \u2014 the single source of truth for what each security/reliability capability of ApexMail ACTUALLY is, versus what the marketing/compliance surfaces say about it. Companion to docs/development/topology-manifest.json (which owns runtime topology; this file owns capability truth). tools/check_capability_claims.py proves: (a) every entry at stage >= runtime-wired has evidence that EXISTS in the tree \u2014 docker_target present in BOTH the Dockerfile (FROM runtime-base AS <target>) and topology-manifest.json, compose_service present in the compose files, and evidence.env_gate.name greppable in the wiring crate's Rust sources (null env_gate = always-on wiring, allowed); (b) the claim surfaces (marketing security/architecture pages + compliance templates) may NAME a sub-runtime-wired capability (stage < runtime-wired) only inside explicit [roadmap]-marked context \u2014 every scan_aliases hit outside that context on a surface is a claim that the capability must be at stage >= runtime-wired or the gate FAILS (advertised == deployed, both directions driven by the per-capability alias lists below); (c) crate README wiring-status lines match registry stages: stage >= runtime-wired forbids a 'NOT WIRED INTO PRODUCTION' banner (unless a stale_marker_exceptions needle still proves the banner stale) and requires the env-gate name to appear in the README when one is declared; stage < runtime-wired requires the banner or an explicit 'wiring in flight' statement. Strictness: CAPABILITY_GATE_STRICT=0 (default) prints in-flight wiring items as WARN and exits 0; =1 fails on them. Set it to 1 once the in_flight_wiring items below have landed.",
+  "$comment": "Capability registry \u2014 the single source of truth for what each security/reliability capability of ApexMail ACTUALLY is, versus what the marketing/compliance surfaces say about it. Companion to docs/development/topology-manifest.json (which owns runtime topology; this file owns capability truth). tools/check_capability_claims.py proves: (a) every entry at stage >= runtime-wired has evidence that EXISTS in the tree \u2014 docker_target present in BOTH the Dockerfile (FROM runtime-base AS <target>) and topology-manifest.json, compose_service present in the compose files, and evidence.env_gate.name greppable in the wiring crate's Rust sources (null env_gate = always-on wiring, allowed); (b) the claim surfaces (marketing security/architecture pages + compliance templates) may NAME a sub-runtime-wired capability (stage < runtime-wired) only inside explicit [roadmap]-marked context \u2014 every scan_aliases hit outside that context on a surface is a claim that the capability must be at stage >= runtime-wired or the gate FAILS (advertised == deployed, both directions driven by the per-capability alias lists below); (c) crate README wiring-status lines match registry stages: stage >= runtime-wired forbids a 'NOT WIRED INTO PRODUCTION' banner (unless a stale_marker_exceptions needle still proves the banner stale) and requires the env-gate name to appear in the README when one is declared; stage < runtime-wired requires the banner or an explicit 'wiring in flight' statement; (d) registry self-consistency: every entry carries exactly ONE lifecycle state \u2014 its `stage` \u2014 so retired-state language ('not landed', 'unlanded', 'wiring in flight', 'not wired', 'no caller') anywhere in an entry's own text is a failure, as is any wording that contradicts the entry's stage (library-only/unwired language on a stage >= runtime-wired entry), and an in_flight_wiring item whose env gate is already greppable in the tree (a landed item must be removed and its stage raised in the same change). Strictness: CAPABILITY_GATE_STRICT=0 (default) prints genuinely-unlanded in-flight wiring items as WARN and exits 0; =1 fails on them. The in_flight_wiring list is empty today \u2014 the 2026-09 wiring wave landed.",
   "lifecycle_ladder": [
     "implemented",
     "integration-tested",
@@ -32,15 +32,8 @@
     "word_boundary_tokens": "aliases shorter than 5 chars or all-caps acronyms are matched with word boundaries (\\b) so 'SSO' does not hit inside longer words; phrase aliases are matched as case-insensitive substrings."
   },
   "in_flight_wiring": {
-    "$comment": "Wiring contracts agreed with the crate owners but whose code has not landed in the tree yet. The checker prints these as WARN lines (CAPABILITY_GATE_STRICT=1 turns an UNLANDED entry below whose registry stage was already raised into a failure; while the stage honestly stays below runtime-wired these are informational). Each entry names the env gate that WILL gate it so the registry/gate/READMEs agree on the contract before the code arrives.",
-    "items": [
-      {
-        "capability": "data-loss-prevention",
-        "wiring_target": "worker outbound delivery path (crates/worker-processors)",
-        "env_gate": "WORKER_DLP_ENABLED",
-        "status": "NOT LANDED: no worker-processors dependency on crates/dlp-engine and no WORKER_DLP_ENABLED reference in the tree as of the 2026-09 wiring wave; the registry entry honestly stays at integration-tested and dlp-engine/README.md declares the contract."
-      }
-    ]
+    "$comment": "Wiring contracts agreed with a crate owner whose code has not arrived in the tree yet. The checker FAILS (both modes) on an item whose env gate is already greppable in the wiring crate's Rust sources: a landed item must be REMOVED from this list in the same change that raises the capability entry's stage, so the registry never carries two lifecycle states for one capability. Each entry names the env gate that WILL gate the wiring so registry/gate/READMEs agree on the contract before the code arrives.",
+    "items": []
   },
   "capabilities": [
     {
@@ -127,9 +120,9 @@
           "crate": "worker-processors",
           "default": false
         },
-        "call_path": "worker-processors email/dlp.rs PreSendDlpScanner: scan_prepared before claim_acceptance",
-        "metrics": null,
-        "explanation": "WIRING IN FLIGHT (env gate WORKER_DLP_ENABLED \u2192 worker outbound delivery path; see top-level in_flight_wiring): the worker-processors dependency and the WORKER_DLP_ENABLED gate are NOT in the tree yet, so no outbound content policy is enforced by it today. Do not represent it as an active control. crates/dlp-engine/README.md declares the same contract.",
+        "call_path": "worker-processors email/processor.rs (EngineDlpScanner built into the email processor; when config.dlp.enabled it runs dlp_scanner.scan_prepared on every prepared email before claim_acceptance) + email/dlp.rs (PreSendDlpScanner seam over dlp_engine::DlpEngine) + common/config.rs (DlpGateConfig::from_env reads WORKER_DLP_ENABLED)",
+        "metrics": "apexmail_dlp_presend_scans / apexmail_dlp_presend_held / apexmail_dlp_presend_refused / apexmail_dlp_engine_unavailable_failopen counters",
+        "explanation": "WIRED into the worker outbound delivery path: every prepared email is scanned by the dlp-engine before claim_acceptance — Refuse refuses the send, Hold defers the row with a metadata.dlp annotation plus audit trail, and the scan runs under the WORKER_DLP_ENABLED gate. ENV-GATED, DEFAULT OFF: DlpGateConfig::from_env keeps the gate OFF unless an operator sets WORKER_DLP_ENABLED=true, so this is runtime-wired, NOT deployed. Fail-open by contract: an engine error allows the send with a loud log and the apexmail_dlp_engine_unavailable_failopen counter. Enforcement is global (no per-tenant override surface). No alert rule consumes the counters — not monitored. crates/dlp-engine/README.md carries the matching wiring-status line.",
         "notes": "enforced inside the deployed worker daemon (no separate service); flip WORKER_DLP_ENABLED=true in the worker compose env to activate"
       },
       "scan_aliases": [
@@ -173,7 +166,7 @@
         "compose_service": "api-server",
         "call_path": "services/mail-server/crates/api-server/src/app.rs:515 (waf middleware mount) + src/middleware/waf.rs:30 (waf_middleware) + src/state.rs:182 (build_waf_engine)",
         "metrics": null,
-        "explanation": "Genuinely mounted on the public api-server request path, but MONITOR mode by default (WAF_ENABLED=true, WAF_ENFORCE=false \u2014 config.rs:781-782): would-block verdicts are logged, nothing is blocked by default, request bodies are not inspected. The crate README's 'NOT WIRED INTO PRODUCTION' marker is STALE (written before the F-WIRING-1 middleware integration); see checker stale_marker_exceptions."
+        "explanation": "Genuinely mounted on the public api-server request path, but MONITOR mode by default (WAF_ENABLED=true, WAF_ENFORCE=false \u2014 config.rs:781-782): would-block verdicts are logged, nothing is blocked by default, request bodies are not inspected. The crate README still carries its original library-only status banner, which is STALE relative to the dep graph (written before the F-WIRING-1 middleware integration); stale_marker_exceptions carries the live needles that prove the banner stale."
       },
       "scan_aliases": [
         "WAF",
@@ -267,7 +260,7 @@
         "compose_service": "mta",
         "call_path": "services/mail-server/crates/mta/src/servers/inbound.rs:1369 (if self.config.arc_seal { build_arc_seal })",
         "metrics": null,
-        "explanation": "ARC sealing is implemented and reachable, but gated by mta config arc_seal which DEFAULTS TO FALSE (crates/mta/src/config.rs:351) \u2014 the managed cloud does not seal by default. Naming it as an applied control requires the roadmap context."
+        "explanation": "Stage runtime-wired: ARC sealing is reachable on the inbound path but gated by the mta config arc_seal flag, which DEFAULTS TO FALSE (crates/mta/src/config.rs; SMTP_ARC_SEAL env override) \u2014 the managed cloud does not seal by default. Naming it as an applied control requires the roadmap context."
       },
       "scan_aliases": [
         "ARC",
@@ -283,13 +276,13 @@
         "compose_service": "mta",
         "call_path": null,
         "metrics": null,
-        "explanation": "crates/mta/src/auth/dane.rs exists, but a whole-tree search finds NO caller outside auth/mod.rs re-exports \u2014 no inbound or outbound delivery path performs DANE/TLSA verification today."
+        "explanation": "Stage implemented: crates/mta/src/auth/dane.rs provides DANE/TLSA verification (verify_dane, certificate/chain-vs-TLSA validation, TLSA record generation) and its consumers are limited to the crates/mta/src/auth re-exports — neither the inbound nor the outbound delivery path verifies DANE/TLSA. Naming it as an applied control requires roadmap context."
       },
       "scan_aliases": [
         "DANE",
         "TLSA"
       ],
-      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)"
     },
     {
       "capability": "mta-sts-tlsrpt",
@@ -300,7 +293,7 @@
         "compose_service": "mta",
         "call_path": null,
         "metrics": null,
-        "explanation": "crates/mta/src/auth/mta_sts.rs exists, but nothing calls it in the servers; no MTA-STS policy file or TLSRPT stream exists anywhere under deploy/ \u2014 neither policy publication nor outbound MTA-STS enforcement is verifiable in the tree."
+        "explanation": "Stage implemented: crates/mta/src/auth/mta_sts.rs provides MTA-STS/TLSRPT verification and policy/record generation; no server path consumes it, and no MTA-STS policy file or TLSRPT stream exists under deploy/ \u2014 neither policy publication nor outbound MTA-STS enforcement is part of the running topology."
       },
       "scan_aliases": [
         "MTA-STS",
@@ -308,7 +301,7 @@
         "TLSRPT",
         "TLS Reporting"
       ],
-      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)"
     },
     {
       "capability": "bimi-logo-verification",
@@ -319,14 +312,14 @@
         "compose_service": "mta",
         "call_path": null,
         "metrics": null,
-        "explanation": "crates/mta/src/auth/bimi.rs verify_bimi has no caller in the mail flow (only the test-DNS helper references it); the email-grader performs an advisory BIMI DNS record CHECK, which is not BIMI logo verification in delivery."
+        "explanation": "Stage implemented: crates/mta/src/auth/bimi.rs verify_bimi is not consumed by the mail flow (only the test-DNS helper references it); the email-grader performs an advisory BIMI DNS record CHECK, which is not BIMI logo verification in delivery."
       },
       "scan_aliases": [
         "BIMI",
         "verified mark certificate",
         "VMC"
       ],
-      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (no caller outside crates/mta/src/auth re-exports)"
+      "readme_status_exemption": "the crate-level README documents the WIRED mta daemon as a whole; the honest per-feature status lives in this entry (its consumers are limited to the crates/mta/src/auth re-exports)"
     },
     {
       "capability": "ddos-middleware",
@@ -355,7 +348,7 @@
         "compose_service": null,
         "call_path": "consumed by fuzz-tests, load-tests, perf-tests and integration-tests only",
         "metrics": null,
-        "explanation": "crates/pattern-matcher/README.md: 'NOT WIRED INTO PRODUCTION: no service in this workspace depends on this crate. It is a library and test target only. Do not represent it as an active control.'"
+        "explanation": "Stage implemented: a library consumed by the test crates (fuzz-tests, load-tests, perf-tests, integration-tests) only \u2014 no production binary in this workspace depends on it, and crates/pattern-matcher/README.md carries the matching library-only status line. Do not represent it as an active control."
       },
       "scan_aliases": []
     },
@@ -368,7 +361,7 @@
         "compose_service": null,
         "call_path": "consumed by functional-tests and integration-tests only",
         "metrics": null,
-        "explanation": "crates/rate-limiter/README.md: 'NOT WIRED INTO PRODUCTION as a middleware: the api-server uses its own middleware (api-server/src/middleware/rate_limiter.rs). This crate is a library and test target only.' The RATE LIMITING capability is real and advertised \u2014 via api-server's own middleware, registered separately below. No scan aliases: the crate name never appears in claim surfaces."
+        "explanation": "Stage implemented as a library: the api-server enforces rate limiting through its own middleware (api-server/src/middleware/rate_limiter.rs, the separate rate-limiting entry below), so this crate is consumed by functional-tests and integration-tests only \u2014 crates/rate-limiter/README.md carries the matching library-only status line. The RATE LIMITING capability is real and advertised via api-server's own middleware. No scan aliases: the crate name never appears in claim surfaces."
       },
       "scan_aliases": []
     },
@@ -381,7 +374,7 @@
         "compose_service": "api-server",
         "call_path": "services/mail-server/crates/ddos-protection/src/lib.rs:685 (Ja4Fingerprint::parse) \u2014 consumed by the wired DDoS middleware",
         "metrics": null,
-        "explanation": "The crate README marker ('no service in this workspace depends on this crate') is STALE: ddos-protection depends on it and the api-server mounts ddos-protection, and the JA4 fingerprint parse runs inside that middleware. See checker stale_marker_exceptions."
+        "explanation": "The crate README still carries its library-only status banner; that banner is STALE: ddos-protection depends on the crate and the api-server mounts ddos-protection, so the JA4 fingerprint parse runs inside the wired DDoS middleware. See stale_marker_exceptions."
       },
       "scan_aliases": []
     },
@@ -589,7 +582,7 @@
         "compose_service": "api-server",
         "call_path": "services/mail-server/crates/api-server/src/app.rs (system_tenant / tenant_binding middleware layers, app.rs:528,674 comments) + require_scopes tenant scoping in middleware/auth.rs",
         "metrics": null,
-        "explanation": "Logical per-account data separation at the application layer (every query scoped by tenant) is real and independent of the unwired crates/isolation namespace-partitioning service. Genuinely deployed \u2014 marketing naming is honest."
+        "explanation": "Logical per-account data separation at the application layer (every query scoped by tenant) is real and independent of the crates/isolation namespace-partitioning service (the separate tenant-isolation-enforcement entry). Genuinely deployed \u2014 marketing naming is honest."
       },
       "scan_aliases": []
     },

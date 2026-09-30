@@ -1,0 +1,21 @@
+{
+  "name": "apexmail",
+  "_comment": [
+    "Fixture for tools/check_image_pinning.py (external audit item 5).",
+    "MUST FAIL (exit 1): docker-compose.prod.yml before the digest override —",
+    "a first-party service resolving the mutable :latest tag. The validate",
+    "stage inverts this assertion: the checker itself must REJECT this file,",
+    "proving the gate has teeth inside CI without docker."
+  ],
+  "services": {
+    "api-server": {
+      "image": "ghcr.io/sbelakho2/apexmail/api-server:latest"
+    },
+    "mta": {
+      "image": "ghcr.io/sbelakho2/apexmail/mta:latest"
+    },
+    "postgres": {
+      "image": "postgres:16.8-alpine"
+    }
+  }
+}
