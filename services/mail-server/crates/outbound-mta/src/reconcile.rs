@@ -144,7 +144,23 @@ mod tests {
             .expect("claim");
         assert!(matches!(claimed, ClaimOutcome::Claimed(_)));
 
-        let accepted_at = now + chrono::Duration::seconds(30);
+        // The daemon's durable RETRY owns attempt 2: the first attempt's
+        // lease expires and the claim ladder re-claims the row BEFORE the
+        // acceptance. `record_accepted` is attempt-fenced (audit finding 2),
+        // so an acceptance that skips this step is correctly rejected as a
+        // stale write and the projection below would find nothing.
+        let reclaimed = ledger
+            .claim_due(
+                now + chrono::Duration::seconds(61),
+                Duration::from_secs(60),
+                10,
+            )
+            .await
+            .expect("the claim ladder re-claims the expired first attempt");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].attempt, 2);
+
+        let accepted_at = now + chrono::Duration::seconds(65);
         let record = AcceptanceRecord {
             send_unit: unit.clone(),
             state: "accepted".to_string(),
@@ -186,9 +202,7 @@ mod tests {
 
         // One reconciler pass completes the stranded acceptance from the
         // ledger's stored evidence.
-        let reconciled = reconcile_acceptances(&pool)
-            .await
-            .expect("reconciler pass");
+        let reconciled = reconcile_acceptances(&pool).await.expect("reconciler pass");
         assert_eq!(
             reconciled.len(),
             1,

@@ -369,12 +369,9 @@ mod tests {
         // P1 #6: the resolved per-workload `ServiceAuth` replaces the bare
         // `service_token` field. An EMPTY token resolves to the deny-all
         // auth (nothing accepted), matching the old empty-string behavior.
-        state.service_auth = crate::auth::ServiceAuth::resolve(
-            (!token.is_empty()).then_some(token),
-            None,
-            false,
-        )
-        .expect("test auth resolves");
+        state.service_auth =
+            crate::auth::ServiceAuth::resolve((!token.is_empty()).then_some(token), None, false)
+                .expect("test auth resolves");
         Ok(state)
     }
 
@@ -455,9 +452,12 @@ mod tests {
     #[tokio::test]
     async fn dedicated_token_authorizes_and_universal_token_is_refused() {
         let mut state = AppState::from_config(DevExConfig::default()).expect("state");
-        state.service_auth =
-            crate::auth::ServiceAuth::resolve(Some("dedicated-secret"), Some("universal-legacy"), false)
-                .expect("dedicated auth resolves");
+        state.service_auth = crate::auth::ServiceAuth::resolve(
+            Some("dedicated-secret"),
+            Some("universal-legacy"),
+            false,
+        )
+        .expect("dedicated auth resolves");
         let app = build_router(state);
         let probe = |app: Router, key: &'static str| async move {
             let mut builder = Request::builder().uri("/sdks");
@@ -633,8 +633,13 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["tenant_id"], "t_123", "the checklist names the tenant: {json}");
-        let items = json["items"].as_array().expect("checklist items array: {json}");
+        assert_eq!(
+            json["tenant_id"], "t_123",
+            "the checklist names the tenant: {json}"
+        );
+        let items = json["items"]
+            .as_array()
+            .expect("checklist items array: {json}");
         assert!(!items.is_empty(), "the checklist carries items: {json}");
         assert!(json["progress_pct"].is_number(), "{json}");
 

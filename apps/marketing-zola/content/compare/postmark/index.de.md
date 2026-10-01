@@ -22,7 +22,7 @@ comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
     { feature = "Zustellrate", apex = '<span class="text-brand-600 font-semibold">Hoch</span>', comp = '<span class="text-surface-600">Hoch</span>', winner = "none" },
     { feature = "P95-Annahme bis zum ersten Zustellversuch", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Nicht öffentlich dokumentiert</span>', winner = "none" },
-    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
+    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
     { feature = "Automatisches IP-Warm-up", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatisch (von Postmark verwaltet)</span>', winner = "none" },
     { feature = "BIMI-Unterstützung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "MTA-STS-Unterstützung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
@@ -36,7 +36,7 @@ comparison_sections = [
   { title = "FUNKTIONEN", rows = [
     { feature = "Transaktions-E-Mails", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Marketing-E-Mails", apex = '<span class="text-brand-600 font-semibold">Ja (einheitliche API)</span>', comp = '<span class="text-surface-600">Separates Produkt</span>', winner = "none" },
-    { feature = "Eingehende Verarbeitung", apex = '<span class="text-brand-600 font-semibold">Scale- und Enterprise-Tarife</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
+    { feature = "Eingehende Verarbeitung", apex = '<span class="text-brand-600 font-semibold">Business- und Enterprise-Tarife</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Vorlagen", apex = '<span class="text-brand-600 font-semibold">Gespeicherte Vorlagen</span>', comp = '<span class="text-surface-600">Proprietär</span>', winner = "none" },
     { feature = "Geplantes Senden", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

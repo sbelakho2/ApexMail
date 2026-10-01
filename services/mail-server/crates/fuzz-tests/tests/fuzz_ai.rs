@@ -9,7 +9,7 @@ use rand::Rng;
 fn fuzz_open_rate_bounded() {
     // Any inputs must produce a rate in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
         let subject = random_unicode(rng.random_range(0..200));
         let hour: u8 = rng.random_range(0..=23);
@@ -27,7 +27,7 @@ fn fuzz_open_rate_bounded() {
 fn fuzz_click_rate_bounded() {
     // Any inputs must produce a rate in [0.0, 1.0].
     let predictor = AnalyticsPredictor::new();
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
         let cta = random_ascii(rng.random_range(0..100));
         let position: u32 = rng.random_range(0..1000);
@@ -60,7 +60,7 @@ fn fuzz_sentiment_bounded() {
 fn fuzz_subject_score_bounded() {
     // ContentOptimizer::score_subject_line must return 0-100.
     let optimizer = ContentOptimizer::new();
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
         let text = random_unicode(rng.random_range(0..300));
         let score = optimizer.score_subject_line(&text);

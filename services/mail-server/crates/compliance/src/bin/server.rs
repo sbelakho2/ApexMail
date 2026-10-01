@@ -400,6 +400,18 @@ async fn run_cron_jobs_with_intervals(
                                         report.bank_statement_lines.already_posted,
                                     bank_failed = report.bank_statement_lines.failed,
                                     bank_unpostable = report.bank_statement_lines.unpostable,
+                                    invoices_claimed = report.invoices.claimed,
+                                    invoices_posted = report.invoices.posted,
+                                    invoices_failed = report.invoices.failed,
+                                    invoices_unpostable = report.invoices.unpostable,
+                                    allocations_claimed = report.payment_allocations.claimed,
+                                    allocations_posted = report.payment_allocations.posted,
+                                    allocations_failed = report.payment_allocations.failed,
+                                    allocations_unpostable = report.payment_allocations.unpostable,
+                                    credit_notes_claimed = report.credit_notes.claimed,
+                                    credit_notes_posted = report.credit_notes.posted,
+                                    credit_notes_failed = report.credit_notes.failed,
+                                    credit_notes_unpostable = report.credit_notes.unpostable,
                                     "Statutory ledger sweep ran"
                                 );
                             }

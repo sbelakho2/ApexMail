@@ -23,6 +23,14 @@ impl Tx {
         self.inner.as_mut()
     }
 
+    /// Get a mutable reborrow of the underlying connection — the executor
+    /// form sqlx 0.8 accepts for `query(...).execute(...)` inside the
+    /// transaction (a bare `&mut Transaction` is NOT an `Executor`).
+    /// Returns `None` once the transaction was committed or rolled back.
+    pub fn conn(&mut self) -> Option<&mut sqlx::PgConnection> {
+        self.inner.as_mut().map(|tx| &mut **tx)
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self) -> Result<(), sqlx::Error> {
         if let Some(tx) = self.inner.take() {

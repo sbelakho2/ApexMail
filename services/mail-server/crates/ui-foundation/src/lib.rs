@@ -149,6 +149,18 @@ mod tests {
                 "blue-tinted slate foreground (15 17 22) must not appear — the brand neutrals are zinc"
             );
         }
+        // The console favicon must carry the brand red, not the pre-2026-08
+        // indigo (#4f46e5) that survived in the one artifact users see on
+        // every tab (audit SM11 F4).
+        let favicon = crate::leptos_views::FAVICON_SVG;
+        assert!(
+            favicon.contains("fill=\"#dc2626\""),
+            "favicon fill must be the brand token #dc2626"
+        );
+        assert!(
+            !favicon.contains("4f46e5"),
+            "indigo #4f46e5 must not appear in the favicon — the brand is #dc2626"
+        );
     }
 
     /// Dark mode is surface-only: the brand red tokens are NOT overridden

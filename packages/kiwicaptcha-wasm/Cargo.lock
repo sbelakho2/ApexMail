@@ -154,7 +154,7 @@ version = "0.1.0"
 
 [[package]]
 name = "kiwicaptcha-wasm"
-version = "0.1.0"
+version = "1.7.0"
 dependencies = [
  "argon2",
  "console_error_panic_hook",

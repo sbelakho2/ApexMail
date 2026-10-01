@@ -1585,6 +1585,24 @@ pub struct EmailProcessor {
     dlp_scanner: Arc<dyn PreSendDlpScanner>,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
+    /// SM10 F9: one-shot gate for the background loops (queue-depth metrics,
+    /// F25 reconcile sweep). `start()` used to spawn them on EVERY entry, so
+    /// every supervised restart (e.g. a flapping transport failing
+    /// `verify()`) piled up another pair of 15 s/60 s loops against the DB —
+    /// the old loops only exit on the shutdown signal, which a restart never
+    /// fires. The first `start()` arms the gate; later restarts reuse the
+    /// already-running loops.
+    background_tasks_started: AtomicBool,
+    /// SM10 F9 test seam: how many background loops this processor has
+    /// spawned (2 per arm — metrics + reconcile). Production code never
+    /// reads it; the hermetic restart test asserts it never exceeds 2.
+    background_loops_spawned: AtomicUsize,
+    /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
+    /// the claim loop refuses to claim (or complete) jobs while this node's
+    /// `ha:fenced:{node}` key stands — or while the fence authority cannot
+    /// be read (fail closed). Default off: the disabled gate returns
+    /// `Ok(())` without touching Redis.
+    fence_gate: crate::fence::FenceGate,
     /// Level-triggered shutdown signal. `Notify::notify_waiters` is edge-
     /// triggered: a background task that was mid-DB-call (not parked on
     /// `notified()`) when `stop()` fired never received the wake and stayed
@@ -1662,6 +1680,9 @@ impl EmailProcessor {
             dlp_scanner: Arc::new(EngineDlpScanner::new()),
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
+            background_tasks_started: AtomicBool::new(false),
+            background_loops_spawned: AtomicUsize::new(0),
+            fence_gate: crate::fence::FenceGate::from_env(),
             queue_metrics_last_emit_ms: AtomicI64::new(0),
             shutdown: Arc::new(watch::channel(false).0),
             suppression_cache: Cache::builder()
@@ -1693,54 +1714,65 @@ impl EmailProcessor {
         let concurrency = self.config.base.concurrency;
         info!(concurrency, "Starting email processor");
 
+        // The two background loops below are spawned EXACTLY ONCE per
+        // processor (SM10 F9): `supervise` re-enters `start()` on every
+        // failure — including a flapping transport that fails `verify()`
+        // below — and the loops exit only on the shutdown signal, so an
+        // unguarded spawn leaked one metrics loop + one reconcile sweep per
+        // restart.
+        //
         // Queue-depth metrics must NOT depend on transport health: while the
         // transport is down (e.g. missing credentials), the poll loop below
         // never starts — and that is exactly when the EmailQueueBacklog
         // alerts need their metric. The task runs for the processor's
         // lifetime and stops with the shutdown notification.
-        {
-            let metrics_self = Arc::clone(&self);
-            let mut shutdown = self.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    metrics_self.record_queue_depth_metrics().await;
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(15)) => {}
-                        _ = shutdown.changed() => break,
+        if !self.background_tasks_started.swap(true, Ordering::SeqCst) {
+            self.background_loops_spawned.fetch_add(2, Ordering::SeqCst);
+            {
+                let metrics_self = Arc::clone(&self);
+                let mut shutdown = self.shutdown.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        metrics_self.record_queue_depth_metrics().await;
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(15)) => {}
+                            _ = shutdown.changed() => break,
+                        }
                     }
-                }
-            });
-        }
+                });
+            }
 
-        // F25: restart reconciliation — sweep parents whose recipient rows
-        // are ALL terminal but whose aggregate status is not (the residue
-        // of a crash between a recipient transition and its parent
-        // reconciliation), once immediately and then every 60 s.
-        //
-        // P0: the same loop sweeps the delivery-acceptance ledger for
-        // `reserved` rows older than ACCEPTANCE_RESERVE_LEASE — crashed
-        // submissions that never reached `accepted`/`failed`. The sweep is
-        // governance/observability; the claim reclaims them on demand too.
-        {
-            let reconcile_self = Arc::clone(&self);
-            let mut shutdown = self.shutdown.subscribe();
-            tokio::spawn(async move {
-                loop {
-                    reconcile_self.reconcile_stuck_parents().await;
-                    if let Err(error) =
-                        reclaim_stale_acceptance_reservations(&reconcile_self.db).await
-                    {
-                        warn!(
-                            error = %error,
-                            "stale delivery-acceptance reservation sweep failed — retried on the next interval"
-                        );
+            // F25: restart reconciliation — sweep parents whose recipient
+            // rows are ALL terminal but whose aggregate status is not (the
+            // residue of a crash between a recipient transition and its
+            // parent reconciliation), once immediately and then every 60 s.
+            //
+            // P0: the same loop sweeps the delivery-acceptance ledger for
+            // `reserved` rows older than ACCEPTANCE_RESERVE_LEASE — crashed
+            // submissions that never reached `accepted`/`failed`. The sweep
+            // is governance/observability; the claim reclaims them on demand
+            // too.
+            {
+                let reconcile_self = Arc::clone(&self);
+                let mut shutdown = self.shutdown.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        reconcile_self.reconcile_stuck_parents().await;
+                        if let Err(error) =
+                            reclaim_stale_acceptance_reservations(&reconcile_self.db).await
+                        {
+                            warn!(
+                                error = %error,
+                                "stale delivery-acceptance reservation sweep failed — retried on the next interval"
+                            );
+                        }
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(60)) => {}
+                            _ = shutdown.changed() => break,
+                        }
                     }
-                    tokio::select! {
-                        _ = sleep(Duration::from_secs(60)) => {}
-                        _ = shutdown.changed() => break,
-                    }
-                }
-            });
+                });
+            }
         }
 
         // Verify transport
@@ -1795,6 +1827,20 @@ impl EmailProcessor {
     async fn poll_loop(&self) {
         let mut shutdown = self.shutdown.subscribe();
         while self.is_running.load(Ordering::SeqCst) {
+            // ── STONITH fence (SM10 F4) ────────────────────────
+            // A fenced node must not claim jobs (nor run the completions
+            // that follow them): the claim is the write-acceptance point.
+            // Unreadable fence authority fails closed. Fencing disabled
+            // (default) returns Ok without any Redis traffic.
+            if let Err(refusal) = self.fence_gate.ensure_can_claim().await {
+                warn!(
+                    error = %refusal,
+                    "node is fenced; email claim loop paused (SM10 F4)"
+                );
+                sleep(self.config.base.poll_interval).await;
+                continue;
+            }
+
             // ── Error rate cooldown ────────────────────────────
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
             let now = Utc::now().timestamp_millis();
@@ -3568,7 +3614,11 @@ impl EmailProcessor {
     /// exist (the same discipline as warmup graduation). No recipient event
     /// is written: nothing happened to this recipient copy, and the queue
     /// row + audit row are the operator-facing record.
-    async fn handle_dlp_hold(&self, job: &EmailJob, verdict: &PreSendVerdict) -> ProcessorResult<()> {
+    async fn handle_dlp_hold(
+        &self,
+        job: &EmailJob,
+        verdict: &PreSendVerdict,
+    ) -> ProcessorResult<()> {
         let copy = format!(
             "Message held by outbound content policy (DLP quarantine): rule class(es) {}. \
              Held in queue pending review; not delivered.",
@@ -3593,8 +3643,8 @@ impl EmailProcessor {
             return Ok(());
         }
 
-        if let Err(error) = record_dlp_audit(&mut tx, job, verdict, "dlp.outbound_hold", "held")
-            .await
+        if let Err(error) =
+            record_dlp_audit(&mut tx, job, verdict, "dlp.outbound_hold", "held").await
         {
             error!(
                 job_id = %job.id,
@@ -8080,9 +8130,11 @@ mod tests {
         // the POST variant on the same route).
         // FIXED (batch 2): the header must carry the RFC 8058 literal
         // `List-Unsubscribe=One-Click`, not the obsolete `Yes`.
-        assert!(prepared.headers.iter().any(|(k, v)| k
-            .eq_ignore_ascii_case("List-Unsubscribe-Post")
-            && v == "List-Unsubscribe=One-Click"));
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("List-Unsubscribe-Post")
+                && v == "List-Unsubscribe=One-Click"));
 
         // The placeholder in the visible body received the SAME URL.
         let html = prepared.html.unwrap();
@@ -11603,14 +11655,19 @@ mod end_to_end_db_tests {
                 .await
                 .expect("queue row");
         assert_eq!(status, "processing");
-        assert!(locked_until.is_some(), "the lease is held by the dead worker");
+        assert!(
+            locked_until.is_some(),
+            "the lease is held by the dead worker"
+        );
 
         // The process dies. The visibility lease expires unrenewed.
-        sqlx::query("UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1")
-            .bind(fixture.queue_id)
-            .execute(&pool)
-            .await
-            .expect("expire lease");
+        sqlx::query(
+            "UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("expire lease");
 
         // The replacement worker re-claims the same row (fresh lease token)
         // and delivers it.
@@ -11627,7 +11684,10 @@ mod end_to_end_db_tests {
             lease_token_of(&ghost),
             "the re-claim mints a fresh lease token"
         );
-        recovered.process_job(job).await.expect("recovered dispatch");
+        recovered
+            .process_job(job)
+            .await
+            .expect("recovered dispatch");
 
         assert_eq!(transport.calls(), 1, "exactly one submission");
         let (status, sent_at, _) = queue_row(&pool, fixture.queue_id).await;
@@ -11653,7 +11713,10 @@ mod end_to_end_db_tests {
             "the ledger must refuse the crashed claim a second submission"
         );
         let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
-        assert_eq!(status, "sent", "the ghost cannot un-send or re-state the row");
+        assert_eq!(
+            status, "sent",
+            "the ghost cannot un-send or re-state the row"
+        );
         assert_eq!(delivery_log_count(&pool, fixture.queue_id).await, 1);
         assert_eq!(sent_event_count(&pool, &fixture).await, 1);
 
@@ -11711,11 +11774,13 @@ mod end_to_end_db_tests {
         let receipt = transport.send(&prepared, &route).await?;
         record_acceptance_accepted(&pool, &send_unit_of(&job), &receipt, None).await?;
         // DIED. The row is 'processing' under a lease nobody will renew.
-        sqlx::query("UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1")
-            .bind(fixture.queue_id)
-            .execute(&pool)
-            .await
-            .expect("expire lease");
+        sqlx::query(
+            "UPDATE email_queue SET locked_until = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("expire lease");
 
         // Recovery: the replacement worker re-claims and the ledger answers
         // AlreadyAccepted — the row completes as possibly-sent.
@@ -11755,7 +11820,9 @@ mod end_to_end_db_tests {
             "nothing is still owed on this row"
         );
         assert_eq!(
-            acceptance_state(&pool, &send_unit_of(&job)).await.as_deref(),
+            acceptance_state(&pool, &send_unit_of(&job))
+                .await
+                .as_deref(),
             Some("accepted")
         );
         // The crashed attempt's delivery log never landed (it died before
@@ -11805,7 +11872,10 @@ mod end_to_end_db_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("reputation counter");
-        assert_eq!(reputation, 1, "the domain sent counter counted the send once");
+        assert_eq!(
+            reputation, 1,
+            "the domain sent counter counted the send once"
+        );
 
         // The crashed worker's late re-run (same claim, result already
         // committed): the ledger refuses a re-send and every counter is
@@ -12435,6 +12505,81 @@ mod orchestration_tests {
         Ok(())
     }
 
+    /// SM10 F9 regression: the two background loops (queue-depth metrics +
+    /// the F25 reconcile sweep) spawn EXACTLY ONCE per processor. `start()`
+    /// used to spawn them on EVERY entry — a supervised restart (a flapping
+    /// transport failing `verify()`, exactly the failure below) piled up
+    /// another pair of 15 s/60 s loops against the DB per restart. The
+    /// loops spawn BEFORE the transport check BY DESIGN (the metrics loop
+    /// must not depend on transport health), so two failing starts must
+    /// still yield exactly two loops, not two pairs.
+    #[tokio::test]
+    async fn background_loops_spawn_exactly_once_across_supervised_restarts() {
+        struct Unverifiable;
+        #[async_trait::async_trait]
+        impl EmailTransport for Unverifiable {
+            fn transport_name(&self) -> &str {
+                "unverifiable"
+            }
+            fn supports_source_binding(&self) -> bool {
+                false
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Err(ProcessorError::Config("no credentials".into()))
+            }
+            async fn send(
+                &self,
+                _email: &PreparedEmail,
+                _route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                unreachable!("an unverifiable transport never submits")
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+
+        crate::common::ensure_aws_test_env();
+        crate::test_support::install_test_tracing();
+        // Hermetic: lazy pools that never carry traffic — the loops' first
+        // DB sweep errors and retries on the next tick; the test ends long
+        // before that matters.
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://127.0.0.1:1/hermetic_f9")
+            .expect("lazy pg pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let hybrid = HybridTransport::new(
+            Some(Arc::new(Unverifiable) as Arc<dyn EmailTransport>),
+            None,
+        );
+        let processor = Arc::new(
+            EmailProcessor::with_transport(db, redis, orch_config(2, 20), hybrid)
+                .await
+                .expect("processor"),
+        );
+
+        // First supervised attempt: arms the gate, spawns the pair, then
+        // fails at transport verify.
+        let first = Arc::clone(&processor).start().await;
+        assert!(
+            first.is_err(),
+            "the unverifiable transport must fail the start"
+        );
+        // The supervised restart re-enters start(): the guard must keep the
+        // already-running loops instead of spawning a second pair.
+        let second = Arc::clone(&processor).start().await;
+        assert!(second.is_err(), "the restart attempt fails the same way");
+        assert_eq!(
+            processor.background_loops_spawned.load(Ordering::SeqCst),
+            2,
+            "two loops total (metrics + reconcile) across TWO start() entries, \
+             not two pairs — the leak is fixed"
+        );
+    }
+
     // ── 5. Database outage: every best-effort surface degrades, none panics
 
     /// With the pool closed (the DB outage injection), each observability /
@@ -13052,10 +13197,11 @@ mod orchestration_tests {
             route: &DeliveryRoute,
         ) -> ProcessorResult<DeliveryReceipt> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.seen
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((email.to.clone(), email.subject.clone(), email.text.clone()));
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).push((
+                email.to.clone(),
+                email.subject.clone(),
+                email.text.clone(),
+            ));
             Ok(DeliveryReceipt {
                 transport: match route {
                     DeliveryRoute::SesShared => TransportType::Ses,
@@ -13178,8 +13324,9 @@ mod orchestration_tests {
         );
 
         // Audit row naming the rule class, committed with the refusal.
-        let (action, outcome, details) =
-            dlp_audit_row(&pool, fixture.queue_id).await.expect("audit row");
+        let (action, outcome, details) = dlp_audit_row(&pool, fixture.queue_id)
+            .await
+            .expect("audit row");
         assert_eq!(action, "dlp.outbound_block");
         assert_eq!(outcome, "refused");
         let rule_classes: Vec<String> = details
@@ -13291,7 +13438,9 @@ mod orchestration_tests {
             Some("held"),
         );
 
-        let (action, outcome, _) = dlp_audit_row(&pool, fixture.queue_id).await.expect("audit row");
+        let (action, outcome, _) = dlp_audit_row(&pool, fixture.queue_id)
+            .await
+            .expect("audit row");
         assert_eq!(action, "dlp.outbound_hold");
         assert_eq!(outcome, "held");
 
@@ -13385,8 +13534,7 @@ mod orchestration_tests {
     /// delivered untouched and the gap is loud (error-level log + metric in
     /// the gate). No dlp annotation, no audit row, no hold, no refusal.
     #[tokio::test]
-    async fn dlp_engine_error_fails_open_and_delivers(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn dlp_engine_error_fails_open_and_delivers() -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]
         let Some(pool) = orch_pool("orch_dlp_failopen").await else { return Ok(()) };
         let fixture = seed(&pool, "dlp-failopen").await;
@@ -13415,9 +13563,16 @@ mod orchestration_tests {
             .process_job_inner(&job)
             .await
             .expect("fail-open delivers");
-        assert_eq!(transport.calls(), 1, "an engine error must not block delivery");
+        assert_eq!(
+            transport.calls(),
+            1,
+            "an engine error must not block delivery"
+        );
         assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
-        assert!(queue_metadata(&pool, fixture.queue_id).await.get("dlp").is_none());
+        assert!(queue_metadata(&pool, fixture.queue_id)
+            .await
+            .get("dlp")
+            .is_none());
         assert!(dlp_audit_row(&pool, fixture.queue_id).await.is_none());
         pool.close().await;
         Ok(())
@@ -13427,8 +13582,8 @@ mod orchestration_tests {
     /// blocked body delivers byte-identically, with zero gate evidence.
     /// Existing send behavior is unchanged when the switch is off.
     #[tokio::test]
-    async fn dlp_disabled_keeps_byte_identical_delivery(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn dlp_disabled_keeps_byte_identical_delivery() -> Result<(), Box<dyn std::error::Error>>
+    {
         #[rustfmt::skip]
         let Some(pool) = orch_pool("orch_dlp_disabled").await else { return Ok(()) };
         let fixture = seed(&pool, "dlp-disabled").await;
@@ -13458,10 +13613,17 @@ mod orchestration_tests {
             .await
             .expect("delivery is the outcome");
         assert_eq!(transport.calls(), 1);
-        let (_, _, text) = transport.seen().into_iter().next().expect("one captured send");
+        let (_, _, text) = transport
+            .seen()
+            .into_iter()
+            .next()
+            .expect("one captured send");
         assert_eq!(text.as_deref(), Some(DLP_BLOCK_BODY), "byte-identical body");
         assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
-        assert!(queue_metadata(&pool, fixture.queue_id).await.get("dlp").is_none());
+        assert!(queue_metadata(&pool, fixture.queue_id)
+            .await
+            .get("dlp")
+            .is_none());
         assert!(dlp_audit_row(&pool, fixture.queue_id).await.is_none());
         pool.close().await;
         Ok(())
@@ -13485,7 +13647,9 @@ mod orchestration_tests {
 
         // One consultation of the scanner in the whole production region.
         assert_eq!(
-            production.matches("self.dlp_scanner.scan_prepared(").count(),
+            production
+                .matches("self.dlp_scanner.scan_prepared(")
+                .count(),
             1,
             "the pre-send DLP gate must consult the scanner exactly once"
         );
@@ -13511,7 +13675,10 @@ mod orchestration_tests {
 
         // Exactly one refusal handler, one hold handler, one audit writer —
         // and each enforcement arm is invoked exactly once.
-        assert_eq!(production.matches("async fn handle_dlp_refusal(").count(), 1);
+        assert_eq!(
+            production.matches("async fn handle_dlp_refusal(").count(),
+            1
+        );
         assert_eq!(
             production
                 .matches("self.handle_dlp_refusal(job, &verdict)")
@@ -13520,7 +13687,9 @@ mod orchestration_tests {
         );
         assert_eq!(production.matches("async fn handle_dlp_hold(").count(), 1);
         assert_eq!(
-            production.matches("self.handle_dlp_hold(job, &verdict)").count(),
+            production
+                .matches("self.handle_dlp_hold(job, &verdict)")
+                .count(),
             1
         );
         assert_eq!(production.matches("async fn record_dlp_audit(").count(), 1);
@@ -14787,11 +14956,20 @@ mod residual_arms_db_tests {
             .fetch_one(&pool)
             .await
             .expect("role");
+        let _ = &role;
 
-        sqlx::query(&format!("REVOKE SELECT ON suppressions FROM {role}"))
+        // SM10 verification repair: make the suppression CHECK fail in a way
+        // that does not depend on the test role's privileges. The previous
+        // REVOKE SELECT was a NO-OP when the canonical TEST_DATABASE_URL role
+        // owns the table (owners and superusers bypass relation privileges),
+        // so the check succeeded and the sentinel requeue never happened.
+        // Renaming the relation away breaks the `FROM suppressions` subselect
+        // for EVERY role. It stays hidden through BOTH phases (the phase-2
+        // requeue attempt needs the failing check too) and is restored below.
+        sqlx::query("ALTER TABLE suppressions RENAME TO suppressions_sentinel_hidden")
             .execute(&pool)
             .await
-            .expect("revoke suppressions read");
+            .expect("hide suppressions table");
 
         processor.is_running.store(true, Ordering::SeqCst);
         let loop_handle = tokio::spawn({
@@ -14859,10 +15037,10 @@ mod residual_arms_db_tests {
         assert_eq!(transport.calls(), 0);
 
         set_fault(&pool, "requeue_write", false).await;
-        sqlx::query(&format!("GRANT SELECT ON suppressions TO {role}"))
+        sqlx::query("ALTER TABLE suppressions_sentinel_hidden RENAME TO suppressions")
             .execute(&pool)
             .await
-            .expect("restore suppressions read");
+            .expect("restore suppressions table");
         processor.stop().await.expect("stop park two");
         tokio::time::timeout(Duration::from_secs(10), loop_two)
             .await

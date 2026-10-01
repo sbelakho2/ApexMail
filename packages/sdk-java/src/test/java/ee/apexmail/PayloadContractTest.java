@@ -24,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Flow;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -186,25 +187,23 @@ class PayloadContractTest {
             assertFalse(body.containsKey("active"));
             assertFalse(body.containsKey("secret"));
 
-            // Unknown event names must be rejected client-side (422 server-side).
-            boolean rejected = false;
-            try {
-                client.webhooks().update("wh_1", Map.of("events", List.of("delivered")));
-            } catch (IllegalArgumentException expected) {
-                rejected = true;
-            }
-            assertTrue(rejected, "unknown event name must be rejected");
+            // SM15 F1: unknown event names are advisory (logged warning) —
+            // the server stays the authority (422s unknown names) so new
+            // server events never brick the client.
+            assertDoesNotThrow(
+                () -> client.webhooks().update("wh_1", Map.of("events", List.of("delivered"))));
         }
     }
 
     @Test
     void knownWebhookEventsMatchServerList() {
         assertEquals(
-            List.of("email.delivered", "email.bounced", "email.complained",
-                "message.sent", "message.delivered", "message.bounced",
-                "message.complained", "message.opened", "message.clicked",
+            List.of("message.accepted", "message.queued", "message.attempted",
+                "message.deferred", "message.delivered", "message.bounced",
+                "message.complained", "message.suppressed", "message.opened",
+                "message.clicked", "message.cancelled",
                 "recipient.unsubscribed", "placement_test.completed",
-                "bounce", "complaint", "inbound", "*"),
+                "inbound", "*"),
             Webhooks.KNOWN_WEBHOOK_EVENTS);
     }
 

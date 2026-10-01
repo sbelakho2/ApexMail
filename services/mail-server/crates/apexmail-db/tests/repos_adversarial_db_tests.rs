@@ -175,17 +175,19 @@ async fn users_null_name_scoping_and_keyset_pagination() {
         .unwrap()
         .is_some());
     assert_eq!(
-        UsersRepo::find_by_email(&pool, "null-name@example.com")
+        UsersRepo::find_by_email_for_login(&pool, "null-name@example.com")
             .await
             .unwrap()
             .unwrap()
             .id,
         null_name.id
     );
-    assert!(UsersRepo::find_by_email(&pool, "nobody@example.com")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        UsersRepo::find_by_email_for_login(&pool, "nobody@example.com")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // Three more users for ordering/pagination.
     for idx in 0..3 {
@@ -1242,6 +1244,126 @@ async fn webhooks_event_containment_and_scoping() {
     assert!(!WebhooksRepo::delete(&pool, &tenant_a, &other.id)
         .await
         .unwrap());
+
+    pool.close().await;
+}
+
+// ── Audit F4: webhook signing secrets encrypted at rest ─────────────
+
+/// Round-trip + masking against the REAL canonical schema: the stored
+/// column must never carry the plaintext, every list/find projection must
+/// be masked, and the authorized fetch must return the plaintext only.
+#[tokio::test]
+async fn webhook_secrets_are_encrypted_at_rest_and_masked_on_read() {
+    let Some(pool) = canonical_pool("webhook_secrets").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let (tenant_a, _tenant_b) = two_tenants(&pool).await;
+
+    let secret = "whsec_0f3a9b7c5d2e4a6188f0deadbeef1234";
+    let created = WebhooksRepo::create(
+        &pool,
+        &tenant_a,
+        "https://example.com/hook",
+        serde_json::json!(["delivered"]),
+        secret,
+    )
+    .await
+    .expect("create webhook");
+
+    // The DB column never holds the plaintext.
+    let stored: String = sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1")
+        .bind(&created.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(stored, secret, "plaintext must not sit in the column");
+
+    // Every read projection is masked to the display prefix.
+    let found = WebhooksRepo::find_by_id(&pool, &tenant_a, &created.id)
+        .await
+        .unwrap()
+        .expect("webhook exists");
+    assert_eq!(found.secret, "whsec_0f…", "masked prefix: {}", found.secret);
+    for listed in [
+        WebhooksRepo::list(&pool, &tenant_a, 100, 0).await.unwrap(),
+        WebhooksRepo::list_keyset(&pool, &tenant_a, 100, None, None)
+            .await
+            .unwrap(),
+        WebhooksRepo::list_by_event_type(&pool, &tenant_a, "delivered")
+            .await
+            .unwrap(),
+    ] {
+        for w in listed {
+            assert_eq!(w.secret, "whsec_0f…", "listings mask: {}", w.secret);
+            assert_ne!(w.secret, secret);
+        }
+    }
+
+    // The authorized fetch returns the plaintext, tenant-scoped.
+    let signing = WebhooksRepo::secret_for_signing(&pool, &tenant_a, &created.id)
+        .await
+        .unwrap()
+        .expect("signing secret");
+    assert_eq!(signing, secret);
+    assert!(
+        WebhooksRepo::secret_for_signing(&pool, "tn_no_such_tenant_000001", &created.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "cross-tenant fetch must not resolve"
+    );
+
+    pool.close().await;
+}
+
+/// Migrate-on-read: a legacy PLAINTEXT row is transparently re-stored as an
+/// encrypted envelope by a read, and decrypts to the original afterwards.
+#[tokio::test]
+async fn webhook_secret_legacy_rows_migrate_on_read() {
+    let Some(pool) = canonical_pool("webhook_legacy").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    let (tenant_a, _tenant_b) = two_tenants(&pool).await;
+
+    // Seed a legacy row exactly like the pre-fix writer left it.
+    let id = short_id('w');
+    sqlx::query(
+        "INSERT INTO webhooks (id, tenant_id, url, events, secret, status) \
+         VALUES ($1, $2, 'https://legacy.example.com/h', '[\"*\"]'::jsonb, $3, 'active')",
+    )
+    .bind(&id)
+    .bind(&tenant_a)
+    .bind("whsec_legacy_plaintext_99aa")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The masked read migrates the row…
+    let found = WebhooksRepo::find_by_id(&pool, &tenant_a, &id)
+        .await
+        .unwrap()
+        .expect("legacy webhook");
+    assert_eq!(found.secret, "whsec_le…");
+
+    let stored: String = sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(
+        stored, "whsec_legacy_plaintext_99aa",
+        "the row must not still be plaintext after a read"
+    );
+
+    // …and the authorized fetch still recovers the original secret.
+    let signing = WebhooksRepo::secret_for_signing(&pool, &tenant_a, &id)
+        .await
+        .unwrap()
+        .expect("signing secret after migration");
+    assert_eq!(signing, "whsec_legacy_plaintext_99aa");
 
     pool.close().await;
 }

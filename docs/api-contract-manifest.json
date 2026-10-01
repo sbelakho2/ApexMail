@@ -14,11 +14,11 @@
     "/v1/billing/payg/usage",
     "/v1/auth/forgot-password",
     "/v1/auth/me",
-    "/v1/auth/profile",
-    "/v1/events/lists",
-    "/v1/analytics/ai/insights",
-    "/api/v1/operator/*",
-    "/api/v1/discovery/run"
+    "/v1/account/profile",
+    "/v1/events",
+    "/v1/ai/*",
+    "/v1/admin/operators*",
+    "/web/admin/sales/discovery/run"
   ],
   "backendRoutePatterns": [
     "/v1/campaigns*",
@@ -29,10 +29,10 @@
     "/v1/billing/payg/usage",
     "/v1/auth/forgot-password",
     "/v1/auth/me",
-    "/v1/auth/profile",
-    "/v1/events/lists",
-    "/v1/analytics/ai/insights",
-    "/api/v1/operator/*",
-    "/api/v1/discovery/run"
+    "/v1/account/profile",
+    "/v1/events",
+    "/v1/ai/*",
+    "/v1/admin/operators*",
+    "/web/admin/sales/discovery/run"
   ]
 }

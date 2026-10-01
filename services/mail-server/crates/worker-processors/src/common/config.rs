@@ -477,7 +477,10 @@ mod dlp_gate_tests {
     fn dlp_gate_defaults_off_and_parses_the_env_switch() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_dlp_env();
-        assert!(!DlpGateConfig::from_env().enabled, "absent env must keep the gate OFF");
+        assert!(
+            !DlpGateConfig::from_env().enabled,
+            "absent env must keep the gate OFF"
+        );
 
         for (value, expected) in [
             ("true", true),

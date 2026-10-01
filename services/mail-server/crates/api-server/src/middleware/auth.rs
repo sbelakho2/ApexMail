@@ -1082,6 +1082,25 @@ pub(crate) async fn enforce_tenant_not_restricted(
         return Ok(());
     }
 
+    // SM3 (audit F1): a PENDING-DELETION tenant authenticates to exactly ONE
+    // operation — cancelling its own deletion. `POST /v1/account/deletion`
+    // promises "30 days to cancel this request"; without this narrow
+    // admission (and the matching user-status carve-out in
+    // `authenticate_jwt`) the response is fiction: the tenant is locked out
+    // of everything, including the cancellation route, the moment the
+    // deletion is scheduled. Everything else stays blocked.
+    if status == "pending_deletion"
+        && is_deletion_cancellation_request(request_method, request_path)
+    {
+        tracing::info!(
+            tenant_id = %tenant_id,
+            method = %request_method,
+            path = %request_path,
+            "deletion-cancellation access granted for pending_deletion tenant"
+        );
+        return Ok(());
+    }
+
     tracing::warn!(tenant_id = %tenant_id, tenant_status = %status, "authentication refused for restricted tenant");
     Err(ApiError::Unauthorized(format!(
         "workspace is {status} — access is restricted"
@@ -1119,6 +1138,14 @@ pub(crate) fn is_billing_recovery_request(method: &http::Method, path: &str) -> 
                         .strip_prefix(*prefix)
                         .is_some_and(|rest| rest.starts_with('/')))
         })
+}
+
+/// SM3 (audit F1): the single route a `pending_deletion` tenant (and its
+/// disabled users) may still reach — cancelling the scheduled deletion.
+/// Exact method + path match: there is deliberately no prefix family, so no
+/// other route can ever ride the recovery window.
+pub(crate) fn is_deletion_cancellation_request(method: &http::Method, path: &str) -> bool {
+    method == http::Method::POST && path == "/v1/account/deletion/cancel"
 }
 
 async fn tenant_status_for_auth(state: &AppState, tenant_id: &str) -> Result<String, ApiError> {
@@ -1245,7 +1272,18 @@ pub(crate) async fn authenticate_jwt(
         }
     };
 
-    if user_status != "active" {
+    // SM3 (audit F1): account deletion disables EVERY user of the tenant.
+    // The 30-day cancellation promise is only keepable if the disabled user
+    // can still authenticate to the one cancellation route — so a `disabled`
+    // user is admitted for exactly `POST /v1/account/deletion/cancel`. The
+    // paired tenant gate (`enforce_tenant_not_restricted`) admits that route
+    // only for `pending_deletion` tenants, and the handler re-verifies the
+    // live tenant state, so a disabled user of an ordinary tenant reaches at
+    // most a 409, never data.
+    if user_status != "active"
+        && !(user_status == "disabled"
+            && is_deletion_cancellation_request(request_method, request_path))
+    {
         return Err(ApiError::Unauthorized(format!(
             "user account is {user_status}"
         )));
@@ -1415,14 +1453,14 @@ pub async fn require_system_tenant(state: &AppState, auth: &AuthUser) -> Result<
     if auth.tenant_id != "system" {
         // Fail closed (audit #16): a storage failure is not evidence of
         // system-tenant membership.
-        let system_tenant =
-            match crate::routes::web::is_system_tenant(state, &auth.tenant_id).await {
-                Ok(system_tenant) => system_tenant,
-                Err(error) => {
-                    tracing::error!(error = %error, "system-tenant gate: lookup failed");
-                    return Err(ApiError::Internal("authentication error".into()));
-                }
-            };
+        let system_tenant = match crate::routes::web::is_system_tenant(state, &auth.tenant_id).await
+        {
+            Ok(system_tenant) => system_tenant,
+            Err(error) => {
+                tracing::error!(error = %error, "system-tenant gate: lookup failed");
+                return Err(ApiError::Internal("authentication error".into()));
+            }
+        };
         if !system_tenant {
             return Err(ApiError::Forbidden(
                 "control-plane access requires system tenant".into(),
@@ -1629,6 +1667,35 @@ mod tests {
         assert!(!tenant_status_permits_auth("suspended"));
         assert!(!tenant_status_permits_auth("pending"));
         assert!(!tenant_status_permits_auth("closed"));
+    }
+
+    #[test]
+    fn deletion_cancellation_allowlist_admits_only_the_exact_route() {
+        use axum::http::Method;
+
+        // SM3 (audit F1): a pending_deletion workspace authenticates to
+        // EXACTLY ONE route — the cancellation of its own deletion.
+        assert!(is_deletion_cancellation_request(
+            &Method::POST,
+            "/v1/account/deletion/cancel"
+        ));
+
+        // No prefix family: nothing else rides the window.
+        for (method, path) in [
+            (&Method::POST, "/v1/account/deletion/cancel/extra"),
+            (&Method::POST, "/v1/account/deletion"),
+            (&Method::POST, "/v1/account"),
+            (&Method::POST, "/v1/account/profile"),
+            (&Method::GET, "/v1/account/deletion/cancel"),
+            (&Method::DELETE, "/v1/account/deletion/cancel"),
+            (&Method::GET, "/v1/account/profile"),
+            (&Method::POST, "/v1/messages"),
+        ] {
+            assert!(
+                !is_deletion_cancellation_request(method, path),
+                "{method} {path} must NOT be admitted for pending_deletion"
+            );
+        }
     }
 
     #[test]

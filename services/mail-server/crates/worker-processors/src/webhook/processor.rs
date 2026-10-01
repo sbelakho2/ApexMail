@@ -27,6 +27,75 @@ use crate::common::{ProcessorError, ProcessorResult, WebhookConfig};
 
 type HmacSha256 = Hmac<Sha256>;
 
+// ── Webhook secret at rest (SM3/SM10 addendum: decrypt-or-migrate) ──────
+
+/// The AAD binding a webhook secret envelope to its row — byte-for-byte the
+/// convention `apexmail_db::repos::webhooks` AND the api-server's
+/// `webhook_secret_aad` use, so a row written or read by any of the three
+/// stacks decrypts identically and a ciphertext cannot be relocated between
+/// rows.
+fn webhook_secret_aad(webhook_id: &str) -> Vec<u8> {
+    format!("webhook={webhook_id}").into_bytes()
+}
+
+/// Resolve the STORED webhook secret into signing material for delivery.
+///
+/// A byte-level mirror of the api-server's `webhook_signing_secret`
+/// (crates/api-server/src/routes/webhooks.rs), which itself mirrors
+/// `WebhooksRepo` — keep the three in lockstep:
+///
+/// * Envelope rows (`enc:v1:…`) decrypt STRICTLY under the row-bound AAD —
+///   a tampered or wrong-key envelope fails closed and never signs.
+/// * `plain:v1:`-marked and legacy unmarked plaintext still sign honestly —
+///   the pre-parity behavior — and are best-effort MIGRATED to the envelope
+///   on this read (a failed rewrite is logged, never fatal).
+async fn webhook_signing_secret(
+    db: &sqlx::PgPool,
+    webhook_id: &str,
+    stored: &str,
+) -> Result<String, apexmail_lib::secret_at_rest::SecretEncryptionError> {
+    if !apexmail_lib::secret_at_rest::is_encrypted(stored) {
+        // Legacy row: sign with the exact stored material, then migrate
+        // best-effort — the same migrate-on-read the repo applies.
+        let material = stored.to_string();
+        match apexmail_lib::secret_at_rest::migrate_at_rest(stored, &webhook_secret_aad(webhook_id))
+        {
+            Ok(Some(envelope)) => {
+                if let Err(update_error) =
+                    sqlx::query("UPDATE webhooks SET secret = $1, updated_at = NOW() WHERE id = $2")
+                        .bind(&envelope)
+                        .bind(webhook_id)
+                        .execute(db)
+                        .await
+                {
+                    warn!(
+                        %update_error,
+                        webhook_id,
+                        "failed to persist the migrated webhook secret envelope"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(migrate_error) => {
+                warn!(%migrate_error, webhook_id, "webhook secret migrate-on-read failed");
+            }
+        }
+        return Ok(material);
+    }
+
+    apexmail_lib::secret_at_rest::decrypt_at_rest(stored, &webhook_secret_aad(webhook_id)).map_err(
+        |error| {
+            error!(
+                %error,
+                webhook_id,
+                "webhook secret envelope failed to decrypt (tampered or wrong key) — \
+                 delivery refused, failing closed"
+            );
+            error
+        },
+    )
+}
+
 /// Webhook processor.
 pub struct WebhookProcessor {
     db: PgPool,
@@ -40,6 +109,11 @@ pub struct WebhookProcessor {
     tenant_active_jobs: RwLock<HashMap<String, usize>>,
     pending_successes: Mutex<Vec<PendingSuccess>>,
     shutdown_notify: Arc<Notify>,
+    /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
+    /// the claim loop refuses to claim (or deliver) webhook jobs while this
+    /// node's `ha:fenced:{node}` key stands — or while the fence authority
+    /// cannot be read (fail closed). Default off: zero behavior change.
+    fence_gate: crate::fence::FenceGate,
 }
 
 impl WebhookProcessor {
@@ -70,6 +144,7 @@ impl WebhookProcessor {
             tenant_active_jobs: RwLock::new(HashMap::new()),
             pending_successes: Mutex::new(Vec::new()),
             shutdown_notify: Arc::new(Notify::new()),
+            fence_gate: crate::fence::FenceGate::from_env(),
         })
     }
 
@@ -108,6 +183,17 @@ impl WebhookProcessor {
     /// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
+            // SM10 F4: a fenced node must not claim or deliver webhook jobs;
+            // an unreadable fence authority fails closed. Disabled by default.
+            if let Err(refusal) = self.fence_gate.ensure_can_claim().await {
+                tracing::warn!(
+                    error = %refusal,
+                    "node is fenced; webhook claim loop paused (SM10 F4)"
+                );
+                sleep(self.config.base.poll_interval).await;
+                continue;
+            }
+
             // Check capacity
             let available = self
                 .config
@@ -570,8 +656,34 @@ impl WebhookProcessor {
         let timestamp = Utc::now().timestamp_millis();
         let delivery_id = format!("dlv_{}", uuid::Uuid::new_v4());
 
+        // SM3/SM10 addendum: the ROW's stored secret may be an `enc:v1:`
+        // envelope (api-server writes them) — resolve it to the signing
+        // material FIRST, and fail closed on a tampered/unreadable envelope:
+        // the delivery is refused (never signed with envelope bytes), the
+        // refusal is recorded like any other failure so the retry budget
+        // dead-letters the job with the error trail until the secret is
+        // rotated.
+        let signing_secret = match webhook_signing_secret(&self.db, &job.webhook_id, &job.secret)
+            .await
+        {
+            Ok(material) => material,
+            Err(error) => {
+                metrics::counter!("apexmail_webhook_secret_decrypt_failures_total").increment(1);
+                return WebhookDeliveryResult::failure(
+                    None,
+                    0,
+                    format!(
+                        "webhook signing secret could not be decrypted (tampered envelope or \
+                         wrong key) — delivery refused; rotate the secret ({error})"
+                    ),
+                    None,
+                    None,
+                );
+            }
+        };
+
         // Sign payload — secret is zeroized inside sign_payload (O-16.3)
-        let signature = self.sign_payload(&job.secret, timestamp, serialized_payload);
+        let signature = self.sign_payload(&signing_secret, timestamp, serialized_payload);
 
         // Build headers
         let mut headers = job.get_headers();
@@ -1480,6 +1592,285 @@ mod adversarial_tests {
             ),
             "delivery signature must bind the actual timestamp and body"
         );
+    }
+
+    // ── secret-at-rest decrypt-or-migrate (SM3/SM10 addendum) ──────────────
+
+    /// Install a deterministic at-rest key for this test process. MUST run
+    /// before the first `secret_at_rest` call in the process (the key state
+    /// is cached at first resolution); under nextest — the canonical runner
+    /// — every test is its own process, so this is deterministic.
+    fn install_at_rest_key() {
+        std::env::set_var(
+            "MFA_SECRET_ENCRYPTION_KEY",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+    }
+
+    /// A row whose secret is an `enc:v1:` envelope (what the api-server now
+    /// writes) must be signed with the DECRYPTED value: the stub's signature
+    /// verifies against the PLAINTEXT under the row-bound AAD — never against
+    /// the envelope string the raw read used to sign with.
+    #[tokio::test]
+    async fn envelope_stored_secret_is_signed_with_the_decrypted_value(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        install_at_rest_key();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let proc = processor(pool, test_config());
+        let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
+        let webhook_id = "whk-envelope-1";
+        let plaintext_secret = "envelope-plaintext-secret";
+        let envelope = apexmail_lib::secret_at_rest::encrypt_at_rest(
+            plaintext_secret,
+            &webhook_secret_aad(webhook_id),
+        )?;
+        assert!(apexmail_lib::secret_at_rest::is_encrypted(&envelope));
+        let job = WebhookJob {
+            secret: envelope.clone(),
+            ..job_for(
+                webhook_id,
+                "t-envelope",
+                &format!("http://127.0.0.1:{}/hook", stub.addr.port()),
+            )
+        };
+
+        let result = proc
+            .deliver_webhook(&job, r#"{"hello":"world"}"#, &ip_target(&stub))
+            .await;
+        assert!(result.success, "2xx must be a success: {:?}", result.error);
+
+        let requests = stub
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        let timestamp = req
+            .head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.eq_ignore_ascii_case("x-apexmail-timestamp") {
+                    v.trim().parse::<i64>().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("timestamp header");
+        let signature = req
+            .head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.eq_ignore_ascii_case("x-apexmail-signature") {
+                    Some(v.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("signature header");
+        let mut mac = HmacSha256::new_from_slice(plaintext_secret.as_bytes()).unwrap();
+        mac.update(format!("{}.{}", timestamp, r#"{"hello":"world"}"#).as_bytes());
+        assert_eq!(
+            signature,
+            format!(
+                "{}{}",
+                SIGNATURE_VERSION,
+                hex::encode(mac.finalize().into_bytes())
+            ),
+            "the envelope row must be signed with the DECRYPTED secret"
+        );
+        assert_ne!(
+            signature,
+            {
+                let mut mac = HmacSha256::new_from_slice(envelope.as_bytes()).unwrap();
+                mac.update(format!("{}.{}", timestamp, r#"{"hello":"world"}"#).as_bytes());
+                format!("{}{}", SIGNATURE_VERSION, hex::encode(mac.finalize().into_bytes()))
+            },
+            "the envelope STRING must never be the signing material"
+        );
+        Ok(())
+    }
+
+    /// A legacy plaintext row still signs honestly AND is migrated to the
+    /// row-bound envelope on the read (the same migrate-on-read the repo and
+    /// the api-server apply): afterwards the column holds an `enc:v1:`
+    /// envelope that decrypts back to the exact signing material.
+    #[tokio::test]
+    async fn legacy_plaintext_secret_still_signs_and_migrates_on_read(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        install_at_rest_key();
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_secret_migrate").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.21/hook", true).await;
+        let plaintext_secret = "legacy-whsec-still-signs";
+        sqlx::query("UPDATE webhooks SET secret = $1 WHERE id = $2")
+            .bind(plaintext_secret)
+            .bind(&webhook_id)
+            .execute(&pool)
+            .await?;
+        let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
+        let job = WebhookJob {
+            secret: plaintext_secret.to_string(),
+            ..job_for(
+                &webhook_id,
+                &tenant,
+                &format!("http://127.0.0.1:{}/hook", stub.addr.port()),
+            )
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        let result = processor
+            .deliver_webhook(&job, r#"{"hello":"world"}"#, &ip_target(&stub))
+            .await;
+        assert!(result.success, "a legacy row must still deliver: {result:?}");
+
+        // The stub saw a delivery signed with the plaintext secret.
+        let requests = stub
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        let timestamp = req
+            .head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.eq_ignore_ascii_case("x-apexmail-timestamp") {
+                    v.trim().parse::<i64>().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("timestamp header");
+        let signature = req
+            .head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.eq_ignore_ascii_case("x-apexmail-signature") {
+                    Some(v.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("signature header");
+        let mut mac = HmacSha256::new_from_slice(plaintext_secret.as_bytes()).unwrap();
+        mac.update(format!("{}.{}", timestamp, r#"{"hello":"world"}"#).as_bytes());
+        assert_eq!(
+            signature,
+            format!(
+                "{}{}",
+                SIGNATURE_VERSION,
+                hex::encode(mac.finalize().into_bytes())
+            ),
+            "a legacy plaintext row must keep signing with the stored material"
+        );
+
+        // Migrate-on-read persisted the envelope under the row-bound AAD.
+        let stored: String = sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1")
+            .bind(&webhook_id)
+            .fetch_one(&pool)
+            .await?;
+        assert!(
+            apexmail_lib::secret_at_rest::is_encrypted(&stored),
+            "the legacy plaintext must be migrated to an envelope: {stored}"
+        );
+        assert_eq!(
+            apexmail_lib::secret_at_rest::decrypt_at_rest(
+                &stored,
+                &webhook_secret_aad(&webhook_id)
+            )?,
+            plaintext_secret,
+            "the migrated envelope must decrypt back to the signing material"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A tampered envelope (here: a ciphertext relocated from another row, so
+    /// the row-bound AAD no longer matches) FAILS CLOSED: the delivery is
+    /// refused with the decrypt error, nothing hits the wire, and nothing is
+    /// ever signed with the envelope bytes. (The refusal flows through the
+    /// standard failure result, so the retry budget / dead-letter bookkeeping
+    /// is the one every other refusal already exercises.)
+    #[tokio::test]
+    async fn tampered_envelope_refuses_delivery_and_never_signs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        install_at_rest_key();
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_secret_tamper").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.22/hook", true).await;
+        let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
+        // An envelope bound to a DIFFERENT row id — exactly what a relocated
+        // or tampered ciphertext looks like to this row.
+        let tampered = apexmail_lib::secret_at_rest::encrypt_at_rest(
+            "victim-secret",
+            &webhook_secret_aad("whk-some-other-row"),
+        )?;
+        sqlx::query("UPDATE webhooks SET secret = $1 WHERE id = $2")
+            .bind(&tampered)
+            .bind(&webhook_id)
+            .execute(&pool)
+            .await?;
+        let job = WebhookJob {
+            secret: tampered,
+            ..job_for(
+                &webhook_id,
+                &tenant,
+                &format!("http://127.0.0.1:{}/hook", stub.addr.port()),
+            )
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        let result = processor
+            .deliver_webhook(&job, r#"{"hello":"world"}"#, &ip_target(&stub))
+            .await;
+        assert!(!result.success, "a tampered envelope must not deliver");
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("could not be decrypted"),
+            "the refusal must name the decrypt failure: {result:?}"
+        );
+
+        // Fail closed: nothing was delivered, nothing recorded, and the
+        // tampered row was NOT rewritten.
+        let requests = stub
+            .requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            requests.is_empty(),
+            "a tampered envelope must never reach the wire"
+        );
+        assert_eq!(delivery_rows(&pool, &webhook_id).await, 0);
+        // The refused row keeps its (other-row-bound) envelope — the refused
+        // read never rewrote it.
+        let stored: String = sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1")
+            .bind(&webhook_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            apexmail_lib::secret_at_rest::decrypt_at_rest(
+                &stored,
+                &webhook_secret_aad("whk-some-other-row")
+            )?,
+            "victim-secret",
+            "the refused row keeps the original (other-row-bound) envelope"
+        );
+        pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
@@ -3729,7 +4120,10 @@ mod residual_arms {
             "the recovered flush records the delivery"
         );
         let gone = queue_state(&pool, &row).await;
-        assert!(gone.is_none(), "the successful flush deletes the claimed row");
+        assert!(
+            gone.is_none(),
+            "the successful flush deletes the claimed row"
+        );
         pool.close().await;
         Ok(())
     }

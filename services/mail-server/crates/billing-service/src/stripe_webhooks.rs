@@ -576,13 +576,16 @@ pub async fn reclaim_stale_pending_webhooks(state: &AppState) -> Result<Vec<Stri
 
 /// Map Stripe invoice money fields (all integer minor units / cents) onto
 /// the local invoice columns, deriving whichever of subtotal/VAT/total is
-/// missing. Negative or absent amounts degrade to zero (Fix A).
+/// missing. Negative or absent amounts degrade to zero (Fix A). Returns
+/// `None` when the payload's arithmetic cannot be represented in integer
+/// cents — external input is never allowed to wrap into a "valid" total
+/// (audit SM7 F7, mirroring `bank_ingest::parse_amount_cents`).
 fn derive_invoice_totals(
     subtotal: Option<i64>,
     tax: Option<i64>,
     total: Option<i64>,
     amount_due: i64,
-) -> (i64, i64, i64) {
+) -> Option<(i64, i64, i64)> {
     // Explicit Stripe figures are authoritative INCLUDING their sign: credit
     // invoices (customer credit / matrix proration exceeding the charge) are
     // legitimately negative, and a 100%-discounted invoice legitimately has
@@ -596,24 +599,31 @@ fn derive_invoice_totals(
         (Some(sub), Some(tot)) => {
             let derived_vat = if tot < 0 {
                 // Credit invoice: the VAT reversal carries the invoice's sign.
-                tot - sub
+                tot.checked_sub(sub)?
             } else {
-                (tot - sub).max(0)
+                (tot.checked_sub(sub)?).max(0)
             };
-            let vat = tax
-                .filter(|value| sub + value <= tot)
-                .unwrap_or(derived_vat);
+            let vat = match tax {
+                // An overflowing `sub + value` cannot satisfy the `<= tot`
+                // filter; it falls back to the derived VAT like any other
+                // incoherent tax figure.
+                Some(value) => match sub.checked_add(value) {
+                    Some(sum) if sum <= tot => value,
+                    _ => derived_vat,
+                },
+                None => derived_vat,
+            };
             (sub, vat, tot)
         }
         (Some(sub), None) => {
             let vat = tax.unwrap_or(0);
-            (sub, vat, sub + vat)
+            (sub, vat, sub.checked_add(vat)?)
         }
         (None, Some(tot)) => (tot, 0, tot),
         (None, None) => (amount_due, 0, amount_due),
     };
 
-    (subtotal, vat, total)
+    Some((subtotal, vat, total))
 }
 
 /// Effective VAT rate (percent) implied by a subtotal + VAT amount pair.
@@ -2037,7 +2047,14 @@ async fn validate_and_snapshot_stripe_tax(
         invoice.tax,
         invoice.total,
         invoice.amount_due,
-    );
+    )
+    .ok_or_else(|| {
+        format!(
+            "invoice.paid for {} carries money fields whose arithmetic overflows integer cents — \
+             refusing to validate tax or settle against wrapped amounts",
+            invoice.id
+        )
+    })?;
     let currency = normalize_stripe_currency(invoice.currency.as_deref());
 
     // Expected side 1: the local invoice row(s) already bound to this Stripe
@@ -2591,13 +2608,15 @@ fn verified_payment_cents(invoice: &InvoiceEvent) -> i64 {
     match invoice.amount_paid {
         Some(paid) => paid.max(0),
         None => {
-            let (_, _, total) = derive_invoice_totals(
+            // Overflowing payload arithmetic yields None: settle nothing
+            // rather than derive a wrapped "total" as the payment amount.
+            derive_invoice_totals(
                 invoice.subtotal,
                 invoice.tax,
                 invoice.total,
                 invoice.amount_due,
-            );
-            total.max(0)
+            )
+            .map_or(0, |(_, _, total)| total.max(0))
         }
     }
 }
@@ -2636,7 +2655,136 @@ fn stripe_decimal_to_cents(value: &str) -> Option<i64> {
     } else {
         frac.parse().ok()?
     };
-    Some(whole * 100 + frac_parsed)
+    // External payload: a (signature-verified but absurd) whole part near
+    // i64::MAX must yield `None`, never a wrapped cent total (audit SM7 F7 —
+    // mirrors bank_ingest::parse_amount_cents).
+    whole
+        .checked_mul(100)
+        .and_then(|cents| cents.checked_add(frac_parsed))
+}
+
+/// What the paid-invoice importer must do when the Stripe event names its
+/// local obligation via `apexmailInvoiceId` metadata (pure — audit SM7 F3,
+/// pinned by unit tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DuplicateCollectionDecision {
+    /// The event's Stripe invoice id IS the obligation's binding: the normal
+    /// conflict-target upsert updates that one row — nothing doubled.
+    SameInvoice,
+    /// The obligation is already bound to a DIFFERENT Stripe invoice: this
+    /// event is a second external invoice for one obligation. REFUSED (and
+    /// flagged for review) — importing it would double-record revenue and AR.
+    RefuseDuplicate,
+    /// The obligation exists but carries no Stripe binding yet: the first
+    /// collection attempt died between finalize and the mapping write.
+    /// Binding the event's id repairs the mapping (the same conditional
+    /// update the collection ladder uses); inserting a second row would
+    /// double-record the obligation.
+    BindObligation,
+    /// No local row carries the obligation id — a legacy or foreign event.
+    /// The legacy import path applies.
+    NoLocalObligation,
+}
+
+/// Decide the importer's course from the obligation's current Stripe binding
+/// (pure). `bound` is `None` when no local row exists for the obligation id,
+/// `Some(binding)` with the row's current `stripe_invoice_id` (`None` =
+/// unbound).
+fn duplicate_collection_decision(
+    bound: Option<Option<&str>>,
+    event_stripe_invoice_id: &str,
+) -> DuplicateCollectionDecision {
+    match bound {
+        None => DuplicateCollectionDecision::NoLocalObligation,
+        Some(None) => DuplicateCollectionDecision::BindObligation,
+        Some(Some(existing)) if existing == event_stripe_invoice_id => {
+            DuplicateCollectionDecision::SameInvoice
+        }
+        Some(Some(_)) => DuplicateCollectionDecision::RefuseDuplicate,
+    }
+}
+
+/// The local Stripe binding of an obligation named by event metadata.
+async fn obligation_stripe_binding(
+    db: &sqlx::PgPool,
+    obligation_id: Uuid,
+) -> Result<Option<Option<String>>, String> {
+    sqlx::query_scalar("SELECT stripe_invoice_id FROM invoices WHERE id = $1")
+        .bind(obligation_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| format!("obligation lookup failed: {error}"))
+}
+
+/// Flag a refused duplicate collection for operator review: alert-grade log,
+/// counter, and a durable operator-facing notification row.
+async fn flag_duplicate_collection_for_review(
+    state: &AppState,
+    tenant_id: &str,
+    obligation_id: Uuid,
+    bound_invoice_id: &str,
+    event_invoice_id: &str,
+) {
+    metrics::counter!("stripe_duplicate_collection_refused_total").increment(1);
+    tracing::error!(
+        tenant_id = %tenant_id,
+        obligation_invoice_id = %obligation_id,
+        bound_stripe_invoice = %bound_invoice_id,
+        refused_stripe_invoice = %event_invoice_id,
+        "DUPLICATE Stripe collection refused — the obligation already carries a bound Stripe \
+         invoice; the refused event was NOT imported (audit SM7 F3). Reconcile manually."
+    );
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO notification_queue (id, tenant_id, type, payload, status, created_at)
+        VALUES (gen_random_uuid(), $1, 'duplicate_stripe_collection_refused', $2, 'pending', NOW())
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(serde_json::json!({
+        "obligationInvoiceId": obligation_id.to_string(),
+        "boundStripeInvoice": bound_invoice_id,
+        "refusedStripeInvoice": event_invoice_id,
+        "audit": "SM7 F3",
+    }))
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(
+            tenant_id = %tenant_id,
+            obligation_invoice_id = %obligation_id,
+            error = %error,
+            "could not enqueue the duplicate-collection review flag"
+        );
+    }
+}
+
+/// Repair a lost local ↔ external mapping: the obligation is unbound because
+/// the first collection attempt died between the Stripe finalize and the
+/// mapping write; the webhook that proves the mapping IS this event.
+async fn bind_unbound_obligation(
+    state: &AppState,
+    obligation_id: Uuid,
+    event_invoice_id: &str,
+) -> Result<u64, String> {
+    let bound = sqlx::query(
+        "UPDATE invoices SET stripe_invoice_id = $2, updated_at = NOW() \
+         WHERE id = $1 AND stripe_invoice_id IS NULL",
+    )
+    .bind(obligation_id)
+    .bind(event_invoice_id)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("binding the obligation failed: {error}"))?;
+    let rows = bound.rows_affected();
+    if rows > 0 {
+        info!(
+            obligation_invoice_id = %obligation_id,
+            stripe_invoice_id = %event_invoice_id,
+            "repaired the lost local↔Stripe mapping from the invoice.paid event (audit SM7 F3)"
+        );
+    }
+    Ok(rows)
 }
 
 async fn insert_paid_invoice_from_stripe(
@@ -2649,7 +2797,50 @@ async fn insert_paid_invoice_from_stripe(
         invoice.tax,
         invoice.total,
         invoice.amount_due,
-    );
+    )
+    .ok_or_else(|| {
+        format!(
+            "invoice.paid for {} carries money fields whose arithmetic overflows integer cents — \
+             refusing to insert a wrapped-amount invoice",
+            invoice.id
+        )
+    })?;
+    // Audit SM7 F3: when the event names its LOCAL obligation, a second
+    // Stripe invoice for an already-bound obligation is refused (and flagged
+    // for review), an unbound obligation is bound — and only a genuinely
+    // unclaimed event reaches the import below. One obligation can never
+    // become two local paid invoices with two ledger entries.
+    if let Some(obligation) = invoice
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("apexmailInvoiceId"))
+        .and_then(|value| Uuid::parse_str(value).ok())
+    {
+        let bound = obligation_stripe_binding(&state.db, obligation).await?;
+        let decision = duplicate_collection_decision(
+            bound.as_ref().map(|binding| binding.as_deref()),
+            &invoice.id,
+        );
+        match decision {
+            DuplicateCollectionDecision::RefuseDuplicate => {
+                let bound_invoice_id = bound.flatten().unwrap_or_default();
+                flag_duplicate_collection_for_review(
+                    state,
+                    tenant_id,
+                    obligation,
+                    &bound_invoice_id,
+                    &invoice.id,
+                )
+                .await;
+                return Ok(0);
+            }
+            DuplicateCollectionDecision::BindObligation => {
+                return bind_unbound_obligation(state, obligation, &invoice.id).await;
+            }
+            DuplicateCollectionDecision::SameInvoice
+            | DuplicateCollectionDecision::NoLocalObligation => {}
+        }
+    }
     let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
     let currency = normalize_stripe_currency(invoice.currency.as_deref());
 
@@ -3721,6 +3912,13 @@ struct InvoiceEvent {
     /// Per-jurisdiction tax breakdown on older API versions.
     #[serde(default)]
     total_tax_amounts: Option<Vec<StripeTotalTax>>,
+    /// Invoice-level metadata. The usage-collection path stamps
+    /// `apexmailInvoiceId` (the LOCAL obligation) onto every Stripe invoice
+    /// it creates; a `invoice.paid` event carrying that metadata names its
+    /// obligation, so a SECOND Stripe invoice for an already-bound obligation
+    /// can be refused instead of minted twice locally (audit SM7 F3).
+    #[serde(default)]
+    metadata: Option<HashMap<String, String>>,
 }
 
 /// Stripe `automatic_tax` object (subset).
@@ -4103,6 +4301,102 @@ pub async fn retry_deadlettered_webhooks(state: &AppState) -> Result<(), String>
 mod tests {
     use super::*;
 
+    /// The `Option`-returning [`derive_invoice_totals`] unwrapped for the
+    /// pinned assertions: every amount asserted below is far from the i64
+    /// bounds, so a `None` here is a test bug, not behaviour under test.
+    #[allow(dead_code)]
+    fn derive_invoice_totals(
+        subtotal: Option<i64>,
+        tax: Option<i64>,
+        total: Option<i64>,
+        amount_due: i64,
+    ) -> (i64, i64, i64) {
+        super::derive_invoice_totals(subtotal, tax, total, amount_due)
+            .expect("pinned test amounts do not overflow")
+    }
+
+    // ------------------------------------------------------------------
+    // Audit SM7 F3 — one obligation, one local paid invoice, one ledger
+    // entry: the duplicate-collection decision matrix.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_collection_decisions_are_fail_safe() {
+        use DuplicateCollectionDecision::{
+            BindObligation, NoLocalObligation, RefuseDuplicate, SameInvoice,
+        };
+        const EVENT: &str = "in_event_second";
+
+        // Bound to the SAME Stripe invoice: the conflict-target upsert
+        // updates that one row.
+        assert_eq!(
+            duplicate_collection_decision(Some(Some("in_event_second")), EVENT),
+            SameInvoice
+        );
+        // Bound to a DIFFERENT Stripe invoice: REFUSED — this is the
+        // double-record.
+        assert_eq!(
+            duplicate_collection_decision(Some(Some("in_first_attempt")), EVENT),
+            RefuseDuplicate
+        );
+        // Unbound (the first attempt died before the mapping write): the
+        // mapping is REPAIRED, never a second row.
+        assert_eq!(
+            duplicate_collection_decision(Some(None), EVENT),
+            BindObligation
+        );
+        // No local row at all: the legacy import path applies.
+        assert_eq!(
+            duplicate_collection_decision(None, EVENT),
+            NoLocalObligation
+        );
+    }
+
+    #[test]
+    fn invoice_events_parse_apexmail_obligation_metadata() {
+        // The usage-collection path stamps apexmailInvoiceId on the Stripe
+        // invoices it creates; the webhook must carry it through.
+        let payload = serde_json::json!({
+            "id": "in_test",
+            "amount_due": 1_000,
+            "metadata": { "apexmailInvoiceId": "01234567-89ab-cdef-0123-456789abcdef" },
+        });
+        let event: InvoiceEvent = serde_json::from_value(payload).expect("event");
+        let obligation = event
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("apexmailInvoiceId"))
+            .and_then(|value| Uuid::parse_str(value).ok());
+        assert_eq!(
+            obligation,
+            Some(Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef").expect("uuid"))
+        );
+
+        // Events without metadata (plain subscription invoices) stay on the
+        // legacy path.
+        let plain: InvoiceEvent = serde_json::from_value(serde_json::json!({
+            "id": "in_test",
+            "amount_due": 1_000,
+        }))
+        .expect("event");
+        assert!(plain.metadata.is_none());
+
+        // A malformed obligation id is NOT an obligation — the guard must
+        // never misfire on garbage metadata.
+        let garbage: InvoiceEvent = serde_json::from_value(serde_json::json!({
+            "id": "in_test",
+            "amount_due": 1_000,
+            "metadata": { "apexmailInvoiceId": "not-a-uuid" },
+        }))
+        .expect("event");
+        assert!(garbage
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("apexmailInvoiceId"))
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none());
+    }
+
     // ------------------------------------------------------------------
     // Audit F36 — entitlement reconciliation after a subscription delete.
     // ------------------------------------------------------------------
@@ -4152,6 +4446,7 @@ mod tests {
             customer_tax_ids: None,
             total_taxes: None,
             total_tax_amounts: None,
+            metadata: None,
         }
     }
 
@@ -5111,6 +5406,21 @@ mod tests {
 #[cfg(test)]
 mod coverage_adversarial {
     use super::*;
+
+    /// The `Option`-returning [`derive_invoice_totals`] unwrapped for the
+    /// pinned assertions: every amount asserted below is far from the i64
+    /// bounds, so a `None` here is a test bug, not behaviour under test.
+    #[allow(dead_code)]
+    fn derive_invoice_totals(
+        subtotal: Option<i64>,
+        tax: Option<i64>,
+        total: Option<i64>,
+        amount_due: i64,
+    ) -> (i64, i64, i64) {
+        super::derive_invoice_totals(subtotal, tax, total, amount_due)
+            .expect("pinned test amounts do not overflow")
+    }
+
     use crate::config::BillingConfig;
     use deadpool_redis::Runtime;
     use sqlx::postgres::PgPoolOptions;
@@ -5610,6 +5920,15 @@ mod coverage_adversarial {
         assert_eq!(stripe_decimal_to_cents("1."), Some(100));
         assert_eq!(stripe_decimal_to_cents(".5"), None);
         assert_eq!(stripe_decimal_to_cents("99999999999999999999"), None);
+        // Audit SM7 F7 — the checked_mul/checked_add edge: the whole part
+        // PARSES as i64 but the cent arithmetic lands exactly on (and one
+        // cent past) i64::MAX. The pre-fix `whole * 100 + frac` wrapped in
+        // release; the fixed helper is exact at the bound and `None` past it.
+        assert_eq!(
+            stripe_decimal_to_cents("92233720368547758.07"),
+            Some(i64::MAX)
+        );
+        assert_eq!(stripe_decimal_to_cents("92233720368547758.08"), None);
     }
 
     #[test]

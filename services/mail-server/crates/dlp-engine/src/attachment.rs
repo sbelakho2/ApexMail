@@ -399,6 +399,25 @@ const MAX_PDF_STREAM_BYTES: u64 = 20 * 1024 * 1024;
 /// shape, so the walk stops here and reports it.
 const MAX_PDF_STREAMS_EXAMINED: usize = 256;
 
+/// Upper bound on `stream` keyword occurrences examined per PDF, INDEPENDENT
+/// of how many Flate streams are actually collected (audit finding: the
+/// collected-stream cap never fired for files made of non-Flate
+/// `stream…endstream` pairs, and each occurrence triggered a full backwards
+/// scan of the entire prefix for `<<` — quadratic work on a crafted
+/// attachment).
+const MAX_PDF_STREAM_KEYWORD_HITS: usize = 4096;
+
+/// How far back from a `stream` keyword the `<<` dictionary search looks
+/// (audit finding: the search previously ran over the whole file prefix).
+/// Legitimate PDF dictionaries are small; anything beyond this window is
+/// treated as "no dictionary found" (the stream is then not Flate).
+const MAX_PDF_DICT_LOOKBACK_BYTES: usize = 1024;
+
+/// Process-wide count of PDFs whose `stream` keyword walk hit
+/// [`MAX_PDF_STREAM_KEYWORD_HITS`] — observable metric for operators.
+pub static PDF_STREAM_KEYWORD_CAP_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Process-wide count of PDFs whose stream count exceeded
 /// [`MAX_PDF_STREAMS_EXAMINED`] — observable metric for operators.
 pub static PDF_STREAM_CAP_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -474,13 +493,30 @@ fn extract_pdf_text(data: &[u8]) -> (String, bool, String) {
 
 /// Locate the raw byte payload of every `stream … endstream` object whose
 /// dictionary mentions `/FlateDecode`.
+///
+/// Bounded two ways (audit finding — the old walk was quadratic on crafted
+/// input): total `stream` keyword iterations are capped independently of
+/// collected streams, and the backwards `<<` dictionary search is windowed
+/// to [`MAX_PDF_DICT_LOOKBACK_BYTES`] instead of scanning the whole prefix.
 fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
     let mut streams = Vec::new();
+    let mut keyword_hits = 0usize;
     let mut pos = 0;
     while let Some(rel) = find_subslice(&data[pos..], b"stream") {
-        // Resource-exhaustion guard: each collected stream costs an inflate
-        // later; a PDF with thousands of streams is a DoS shape. Stop at the
-        // cap, count it, and let text extraction proceed on what we have.
+        // Resource-exhaustion guard: each keyword occurrence costs a
+        // dictionary look-back even when the stream is NOT Flate, so the
+        // bound must count every occurrence, not just collected streams.
+        keyword_hits += 1;
+        if keyword_hits > MAX_PDF_STREAM_KEYWORD_HITS {
+            PDF_STREAM_KEYWORD_CAP_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                cap = MAX_PDF_STREAM_KEYWORD_HITS,
+                "PDF stream keyword walk capped (possible resource-exhaustion shape)"
+            );
+            break;
+        }
+        // Collected-stream cap: each collected stream costs an inflate
+        // later; a PDF with thousands of streams is a DoS shape.
         if streams.len() >= MAX_PDF_STREAMS_EXAMINED {
             PDF_STREAM_CAP_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
@@ -491,11 +527,13 @@ fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
         }
         let stream_kw = pos + rel;
         // The dictionary precedes the stream keyword; look back for the
-        // object start to inspect the filter.
-        let dict_start = data[..stream_kw]
+        // nearest `<<` within a small window (previously this scanned the
+        // ENTIRE prefix per keyword — O(position) per occurrence).
+        let lookback_start = stream_kw.saturating_sub(MAX_PDF_DICT_LOOKBACK_BYTES);
+        let dict_start = data[lookback_start..stream_kw]
             .windows(2)
             .rposition(|w| w == b"<<")
-            .map(|i| i + 2)
+            .map(|i| lookback_start + i + 2)
             .unwrap_or(stream_kw);
         let dict = &data[dict_start..stream_kw];
         let is_flate = find_subslice(dict, b"/FlateDecode").is_some();
@@ -1350,5 +1388,86 @@ mod tests {
         ]));
         assert!(!is_ole_container(b"%PDF-1.4"));
         assert!(!is_ole_container(&[0xFF, 0xFE, 0x00, 0x00]));
+    }
+
+    // ── Audit:bounded PDF stream walk (quadratic scan on crafted input) ──
+
+    #[test]
+    fn pdf_stream_walk_is_bounded_on_many_non_flate_streams() {
+        // Fail-first: the walk iterated EVERY `stream` occurrence and ran a
+        // whole-prefix backwards `<<` scan per occurrence; a file of
+        // non-Flate `stream…endstream` pairs never tripped the collected-
+        // streams cap, giving ~O(n²) work on a crafted attachment. The
+        // keyword-iteration cap must fire and the walk must return promptly.
+        let before = PDF_STREAM_KEYWORD_CAP_HITS.load(std::sync::atomic::Ordering::Relaxed);
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        for i in 0..5000usize {
+            pdf.extend_from_slice(
+                format!("{i} 0 obj\nstream\njunk-payload\nendstream\nendobj\n").as_bytes(),
+            );
+        }
+        let streams = find_pdf_streams(&pdf);
+        assert!(
+            streams.is_empty(),
+            "no Flate streams present: {}",
+            streams.len()
+        );
+        let after = PDF_STREAM_KEYWORD_CAP_HITS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            after > before,
+            "the keyword-iteration cap must be observable (before={before}, after={after})"
+        );
+    }
+
+    #[test]
+    fn flate_streams_are_still_collected_under_the_bounded_walk() {
+        // Guard against over-tightening: a legitimate FlateDecode stream
+        // with its dictionary near the keyword must still be found.
+        let payload = {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder
+                .write_all(b"BT (card 4111 1111 1111 1111) Tj ET")
+                .expect("in-memory encode");
+            encoder.finish().expect("in-memory finish")
+        };
+        let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n".to_vec();
+        pdf.extend_from_slice(&payload);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let streams = find_pdf_streams(&pdf);
+        assert_eq!(streams.len(), 1, "the Flate stream must be collected");
+        // The walk slices everything between "stream\n" and "endstream",
+        // including the trailing newline before `endstream`.
+        let expected = {
+            let mut p = payload;
+            p.push(b'\n');
+            p
+        };
+        assert_eq!(streams[0], expected.as_slice());
+    }
+
+    #[test]
+    fn dictionary_lookback_is_windowed() {
+        // A `/FlateDecode` dictionary farther than the look-back window
+        // from `stream` is deliberately NOT found any more (bounded
+        // backwards search); a dictionary inside the window still is.
+        let far_dict = b"1 0 obj\n<< /Filter /FlateDecode >>\nendobj\n";
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        pdf.extend_from_slice(far_dict);
+        pdf.extend(std::iter::repeat_n(b'A', MAX_PDF_DICT_LOOKBACK_BYTES + 64));
+        pdf.extend_from_slice(b"\n2 0 obj\nstream\npayload\nendstream\nendobj\n");
+        assert!(
+            find_pdf_streams(&pdf).is_empty(),
+            "a dictionary beyond the look-back window must not be found"
+        );
+
+        let mut close = b"%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n".to_vec();
+        close.extend_from_slice(b"payload\nendstream\nendobj\n");
+        assert_eq!(
+            find_pdf_streams(&close).len(),
+            1,
+            "a dictionary inside the window must still be found"
+        );
     }
 }

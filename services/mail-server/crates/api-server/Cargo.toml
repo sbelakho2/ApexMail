@@ -50,6 +50,10 @@ regex = "1"
 jsonwebtoken = "9.3"
 http = "1.0"
 dirs = "5.0"
+# SM10 F4: the shared STONITH fence helper (ha::fence) the mutating-request
+# middleware gates on. Path dependency: `ha` is not a workspace dependency
+# and the workspace root manifest is out of bounds for this change.
+ha = { path = "../ha" }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 

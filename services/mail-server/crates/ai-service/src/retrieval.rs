@@ -585,7 +585,10 @@ mod tests {
 
         // Empty and whitespace-only queries never reach the database.
         // Fix #17: this is Empty (nothing to look up), not Unavailable.
-        assert_eq!(search(&pool, "", &version).await.state, RetrievalState::Empty);
+        assert_eq!(
+            search(&pool, "", &version).await.state,
+            RetrievalState::Empty
+        );
         assert_eq!(
             search(&pool, "   ", &version).await.state,
             RetrievalState::Empty

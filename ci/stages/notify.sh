@@ -99,7 +99,15 @@ enqueue_failure_email() {
     fi
     cd "$CI_DEPLOY_DIR"
     _ne_log=$RUN_DIR/stages/$_ne_stage.log
-    _ne_tail=$(tail -c 4000 "$_ne_log" 2>/dev/null | tr -d '\0' | sed "s/'/''/g" || true)
+    # Audit SM14 F6: the log tail used to be spliced DIRECTLY into a
+    # dollar-quoted SQL literal with only single quotes escaped — a stage
+    # log containing the literal `$body$` (routine in cargo/test/dependency
+    # output) terminated the string early and the remainder executed as raw
+    # SQL against the production postgres. The values now travel as psql
+    # VARIABLES (-v) referenced with :'var' — psql itself produces the
+    # safely-escaped literal, so NO log/binary output can break out, whatever
+    # bytes it carries (NULs, quotes, dollar-quote tokens).
+    _ne_tail=$(tail -c 4000 "$_ne_log" 2>/dev/null | tr -d '\000' || true)
     _ne_subject="ApexMail pipeline FAILED: $_ne_stage (run $CI_RUN_ID)"
     _ne_body="The ApexMail CI pipeline failed at stage '$_ne_stage'.
 Run:    $CI_RUN_ID
@@ -114,18 +122,23 @@ This email was enqueued through the platform's own email_queue by
 ci/stages/notify.sh — delivery itself proves outbound mail works."
 
     # Insert straight into the platform's outbound queue (schema:
-    # 001_initial_schema.sql email_queue). Single-quoted values are escaped
-    # above; array literal cast keeps psql happy.
+    # 001_initial_schema.sql email_queue). Every variable-length value is a
+    # psql :'var' literal — parameterized, injection-proof.
     if docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
         exec -T postgres psql -U "${POSTGRES_USER:-apexmail}" -d "${POSTGRES_DB:-apexmail}" \
-        -v ON_ERROR_STOP=1 >>"$CI_STAGE_LOG" 2>&1 <<SQL
+        -v ON_ERROR_STOP=1 \
+        -v ne_from="${CI_NOTIFY_FROM:-ci@apexmail.ee}" \
+        -v ne_to="${CI_NOTIFY_TO:-admin@apexmail.ee}" \
+        -v ne_subject="$_ne_subject" \
+        -v ne_body="$_ne_body" \
+        >>"$CI_STAGE_LOG" 2>&1 <<'SQL'
 INSERT INTO email_queue
     (from_address, to_addresses, subject, text_body, status, priority, tags)
 VALUES
-    ('${CI_NOTIFY_FROM:-ci@apexmail.ee}',
-     ARRAY['${CI_NOTIFY_TO:-admin@apexmail.ee}']::text[],
-     '${_ne_subject}',
-     \$body\$${_ne_body}\$body\$,
+    (:'ne_from',
+     ARRAY[:'ne_to']::text[],
+     :'ne_subject',
+     :'ne_body',
      'pending', 100, ARRAY['ci-notification']::text[]);
 SQL
     then

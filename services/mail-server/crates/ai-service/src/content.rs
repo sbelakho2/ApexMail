@@ -12,6 +12,187 @@ impl Default for ContentOptimizer {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Model-output sanitization (SM9 #1/#2/#7b): the ammonia allowlist is the
+// single output-sanitization policy shared by every generative surface.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The vendored ammonia allowlist policy (O-10.2).
+///
+/// An ALLOWLIST, not a blocklist: anything not explicitly permitted
+/// (unknown tags, unknown attributes, `javascript:` URLs, event handlers)
+/// is removed regardless of how novel the payload shape is — pattern-based
+/// strippers can always be bypassed by payloads their detectors never saw.
+fn model_output_allowlist() -> ammonia::Builder<'static> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut tag_attrs = HashMap::new();
+    tag_attrs.insert("a", HashSet::from(["href", "title", "target"]));
+    tag_attrs.insert("img", HashSet::from(["src", "alt", "width", "height"]));
+    tag_attrs.insert("td", HashSet::from(["colspan", "rowspan"]));
+    tag_attrs.insert("th", HashSet::from(["colspan", "rowspan"]));
+
+    // ammonia 4.x builder methods take `&mut self` and return `&mut Self`,
+    // so the policy is assembled on an owned builder and returned by value.
+    let mut builder = ammonia::Builder::new();
+    builder.tags(HashSet::from([
+        "a",
+        "abbr",
+        "b",
+        "blockquote",
+        "br",
+        "caption",
+        "cite",
+        "code",
+        "col",
+        "colgroup",
+        "dd",
+        "del",
+        "dfn",
+        "div",
+        "dl",
+        "dt",
+        "em",
+        "figcaption",
+        "figure",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "img",
+        "ins",
+        "kbd",
+        "li",
+        "mark",
+        "ol",
+        "p",
+        "pre",
+        "q",
+        "s",
+        "samp",
+        "small",
+        "span",
+        "strong",
+        "sub",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "time",
+        "tr",
+        "ul",
+        "var",
+    ]));
+    builder.tag_attributes(tag_attrs);
+    // Allow common URL schemes only
+    builder.link_rel(Some("noopener noreferrer"));
+    builder
+}
+
+/// Sanitize model output with the ammonia allowlist (SM9 #1).
+///
+/// This is THE output-sanitization pass for model-generated text: the live
+/// `/chat` path runs it on every answer before both the HTTP response and
+/// the audit persistence, and the streaming pipeline runs its incremental
+/// variant ([`StreamingSanitizer`]) on every token. Unconditional by
+/// design — there is no detector gate that novel payloads can slip past.
+pub fn sanitize_model_output(raw: &str) -> String {
+    model_output_allowlist().clean(raw).to_string()
+}
+
+/// Incremental, streaming-safe variant of [`sanitize_model_output`].
+///
+/// Tokens cannot be sanitized one-by-one: a dangerous tag split across
+/// tokens (`<scr` + `ipt>`) would pass a per-token pass and a benign `<`
+/// could be mangled mid-tag. Instead text is buffered until it can no
+/// longer be the prefix of a tag or entity (`<`/`&` with no closing `>`
+/// /`;` yet), and only then flushed through the allowlist; [`Self::finish`]
+/// flushes the remainder at end-of-stream.
+///
+/// Concatenating the emitted fragments is NOT byte-identical to
+/// sanitizing the whole string at once (stray `<`/`&` are escaped when
+/// their fragment flushes) but the emitted stream is safe at every point:
+/// no incomplete or complete dangerous markup is ever forwarded.
+pub struct StreamingSanitizer {
+    pending: String,
+}
+
+/// Buffer cap for the pending partial-tag candidate. A model stream is
+/// already bounded by its token budget, but a hostile/degenerate stream
+/// must not be able to grow the buffer without limit: past the cap the
+/// entire pending candidate is flushed through the allowlist anyway (an
+/// unterminated tag is dropped as inert — never forwarded as markup), so
+/// flushing early stays safe.
+const STREAM_SANITIZER_PENDING_CAP: usize = 4096;
+
+impl Default for StreamingSanitizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamingSanitizer {
+    pub fn new() -> Self {
+        Self {
+            pending: String::new(),
+        }
+    }
+
+    /// Feed one raw token; returns the sanitized text now safe to emit
+    /// (possibly empty).
+    pub fn push(&mut self, token: &str) -> String {
+        self.pending.push_str(token);
+        // Bound the buffer first: a hostile/degenerate stream must not be
+        // able to grow the pending candidate without limit. Past the cap
+        // everything is flushed through the allowlist — an incomplete tag
+        // is escaped to inert text, so flushing early stays safe.
+        if self.pending.len() > STREAM_SANITIZER_PENDING_CAP {
+            let rest = std::mem::take(&mut self.pending);
+            return sanitize_model_output(&rest);
+        }
+        // Hold back a trailing partial-tag / partial-entity candidate:
+        // everything from the earliest unclosed '<' (or bare '&') could
+        // still grow into markup.
+        let hold_from = [self.pending.rfind('<'), self.pending.rfind('&')]
+            .into_iter()
+            .flatten()
+            .filter(|&i| {
+                let rest = &self.pending[i..];
+                let terminator = if self.pending.as_bytes()[i] == b'<' {
+                    '>'
+                } else {
+                    ';'
+                };
+                !rest.contains(terminator)
+            })
+            .min()
+            .unwrap_or(self.pending.len());
+        if hold_from == 0 {
+            return String::new();
+        }
+        let flush = self.pending[..hold_from].to_string();
+        self.pending.drain(..hold_from);
+        sanitize_model_output(&flush)
+    }
+
+    /// Flush the remainder at end-of-stream. Always call exactly once.
+    pub fn finish(&mut self) -> String {
+        let rest = std::mem::take(&mut self.pending);
+        if rest.is_empty() {
+            String::new()
+        } else {
+            sanitize_model_output(&rest)
+        }
+    }
+}
+
 impl ContentOptimizer {
     pub fn new() -> Self {
         Self
@@ -154,75 +335,7 @@ impl ContentOptimizer {
     /// `tag_attributes()` accepts a single `HashMap<&str, HashSet<&str>>`
     /// mapping each tag to its allowed attributes, rather than per-tag calls.
     pub fn sanitize_html(&self, html: &str) -> String {
-        use std::collections::{HashMap, HashSet};
-
-        let mut tag_attrs = HashMap::new();
-        tag_attrs.insert("a", HashSet::from(["href", "title", "target"]));
-        tag_attrs.insert("img", HashSet::from(["src", "alt", "width", "height"]));
-        tag_attrs.insert("td", HashSet::from(["colspan", "rowspan"]));
-        tag_attrs.insert("th", HashSet::from(["colspan", "rowspan"]));
-
-        ammonia::Builder::new()
-            .tags(HashSet::from([
-                "a",
-                "abbr",
-                "b",
-                "blockquote",
-                "br",
-                "caption",
-                "cite",
-                "code",
-                "col",
-                "colgroup",
-                "dd",
-                "del",
-                "dfn",
-                "div",
-                "dl",
-                "dt",
-                "em",
-                "figcaption",
-                "figure",
-                "h1",
-                "h2",
-                "h3",
-                "h4",
-                "h5",
-                "h6",
-                "hr",
-                "i",
-                "img",
-                "ins",
-                "kbd",
-                "li",
-                "mark",
-                "ol",
-                "p",
-                "pre",
-                "q",
-                "s",
-                "samp",
-                "small",
-                "span",
-                "strong",
-                "sub",
-                "sup",
-                "table",
-                "tbody",
-                "td",
-                "tfoot",
-                "th",
-                "thead",
-                "time",
-                "tr",
-                "ul",
-                "var",
-            ]))
-            .tag_attributes(tag_attrs)
-            // Allow common URL schemes only
-            .link_rel(Some("noopener noreferrer"))
-            .clean(html)
-            .to_string()
+        sanitize_model_output(html)
     }
 
     /// Generate a plain-text preview from HTML email content.
@@ -344,5 +457,167 @@ mod tests {
             !sanitized.contains("javascript:"),
             "javascript: href preserved"
         );
+    }
+
+    // ── SM9 #1: the shared ammonia allowlist pass ───────────────────────
+
+    /// Raw (non-entity-encoded) XSS payloads are stripped by the allowlist
+    /// regardless of detector coverage — an allowlist cannot be bypassed by
+    /// pattern novelty. (`<img src=…>` is an ALLOWED element: the assertions
+    /// for it target the handler/URL payload, not the tag itself.)
+    #[test]
+    fn sanitize_model_output_strips_raw_tag_payloads() {
+        for payload in [
+            "<script>alert(1)</script>",
+            r#"<a href="javascript:alert(3)">go</a>"#,
+            "<iframe src=\"http://evil.example\"></iframe>",
+            "<object data=\"data:text/html;base64,PHNjcmlwdD4=\"></object>",
+            "<form action=\"/steal\"><input name=\"pw\"></form>",
+            "<style>@import 'http://evil.example/x.css';</style>",
+            "<svg onload=alert(4)>",
+            "<base href=\"http://evil.example/\">",
+            "<meta http-equiv=\"refresh\" content=\"0\">",
+        ] {
+            let out = sanitize_model_output(payload);
+            for marker in [
+                "<script",
+                "<iframe",
+                "<object",
+                "<form",
+                "<input",
+                "<style",
+                "<svg",
+                "<base",
+                "<meta",
+                "onerror",
+                "onload",
+                "javascript:",
+                "data:text/html",
+            ] {
+                assert!(
+                    !out.to_ascii_lowercase().contains(marker),
+                    "payload {payload:?} must not survive as {marker:?}: {out}"
+                );
+            }
+        }
+        // An <img> is allowed but its event-handler payload is not, and a
+        // non-http(s) src scheme is dropped with the attribute.
+        let out = sanitize_model_output("<img src=x onerror=alert(2)>");
+        assert!(!out.to_ascii_lowercase().contains("onerror"), "{out}");
+        let out = sanitize_model_output("<img src=\"data:text/html;base64,PHNjcmlwdD4=\">");
+        assert!(
+            !out.to_ascii_lowercase().contains("data:text/html"),
+            "data: URL src must be dropped: {out}"
+        );
+    }
+
+    /// Benign prose (the overwhelmingly common model answer) passes through
+    /// byte-unchanged, and benign HTML survives structurally (the allowlist
+    /// hardens links with `rel="noopener noreferrer"`).
+    #[test]
+    fn sanitize_model_output_preserves_benign_text() {
+        let answer = "The Pro plan costs €65 per month with 150,000 emails included.";
+        assert_eq!(sanitize_model_output(answer), answer);
+        let html_answer = "<p>Hello <strong>world</strong> — see <a href=\"https://apexmail.ee/docs\">the docs</a>.</p>";
+        let out = sanitize_model_output(html_answer);
+        assert!(out.contains("<p>"), "{out}");
+        assert!(out.contains("<strong>world</strong>"), "{out}");
+        assert!(out.contains("href=\"https://apexmail.ee/docs\""), "{out}");
+        assert!(out.contains("the docs</a>."), "{out}");
+        // The policy's link hardening is applied (ammonia `link_rel`).
+        assert!(out.contains("rel=\"noopener noreferrer\""), "{out}");
+    }
+
+    // ── SM9 #7b: streaming-safe incremental sanitizer ───────────────────
+
+    /// A dangerous tag SPLIT ACROSS TOKENS must never reach the client as
+    /// markup: the sanitizer holds every unclosed `<` region, so no emitted
+    /// fragment can carry a raw `<…` prefix that reassembles into a tag
+    /// downstream. (The inert text of an incomplete unknown tag may pass
+    /// through — `alert(1)` as plain text is harmless; the *tag* cannot.)
+    #[test]
+    fn streaming_sanitizer_strips_tags_split_across_tokens() {
+        let tokens = ["Sure: ", "<scr", "ipt>alert(", "1)</scr", "ipt> done"];
+        let mut sink = StreamingSanitizer::new();
+        let mut emitted = String::new();
+        for t in tokens {
+            emitted.push_str(&sink.push(t));
+        }
+        emitted.push_str(&sink.finish());
+        let lower = emitted.to_ascii_lowercase();
+        assert!(
+            !lower.contains("<scr") && !lower.contains("<script"),
+            "no raw tag-open may survive the stream: {emitted:?}"
+        );
+        assert!(
+            !lower.contains("</script"),
+            "no raw tag-close may survive the stream: {emitted:?}"
+        );
+        assert!(emitted.contains("Sure:"), "prose is kept: {emitted:?}");
+        assert!(
+            emitted.contains("done"),
+            "trailing prose is kept: {emitted:?}"
+        );
+
+        // Contrast: the same payload streamed as ONE fragment is stripped
+        // element-and-content by the allowlist (script is clean-content).
+        let whole = sanitize_model_output("Sure: <script>alert(1)</script> done");
+        assert!(
+            !whole.contains("alert(1)") && !whole.contains("<script"),
+            "a complete script element is removed with its content: {whole:?}"
+        );
+    }
+
+    /// Benign streamed text is forwarded with its content intact, and the
+    /// concatenation of sanitized fragments carries the whole answer.
+    #[test]
+    fn streaming_sanitizer_forwards_benign_tokens_losslessly() {
+        let mut sink = StreamingSanitizer::new();
+        let mut emitted = String::new();
+        for t in ["The Pro plan ", "costs €65 ", "per month."] {
+            emitted.push_str(&sink.push(t));
+        }
+        emitted.push_str(&sink.finish());
+        assert_eq!(emitted, "The Pro plan costs €65 per month.");
+    }
+
+    /// A trailing partial tag at end-of-stream is flushed inert (escaped or
+    /// allowlist-stripped), never forwarded raw.
+    #[test]
+    fn streaming_sanitizer_neutralizes_trailing_partial_tag() {
+        let mut sink = StreamingSanitizer::new();
+        let mut emitted = sink.push("hello <form action=/steal");
+        emitted.push_str(&sink.finish());
+        assert!(
+            !emitted.contains("<form"),
+            "raw partial tag must not survive: {emitted:?}"
+        );
+        assert!(emitted.contains("hello"));
+    }
+
+    /// An `<` inside ordinary prose is escaped, not swallowed — and a long
+    /// tag-less candidate past the buffer cap is flushed rather than
+    /// buffering forever (the unterminated tag is dropped as inert, and
+    /// the drained buffer keeps streaming).
+    #[test]
+    fn streaming_sanitizer_escapes_stray_angle_bracket_and_bounds_its_buffer() {
+        let mut sink = StreamingSanitizer::new();
+        let mut out = sink.push("5 < 6 always");
+        out.push_str(&sink.finish());
+        assert!(out.contains("&lt;"), "stray < is escaped: {out:?}");
+
+        let mut sink = StreamingSanitizer::new();
+        let _ = sink.push("<");
+        let long = "x".repeat(STREAM_SANITIZER_PENDING_CAP + 100);
+        let over_cap = sink.push(&long);
+        assert!(
+            !over_cap.contains('<'),
+            "the raw partial tag must not survive the cap flush: {over_cap:?}"
+        );
+        // The buffer was DRAINED by the cap flush: the next push is emitted
+        // immediately instead of being swallowed into a growing candidate.
+        let mut tail = sink.push("TAIL");
+        tail.push_str(&sink.finish());
+        assert!(tail.contains("TAIL"), "buffer must be drained: {tail:?}");
     }
 }

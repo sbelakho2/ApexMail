@@ -54,6 +54,18 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 15s
 
+  # Outbound MTA relay daemon (audit F2): the ONLY component draining the
+  # durable outbound queue (outbound_relay_ledger). Its health listener
+  # (OUTBOUND_MTA_HEALTH_ADDR, 0.0.0.0:8093 since the F2 fix) serves
+  # /healthz, /readyz and the /metrics route scraped here. Without this job
+  # the OutboundMtaDown / OutboundMtaPendingOldestAgeSlo rules in
+  # deploy/alerting-rules.yml were dead — an empty selector can never fire.
+  - job_name: 'apexmail-outbound-mta'
+    static_configs:
+      - targets: ['outbound-mta:8093']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
   # Observability service: self-monitoring gauges plus the Redis eviction
   # monitor metrics, exposed in Prometheus text format on :4400/metrics.
   - job_name: 'apexmail-observability'
@@ -228,6 +240,15 @@ scrape_configs:
         target_label: __param_target
       - target_label: __address__
         replacement: blackbox-exporter:9115
+      # F1 (audit): 465/993 are IMPLICIT-TLS listeners (SMTPS/IMAPS speak
+      # TLS from the first byte, no plaintext 220 banner), so they probe
+      # with the tcp+tls `smtp_tls` module instead of the STARTTLS
+      # handshake. Per-target module via __param_module keeps the single
+      # job name (alert selectors key on job=blackbox-smtp).
+      - source_labels: [__param_target]
+        regex: 'smtp\.apexmail\.ee:(465|993)'
+        target_label: __param_module
+        replacement: smtp_tls
 
   - job_name: 'blackbox-dns'
     metrics_path: /probe

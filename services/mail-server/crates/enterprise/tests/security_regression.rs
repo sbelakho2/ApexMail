@@ -105,6 +105,14 @@ impl TestApp {
 }
 
 fn mint_token(tenant: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -> String {
+    mint_token_as(tenant, "user-test-subject", admin, aud, iss)
+}
+
+/// Audit F3 (verifier repair): a subject-parameterized mint, so tests can
+/// act as TWO different members of the same tenant — the repaired
+/// separation-of-duties refuses self-approval, and approval happy paths need
+/// a distinct approver.
+fn mint_token_as(tenant: &str, sub: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -> String {
     #[derive(serde::Serialize)]
     struct Claims<'a> {
         sub: &'a str,
@@ -114,14 +122,26 @@ fn mint_token(tenant: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -
         aud: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         iss: Option<&'a str>,
+        // Audit F8: this suite tests tenant isolation and regression
+        // contracts, not RBAC refusal, so its member tokens carry the
+        // control-plane scopes and the scope-gated happy paths stay
+        // exercisable. Gate semantics are pinned by `rbac_scope_guards` in
+        // `routes.rs`.
+        scopes: Vec<&'a str>,
         exp: usize,
     }
     let claims = Claims {
-        sub: "user-test-subject",
+        sub,
         tenant_id: tenant,
         admin,
         aud,
         iss,
+        scopes: vec![
+            "compliance:write",
+            "whitelabel:write",
+            "log-streams:write",
+            "dedicated-ips:write",
+        ],
         exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
     };
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).unwrap();
@@ -574,7 +594,8 @@ async fn decrypt_field_is_tenant_bound() {
         return;
     };
     let a = app.token(&app.tenant_a, false);
-    let b = app.token(&app.tenant_b, false);
+    let admin_a = app.token(&app.tenant_a, true);
+    let admin_b = app.token(&app.tenant_b, true);
 
     let (status, encrypted) = app
         .post(
@@ -589,11 +610,31 @@ async fn decrypt_field_is_tenant_bound() {
     let ciphertext = encrypted["value"].as_str().unwrap().to_string();
     assert!(ciphertext.starts_with("ENC:v1:"));
 
-    // Tenant B submitting tenant A's ciphertext is rejected with 400.
+    // Audit F1: decrypt-field is the PHI oracle — a NON-ADMIN member of the
+    // owning tenant is refused before any decryption (403), so a
+    // low-privilege insider cannot bulk-decrypt their tenant's ciphertexts.
     let (status, body) = app
         .post(
             "/compliance/encryption/decrypt-field",
-            &b,
+            &a,
+            Some(serde_json::json!({
+                "tenant_id": app.tenant_a, "field_name": "email", "value": ciphertext
+            })),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "member decrypt must 403, got {status}: {body}"
+    );
+
+    // Tenant B's ADMIN submitting tenant A's ciphertext passes the admin
+    // gate (they are an admin of their OWN tenant) but the tenant-bound AAD
+    // refuses the foreign ciphertext with 400.
+    let (status, body) = app
+        .post(
+            "/compliance/encryption/decrypt-field",
+            &admin_b,
             Some(serde_json::json!({
                 "tenant_id": app.tenant_b, "field_name": "email", "value": ciphertext
             })),
@@ -605,11 +646,11 @@ async fn decrypt_field_is_tenant_bound() {
         "cross-tenant decrypt must 400, got {status}: {body}"
     );
 
-    // The owner decrypts their own ciphertext.
+    // The owning tenant's ADMIN decrypts their own ciphertext.
     let (status, body) = app
         .post(
             "/compliance/encryption/decrypt-field",
-            &a,
+            &admin_a,
             Some(serde_json::json!({
                 "tenant_id": app.tenant_a, "field_name": "email", "value": ciphertext
             })),
@@ -622,7 +663,7 @@ async fn decrypt_field_is_tenant_bound() {
     let (status, _) = app
         .post(
             "/compliance/encryption/decrypt-field",
-            &a,
+            &admin_a,
             Some(serde_json::json!({
                 "tenant_id": app.tenant_a, "field_name": "email", "value": "not-a-ciphertext"
             })),
@@ -1258,10 +1299,15 @@ async fn data_access_approval_derives_approver_and_clamps_duration() {
         .await;
     let id = req["data"]["id"].as_str().unwrap().to_string();
 
+    // Audit F3 (verifier repair): the approver is a DIFFERENT member of the
+    // same tenant — the repaired separation of duties refuses the filer's
+    // own approval (the stored requester is now the token subject, so the
+    // old self-approval here would 403).
+    let approver = mint_token_as(&app.tenant_a, "user-test-approver", false, None, None);
     let (status, body) = app
         .post(
             &format!("/compliance/data-access/{id}/approve"),
-            &a,
+            &approver,
             Some(serde_json::json!({"approved_by": "forged-approver", "duration_minutes": 99999})),
         )
         .await;
@@ -1276,17 +1322,43 @@ async fn data_access_approval_derives_approver_and_clamps_duration() {
     .unwrap();
     assert_eq!(
         approved_by.as_deref(),
-        Some("user-test-subject"),
+        Some("user-test-approver"),
         "approver must come from token claims"
     );
     assert_eq!(duration, Some(1440), "duration must clamp to 1440 min");
 
-    // The raw access token must not be echoed.
-    let token_in_response = body["data"]["access_token"].as_str().unwrap_or("");
+    // Audit F3: the raw grant token is returned EXACTLY ONCE — in this
+    // approval response, as the approver's handoff to the requester. The
+    // database persists ONLY its SHA-256 digest (the SSO bearer-token
+    // model), so no DB read — and no re-approval — can recover a usable
+    // token. (The old contract masked the response with `ref:{id}`; the
+    // masking moved to where it belongs: the storage layer.)
+    let raw_token = body["data"]["access_token"]
+        .as_str()
+        .expect("the approval response hands off the raw token once")
+        .to_string();
     assert!(
-        token_in_response.starts_with("ref:") || body["data"]["access_token"].is_null(),
-        "raw access_token must not be returned: {}",
-        body["data"]["access_token"]
+        !raw_token.starts_with("ref:"),
+        "the handoff must be the raw grant token: {raw_token}"
+    );
+    let (stored,): (Option<String>,) =
+        sqlx::query_as("SELECT access_token FROM ent_data_access_requests WHERE id = $1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    let stored = stored.expect("the digest is stored");
+    assert_ne!(
+        stored, raw_token,
+        "the raw grant token must never persist verbatim"
+    );
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(raw_token.as_bytes());
+    assert_eq!(
+        stored,
+        hex::encode(hasher.finalize()),
+        "at rest there is only the token's SHA-256 digest"
     );
 }
 

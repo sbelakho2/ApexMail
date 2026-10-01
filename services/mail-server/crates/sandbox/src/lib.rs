@@ -1,34 +1,44 @@
 #![allow(clippy::doc_lazy_continuation)]
-//! # Sandbox — Secure Attachment Detonation
+//! # Sandbox — Attachment Content Inspection
 //!
-//! Provides a sandboxed execution environment for analyzing email attachments,
-//! inspecting file contents, and detecting malicious payloads without executing
-//! arbitrary code on the host system.
+//! Provides bounded, in-process inspection of email attachments:
+//! file-type detection, content analysis, and policy evaluation — without
+//! ever executing the inspected content.
 //!
 //! ## Architecture
 //!
 //! The sandbox operates at multiple levels://!
 //! 1. **Static analysis** — File magic detection, extension validation, hash computation
 //! 2. **Content inspection** — Archive enumeration, embedded macro detection, OLE parsing
-//! 3. **Policy engine** — Configurable allowlists/blocklists, size limits, nesting depth limits
-//! 4. **Verdict generation** — Risk scoring and actionable classification
+//! 3. **Bounded archive extraction** — ZIP containers are recursed into up to
+//!    `max_nesting_depth` levels under `max_archive_entries` and
+//!    `max_total_extracted_size` budgets; every extracted entry is
+//!    re-inspected on its DECOMPRESSED content ([`archive`])
+//! 4. **Policy engine** — Configurable allowlists/blocklists, size limits, nesting depth limits
+//! 5. **Verdict generation** — Risk scoring and actionable classification
 //!
-//! On Linux, this module can additionally leverage://! - **Namespaces** (mount, PID, network, user) for filesystem isolation
-//! - **cgroups v2** for memory/CPU limits on analysis processes
-//! - **seccomp-BPF** for syscall filtering
+//! ## What this is NOT (read before relying on it)
 //!
-//! These OS-level features are behind the `linux-sandbox` feature flag.
+//! This module performs **static analysis only**. Despite claims in
+//! historical revisions of these docs, it does NOT use Linux namespaces,
+//! cgroups v2, seccomp-BPF, or any other OS-level isolation primitive,
+//! there is no `linux-sandbox` feature flag, and no process is ever
+//! spawned: there is no detonation. Resource usage is bounded by explicit
+//! budgets (file size, extraction bytes/entries, analysis wall-clock), not
+//! by an OS sandbox. The optional [`dynamic_analyzers`] hooks (YARA-style
+//! signatures, ClamAV) are also plain in-process scanners.
 //!
-//! ## Non-Linux Platforms
+//! ## Platform notes
 //!
-//! On non-Linux (macOS, Windows), full process isolation is unavailable.
-//! The sandbox still provides static analysis, content inspection, and policy enforcement,
-//! which catch the vast majority of malicious attachments without process execution.
+//! The static inspection and archive extraction run identically on every
+//! platform. The ClamAV dynamic analyzer requires a Unix domain socket and
+//! fails closed (explicit unsupported verdict) on non-Unix targets.
 
 #![deny(unsafe_code)]
 #![deny(clippy::unwrap_used)]
 #![warn(missing_docs)]
 
+pub mod archive;
 pub mod config;
 pub mod dynamic_analyzers;
 pub mod engine;

@@ -702,9 +702,10 @@ fn parse_attachment_scan_mode(raw: &str) -> anyhow::Result<AttachmentScanAction>
 
 fn parse_f64_env(name: &str, default: f64) -> anyhow::Result<f64> {
     match std::env::var(name) {
-        Ok(raw) => raw.trim().parse::<f64>().map_err(|_| {
-            anyhow::anyhow!("{name} must be a number, got {raw:?}")
-        }),
+        Ok(raw) => raw
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| anyhow::anyhow!("{name} must be a number, got {raw:?}")),
         Err(_) => Ok(default),
     }
 }
@@ -1472,7 +1473,10 @@ mod adversarial_env_tests {
         assert!(config.inbound.spam_filter.reject_at_data);
         assert!((config.inbound.spam_filter.reject_threshold - 7.5).abs() < f64::EPSILON);
         assert!(config.inbound.attachment_scan.enabled);
-        assert_eq!(config.inbound.attachment_scan.action, AttachmentScanAction::Strip);
+        assert_eq!(
+            config.inbound.attachment_scan.action,
+            AttachmentScanAction::Strip
+        );
         assert!(config.inbound.ids.enabled);
         assert!(config.inbound.ids.refuse);
 

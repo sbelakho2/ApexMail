@@ -853,18 +853,11 @@ impl AuditLogger {
     /// active (fall back to keep). Both the copy and the delete apply the
     /// same exclusion, so held rows simply stay live.
     pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
-        // Held tenants, best-effort: no tenants table / no legal_hold column
-        // (pre-121) → no exclusion possible, behave as before.
-        let held: Option<Vec<String>> =
-            match sqlx::query_scalar("SELECT id FROM tenants WHERE legal_hold = true")
-                .fetch_all(&self.db)
-                .await
-            {
-                Ok(ids) => Some(ids),
-                Err(e) if is_undefined_table(&e) => None,
-                Err(e) if is_undefined_column(&e) => None,
-                Err(e) => return Err(format!("DB error (legal hold lookup): {e}")),
-            };
+        // F5/F4: held tenants via the ONE central legal-hold authority
+        // (`legal_hold::active_holds`) — previously this carried its own
+        // inline copy of the same lookup. No tenants table / no legal_hold
+        // column (pre-121) → no exclusion possible, behave as before.
+        let held: Option<Vec<String>> = crate::legal_hold::active_holds(&self.db).await?;
         // `tenant_id IS NOT NULL AND tenant_id <> ALL($2)`: NULL-tenant rows
         // are excluded too while any hold is active.
         let any_held = held.as_ref().is_some_and(|ids| !ids.is_empty());
@@ -1088,15 +1081,8 @@ fn is_undefined_table(err: &sqlx::Error) -> bool {
         .map(|c| c == "42P01")
         .unwrap_or(false)
 }
-
-/// Postgres undefined_column (42703) — e.g. `tenants.legal_hold` before
-/// migration 121 on a runtime-provisioned database.
-fn is_undefined_column(err: &sqlx::Error) -> bool {
-    err.as_database_error()
-        .and_then(|d| d.code())
-        .map(|c| c == "42703")
-        .unwrap_or(false)
-}
+// (the former `is_undefined_column` helper died with archive()'s inline
+// legal-hold lookup — that logic now lives in `legal_hold::active_holds`)
 
 #[derive(Debug, Clone)]
 pub struct ExportResult {
@@ -2312,10 +2298,7 @@ mod db_tests {
         let legacy_hash = "legacy-null-tenant-head";
         let tenant = test_support::unique_tenant();
         let tenant_hash = "attributed-tenant-head";
-        for (tenant_id, hash) in [
-            (None, legacy_hash),
-            (Some(tenant.as_str()), tenant_hash),
-        ] {
+        for (tenant_id, hash) in [(None, legacy_hash), (Some(tenant.as_str()), tenant_hash)] {
             sqlx::query(
                 "INSERT INTO audit_logs (id, tenant_id, action, resource, outcome, timestamp, hash, signature)
                  VALUES ($1, $2, 'create', 'api_key', 'success', NOW(), $3, 'sig')",
@@ -2410,7 +2393,12 @@ mod db_tests {
         };
         let tenant = test_support::unique_tenant();
         let entry = logger
-            .log_create(AuditResource::ApiKey, "k-1", json!({"probe": "archive"}), &ctx(&tenant))
+            .log_create(
+                AuditResource::ApiKey,
+                "k-1",
+                json!({"probe": "archive"}),
+                &ctx(&tenant),
+            )
             .await
             .expect("log");
         assert_eq!(
@@ -2428,7 +2416,9 @@ mod db_tests {
             .expect("archived entry is still readable");
         assert_eq!(from_archive.hash, entry.hash);
         assert!(
-            logger.verify_chain_entries(std::slice::from_ref(&from_archive)).valid,
+            logger
+                .verify_chain_entries(std::slice::from_ref(&from_archive))
+                .valid,
             "the archive round-trip preserves verifiability"
         );
 
@@ -2437,9 +2427,16 @@ mod db_tests {
         forged.signature = "0".repeat(64);
         let verdict = logger.verify_chain_entries(&[forged.clone()]);
         assert!(!verdict.valid, "signature forgery must not verify");
-        assert_eq!(verdict.first_invalid_entry.as_deref(), Some(forged.id.as_str()));
+        assert_eq!(
+            verdict.first_invalid_entry.as_deref(),
+            Some(forged.id.as_str())
+        );
         assert!(
-            verdict.error.as_deref().unwrap_or_default().contains("Signature mismatch"),
+            verdict
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Signature mismatch"),
             "{verdict:?}"
         );
         pool.close().await;

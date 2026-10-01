@@ -107,7 +107,11 @@ impl ServiceAuth {
     pub fn from_env() -> Result<Self, String> {
         let dedicated = std::env::var(DEDICATED_TOKEN_ENV).ok();
         let universal = std::env::var("INTERNAL_SERVICE_TOKEN").ok();
-        Self::resolve(dedicated.as_deref(), universal.as_deref(), is_production_mode())
+        Self::resolve(
+            dedicated.as_deref(),
+            universal.as_deref(),
+            is_production_mode(),
+        )
     }
 
     /// Timing-safe authorization decision for a presented credential.
@@ -146,7 +150,10 @@ mod tests {
         let auth = ServiceAuth::resolve(Some("dedicated-secret"), Some("universal"), false)
             .expect("dedicated config resolves");
         assert!(auth.authorize("dedicated-secret"));
-        assert!(!auth.authorize("universal"), "universal token must be refused");
+        assert!(
+            !auth.authorize("universal"),
+            "universal token must be refused"
+        );
         assert!(!auth.authorize("wrong"));
         assert!(auth.dedicated_configured());
         // The universal attempt is detected so the middleware can log loudly.
@@ -186,8 +193,8 @@ mod tests {
     fn dedicated_equal_to_universal_is_flagged_but_still_required() {
         // Misconfiguration (same secret everywhere) still authorizes ONLY the
         // one value — resolve() logs the warning at boot.
-        let auth = ServiceAuth::resolve(Some("same"), Some("same"), false)
-            .expect("resolve succeeds");
+        let auth =
+            ServiceAuth::resolve(Some("same"), Some("same"), false).expect("resolve succeeds");
         assert!(auth.authorize("same"));
         assert!(!auth.is_refused_universal_attempt("same"));
     }
@@ -208,7 +215,9 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Sets env vars for its lifetime and restores the previous values
@@ -265,9 +274,9 @@ mod tests {
         // drop: the inner guard removes it (fail-closed again), and its own
         // drop undoes the removal.
         {
-            let outer = EnvGuard::with(&[("APP_ENV", Some("staging"))]);
+            let _outer = EnvGuard::with(&[("APP_ENV", Some("staging"))]);
             {
-                let inner = EnvGuard::with(&[("APP_ENV", None)]);
+                let _inner = EnvGuard::with(&[("APP_ENV", None)]);
                 assert!(is_production_mode(), "a removed APP_ENV fails closed");
             }
             assert!(
@@ -339,8 +348,8 @@ mod tests {
 
     #[test]
     fn accepted_token_is_exposed_for_boot_diagnostics_only() {
-        let auth = ServiceAuth::resolve(Some("diagnostic-secret"), None, false)
-            .expect("resolve succeeds");
+        let auth =
+            ServiceAuth::resolve(Some("diagnostic-secret"), None, false).expect("resolve succeeds");
         assert_eq!(auth.accepted_token(), "diagnostic-secret");
     }
 }

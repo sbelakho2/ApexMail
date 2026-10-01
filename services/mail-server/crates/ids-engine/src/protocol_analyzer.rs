@@ -17,8 +17,24 @@ pub struct ProtocolAnomaly {
     pub protocol: String,
 }
 
+/// SMTP conversation phase a payload belongs to (audit SM5 F6).
+///
+/// The NUL-byte rule (3000004) is a COMMAND-stream evasion signal: NULs
+/// inside SMTP verbs can smuggle or confuse command parsing. During DATA,
+/// NUL bytes are ORDINARY MAIL CONTENT — 8BITMIME bodies, base64-decoded
+/// attachments (PDFs, images, zip archives) all contain `0x00` — so the
+/// same rule applied to DATA refused every binary message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SmtpPhase {
+    /// Command stream (before DATA): EHLO/MAIL/RCPT/DATA/... lines.
+    #[default]
+    Command,
+    /// Message content inside the DATA phase.
+    Data,
+}
+
 /// Validate SMTP data for protocol-level anomalies
-pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
+pub fn analyze_smtp(payload: &[u8], phase: SmtpPhase) -> Vec<ProtocolAnomaly> {
     let mut anomalies = Vec::new();
     let text = String::from_utf8_lossy(payload);
 
@@ -101,11 +117,13 @@ pub fn analyze_smtp(payload: &[u8]) -> Vec<ProtocolAnomaly> {
         });
     }
 
-    // Null bytes in SMTP stream
-    if payload.contains(&0u8) {
+    // Null bytes in the SMTP COMMAND stream (audit SM5 F6: DATA payloads
+    // are exempt — binary mail content legitimately contains NULs, and a
+    // DATA-phase Drop here refused every non-base64 binary attachment).
+    if phase == SmtpPhase::Command && payload.contains(&0u8) {
         anomalies.push(ProtocolAnomaly {
             id: 3000004,
-            message: "Null byte in SMTP stream (possible evasion)".into(),
+            message: "Null byte in SMTP command stream (possible evasion)".into(),
             severity: SigSeverity::High,
             action: SignatureAction::Drop,
             protocol: "smtp".into(),
@@ -307,15 +325,43 @@ mod tests {
     #[test]
     fn test_smtp_bare_lf() {
         let payload = b"EHLO test.com\nMAIL FROM:<a@b.com>\n";
-        let anomalies = analyze_smtp(payload);
+        let anomalies = analyze_smtp(payload, SmtpPhase::Command);
         assert!(anomalies.iter().any(|a| a.id == 3000002));
     }
 
     #[test]
     fn test_smtp_null_byte() {
         let payload = b"EHLO test\x00.com\r\n";
-        let anomalies = analyze_smtp(payload);
+        let anomalies = analyze_smtp(payload, SmtpPhase::Command);
         assert!(anomalies.iter().any(|a| a.id == 3000004));
+    }
+
+    // ── Audit SM5 F6:the NUL rule is command-phase only ──────────────
+
+    #[test]
+    fn test_smtp_data_phase_nul_bytes_are_exempt() {
+        // A binary attachment body (e.g. an embedded PDF/zip) contains
+        // NUL bytes; in the DATA phase this is ordinary mail content and
+        // must NOT be classified as evasion.
+        let mut payload = b"Content-Type: application/octet-stream\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0x00, 0xFE, 0x00]);
+        let anomalies = analyze_smtp(&payload, SmtpPhase::Data);
+        assert!(
+            !anomalies.iter().any(|a| a.id == 3000004),
+            "NUL bytes in a DATA payload must not fire 3000004, got {:?}",
+            anomalies.iter().map(|a| a.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_smtp_command_phase_nul_bytes_still_drop() {
+        let payload = b"MAIL FROM:<a@b.com>\x00RCPT TO:<c@d.com>\r\n";
+        let anomalies = analyze_smtp(payload, SmtpPhase::Command);
+        assert!(anomalies.iter().any(|a| a.id == 3000004));
+        assert!(matches!(
+            anomalies.iter().find(|a| a.id == 3000004).map(|a| a.action),
+            Some(SignatureAction::Drop)
+        ));
     }
 
     #[test]
@@ -336,7 +382,7 @@ mod tests {
     #[test]
     fn test_smtp_bare_cr() {
         let payload = b"EHLO test.com\rMAIL FROM:<a@b.com>\r\n";
-        let anomalies = analyze_smtp(payload);
+        let anomalies = analyze_smtp(payload, SmtpPhase::Command);
         assert!(anomalies.iter().any(|a| a.id == 3000005));
     }
 

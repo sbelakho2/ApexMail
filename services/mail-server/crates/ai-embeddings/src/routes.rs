@@ -3,7 +3,7 @@
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, Json, State},
-    http::{header::AUTHORIZATION, Request, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -19,6 +19,12 @@ use crate::config::EmbeddingsConfig;
 use crate::embeddings::EmbeddingService;
 use crate::vector_store::VectorStore;
 
+/// SM9 #6: the gateway-asserted tenant identity header (the ai-service
+/// "P1-SECURITY" convention). The control-plane gateway sets it AFTER its
+/// own authorization, so a holder of the shared internal service token can
+/// never name an arbitrary tenant in the request body and act as it.
+pub const TENANT_HEADER: &str = "x-apexmail-tenant-id";
+
 pub struct AppState {
     pub embedding_service: EmbeddingService,
     pub vector_store: VectorStore,
@@ -27,6 +33,53 @@ pub struct AppState {
     /// `INTERNAL_SERVICE_TOKEN` authorizes nothing here once the dedicated
     /// `AI_EMBEDDINGS_AUTH_TOKEN` is configured.
     pub service_auth: ServiceAuth,
+    /// SM9 #6: DEV-ONLY escape hatch (`AI_EMBEDDINGS_TRUST_BODY_TENANT`).
+    /// When `false` (the default), `/vectors` and `/search` require the
+    /// gateway-asserted [`TENANT_HEADER`] cross-checked against the body
+    /// `tenant_id`. Never enable outside a local, gateway-less dev run.
+    pub trust_body_tenant: bool,
+}
+
+/// SM9 #6: resolve the tenant scope for `/vectors` and `/search`.
+///
+/// The gateway-asserted [`TENANT_HEADER`] is REQUIRED: absent (or empty) is
+/// a 401 and a mismatch with the body `tenant_id` is a 403 — both fail
+/// closed. `trust_body_tenant` (the `AI_EMBEDDINGS_TRUST_BODY_TENANT`
+/// escape hatch) restores the old body-trusting behavior for local,
+/// gateway-less dev runs only.
+fn resolve_tenant_scope(
+    headers: &HeaderMap,
+    body_tenant: &str,
+    trust_body_tenant: bool,
+) -> Result<(), (StatusCode, String)> {
+    if trust_body_tenant {
+        return Ok(());
+    }
+    let asserted = headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                format!(
+                    "missing required {TENANT_HEADER} header: the gateway must assert the \
+                     authenticated tenant identity (AI_EMBEDDINGS_TRUST_BODY_TENANT is the \
+                     dev-only escape hatch)"
+                ),
+            )
+        })?;
+    if asserted != body_tenant.trim() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "{TENANT_HEADER} ({asserted}) does not match the body tenant_id \
+                 ({body_tenant}) — refusing a cross-tenant scope"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -178,8 +231,16 @@ async fn embed_handler(
 
 async fn add_vector_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<AddVectorRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // SM9 #6: the caller's tenant scope is gateway-asserted, not just
+    // body-asserted — fail closed on absence/mismatch.
+    if let Err((status, msg)) =
+        resolve_tenant_scope(&headers, &req.tenant_id, state.trust_body_tenant)
+    {
+        return (status, Json(serde_json::json!({ "error": msg })));
+    }
     let mut metadata = match req.metadata {
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
@@ -200,8 +261,16 @@ async fn add_vector_handler(
 
 async fn search_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<SearchRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // SM9 #6: identity before capability — the tenant scope is validated
+    // before any search work happens.
+    if let Err((status, msg)) =
+        resolve_tenant_scope(&headers, &req.tenant_id, state.trust_body_tenant)
+    {
+        return (status, Json(serde_json::json!({ "error": msg })));
+    }
     // F11:reject out-of-range top_k before touching the heap.
     if let Err(msg) = validate_top_k(req.top_k) {
         return (
@@ -282,6 +351,8 @@ mod tests {
             // single credential, the universal token refuses.
             service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
                 .expect("test auth resolves"),
+            // SM9 #6: gateway tenant assertion is ON by default.
+            trust_body_tenant: false,
         });
         let _router = router(state);
     }
@@ -345,6 +416,8 @@ mod tests {
             // token string.
             service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
                 .expect("test auth resolves"),
+            // SM9 #6: gateway tenant assertion is ON by default.
+            trust_body_tenant: false,
         })
     }
 
@@ -446,6 +519,7 @@ mod tests {
             config: template.config.clone(),
             service_auth: crate::auth::ServiceAuth::resolve(None, None, false)
                 .expect("deny-all auth resolves"),
+            trust_body_tenant: false,
         });
         let locked = router(empty_token_state);
         let response = locked
@@ -481,6 +555,7 @@ mod tests {
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config: template.config.clone(),
             service_auth: auth,
+            trust_body_tenant: false,
         });
         let app = router(state);
         let probe = |app: axum::Router, key: &'static str| {
@@ -516,22 +591,26 @@ mod tests {
     async fn unset_dedicated_token_keeps_universal_token_working() {
         use tower::ServiceExt;
         let template = test_state();
-        let auth =
-            crate::auth::ServiceAuth::resolve(None, Some("universal-legacy"), false)
-                .expect("legacy auth resolves");
+        let auth = crate::auth::ServiceAuth::resolve(None, Some("universal-legacy"), false)
+            .expect("legacy auth resolves");
         let state = Arc::new(AppState {
             embedding_service: EmbeddingService::new(template.config.inference.clone())
                 .expect("service"),
             vector_store: VectorStore::new(384, 1000, 900, vec![]),
             config: template.config.clone(),
             service_auth: auth,
+            trust_body_tenant: false,
         });
         let app = router(state);
         let response = app
             .oneshot(auth_request("GET", "/stats", Some("universal-legacy")))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "legacy token still works"
+        );
     }
 
     #[tokio::test]
@@ -552,6 +631,7 @@ mod tests {
                     .method("POST")
                     .uri("/vectors")
                     .header("x-api-key", "test-key")
+                    .header(TENANT_HEADER, "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -575,6 +655,7 @@ mod tests {
                     .method("POST")
                     .uri("/vectors")
                     .header("x-api-key", "test-key")
+                    .header(TENANT_HEADER, "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -601,6 +682,7 @@ mod tests {
                         .method("POST")
                         .uri("/search")
                         .header("x-api-key", "test-key")
+                        .header(TENANT_HEADER, "tenant-a")
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::json!({
@@ -627,6 +709,7 @@ mod tests {
                         .method("POST")
                         .uri("/search")
                         .header("x-api-key", "test-key")
+                        .header(TENANT_HEADER, tenant)
                         .header("content-type", "application/json")
                         .body(Body::from(
                             serde_json::json!({
@@ -678,9 +761,7 @@ mod tests {
                     .uri("/embed")
                     .header("x-api-key", "test-key")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "texts": [] }).to_string(),
-                    ))
+                    .body(Body::from(serde_json::json!({ "texts": [] }).to_string()))
                     .unwrap(),
             )
             .await
@@ -706,6 +787,7 @@ mod tests {
                     .method("POST")
                     .uri("/search")
                     .header("x-api-key", "test-key")
+                    .header(TENANT_HEADER, "tenant-a")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -726,5 +808,175 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["count"], 0, "the store is empty in this test: {json}");
         assert_eq!(json["results"].as_array().unwrap().len(), 0, "{json}");
+    }
+
+    // ── SM9 #6: gateway-asserted tenant identity on /vectors + /search ──
+
+    /// POST a JSON body to `path` with (optionally) a tenant header.
+    async fn post_with_tenant(
+        app: axum::Router,
+        path: &'static str,
+        body: serde_json::Value,
+        tenant_header: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json");
+        if let Some(tenant) = tenant_header {
+            builder = builder.header(TENANT_HEADER, tenant);
+        }
+        let response = app
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("request body"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn search_body(tenant: &str) -> serde_json::Value {
+        let mut unit = vec![0.0f32; 384];
+        unit[0] = 1.0;
+        serde_json::json!({ "vector": unit, "tenant_id": tenant, "top_k": 5 })
+    }
+
+    /// SM9 #6: WITHOUT the gateway-asserted header both tenant routes fail
+    /// closed with 401 — a holder of the shared service token can no longer
+    /// name an arbitrary tenant in the body and act as it.
+    #[tokio::test]
+    async fn missing_tenant_header_is_unauthorized_on_vectors_and_search() {
+        let app = router(test_state());
+
+        let (status, body) = post_with_tenant(
+            app.clone(),
+            "/vectors",
+            serde_json::json!({"text": "t", "vector": vec![0.0f32; 384], "tenant_id": "tenant-a"}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body["error"].as_str().unwrap().contains(TENANT_HEADER));
+
+        let (status, body) = post_with_tenant(app, "/search", search_body("tenant-a"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+
+    /// SM9 #6: a header that names a DIFFERENT tenant than the body is a 403.
+    #[tokio::test]
+    async fn mismatched_tenant_header_is_forbidden() {
+        let app = router(test_state());
+
+        let (status, body) = post_with_tenant(
+            app.clone(),
+            "/vectors",
+            serde_json::json!({"text": "t", "vector": vec![0.0f32; 384], "tenant_id": "tenant-a"}),
+            Some("tenant-evil"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("does not match"));
+
+        let (status, body) =
+            post_with_tenant(app, "/search", search_body("tenant-a"), Some("tenant-evil")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    /// SM9 #6: header and body AGREEING authorizes, and the store stays
+    /// scoped to the agreed tenant.
+    #[tokio::test]
+    async fn matching_tenant_header_authorizes_and_stores_scoped() {
+        let state = test_state();
+        let app = router(state.clone());
+
+        let (status, body) = post_with_tenant(
+            app,
+            "/vectors",
+            serde_json::json!({
+                "text": "scoped row",
+                "vector": vec![1.0f32; 384],
+                "tenant_id": "tenant-a"
+            }),
+            Some("tenant-a"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(state.vector_store.len(), 1);
+    }
+
+    /// SM9 #6: the `AI_EMBEDDINGS_TRUST_BODY_TENANT` escape hatch (dev-only)
+    /// removes the header requirement — that is exactly why it must default
+    /// to false and never run outside a local, gateway-less environment.
+    #[tokio::test]
+    async fn trust_body_tenant_escape_hatch_removes_the_header_requirement() {
+        let template = test_state();
+        let dev_state = Arc::new(AppState {
+            embedding_service: EmbeddingService::new(template.config.inference.clone())
+                .expect("service"),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
+            config: template.config.clone(),
+            service_auth: crate::auth::ServiceAuth::resolve(Some("test-key"), None, false)
+                .expect("test auth resolves"),
+            trust_body_tenant: true,
+        });
+        let app = router(dev_state);
+
+        // No header at all: the body tenant is trusted (dev behavior).
+        let mut unit = vec![0.0f32; 384];
+        unit[0] = 1.0;
+        let (status, body) = post_with_tenant(
+            app.clone(),
+            "/vectors",
+            serde_json::json!({"text": "dev", "vector": unit, "tenant_id": "dev-tenant"}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let (status, _) = post_with_tenant(app, "/search", search_body("dev-tenant"), None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// SM9 #6: the scope resolver unit contract — trim-tolerant, empty
+    /// header values count as absent, whitespace-only body tenants must
+    /// match exactly after trimming.
+    #[test]
+    fn tenant_scope_resolver_unit_contract() {
+        let mut headers = HeaderMap::new();
+        // Absent → 401.
+        assert_eq!(
+            resolve_tenant_scope(&headers, "tenant-a", false)
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // Empty/whitespace header counts as absent → 401.
+        headers.insert(TENANT_HEADER, "   ".parse().unwrap());
+        assert_eq!(
+            resolve_tenant_scope(&headers, "tenant-a", false)
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // Mismatch → 403.
+        headers.insert(TENANT_HEADER, "tenant-b".parse().unwrap());
+        assert_eq!(
+            resolve_tenant_scope(&headers, "tenant-a", false)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        // Agreement (trimmed) → Ok; and the escape hatch skips everything.
+        headers.insert(TENANT_HEADER, " tenant-a ".parse().unwrap());
+        assert!(resolve_tenant_scope(&headers, "tenant-a ", false).is_ok());
+        assert!(resolve_tenant_scope(&HeaderMap::new(), "anything", true).is_ok());
     }
 }

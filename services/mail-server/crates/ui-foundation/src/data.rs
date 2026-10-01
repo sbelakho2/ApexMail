@@ -168,7 +168,7 @@ mod tests {
         assert!(CONTROL_PLANE_MIDDLEWARE_SOURCE.contains("CSRF token invalid"));
         assert!(CONTROL_PLANE_MIDDLEWARE_SOURCE.contains("sessionBinding"));
         assert!(FRONTEND_ENDPOINT_BASELINE_SOURCE.contains("/v1/auth/forgot-password"));
-        assert!(FRONTEND_ENDPOINT_BASELINE_SOURCE.contains("/api/v1/discovery/run"));
+        assert!(FRONTEND_ENDPOINT_BASELINE_SOURCE.contains("/web/admin/sales/discovery/run"));
     }
 
     #[test]
@@ -212,8 +212,8 @@ mod tests {
                 && *status == 200));
         assert_eq!(endpoints.len(), 13);
         assert_eq!(patterns.len(), 13);
-        assert!(patterns.contains(&"/api/v1/operator/*"));
-        assert!(endpoints.contains(&"/api/v1/discovery/run"));
+        assert!(patterns.contains(&"/v1/admin/operators*"));
+        assert!(endpoints.contains(&"/web/admin/sales/discovery/run"));
         assert!(auth_networks.contains(&("/v1/auth/csrf", "GET", 200)));
         assert!(auth_networks.contains(&("/v1/auth/session", "GET", 200)));
     }

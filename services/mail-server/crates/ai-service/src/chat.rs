@@ -131,6 +131,11 @@ pub struct ChatService {
     verifier: ResponseVerifier,
     pool: Option<PgPool>,
     model_enabled: bool,
+    /// SM9 #3: `AI_SANITIZE_AI_OUTPUT` wired to the output-sanitization pass
+    /// in [`ChatService::build_response`]. Default `true`. `false` is a
+    /// fail-closed refusal — generative answers are refused with an honest
+    /// error; it does NOT create an unsanitized path.
+    sanitize_ai_output: bool,
 }
 
 /// Sanitize and validate one replayed history turn, returning
@@ -222,6 +227,7 @@ impl ChatService {
             verifier: ResponseVerifier::new(),
             pool,
             model_enabled: config.model_enabled,
+            sanitize_ai_output: config.sanitize_ai_output,
         }
     }
 
@@ -317,6 +323,21 @@ been noted for the support team — you can also reach them at support@apexmail.
                 true,
                 &docs_version,
                 retrieval_state,
+            ));
+        }
+
+        // 3b. SM9 #3: the operator cannot trade output sanitization away.
+        // `AI_SANITIZE_AI_OUTPUT=false` refuses generative answers outright
+        // (fail closed) — it never creates an unsanitized output path.
+        if !self.sanitize_ai_output {
+            tracing::warn!(
+                "AI_SANITIZE_AI_OUTPUT=false — refusing to generate an answer that could \
+                 not be sanitized; failing closed"
+            );
+            return Err(AiError::ModelUnavailable(
+                "output sanitization is disabled (AI_SANITIZE_AI_OUTPUT=false); generative \
+                 answers are refused — re-enable sanitization to restore chat"
+                    .into(),
             ));
         }
 
@@ -462,6 +483,15 @@ support@apexmail.ee."
         docs_version: &str,
         retrieval_state: RetrievalState,
     ) -> (ChatResponse, ChatAuditRow) {
+        // SM9 #1: EVERY answer — model output and canned escalation alike —
+        // runs through the ammonia allowlist BEFORE it reaches the HTTP
+        // response or the audit persistence. The verifier's rejection rules
+        // are a blocklist upstream; this allowlist is the layer that cannot
+        // be bypassed by a payload its detectors never saw, and it is
+        // unconditional: there is no detect-then-strip gate here. Because
+        // both the response and the audit row are built from the sanitized
+        // value, `/admin/chat/history` can never re-serve a raw payload.
+        let answer = crate::content::sanitize_model_output(&answer);
         let audit = ChatAuditRow {
             tenant_id: req.tenant_id.clone(),
             user_id: req.user_id.clone(),
@@ -940,6 +970,120 @@ mod tests {
         assert!(matches!(result, Err(AiError::ModelUnavailable(_))));
     }
 
+    // ── SM9 #1/#3: output sanitization on the live path ──────────────────
+
+    /// SM9 #1: a raw (non-entity-encoded) `<script>` payload in the model
+    /// answer is refused — the verifier's raw-markup rejection fires, the
+    /// answer follows the escalation ladder, and neither the HTTP response
+    /// nor the persisted audit row ever carries the payload.
+    #[tokio::test]
+    async fn chat_refuses_raw_script_payload_from_the_model() {
+        let _serial = ENV_SERIAL.lock().await;
+        let xss = "Sure! The Pro plan costs \u{20ac}65 per month. <script>alert('xss')</script>";
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(xss)]).await;
+        let svc = enabled_service(&mock.endpoint(), None);
+
+        let (resp, audit) = svc
+            .chat(&chat_request("What does the Pro plan cost?", vec![]))
+            .await
+            .expect("chat itself succeeds");
+        assert!(resp.escalated, "raw-markup answers must be refused");
+        assert!(!resp.passed_policy_verification);
+        assert!(
+            !resp.answer.contains("<script"),
+            "the payload must not reach the caller: {}",
+            resp.answer
+        );
+        assert!(
+            !audit.answer.contains("<script"),
+            "the payload must not reach the audit table: {}",
+            audit.answer
+        );
+        // The escalation ladder ran: generation + one corrective retry, both
+        // refused by the verifier before the honest escalation shipped.
+        assert_eq!(mock.request_count(), 2);
+    }
+
+    /// SM9 #1: `build_response` is the unconditional backstop — EVERY answer
+    /// (model output and canned text alike) is allowlist-sanitized once and
+    /// both the response and the audit row are built from that sanitized
+    /// value, so `/admin/chat/history` can never re-serve a raw payload.
+    #[test]
+    fn build_response_sanitizes_answer_for_response_and_audit_alike() {
+        let cfg = AiConfig::default();
+        let svc = ChatService::new(&cfg, None);
+        let raw = "<p>The Pro plan is <strong>great</strong>.</p><script>alert(1)</script>";
+        let (resp, audit) = svc.build_response(
+            &chat_request("q", vec![]),
+            raw.to_string(),
+            Vec::new(),
+            false,
+            true,
+            "",
+            RetrievalState::Empty,
+        );
+        assert!(!resp.answer.contains("<script"), "{}", resp.answer);
+        assert!(!audit.answer.contains("<script"), "{}", audit.answer);
+        assert_eq!(resp.answer, audit.answer, "one sanitized value, two sinks");
+        assert!(
+            resp.answer.contains("The Pro plan is"),
+            "benign prose survives: {}",
+            resp.answer
+        );
+    }
+
+    /// SM9 #3: `AI_SANITIZE_AI_OUTPUT=false` refuses generative answers
+    /// outright — a fail-closed honest error, no model call is even spent,
+    /// and no unsanitized path exists.
+    #[tokio::test]
+    async fn chat_with_sanitization_disabled_fails_closed() {
+        let _serial = ENV_SERIAL.lock().await;
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(CHAT_ANSWER)]).await;
+        let cfg = AiConfig {
+            model_enabled: true,
+            model_endpoint: mock.endpoint(),
+            sanitize_ai_output: false,
+            ..AiConfig::default()
+        };
+        let svc = ChatService::new(&cfg, None);
+        let result = svc
+            .chat(&chat_request("What does the Pro plan cost?", vec![]))
+            .await;
+        match result {
+            Err(AiError::ModelUnavailable(msg)) => {
+                assert!(
+                    msg.contains("AI_SANITIZE_AI_OUTPUT"),
+                    "the refusal names the knob: {msg}"
+                );
+            }
+            other => panic!("sanitization-off must fail closed, got {other:?}"),
+        }
+        assert_eq!(
+            mock.request_count(),
+            0,
+            "a refused answer never reaches the model"
+        );
+    }
+
+    /// SM9 #3: the default (`AI_SANITIZE_AI_OUTPUT=true`) answers normally.
+    #[tokio::test]
+    async fn chat_with_sanitization_enabled_answers() {
+        let _serial = ENV_SERIAL.lock().await;
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(CHAT_ANSWER)]).await;
+        let cfg = AiConfig {
+            model_enabled: true,
+            model_endpoint: mock.endpoint(),
+            sanitize_ai_output: true,
+            ..AiConfig::default()
+        };
+        let svc = ChatService::new(&cfg, None);
+        let (resp, _) = svc
+            .chat(&chat_request("What does the Pro plan cost?", vec![]))
+            .await
+            .expect("chat succeeds with sanitization on");
+        assert_eq!(resp.answer, CHAT_ANSWER);
+    }
+
     /// P1-GROUNDING end-to-end: a `[1]` marker whose passage does not contain
     /// the claim's numbers ("72 hours") is rejected — one corrective retry,
     /// then the human-review escalation. When the indexed passage DOES carry
@@ -991,11 +1135,18 @@ mod tests {
             .chat(&chat_request("How quickly do soft bounces clear?", vec![]))
             .await
             .expect("chat succeeds");
-        assert!(resp.escalated, "the fabricated 72-hours claim must escalate");
+        assert!(
+            resp.escalated,
+            "the fabricated 72-hours claim must escalate"
+        );
         assert!(!resp.passed_policy_verification);
         assert!(resp.answer.contains("I couldn't produce a verified answer"));
         assert!(audit.escalated);
-        assert_eq!(mock.request_count(), 2, "one corrective retry, then escalation");
+        assert_eq!(
+            mock.request_count(),
+            2,
+            "one corrective retry, then escalation"
+        );
 
         // Supported: the passage itself carries the warmup guidance, so the
         // cited claim passes and keeps its citation.
@@ -1003,7 +1154,11 @@ mod tests {
             .chat(&chat_request("How do I warm up my IP?", vec![]))
             .await
             .expect("chat succeeds");
-        assert!(!resp.escalated, "passage-backed claim must pass: {}", resp.answer);
+        assert!(
+            !resp.escalated,
+            "passage-backed claim must pass: {}",
+            resp.answer
+        );
         assert!(resp.passed_policy_verification);
         assert_eq!(resp.citations.len(), 1, "the [1] citation is retained");
         assert_eq!(resp.citations[0].path, "warmup.md");
@@ -1249,11 +1404,8 @@ mod tests {
         // (1) A citation-marker answer under Unavailable retrieval: retried
         //     once with the deterministic hint, then escalated honestly.
         let cited = "The Pro plan costs €65 per month [1].";
-        let mock_cited = spawn_scripted_llm(vec![
-            LlmScript::Content(cited),
-            LlmScript::Content(cited),
-        ])
-        .await;
+        let mock_cited =
+            spawn_scripted_llm(vec![LlmScript::Content(cited), LlmScript::Content(cited)]).await;
         let svc = enabled_service(&mock_cited.endpoint(), Some(dead_pool.clone()));
         let (resp, audit) = svc
             .chat(&chat_request("What does the Pro plan cost?", vec![]))

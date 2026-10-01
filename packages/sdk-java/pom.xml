@@ -6,7 +6,7 @@
 
   <groupId>ee.apexmail</groupId>
   <artifactId>apexmail-java</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
   <packaging>jar</packaging>
 
   <name>ApexMail Java SDK</name>

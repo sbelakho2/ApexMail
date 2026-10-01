@@ -56,7 +56,7 @@ comparison_sections = [
   { title = "AREAS WHERE AMAZON SES IS STRONGER", rows = [
     { feature = "Raw cost per email", apex = 'See the current public catalog and checkout for applicable usage terms', comp = '€0.09 (US$0.10)/1,000 emails — lowest per-message cost among major providers<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS ecosystem integration", apex = 'Standalone platform with API integration', comp = 'Deep integration with AWS services: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
-    { feature = "Maximum sending volume", apex = 'Scale supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Maximum sending volume", apex = 'Business supports up to 2 million emails/month; Enterprise terms are contract-scoped', comp = 'Virtually unlimited — constrained by account sending limits which auto-scale with reputation<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Global regions", apex = 'Germany &amp; Finland (EEA focus)', comp = '22+ AWS regions globally including US, EU, APAC, South America<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]

@@ -35,9 +35,22 @@ pub struct AttachmentLimits {
 #[serde(deny_unknown_fields)]
 pub struct RetryConfig {
     pub max_retries: u32,
+    /// Base delay of the retry schedule. SM10 F16: aligned with the email
+    /// processor's actual soft-bounce base (`ProcessorConfig::retry_delay`,
+    /// 30 s) — this service mirrors that behavior, it does not invent its
+    /// own schedule.
     pub initial_delay_secs: u64,
+    /// Upper clamp for absurd operator configs; with the aligned defaults
+    /// (base 30 s, ×2, 3 retries → 30/60/120 s) it never engages.
     pub max_delay_secs: u64,
+    /// SM10 F16: aligned with the email processor's actual backoff shape
+    /// (`retry_delay * 2^attempt`).
     pub backoff_multiplier: f64,
+    /// Deprecated, retained for configuration-file compatibility
+    /// (`deny_unknown_fields` rejects removal): no longer read. Greylisted
+    /// responses follow the SAME exponential schedule as every other 4xx,
+    /// matching the email processor (SM10 F16) — the previous fixed 300 s
+    /// greylist promise was never honored by any delivery path.
     pub greylist_retry_delay_secs: u64,
 }
 
@@ -115,10 +128,16 @@ impl Default for AttachmentLimits {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
+            // SM10 F16: these three are the email processor's ACTUAL
+            // soft-bounce schedule (ProcessorConfig::default retry_delay =
+            // 30 s, max_retries = 3; handle_soft_bounce multiplies by
+            // 2^attempt). The parity tests in
+            // `services/delivery.rs` pin this alignment.
             max_retries: 3,
-            initial_delay_secs: 1,
+            initial_delay_secs: 30,
             max_delay_secs: 300,
             backoff_multiplier: 2.0,
+            // Deprecated, no longer read (see the field docs).
             greylist_retry_delay_secs: 300,
         }
     }

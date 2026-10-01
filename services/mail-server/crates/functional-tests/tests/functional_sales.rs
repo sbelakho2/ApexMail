@@ -47,29 +47,19 @@ const FUNCTIONAL_SALES_DB: &str = "apexmail_functional_sales";
 /// shared (a sqlx pool is bound to the runtime that created it, so handing
 /// one pool to parallel `#[tokio::test]` runtimes deadlocks with
 /// `PoolTimedOut`). Fresh pool per test, shared initialized database.
+///
+/// Audit F20: the env read, soft-skip contract, provisioning and bounded
+/// per-runtime pool connect are the SHARED `migrator::test_support`
+/// helpers, not a suite-local copy.
 static INIT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 
 async fn optional_db(test_name: &str) -> Option<sqlx::PgPool> {
-    let ready = INIT
+    let ready = *INIT
         .get_or_init(|| async {
-            let Some(base_url) = test_database_url() else {
+            let Some(db) =
+                migrator::test_support::provision_shared_canonical_db(FUNCTIONAL_SALES_DB).await
+            else {
                 eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
-                return false;
-            };
-            let db = match migrator::test_support::shared_canonical_db(
-                base_url.as_str(),
-                FUNCTIONAL_SALES_DB,
-            )
-            .await
-            {
-                Ok(db) => db,
-                // F01: the URL is configured, so an unreachable server or a
-                // failed clone/migration is an infrastructure FAILURE — it
-                // must fail the suite, not silently skip every test.
-                Err(error) => panic!("{}", error.panic_message()),
-            };
-            let Some(db) = db else {
-                eprintln!("skipping {test_name}: unconfigured");
                 return false;
             };
             // Post-migration assertion: `initialize_schema` VERIFIES the
@@ -89,43 +79,14 @@ async fn optional_db(test_name: &str) -> Option<sqlx::PgPool> {
     if !ready {
         return None;
     }
-    let base_url = test_database_url()?;
-    Some(connect(&database_url_for(&base_url, FUNCTIONAL_SALES_DB)).await)
-}
-
-fn test_database_url() -> Option<String> {
-    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
-    std::env::var("TEST_DATABASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-}
-
-/// Rewrite the database segment of a `postgresql://…/<db>` URL, preserving
-/// any query string (e.g. `?sslmode=disable`).
-fn database_url_for(base_url: &str, db_name: &str) -> String {
-    match base_url.rsplit_once('/') {
-        Some((server, rest)) => {
-            let query = rest
-                .split_once('?')
-                .map(|(_, query)| format!("?{query}"))
-                .unwrap_or_default();
-            format!("{server}/{db_name}{query}")
-        }
-        None => base_url.to_string(),
-    }
-}
-
-/// A FRESH pool for THIS `#[tokio::test]` runtime. A sqlx pool is bound to
-/// the runtime that created it; sharing one across test runtimes deadlocks
-/// with `PoolTimedOut` (same rationale as the sales-autopilot harness).
-async fn connect(url: &str) -> PgPool {
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        PgPoolOptions::new().max_connections(10).connect(url),
+    let base_url = migrator::test_support::test_database_url()?;
+    Some(
+        migrator::test_support::connect_pool(&migrator::test_support::database_url_for(
+            &base_url,
+            FUNCTIONAL_SALES_DB,
+        ))
+        .await,
     )
-    .await
-    .unwrap_or_else(|_| panic!("timed out connecting to canonical test database {url}"))
-    .unwrap_or_else(|error| panic!("could not connect to canonical test database {url}: {error}"))
 }
 
 fn unique_tenant(prefix: &str) -> String {
@@ -342,21 +303,35 @@ async fn campaign_lifecycle_draft_active_paused() {
 
 // ── Calendar availability ──────────────────────────────────────
 
-/// The canonical v2 schema owns `sales_meetings`, not the legacy
-/// `sales_calendar_events` table that the removed runtime
-/// `initialize_schema` DDL used to create. `CalendarService` still targets
-/// the legacy name (owned by the sales-autopilot source/migration agents),
-/// so while that name is absent the calendar tests below assert the service
-/// fails CLOSED with a diagnosable database error instead of pretending to
-/// book. When the canonical calendar store lands, the normal success
-/// assertions run again automatically.
-async fn legacy_calendar_table_present(db: &PgPool) -> bool {
-    let reg: Option<Option<String>> =
-        sqlx::query_scalar("SELECT to_regclass('public.sales_calendar_events')::text")
-            .fetch_one(db)
+/// Audit F11 schema check: the canonical migration chain DOES install the
+/// calendar stores `CalendarService` writes — `sales_calendar_events`
+/// (availability index, `migrations/200_sales_autopilot_v2_unification.sql:144`,
+/// with the `no_overlapping_events` GiST exclusion constraint) and
+/// `sales_meetings` (store of record, `:716`). The historical fail-closed
+/// branch (asserting a `Database` error naming the absent legacy table) is
+/// therefore DEAD: these tests exercise the REAL booking path end to end on
+/// the canonical schema, and will now FAIL — not silently degrade — if the
+/// tables ever vanish from the chain again.
+///
+/// Every test pins the policy with `CalendarService::with_working_hours`
+/// (UTC 09:00–17:00, Monday–Friday) so no `SALES_CALENDAR_*` environment
+/// override can change what is being asserted.
+
+/// Remove this test's calendar rows from the SHARED canonical test database
+/// (same convention as the sales-autopilot calendar unit tests): bookings
+/// are tenant-scoped, so deleting both rows of a unique tenant is exactly
+/// this test's footprint.
+async fn cleanup_calendar_tenant(db: &PgPool, tenant_id: &str) {
+    for statement in [
+        "DELETE FROM sales_meetings WHERE tenant_id = $1",
+        "DELETE FROM sales_calendar_events WHERE tenant_id = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(tenant_id)
+            .execute(db)
             .await
-            .expect("to_regclass probe must run");
-    reg.flatten().is_some()
+            .unwrap_or_else(|error| panic!("cleanup `{statement}`: {error}"));
+    }
 }
 
 #[tokio::test]
@@ -369,46 +344,48 @@ async fn calendar_within_working_hours() {
     let end = date(2037, 3, 2, 10, 30);
     let tenant_id = unique_tenant("tenant-calendar-working-hours");
 
-    if !legacy_calendar_table_present(&db).await {
-        let err = CalendarService::new(db)
-            .create_event(
-                tenant_id,
-                "Demo".into(),
-                vec!["a@x.com".into()],
-                start,
-                end,
-                None,
-            )
-            .await
-            .expect_err("create_event must not report success without its backing table");
-        assert!(
-            matches!(&err, SalesError::Database(msg) if msg.contains("sales_calendar_events")),
-            "expected a diagnosable Database error naming the missing legacy table, got {err:?}"
-        );
-        eprintln!(
-            "KNOWN V2 GAP (owned by sales-autopilot src/migrations): no \
-             sales_calendar_events in the canonical chain; asserted fail-closed instead"
-        );
-        return;
-    }
-
-    let svc = CalendarService::new(db);
+    let svc = CalendarService::with_working_hours(db.clone(), 9, 17, 2);
     let evt = svc
         .create_event(
-            tenant_id,
+            tenant_id.clone(),
             "Demo".into(),
             vec!["a@x.com".into()],
             start,
             end,
             None,
         )
-        .await;
-    assert!(evt.is_ok());
+        .await
+        .expect("an in-hours slot on the canonical schema must book");
+
+    // The booking is real: the returned event carries the requested window
+    // and the deterministic internal join handle…
+    assert_eq!(evt.tenant_id, tenant_id);
+    assert_eq!(evt.title, "Demo");
+    assert_eq!(evt.start_at, start);
+    assert_eq!(evt.end_at, end);
+    assert_eq!(
+        evt.meeting_link.as_deref(),
+        Some(format!("apexmail-meeting://{tenant_id}/{}", evt.id).as_str())
+    );
+    // …and the store of record lists it, tenant-scoped.
+    let day_start = date(2037, 3, 2, 0, 0);
+    let day_end = date(2037, 3, 3, 0, 0);
+    let listed = svc
+        .list_events(&tenant_id, day_start, day_end, 10, 0)
+        .await
+        .expect("list events");
+    assert_eq!(listed.len(), 1, "the booked event must be listed");
+    assert_eq!(listed[0].id, evt.id);
+
+    cleanup_calendar_tenant(&db, &tenant_id).await;
 }
 
 #[tokio::test]
 async fn calendar_outside_working_hours_rejected() {
-    let svc = CalendarService::new(lazy_db());
+    // A lazy pool: the working-hours check runs BEFORE any database I/O
+    // (`sales-autopilot/src/calendar/mod.rs` `create_event`), so rejection
+    // is provably independent of the database.
+    let svc = CalendarService::with_working_hours(lazy_db(), 9, 17, 2);
     // 2037-03-02 is a Monday, in the future.
     let start = date(2037, 3, 2, 20, 0); // 8 PM
     let end = date(2037, 3, 2, 20, 30);
@@ -422,7 +399,13 @@ async fn calendar_outside_working_hours_rejected() {
             None,
         )
         .await;
-    assert!(res.is_err(), "events outside 09-17 should be rejected");
+    // The precise variant matters (audit F11): a bare `is_err()` would also
+    // be satisfied by an unreachable-database error, silently re-arming this
+    // test if the working-hours check were removed or reordered.
+    assert!(
+        matches!(res, Err(SalesError::SlotUnavailable)),
+        "events outside 09-17 must be SalesError::SlotUnavailable, got {res:?}"
+    );
 }
 
 #[tokio::test]
@@ -435,33 +418,37 @@ async fn calendar_overlap_rejected() {
     let s = date(2037, 3, 2, 10, 0);
     let e = date(2037, 3, 2, 10, 30);
 
-    if !legacy_calendar_table_present(&db).await {
-        // See `legacy_calendar_table_present`: fail-closed is the current
-        // canonical truth until CalendarService is repointed.
-        let err = CalendarService::new(db)
-            .create_event(tenant_id, "A".into(), vec![], s, e, None)
-            .await
-            .expect_err("create_event must not report success without its backing table");
-        assert!(
-            matches!(&err, SalesError::Database(msg) if msg.contains("sales_calendar_events")),
-            "expected a diagnosable Database error naming the missing legacy table, got {err:?}"
-        );
-        eprintln!(
-            "KNOWN V2 GAP (owned by sales-autopilot src/migrations): no \
-             sales_calendar_events in the canonical chain; asserted fail-closed instead"
-        );
-        return;
-    }
-
-    let svc = CalendarService::new(db);
+    let svc = CalendarService::with_working_hours(db.clone(), 9, 17, 2);
     svc.create_event(tenant_id.clone(), "A".into(), vec![], s, e, None)
         .await
-        .unwrap();
-    // Same slot should fail
+        .expect("the first booking on a free slot must succeed");
+
+    // The same slot must fail with the precise unavailability variant: the
+    // service-level overlap pre-check and the `no_overlapping_events` GiST
+    // exclusion constraint both map to `SalesError::SlotUnavailable`, never
+    // to a 500-class `Database` error.
     let res = svc
-        .create_event(tenant_id, "B".into(), vec![], s, e, None)
+        .create_event(tenant_id.clone(), "B".into(), vec![], s, e, None)
         .await;
-    assert!(res.is_err());
+    assert!(
+        matches!(res, Err(SalesError::SlotUnavailable)),
+        "double-booking must be SalesError::SlotUnavailable, got {res:?}"
+    );
+
+    // The refused booking left no second row.
+    let day_start = date(2037, 3, 2, 0, 0);
+    let day_end = date(2037, 3, 3, 0, 0);
+    let listed = svc
+        .list_events(&tenant_id, day_start, day_end, 10, 0)
+        .await
+        .expect("list events");
+    assert_eq!(
+        listed.len(),
+        1,
+        "the refused booking must not persist a row"
+    );
+
+    cleanup_calendar_tenant(&db, &tenant_id).await;
 }
 
 // ── CRM search ─────────────────────────────────────────────────
@@ -534,7 +521,7 @@ async fn campaign_stats_track_sends() {
 /// `CREATE TABLE IF NOT EXISTS`, this test fails.
 #[tokio::test]
 async fn initialize_schema_refuses_a_database_without_sales_tables() {
-    let Some(base_url) = test_database_url() else {
+    let Some(base_url) = migrator::test_support::test_database_url() else {
         eprintln!(
             "skipping initialize_schema_refuses_a_database_without_sales_tables: \
              set TEST_DATABASE_URL to run DB-backed test"
@@ -565,7 +552,7 @@ async fn initialize_schema_refuses_a_database_without_sales_tables() {
         .await
         .unwrap_or_else(|error| panic!("could not create throwaway database {EMPTY_DB}: {error}"));
 
-    let empty = connect(&format!("{server_part}/{EMPTY_DB}")).await;
+    let empty = migrator::test_support::connect_pool(&format!("{server_part}/{EMPTY_DB}")).await;
     let result = initialize_schema(&empty).await;
     empty.close().await;
 

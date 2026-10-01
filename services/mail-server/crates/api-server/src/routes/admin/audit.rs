@@ -66,9 +66,7 @@ fn decode_audit_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErro
         ));
     };
     let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|_| {
-            ApiError::BadRequest("invalid cursor: must be an encoded timestamp".into())
-        })?
+        .map_err(|_| ApiError::BadRequest("invalid cursor: must be an encoded timestamp".into()))?
         .with_timezone(&Utc);
     if id.is_empty()
         || id.len() > 128
@@ -437,9 +435,8 @@ async fn list_audit_logs(
     if let Some(cursor) = next_cursor {
         headers.insert(
             "x-next-cursor",
-            axum::http::HeaderValue::from_str(&cursor).map_err(|e| {
-                ApiError::Internal(format!("cursor encoding error: {e}"))
-            })?,
+            axum::http::HeaderValue::from_str(&cursor)
+                .map_err(|e| ApiError::Internal(format!("cursor encoding error: {e}")))?,
         );
     }
 
@@ -515,8 +512,7 @@ mod tests {
             "bad\u{7}id",
             "x'; DROP TABLE audit_logs; --",
         ] {
-            let cursor =
-                encode_cursor(&format!("2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}{bad_id}"));
+            let cursor = encode_cursor(&format!("2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}{bad_id}"));
             assert!(
                 matches!(
                     decode_audit_cursor(&cursor),
@@ -528,11 +524,9 @@ mod tests {
         // A well-formed cursor round-trips (RFC 3339 payload — NOT
         // DateTime's Display form, which the decoder would reject).
         let ts = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        let (decoded_ts, decoded_id) = decode_audit_cursor(&encode_audit_cursor(
-            &ts,
-            "cov-audit-0197d0e6f2b8",
-        ))
-        .expect("valid cursor");
+        let (decoded_ts, decoded_id) =
+            decode_audit_cursor(&encode_audit_cursor(&ts, "cov-audit-0197d0e6f2b8"))
+                .expect("valid cursor");
         assert_eq!(decoded_ts, ts);
         assert_eq!(decoded_id, "cov-audit-0197d0e6f2b8");
     }
@@ -668,9 +662,10 @@ mod tests {
             offset: 0,
             cursor: None,
         };
-        let (_headers, Json(entries)) = list_audit_logs(State(state.clone()), viewer(), Query(params))
-            .await
-            .expect("audit list query succeeds");
+        let (_headers, Json(entries)) =
+            list_audit_logs(State(state.clone()), viewer(), Query(params))
+                .await
+                .expect("audit list query succeeds");
 
         let envelope = entries
             .iter()
@@ -711,9 +706,10 @@ mod tests {
             offset: 0,
             cursor: None,
         };
-        let (_headers, Json(entries)) = list_audit_logs(State(state.clone()), viewer(), Query(params))
-            .await
-            .expect("filtered audit list");
+        let (_headers, Json(entries)) =
+            list_audit_logs(State(state.clone()), viewer(), Query(params))
+                .await
+                .expect("filtered audit list");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "cov.probe.envelope");
 
@@ -730,9 +726,10 @@ mod tests {
             offset: 0,
             cursor: None,
         };
-        let (_headers, Json(entries)) = list_audit_logs(State(state.clone()), viewer(), Query(params))
-            .await
-            .expect("user-filtered audit list");
+        let (_headers, Json(entries)) =
+            list_audit_logs(State(state.clone()), viewer(), Query(params))
+                .await
+                .expect("user-filtered audit list");
         assert!(entries.is_empty(), "NULL user_id never matches a filter");
 
         // Pagination is applied (limit clamps inside the plan; offset skips).
@@ -843,12 +840,12 @@ mod tests {
         };
         let result = list_audit_logs(State(state), customer, Query(params)).await;
         assert!(matches!(result, Err(ApiError::Forbidden(_))));
-
     }
 
     // ── Keyset cursor adversarial properties ─────────────────────
 
-    const CURSOR_PROBE_SQL: &str = "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
+    const CURSOR_PROBE_SQL: &str =
+        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
          details, ip_address, user_agent, outcome, timestamp, hash, signature)
          SELECT 'cur-' || lpad(g::text, 2, '0') || '-' || substr(gen_random_uuid()::text, 1, 8),
                 $1, 'usr_cur', 'cov.cursor.' || g, 'audit_probe', 'res',
@@ -994,7 +991,9 @@ mod tests {
             }
             assert_eq!(entries.len(), 1);
             assert!(
-                entries.iter().all(|e| e.tenant_id.as_deref() == Some("system")),
+                entries
+                    .iter()
+                    .all(|e| e.tenant_id.as_deref() == Some("system")),
                 "a foreign-tenant row leaked into the tenant-filtered walk"
             );
             by_cursor.push(entries[0].id.clone());
@@ -1017,7 +1016,10 @@ mod tests {
             );
         }
         assert_eq!(
-            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             by_cursor.len(),
             "a cursor sweep must never repeat a row"
         );
@@ -1061,13 +1063,7 @@ mod tests {
         let (headers, Json(last)) = list_audit_logs(
             State(state.clone()),
             viewer(),
-            Query(list_params(
-                Some("audit_probe".into()),
-                None,
-                200,
-                0,
-                None,
-            )),
+            Query(list_params(Some("audit_probe".into()), None, 200, 0, None)),
         )
         .await
         .expect("final page");
@@ -1083,7 +1079,13 @@ mod tests {
             let result = list_audit_logs(
                 State(state.clone()),
                 viewer(),
-                Query(list_params(Some("audit_probe".into()), None, 1, 0, Some(bad.into()))),
+                Query(list_params(
+                    Some("audit_probe".into()),
+                    None,
+                    1,
+                    0,
+                    Some(bad.into()),
+                )),
             )
             .await;
             assert!(

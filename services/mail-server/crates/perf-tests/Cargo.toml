@@ -7,7 +7,11 @@ edition.workspace = true
 [dependencies]
 apexmail-lib = { path = "../apexmail-lib" }
 billing-service = { path = "../billing-service" }
+# SM12 F9: the quota-check perf test exercises the REAL entitlement
+# enforcement path (EntitlementSnapshot::require_capacity/require_feature).
+billing-entitlements = { path = "../billing-entitlements" }
 ai-service = { path = "../ai-service" }
 pattern-matcher = { path = "../pattern-matcher" }
 observability-service = { path = "../observability-service" }
 devex-service = { path = "../devex-service" }
+serde_json.workspace = true

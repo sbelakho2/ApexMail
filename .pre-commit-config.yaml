@@ -10,13 +10,34 @@ repos:
       - id: trailing-whitespace
         exclude: ^(secrets/|reports/|target/)
       - id: check-yaml
+        # Audit SM14 F12 (the CI lane made this hook non-opt-in): three
+        # tracked files legitimately fail stock pyyaml parsing and are
+        # excluded here — everything else (including .woodpecker.yml, ci/
+        # and every workflow-shaped YAML) is checked:
+        #   * deploy/cdn/cloudfront.yaml — CloudFormation !Ref/!Sub tags are
+        #     not YAML-constructor-parseable by pyyaml;
+        #   * docker-compose.prod.yml — compose's !override/!reset
+        #     extension tags (same class);
+        #   * docs/api/openapi.yaml — duplicate schema keys in the tracked
+        #     spec (spec cleanup is a docs task, not this hook's).
+        exclude: |
+          (?x)^(
+            deploy/cdn/cloudfront\.yaml|
+            docker-compose\.prod\.yml|
+            docs/api/openapi\.yaml
+          )$
       - id: check-json
       - id: mixed-line-ending
         args: [--fix=lf]
 
   - repo: https://github.com/gitleaks/gitleaks
     # Audit P — pinned to the full commit SHA (tags are mutable).
-    rev: ac4b5146b0f112df989b4374abb2b12799e37cba  # v8.18.2
+    # Audit SM14 F12 — the pin MUST track the CI image's gitleaks
+    # (GITLEAKS_VERSION in ci/ci-image/Dockerfile + toolchain-versions.env,
+    # currently 8.30.1): rule sets drift between releases, and a developer
+    # scanning with 8.18.2 locally while CI scans with 8.30.1 is exactly the
+    # skew this config exists to prevent. Bump BOTH in the same change.
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1 (== CI image pin)
     hooks:
       - id: gitleaks
         name: Gitleaks secret scanning
@@ -56,3 +77,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^services/mail-server/.*(Cargo\.toml|Cargo\.lock)$
+        # Audit SM14 F12: this hook is deliberately NOT in the pre-commit /
+        # CI-lane stage set:
+        #   * it duplicates the security stage's REQUIRED cargo audit (which
+        #     owns the canonical CI_CARGO_AUDIT_IGNORES list);
+        #   * it cargo-INSTALLS cargo-audit/cargo-deny on demand — not a
+        #     fast-iteration hook;
+        #   * its inline ignore list has already drifted from the canonical
+        #     one (still lists RUSTSEC-2024-0437; missing the 2026-0192/0205/
+        #     0206/0258 entries) — scripts/ is outside CI-review scope, so
+        #     gating CI on it would gate CI on a stale ledger. The security
+        #     stage's selftest asserts the CANONICAL pair in lockstep.
+        # It still runs before every push (pre-push stage) and on demand
+        # (`pre-commit run cargo-audit-mail-server --all-files`).
+        stages: [pre-push, manual]

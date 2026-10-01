@@ -7,7 +7,7 @@
 //! flush log entries to the database to survive process restarts.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use chrono::{Duration, Utc};
 use parking_lot::RwLock;
@@ -19,15 +19,84 @@ use crate::types::{LogEntry, LogLevel};
 // LogAggregator
 // ---------------------------------------------------------------------------
 
+/// Serialized-size budget for ONE ingested entry's `context`/`metadata` map
+/// (SM10 F15). The ingest route truncates only `message`, so a single entry
+/// could previously carry megabytes of untruncated maps (a 2 MB body can be
+/// one entry) and the default 500 000-entry store could hold gigabytes.
+/// Maps over budget are shed key-by-key until they fit; a map that cannot
+/// fit at all is dropped (`None`) rather than stored oversized.
+const MAX_INGEST_MAP_BYTES: usize = 1024;
+
+/// Approximate serialized size of a JSON value in bytes.
+fn value_bytes(value: &serde_json::Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
+}
+
+/// Approximate serialized size of a context/metadata map (key + value +
+/// per-entry overhead estimate).
+fn map_bytes(map: &HashMap<String, serde_json::Value>) -> usize {
+    map.iter().map(|(k, v)| k.len() + value_bytes(v) + 1).sum()
+}
+
+/// Bound one ingested map to [`MAX_INGEST_MAP_BYTES`] (SM10 F15).
+///
+/// Maps within budget pass through unchanged (the hot path — one size
+/// computation, no copy). Over-budget maps are shed whole-key in
+/// lexicographic key order (deterministic, so logs shed the same way on
+/// every node) until the remainder fits; entries that do not fit are
+/// dropped. A map with nothing left is `None`, not an empty husk.
+fn cap_ingest_map(
+    map: Option<HashMap<String, serde_json::Value>>,
+) -> Option<HashMap<String, serde_json::Value>> {
+    let map = map?;
+    if map.is_empty() {
+        return None;
+    }
+    if map_bytes(&map) <= MAX_INGEST_MAP_BYTES {
+        return Some(map);
+    }
+
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+
+    let mut kept: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut used = 0usize;
+    for key in keys {
+        let value = &map[key];
+        let cost = key.len() + value_bytes(value) + 1;
+        if used + cost <= MAX_INGEST_MAP_BYTES {
+            used += cost;
+            kept.insert(key.clone(), value.clone());
+        }
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept)
+    }
+}
+
 /// Thread-safe in-memory structured log store.
 /// Caps total stored entries at `max_entries`; when full, the oldest entries
 /// are evicted on each insert to prevent unbounded memory growth.
+///
+/// The store is a ring (`VecDeque`): eviction pops from the front instead of
+/// shifting the surviving half of a `Vec::drain`, and the allocation is
+/// shrunk when the ring's slack grows past half the cap again, so evicted
+/// capacity is actually returned (SM10 F15 — `Vec::drain` never shrank the
+/// allocation).
+///
+/// Per-entry payloads are bounded at the single point every producer passes
+/// through ([`LogAggregator::ingest`]): `context`/`metadata` maps are capped
+/// by [`cap_ingest_map`].
 ///
 /// Optionally persists log entries to the database when `persistence_config`
 /// is `Some` and `enabled` is `true`.
 #[derive(Debug)]
 pub struct LogAggregator {
-    entries: RwLock<Vec<LogEntry>>,
+    entries: RwLock<VecDeque<LogEntry>>,
     max_entries: usize,
     persistence_config: Option<PersistenceConfig>,
 }
@@ -41,7 +110,7 @@ impl LogAggregator {
     /// Create an aggregator that retains at most `max_entries` entries.
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
-            entries: RwLock::new(Vec::new()),
+            entries: RwLock::new(VecDeque::new()),
             max_entries,
             persistence_config: None,
         }
@@ -51,7 +120,7 @@ impl LogAggregator {
     /// flush of log entries to the database.
     pub fn with_persistence(max_entries: usize, config: PersistenceConfig) -> Self {
         Self {
-            entries: RwLock::new(Vec::new()),
+            entries: RwLock::new(VecDeque::new()),
             max_entries,
             persistence_config: if config.enabled { Some(config) } else { None },
         }
@@ -64,13 +133,26 @@ impl LogAggregator {
 
     /// Ingest a single log entry.
     /// If the store is at capacity, the oldest 10% of entries are evicted.
-    pub fn ingest(&self, entry: LogEntry) {
+    /// The entry's `context`/`metadata` maps are size-capped before storage
+    /// (SM10 F15).
+    pub fn ingest(&self, mut entry: LogEntry) {
+        entry.context = cap_ingest_map(entry.context);
+        entry.metadata = cap_ingest_map(entry.metadata);
+
         let mut guard = self.entries.write();
         if guard.len() >= self.max_entries {
             let prune_count = guard.len() / 10;
-            guard.drain(..prune_count);
+            for _ in 0..prune_count {
+                guard.pop_front();
+            }
+            // Return evicted capacity once the ring's slack passes half the
+            // cap — bounding memory at ~1.5x max entries without paying a
+            // realloc on every insert-at-capacity.
+            if guard.capacity() > self.max_entries + self.max_entries / 2 {
+                guard.shrink_to_fit();
+            }
         }
-        guard.push(entry);
+        guard.push_back(entry);
     }
 
     /// Query logs with optional level and service filters, returning at most
@@ -233,5 +315,126 @@ mod tests {
         // Empty window (impossibly old) → 0
         let empty = LogAggregator::new();
         assert!((empty.get_error_rate(60)).abs() < f64::EPSILON);
+    }
+
+    // ── SM10 F15: bounded per-entry payloads + ring eviction ───────────────
+
+    fn oversized_map(keys: usize, value_bytes: usize) -> HashMap<String, serde_json::Value> {
+        (0..keys)
+            .map(|i| {
+                (
+                    format!("key-{i:04}"),
+                    serde_json::Value::String("x".repeat(value_bytes)),
+                )
+            })
+            .collect()
+    }
+
+    /// An oversized `metadata` map must be stored capped: the stored entry's
+    /// map stays within the ingest budget instead of the full ~10 KB the
+    /// producer sent (the old code stored the map verbatim).
+    #[test]
+    fn ingest_caps_oversized_metadata_maps() {
+        let agg = LogAggregator::new();
+        let mut entry = make_log(LogLevel::Info, "api", "big context");
+        entry.metadata = Some(oversized_map(100, 100)); // ~10 KB serialized
+
+        agg.ingest(entry);
+
+        let stored = agg.query(None, Some("api"), 1);
+        assert_eq!(stored.len(), 1);
+        let metadata = stored[0].metadata.as_ref().expect("some keys must survive");
+        assert!(
+            map_bytes(metadata) <= MAX_INGEST_MAP_BYTES,
+            "stored map must be capped to {MAX_INGEST_MAP_BYTES} bytes, got {}",
+            map_bytes(metadata)
+        );
+        assert!(
+            metadata.len() < 100,
+            "shedding must have dropped keys, got {}",
+            metadata.len()
+        );
+    }
+
+    /// Maps within budget pass through byte-for-byte — the cap must not
+    /// degrade healthy payloads.
+    #[test]
+    fn ingest_passes_reasonably_sized_maps_through_unchanged() {
+        let agg = LogAggregator::new();
+        let mut entry = make_log(LogLevel::Info, "api", "normal");
+        let small = oversized_map(4, 16);
+        entry.context = Some(small.clone());
+
+        agg.ingest(entry);
+
+        let stored = agg.query(None, Some("api"), 1);
+        assert_eq!(stored[0].context.as_ref(), Some(&small));
+    }
+
+    /// A single value that alone exceeds the budget cannot fit even after
+    /// shedding — the map is dropped (`None`), never stored oversized.
+    #[test]
+    fn ingest_drops_a_map_that_cannot_fit_at_all() {
+        let oversized = oversized_map(1, MAX_INGEST_MAP_BYTES * 4);
+        assert_eq!(cap_ingest_map(Some(oversized)), None);
+
+        // And the same holds through the ingest path.
+        let mut entry = make_log(LogLevel::Info, "api", "one giant value");
+        entry.metadata = Some(oversized_map(1, MAX_INGEST_MAP_BYTES * 4));
+        let agg = LogAggregator::new();
+        agg.ingest(entry);
+        let stored = agg.query(None, Some("api"), 1);
+        assert_eq!(stored[0].metadata, None);
+        assert_eq!(
+            cap_ingest_map(Some(HashMap::new())),
+            None,
+            "an empty map must not be stored as a husk"
+        );
+    }
+
+    /// Both map fields are capped independently on the same entry.
+    #[test]
+    fn ingest_caps_context_and_metadata_independently() {
+        let mut entry = make_log(LogLevel::Info, "api", "both maps");
+        entry.context = Some(oversized_map(50, 100));
+        entry.metadata = Some(oversized_map(50, 100));
+        let capped = LogAggregator::with_capacity(8);
+        capped.ingest(entry);
+        let stored = capped.query(None, Some("api"), 1);
+        for field in [&stored[0].context, &stored[0].metadata] {
+            let map = field.as_ref().expect("each field keeps some keys");
+            assert!(map_bytes(map) <= MAX_INGEST_MAP_BYTES);
+        }
+    }
+
+    /// The ring keeps the store at its cap and evicts the OLDEST entries;
+    /// the allocation is shrunk when the slack passes half the cap.
+    #[test]
+    fn eviction_keeps_len_capped_and_drops_oldest() {
+        let agg = LogAggregator::with_capacity(10);
+        for i in 0..25 {
+            let mut entry = make_log(LogLevel::Info, "svc", &format!("m{i}"));
+            entry.timestamp = Utc::now() + Duration::milliseconds(i);
+            agg.ingest(entry);
+        }
+        assert!(
+            agg.len() <= 10,
+            "the ring must stay at the cap, got {}",
+            agg.len()
+        );
+        // The 15 oldest entries are gone; the newest survive.
+        let newest = agg.query(None, Some("svc"), 100);
+        assert_eq!(newest.len(), 10);
+        assert_eq!(newest[0].message, "m24");
+        assert_eq!(newest[9].message, "m15");
+        let guard = agg.entries.read();
+        // The shrink triggers when slack passes 1.5x the cap; the ring then
+        // grows back by doubling (0.9x → 1.8x), so the observed steady-state
+        // bound is 2x the cap — far below the old unbounded Vec slack.
+        assert!(
+            guard.capacity() <= 20,
+            "ring slack must stay within ~2x the cap, got {}",
+            guard.capacity()
+        );
     }
 }

@@ -946,12 +946,12 @@ mod tests {
 #[cfg(test)]
 mod w6a_adversarial_tests {
     use super::*;
+    use crate::config::Config;
     use axum::body::Body;
     use axum::http::HeaderValue;
     use axum::http::Method;
     use axum::routing::{get, post};
     use axum::Router;
-    use crate::config::Config;
     use std::net::SocketAddr;
     use std::time::Duration;
     use tower::ServiceExt;
@@ -1115,7 +1115,8 @@ mod w6a_adversarial_tests {
 
     fn with_header(mut req: Request<Body>, name: &str, value: &str) -> Request<Body> {
         let name = axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap();
-        req.headers_mut().insert(name, HeaderValue::from_str(value).unwrap());
+        req.headers_mut()
+            .insert(name, HeaderValue::from_str(value).unwrap());
         req
     }
 
@@ -1151,10 +1152,7 @@ mod w6a_adversarial_tests {
 
     async fn seed(state: &AppState, key: &str, value: &str, ttl_secs: u64) {
         let mut conn = state.redis.get().await.expect("redis pool");
-        let _: () = conn
-            .set_ex(key, value, ttl_secs)
-            .await
-            .expect("SET EX ok");
+        let _: () = conn.set_ex(key, value, ttl_secs).await.expect("SET EX ok");
     }
 
     async fn stored_value(state: &AppState, key: &str) -> Option<String> {
@@ -1194,7 +1192,10 @@ mod w6a_adversarial_tests {
 
         // The burst+1 request is rejected with Retry-After and the
         // machine-readable error envelope.
-        let resp = app.oneshot(tenant_req(Some(&tenant))).await.expect("oneshot");
+        let resp = app
+            .oneshot(tenant_req(Some(&tenant)))
+            .await
+            .expect("oneshot");
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(
             numeric_header(&resp, "Retry-After") > 0,
@@ -1226,7 +1227,11 @@ mod w6a_adversarial_tests {
 
         // A is exhausted; B must be untouched (no shared counter).
         assert_eq!(
-            app.clone().oneshot(tenant_req(Some(&a))).await.unwrap().status(),
+            app.clone()
+                .oneshot(tenant_req(Some(&a)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
         let resp = app.clone().oneshot(tenant_req(Some(&b))).await.unwrap();
@@ -1253,18 +1258,29 @@ mod w6a_adversarial_tests {
         let tenant = format!("w6a-rotate-{}", Uuid::new_v4());
 
         assert_eq!(
-            app.clone().oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            app.clone()
+                .oneshot(tenant_req(Some(&tenant)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::OK
         );
         assert_eq!(
-            app.clone().oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            app.clone()
+                .oneshot(tenant_req(Some(&tenant)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
         // Sleep past the 1.1s window: the window index must advance and the
         // budget must be fresh (a stale key would 429 forever).
         tokio::time::sleep(Duration::from_millis(1_300)).await;
         assert_eq!(
-            app.oneshot(tenant_req(Some(&tenant))).await.unwrap().status(),
+            app.oneshot(tenant_req(Some(&tenant)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::OK,
             "a new fixed window must reset the counter"
         );
@@ -1320,7 +1336,11 @@ mod w6a_adversarial_tests {
             60,
         )
         .await;
-        let resp = app.clone().oneshot(tenant_req(Some(&tiered))).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(tenant_req(Some(&tiered)))
+            .await
+            .unwrap();
         assert_eq!(
             numeric_header(&resp, "X-RateLimit-Limit"),
             30_000,
@@ -1330,10 +1350,16 @@ mod w6a_adversarial_tests {
         // (b) An unknown tenant falls back to the DB's Ok(None) → config
         // default, and the negative result is cached to spare the DB.
         let unknown = format!("w6a-unknown-{}", Uuid::new_v4());
-        let resp = app.clone().oneshot(tenant_req(Some(&unknown))).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(tenant_req(Some(&unknown)))
+            .await
+            .unwrap();
         assert_eq!(numeric_header(&resp, "X-RateLimit-Limit"), 4_321);
         assert_eq!(
-            stored_value(&state, &tenant_rate_limit_cache_key(&unknown)).await.as_deref(),
+            stored_value(&state, &tenant_rate_limit_cache_key(&unknown))
+                .await
+                .as_deref(),
             Some(TENANT_RATE_LIMIT_CACHE_NONE),
             "Ok(None) must be negative-cached"
         );
@@ -1348,7 +1374,11 @@ mod w6a_adversarial_tests {
             60,
         )
         .await;
-        let resp = app.clone().oneshot(tenant_req(Some(&poisoned))).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(tenant_req(Some(&poisoned)))
+            .await
+            .unwrap();
         assert_eq!(
             numeric_header(&resp, "X-RateLimit-Limit"),
             4_321,
@@ -1405,28 +1435,58 @@ mod w6a_adversarial_tests {
 
         // (b) Malformed override JSON → baseline unchanged (never a 500, never off).
         let malformed = format!("w6a-cost-bad-{}", Uuid::new_v4());
-        seed(&state, &tenant_rate_limit_cache_key(&malformed), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&malformed),
+            TENANT_RATE_LIMIT_CACHE_NONE,
+            60,
+        )
+        .await;
         seed(&state, &cost_throttle_key(&malformed), "{{{not json", 60).await;
         assert_eq!(resolve(malformed).await, 4_321);
 
         // (c) cap_percent = 100 would not reduce anything → ignored.
         let non_reducing = format!("w6a-cost-cap100-{}", Uuid::new_v4());
-        seed(&state, &tenant_rate_limit_cache_key(&non_reducing), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&non_reducing),
+            TENANT_RATE_LIMIT_CACHE_NONE,
+            60,
+        )
+        .await;
         let cap100 = CostThrottleOverride {
             cap_percent: 100,
             ..CostThrottleOverride::critical_low_margin()
         };
-        seed(&state, &cost_throttle_key(&non_reducing), &serde_json::to_string(&cap100).unwrap(), 60).await;
+        seed(
+            &state,
+            &cost_throttle_key(&non_reducing),
+            &serde_json::to_string(&cap100).unwrap(),
+            60,
+        )
+        .await;
         assert_eq!(resolve(non_reducing).await, 4_321);
 
         // (d) An unsupported version must be ignored, not applied.
         let future_version = format!("w6a-cost-v99-{}", Uuid::new_v4());
-        seed(&state, &tenant_rate_limit_cache_key(&future_version), TENANT_RATE_LIMIT_CACHE_NONE, 60).await;
+        seed(
+            &state,
+            &tenant_rate_limit_cache_key(&future_version),
+            TENANT_RATE_LIMIT_CACHE_NONE,
+            60,
+        )
+        .await;
         let v99 = CostThrottleOverride {
             version: 99,
             ..CostThrottleOverride::critical_low_margin()
         };
-        seed(&state, &cost_throttle_key(&future_version), &serde_json::to_string(&v99).unwrap(), 60).await;
+        seed(
+            &state,
+            &cost_throttle_key(&future_version),
+            &serde_json::to_string(&v99).unwrap(),
+            60,
+        )
+        .await;
         assert_eq!(resolve(future_version).await, 4_321);
     }
 
@@ -1437,7 +1497,11 @@ mod w6a_adversarial_tests {
         // Production: 503 with the SERVICE_UNAVAILABLE envelope.
         let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
         let app = tenant_app(prod);
-        let resp = app.clone().oneshot(tenant_req(Some("w6a-dead-prod"))).await.unwrap();
+        let resp = app
+            .clone()
+            .oneshot(tenant_req(Some("w6a-dead-prod")))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
@@ -1512,7 +1576,10 @@ mod w6a_adversarial_tests {
         assert!(numeric_header(&resp, "Retry-After") > 0);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
-        assert_eq!(body["error"]["message"], "too many requests — try again later");
+        assert_eq!(
+            body["error"]["message"],
+            "too many requests — try again later"
+        );
     }
 
     #[tokio::test]
@@ -1608,12 +1675,20 @@ mod w6a_adversarial_tests {
 
         for _ in 0..20 {
             assert_eq!(
-                app.clone().oneshot(public_req(&path_a)).await.unwrap().status(),
+                app.clone()
+                    .oneshot(public_req(&path_a))
+                    .await
+                    .unwrap()
+                    .status(),
                 StatusCode::OK
             );
         }
         assert_eq!(
-            app.clone().oneshot(public_req(&path_a)).await.unwrap().status(),
+            app.clone()
+                .oneshot(public_req(&path_a))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
         assert_eq!(
@@ -1812,7 +1887,10 @@ mod w6a_adversarial_tests {
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "RATE_LIMIT_EXCEEDED");
-        assert_eq!(body["error"]["message"], "too many requests — try again later");
+        assert_eq!(
+            body["error"]["message"],
+            "too many requests — try again later"
+        );
     }
 
     /// F1b: with Redis down in production the browser form post gets the
@@ -1824,7 +1902,10 @@ mod w6a_adversarial_tests {
         let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
         let app = public_app_paths(prod);
 
-        let resp = app.oneshot(browser_post_req("/web/auth/login")).await.unwrap();
+        let resp = app
+            .oneshot(browser_post_req("/web/auth/login"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             resp.headers()
@@ -1853,7 +1934,10 @@ mod w6a_adversarial_tests {
         let prod = state_with(rl_config(Environment::Production, 10, 60_000, true), dead).await;
         let app = public_app_paths(prod);
 
-        let resp = app.oneshot(browser_post_req("/v1/auth/login")).await.unwrap();
+        let resp = app
+            .oneshot(browser_post_req("/v1/auth/login"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(body["error"]["code"], "SERVICE_UNAVAILABLE");
@@ -1936,14 +2020,18 @@ mod w6a_adversarial_tests {
 
         // No counters at all → estimate 0 → allowed.
         let fresh = format!("w6a-slide-fresh-{}", Uuid::new_v4());
-        assert!(sliding_window_count(&state, &fresh, 60_000, 10).await.unwrap());
+        assert!(sliding_window_count(&state, &fresh, 60_000, 10)
+            .await
+            .unwrap());
 
         // Deterministic over-limit: with window = u64::MAX/2 the window index
         // is 0 now and forever, so current == previous == the seeded key and
         // the estimate is 11..=22 regardless of the position in the window.
         let huge = format!("w6a-slide-max-{}", Uuid::new_v4());
         seed(&state, &format!("apexmail:ratelimit:{huge}:0"), "11", 60).await;
-        assert!(!sliding_window_count(&state, &huge, u64::MAX / 2, 10).await.unwrap());
+        assert!(!sliding_window_count(&state, &huge, u64::MAX / 2, 10)
+            .await
+            .unwrap());
 
         // Dead Redis must be an Err, never a silent allow.
         let dead = state_with(
@@ -1971,7 +2059,12 @@ mod w6a_adversarial_tests {
         let key = format!("w6a-lua-{}", Uuid::new_v4());
         let script = redis::Script::new(INCR_EXPIRE_LUA);
 
-        let count: u64 = script.key(&key).arg(60).invoke_async(&mut *conn).await.unwrap();
+        let count: u64 = script
+            .key(&key)
+            .arg(60)
+            .invoke_async(&mut *conn)
+            .await
+            .unwrap();
         assert_eq!(count, 1);
         let ttl: i64 = redis::cmd("TTL")
             .arg(&key)
@@ -1983,7 +2076,12 @@ mod w6a_adversarial_tests {
             "the first INCR must leave the key with a TTL (crash safety), got {ttl}"
         );
 
-        let count: u64 = script.key(&key).arg(60).invoke_async(&mut *conn).await.unwrap();
+        let count: u64 = script
+            .key(&key)
+            .arg(60)
+            .invoke_async(&mut *conn)
+            .await
+            .unwrap();
         assert_eq!(count, 2, "the script must return the incrementing count");
         let ttl2: i64 = redis::cmd("TTL")
             .arg(&key)
@@ -2027,7 +2125,10 @@ mod w6a_adversarial_tests {
         headers.insert("x-api-key", HeaderValue::from_static("key-123"));
         assert_eq!(
             extract_user_key_from_headers(&headers),
-            Some(format!("ak:{}", hex::encode(sha2::Sha256::digest(b"key-123"))))
+            Some(format!(
+                "ak:{}",
+                hex::encode(sha2::Sha256::digest(b"key-123"))
+            ))
         );
 
         // An EMPTY api key must be ignored, not hashed, so the cookie is used.
@@ -2130,10 +2231,7 @@ mod w6a_adversarial_tests {
         // (e) Untrusted socket: headers are never consulted, not even
         // x-real-ip.
         let mut h = HeaderMap::new();
-        h.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("198.51.100.24"),
-        );
+        h.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.24"));
         h.insert("x-real-ip", HeaderValue::from_static("198.51.100.25"));
         assert_eq!(
             extract_public_client_ip(&h, "203.0.113.5".parse().unwrap(), &trusted),

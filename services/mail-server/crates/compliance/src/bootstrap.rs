@@ -164,6 +164,7 @@ pub async fn build_state(
         http_client,
         dsar_rate_limiter,
         retention_sweeper,
+        trust_access_limiter: crate::trust_portal::TrustAccessRateLimiter::new(),
     });
 
     Ok((state, seeds))

@@ -281,7 +281,7 @@ named!(msg_att_body_structure_inner<AttributeValue>, do_parse!(
     (AttributeValue::BodyStructure(body))
 ));
 
-pub(crate) fn msg_att_body_structure(input: &[u8]) -> IResult<&[u8], AttributeValue> {
+pub(crate) fn msg_att_body_structure(input: &[u8]) -> IResult<&[u8], AttributeValue<'_>> {
     if max_paren_depth(input) > MAX_BODYSTRUCTURE_DEPTH {
         return Err(nom::Err::Error(nom::error::make_error(
             input,

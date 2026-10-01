@@ -488,17 +488,13 @@ groups:
           description: "A Postgres replica is more than 256 MiB behind the primary for 5 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#postgres-replication-lag-high"
 
-  - name: apexmail-storage
-    rules:
-      - alert: LowDiskSpace
-        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) < 0.15
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Low disk space on {{ $labels.instance }}"
-          description: "Disk free space below 15% for 10 minutes."
-          runbook_url: "https://apexmail.ee/docs/alerts#low-disk-space"
+  # F10 (audit): the old apexmail-storage / LowDiskSpace group was REMOVED —
+  # it was a third byte-equivalent copy of the disk-pressure condition already
+  # covered by HostDiskSpaceWarning/Critical/PredictedFull in
+  # deploy/prometheus/alerts/infrastructure-alerts.yml (the single canonical
+  # disk-alert family; NodeDiskSpace* duplicates in
+  # deploy/monitoring/alerts/disk-space.yml were removed at the same time).
+  # A full disk used to fire four alerts through three rule files.
 
   - name: apexmail-tls
     rules:

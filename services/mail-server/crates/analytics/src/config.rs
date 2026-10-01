@@ -355,7 +355,10 @@ mod tests {
         // restore matches below execute deterministically regardless of the
         // ambient environment (the assertion is identical in both passes).
         for (db_pre, node_pre) in [
-            (Some("postgres://ci-a@localhost/ci".to_string()), Some("ci-a".to_string())),
+            (
+                Some("postgres://ci-a@localhost/ci".to_string()),
+                Some("ci-a".to_string()),
+            ),
             (None, None),
         ] {
             match db_pre {
@@ -436,11 +439,7 @@ mod tests {
 
     impl EnvSnapshot {
         fn take(vars: &[&'static str]) -> Self {
-            Self(
-                vars.iter()
-                    .map(|v| (*v, std::env::var(v).ok()))
-                    .collect(),
-            )
+            Self(vars.iter().map(|v| (*v, std::env::var(v).ok())).collect())
         }
     }
 
@@ -544,8 +543,20 @@ mod tests {
         // because dotenvy never overrides an existing var.
         std::env::set_var("DATABASE_URL", "");
         let cfg = AnalyticsConfig::from_env();
-        assert_eq!(cfg.database_url, "postgres://apexmail@localhost:5432/apexmail");
-        assert!(!cfg.database_url.contains(':') || !cfg.database_url.split('@').next().unwrap_or("").contains("postgres:postgres"), "no credential pair");
+        assert_eq!(
+            cfg.database_url,
+            "postgres://apexmail@localhost:5432/apexmail"
+        );
+        assert!(
+            !cfg.database_url.contains(':')
+                || !cfg
+                    .database_url
+                    .split('@')
+                    .next()
+                    .unwrap_or("")
+                    .contains("postgres:postgres"),
+            "no credential pair"
+        );
     }
 
     /// `validate` rejects each hostile field with a SPECIFIC error — every

@@ -309,7 +309,9 @@ mod tests {
             DlpAction::Quarantine,
             "a Luhn-valid card (risk 8.0 >= quarantine threshold 5.0) hidden in HTML must still be found"
         );
-        assert!(verdict.rule_classes.contains(&"pii:credit_card".to_string()));
+        assert!(verdict
+            .rule_classes
+            .contains(&"pii:credit_card".to_string()));
     }
 
     /// The subject line is part of the scanned corpus.
@@ -325,7 +327,9 @@ mod tests {
             .expect("engine is infallible");
         assert_eq!(verdict.action, DlpAction::Block);
         assert!(verdict.rule_classes.contains(&"pii:ssn".to_string()));
-        assert!(verdict.rule_classes.contains(&"pii:credit_card".to_string()));
+        assert!(verdict
+            .rule_classes
+            .contains(&"pii:credit_card".to_string()));
     }
 
     /// Decoded attachment CONTENT is scanned (the processor hands the gate
@@ -361,7 +365,9 @@ mod tests {
             ))
             .expect("engine is infallible");
         assert_eq!(verdict.action, DlpAction::Audit);
-        assert!(verdict.rule_classes.contains(&"pii:phone_number".to_string()));
+        assert!(verdict
+            .rule_classes
+            .contains(&"pii:phone_number".to_string()));
     }
 
     /// The combined verdict takes the WORST channel: a clean body cannot
@@ -473,6 +479,9 @@ mod tests {
             classes.contains(&"policy:internal_only".to_string()),
             "multi-word keyword slugs lowercase and underscore: {classes:?}"
         );
-        assert!(classes.contains(&"policy:confidential".to_string()), "{classes:?}");
+        assert!(
+            classes.contains(&"policy:confidential".to_string()),
+            "{classes:?}"
+        );
     }
 }

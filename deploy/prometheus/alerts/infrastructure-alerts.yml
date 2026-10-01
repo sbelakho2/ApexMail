@@ -71,7 +71,9 @@ groups:
       # ── Host Disk (node-exporter) ───────────────────────────────────────────
       # Compose volumes (postgres_data, clickhouse_data, backups) all live on
       # the host root filesystem — these are the real disk-pressure signals.
-      # (fstype filters mirror deploy/alerting-rules.yml LowDiskSpace.)
+      # F10 (audit): this is the ONE canonical disk-pressure family — the
+      # byte-identical NodeDiskSpace* (deploy/monitoring/alerts/disk-space.yml)
+      # and LowDiskSpace (deploy/alerting-rules.yml) copies were removed.
 
       - alert: HostDiskSpaceWarning
         expr: (1 - (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"})) * 100 > 80

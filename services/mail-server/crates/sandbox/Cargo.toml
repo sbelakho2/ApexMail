@@ -2,7 +2,7 @@
 name = "sandbox"
 version = "0.1.0"
 edition.workspace = true
-description = "Secure attachment detonation sandbox using Linux namespaces, cgroups v2, and seccomp-bpf"
+description = "Bounded static attachment inspection: file-type detection, header parsing, and in-memory archive extraction with hard size/entry/depth budgets (static analysis only — no execution, no OS-level isolation)"
 license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was "MIT" — scaffolding drift; the product is proprietary per the root LICENSE)
 
 [dependencies]
@@ -16,6 +16,7 @@ serde_json = "1.0"
 tracing = "0.1"
 uuid = { workspace = true, features = ["v4"] }
 aho-corasick = { workspace = true }
+zip = "2.4"  # bounded in-memory extraction of ZIP-family attachments (audit: nested-payload visibility)
 mail-common = { path = "../mail-common", optional = true }
 
 [features]

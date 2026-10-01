@@ -57,8 +57,8 @@ async fn main() -> Result<()> {
     // required-soon warning. `from_env` is the strict boot check; the
     // identical (lenient) resolution inside `from_config` becomes the
     // state's credential.
-    let service_auth = ServiceAuth::from_env()
-        .map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
+    let service_auth =
+        ServiceAuth::from_env().map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
     if service_auth.dedicated_configured() {
         info!(
             "per-workload auth active: {} is the only accepted credential",

@@ -27,9 +27,17 @@ const APPEARANCE_SURFACES: &[&str] = &["web", "control-plane"];
 const STATEFUL_RENDER_VARIANTS: &[(&str, &str, &str)] = &[
     ("web", "/verify-email", "status=success"),
     ("web", "/verify-email", "status=error"),
-    ("web", "/reset-password", "token=gate-token&email=owner%40apexmail.ee"),
+    (
+        "web",
+        "/reset-password",
+        "token=gate-token&email=owner%40apexmail.ee",
+    ),
     ("web", "/login", "mfa=1&email=ops%40apexmail.ee"),
-    ("web", "/confirm", "intent=delete-campaign&id=c_spring&return_to=%2Fcampaigns"),
+    (
+        "web",
+        "/confirm",
+        "intent=delete-campaign&id=c_spring&return_to=%2Fcampaigns",
+    ),
     ("control-plane", "/login", "mfa=1&email=ops%40apexmail.ee"),
 ];
 
@@ -72,7 +80,11 @@ fn link_targets(html: &str) -> Vec<String> {
 /// A link target resolves if it is an anchor, mail address, external URL,
 /// static asset, allowlisted API prefix, registered browser endpoint, or a
 /// known route.
-fn target_resolves(surface: &str, target: &str, manifest: &std::collections::HashSet<String>) -> bool {
+fn target_resolves(
+    surface: &str,
+    target: &str,
+    manifest: &std::collections::HashSet<String>,
+) -> bool {
     let Some(path_only) = target.split(['?', '#']).next() else {
         return false;
     };
@@ -130,7 +142,12 @@ fn every_web_and_cp_href_and_form_action_resolves() {
         let manifest = &manifests[surface];
         let mut documents: Vec<(String, String)> = routing::surface_routes(surface)
             .into_iter()
-            .map(|route| (route.path.to_string(), render_with_secret(surface, route.path)))
+            .map(|route| {
+                (
+                    route.path.to_string(),
+                    render_with_secret(surface, route.path),
+                )
+            })
             .collect();
         for (path, query) in STATEFUL_RENDER_VARIANTS
             .iter()
@@ -174,12 +191,8 @@ fn web_dead_link_allowlist_entries_are_still_dead() {
         let html = render_variant_with_secret(surface, path, query);
         let still_dead = link_targets(&html).into_iter().any(|link| {
             link.split(['?', '#']).next().unwrap_or(&link) == *target
-                && !target_resolves(
-                    surface,
-                    &link,
-                    &manifest_route_set(surface),
-                )
-            });
+                && !target_resolves(surface, &link, &manifest_route_set(surface))
+        });
         assert!(
             still_dead,
             "DEAD_LINK_ALLOWLIST entry ({surface}, {document}, {target}) is dead no more — fix applied? Delete the entry.",
@@ -287,12 +300,13 @@ fn marketing_documents_do_not_link_dead_routes() {
                     .unwrap_or(&target)
                     .trim_end_matches('/')
                     .to_string();
-                let allowlisted = MARKETING_DEAD_LINK_ALLOWLIST
-                    .iter()
-                    .any(|(document, dead_target)| {
-                        (*document == "*" || *document == route.path)
-                            && *dead_target == path_only
-                    });
+                let allowlisted =
+                    MARKETING_DEAD_LINK_ALLOWLIST
+                        .iter()
+                        .any(|(document, dead_target)| {
+                            (*document == "*" || *document == route.path)
+                                && *dead_target == path_only
+                        });
                 if !allowlisted {
                     dead.push(format!("[marketing-zola] {} -> {target}", route.path));
                 }

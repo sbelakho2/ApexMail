@@ -76,8 +76,6 @@ pub struct ListWebhooksQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    #[serde(default)]
-    pub cursor: Option<i64>,
 }
 
 // ─── Validation ────────────────────────────────────────────────
@@ -335,6 +333,13 @@ async fn create_webhook(
     let now = Utc::now();
     let secret = apexmail_lib::id::generate_webhook_secret();
 
+    // Webhook secret at rest (SM4 parity): the signing secret is stored ONLY
+    // as an `enc:v1:` envelope bound to the row (AAD `webhook={id}`) — the
+    // SAME convention as `apexmail_db::repos::webhooks::WebhooksRepo`, so
+    // both stacks interoperate. The plaintext is returned exactly once in
+    // this response and never persisted.
+    let stored_secret = encrypt_webhook_secret(&secret, &id)?;
+
     sqlx::query(
         "INSERT INTO webhooks (id, tenant_id, url, events, secret, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'active',$6,$6)",
@@ -343,7 +348,7 @@ async fn create_webhook(
     .bind(&auth.tenant_id)
     .bind(&body.url)
     .bind(serde_json::json!(body.events))
-    .bind(&secret)
+    .bind(&stored_secret)
     .bind(now)
     .execute(&state.db)
     .await?;
@@ -370,7 +375,13 @@ async fn list_webhooks(
 ) -> Result<Json<Vec<WebhookResponse>>, ApiError> {
     require_scopes(&auth, &["webhooks:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, WebhookRow>(
         "SELECT id, url, events, secret, status, created_at, updated_at
          FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -538,8 +549,14 @@ async fn test_webhook(
     let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
         ApiError::Internal(format!("failed to serialize webhook test payload: {e}"))
     })?;
+    // Webhook secret at rest (SM4 parity): `wh.secret` is the STORED value —
+    // an `enc:v1:` envelope for every row this module wrote, or a legacy
+    // plaintext row from before the at-rest parity. Resolve the signing
+    // material through the shared decrypt-or-migrate helper (the same
+    // legacy semantics WebhooksRepo applies).
+    let signing_secret = webhook_signing_secret(&state.db, &wh.id, &wh.secret).await?;
     let signature =
-        apexmail_lib::crypto::create_hmac_signature(wh.secret.as_bytes(), &payload_bytes);
+        apexmail_lib::crypto::create_hmac_signature(signing_secret.as_bytes(), &payload_bytes);
 
     let start = std::time::Instant::now();
     let result = client
@@ -593,11 +610,16 @@ async fn rotate_webhook_secret(
     // Generate a new secret atomically within a transaction
     let new_secret = apexmail_lib::id::generate_webhook_secret();
 
+    // Webhook secret at rest (SM4 parity): the rotated secret is persisted
+    // ONLY as the row-bound envelope (AAD `webhook={id}`), matching the
+    // WebhooksRepo convention; the plaintext is returned exactly once.
+    let stored_secret = encrypt_webhook_secret(&new_secret, &existing.id)?;
+
     sqlx::query(
         "UPDATE webhooks SET secret = $1, updated_at = NOW()
          WHERE id = $2 AND tenant_id = $3",
     )
-    .bind(&new_secret)
+    .bind(&stored_secret)
     .bind(&existing.id)
     .bind(&auth.tenant_id)
     .execute(&state.db)
@@ -661,6 +683,89 @@ async fn fetch_webhook(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("webhook not found".into()))
+}
+
+// ─── Webhook secret at rest (SM4 parity) ───────────────────────
+
+/// The AAD binding a webhook secret envelope to its row — byte-for-byte the
+/// convention `apexmail_db::repos::webhooks` uses, so a row written by
+/// either stack decrypts in the other and a ciphertext cannot be relocated
+/// between rows.
+pub(crate) fn webhook_secret_aad(webhook_id: &str) -> Vec<u8> {
+    format!("webhook={webhook_id}").into_bytes()
+}
+
+/// Encrypt a signing secret for storage. Fail-closed: a missing encryption
+/// key in production is an Internal error — never a silent plaintext write
+/// (the same contract `WebhooksRepo` applies).
+pub(crate) fn encrypt_webhook_secret(secret: &str, webhook_id: &str) -> Result<String, ApiError> {
+    apexmail_lib::secret_at_rest::encrypt_at_rest(secret, &webhook_secret_aad(webhook_id)).map_err(
+        |error| {
+            tracing::error!(
+                %error,
+                webhook_id,
+                "webhook secret encryption failed — refusing to store plaintext"
+            );
+            ApiError::Internal("webhook secret encryption is unavailable".into())
+        },
+    )
+}
+
+/// Resolve the STORED webhook secret into signing material for delivery.
+///
+/// * Envelope rows (`enc:v1:…`) decrypt STRICTLY under the row-bound AAD —
+///   a tampered or wrong-key envelope fails closed and never signs.
+/// * Legacy rows (plaintext written before the at-rest parity) still sign
+///   honestly — the pre-parity behavior this endpoint must keep for them —
+///   and are best-effort MIGRATED to the envelope on this read, mirroring
+///   the migrate-on-read `WebhooksRepo` applies on its own read paths.
+pub(crate) async fn webhook_signing_secret(
+    db: &sqlx::PgPool,
+    webhook_id: &str,
+    stored: &str,
+) -> Result<String, ApiError> {
+    if !apexmail_lib::secret_at_rest::is_encrypted(stored) {
+        // Legacy row (pre-parity INSERTs stored the raw generated secret, no
+        // marker): sign with the exact stored material, then migrate
+        // best-effort. A failed rewrite is logged, never fatal.
+        let material = stored.to_string();
+        match apexmail_lib::secret_at_rest::migrate_at_rest(stored, &webhook_secret_aad(webhook_id))
+        {
+            Ok(Some(envelope)) => {
+                if let Err(update_error) =
+                    sqlx::query("UPDATE webhooks SET secret = $1, updated_at = NOW() WHERE id = $2")
+                        .bind(&envelope)
+                        .bind(webhook_id)
+                        .execute(db)
+                        .await
+                {
+                    tracing::warn!(
+                        %update_error,
+                        webhook_id,
+                        "failed to persist the migrated webhook secret envelope"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(migrate_error) => {
+                tracing::warn!(%migrate_error, webhook_id, "webhook secret migrate-on-read failed");
+            }
+        }
+        return Ok(material);
+    }
+
+    apexmail_lib::secret_at_rest::decrypt_at_rest(stored, &webhook_secret_aad(webhook_id)).map_err(
+        |error| {
+            tracing::error!(
+                %error,
+                webhook_id,
+                "webhook secret envelope failed to decrypt (tampered or wrong key) — failing closed"
+            );
+            ApiError::Internal(
+                "the webhook signing secret could not be decrypted — rotate the secret".into(),
+            )
+        },
+    )
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -1170,7 +1275,6 @@ mod adversarial_tests {
             Query(ListWebhooksQuery {
                 limit: 200,
                 offset: 0,
-                cursor: None,
             }),
         )
         .await
@@ -1298,7 +1402,16 @@ mod adversarial_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("stored secret");
-        assert_eq!(stored, rotated_secret);
+        // SM4 parity: the rotated secret is stored ONLY as the row-bound
+        // envelope; it must not sit in the row as plaintext, and it must
+        // decrypt back to exactly what was returned to the operator.
+        assert_ne!(stored, rotated_secret, "no plaintext secret at rest");
+        let round_tripped = apexmail_lib::secret_at_rest::decrypt_at_rest(
+            &stored,
+            &webhook_secret_aad(&created.id),
+        )
+        .expect("the rotated envelope decrypts");
+        assert_eq!(round_tripped, rotated_secret);
 
         // Inbound subscription needs the inbound_email entitlement (starter
         // does not have it).
@@ -1349,8 +1462,7 @@ mod adversarial_tests {
                 auth_for(&tenant_a, &[]),
                 Query(ListWebhooksQuery {
                     limit: 1,
-                    offset: 0,
-                    cursor: None
+                    offset: 0
                 })
             )
             .await,
@@ -1368,6 +1480,211 @@ mod adversarial_tests {
             .execute(&pool)
             .await
             .expect("cleanup tenants");
+    }
+
+    // ── Webhook secret at rest (SM4 parity) ────────────────────
+
+    /// SM4 parity: a created webhook's signing secret is NEVER stored as
+    /// plaintext — the row carries the row-bound `enc:v1:` envelope (AAD
+    /// `webhook={id}`) that decrypts back to exactly the once-shown secret.
+    #[tokio::test]
+    async fn created_webhook_secret_is_stored_enveloped_and_round_trips() {
+        let Some((state, pool)) = state_and_pool("adv_webhooks_secret_at_rest").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "starter").await;
+        let write = auth_for(&tenant, &["webhooks:write"]);
+
+        let (status, Json(created)) = create_webhook(
+            State(state.clone()),
+            write,
+            Json(CreateWebhookRequest {
+                url: format!("https://{}.example.com/hook", uuid::Uuid::new_v4().simple()),
+                events: vec!["message.delivered".into()],
+            }),
+        )
+        .await
+        .expect("create webhook");
+        assert_eq!(status, StatusCode::CREATED);
+        let plaintext = created.secret.clone().expect("secret returned once");
+
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1 AND tenant_id = $2")
+                .bind(&created.id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("webhook row");
+        assert_ne!(
+            stored, plaintext,
+            "the signing secret must never sit in the row as plaintext"
+        );
+        let round_tripped = apexmail_lib::secret_at_rest::decrypt_at_rest(
+            &stored,
+            &webhook_secret_aad(&created.id),
+        )
+        .expect("the stored envelope decrypts");
+        assert_eq!(
+            round_tripped, plaintext,
+            "the envelope round-trips to the once-shown secret"
+        );
+
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup webhooks");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    /// SM4 parity: rotation re-envelopes too, and the new envelope decrypts
+    /// to exactly the rotated secret (the old one is gone).
+    #[tokio::test]
+    async fn rotated_webhook_secret_is_stored_enveloped() {
+        let Some((state, pool)) = state_and_pool("adv_webhooks_rotate_envelope").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "starter").await;
+        let write = auth_for(&tenant, &["webhooks:write"]);
+
+        let (status, Json(created)) = create_webhook(
+            State(state.clone()),
+            write.clone(),
+            Json(CreateWebhookRequest {
+                url: format!("https://{}.example.com/hook", uuid::Uuid::new_v4().simple()),
+                events: vec!["message.bounced".into()],
+            }),
+        )
+        .await
+        .expect("create webhook");
+        assert_eq!(status, StatusCode::CREATED);
+        let original = created.secret.clone().expect("secret returned once");
+
+        let rotated = rotate_webhook_secret(State(state.clone()), write, Path(created.id.clone()))
+            .await
+            .expect("rotate");
+        let rotated_secret = rotated
+            .secret
+            .clone()
+            .expect("rotated secret returned once");
+        assert_ne!(rotated_secret, original, "rotation minted a new secret");
+
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1 AND tenant_id = $2")
+                .bind(&created.id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("webhook row");
+        let round_tripped = apexmail_lib::secret_at_rest::decrypt_at_rest(
+            &stored,
+            &webhook_secret_aad(&created.id),
+        )
+        .expect("the rotated envelope decrypts");
+        assert_eq!(round_tripped, rotated_secret);
+        assert_ne!(
+            round_tripped, original,
+            "the old secret is invalidated in storage"
+        );
+
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup webhooks");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    /// SM4 parity read path: a LEGACY plaintext row (written before the
+    /// at-rest parity) still resolves to signing material AND is migrated
+    /// to the row-bound envelope by the read.
+    #[tokio::test]
+    async fn signing_secret_migrates_a_legacy_plaintext_row() {
+        let Some((_state, pool)) = state_and_pool("adv_webhooks_legacy_migrate").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "starter").await;
+        let id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, events, secret, status, created_at, updated_at)
+             VALUES ($1, $2, 'https://legacy.example.com/hook', '[\"*\"]'::jsonb, 'legacy-plain-secret', 'active', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed legacy webhook");
+
+        let material = webhook_signing_secret(&pool, &id, "legacy-plain-secret")
+            .await
+            .expect("legacy plaintext still signs");
+        assert_eq!(material, "legacy-plain-secret");
+
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1 AND tenant_id = $2")
+                .bind(&id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("webhook row");
+        assert_ne!(
+            stored, "legacy-plain-secret",
+            "the read must migrate the row off plaintext"
+        );
+        let round_tripped =
+            apexmail_lib::secret_at_rest::decrypt_at_rest(&stored, &webhook_secret_aad(&id))
+                .expect("the migrated envelope decrypts");
+        assert_eq!(round_tripped, "legacy-plain-secret");
+
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup webhooks");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    /// SM4 parity read path: an envelope is BOUND to its row — decrypting
+    /// one webhook's envelope under another row's AAD (a relocated
+    /// ciphertext) fails closed and never yields signing material.
+    #[tokio::test]
+    async fn signing_secret_fails_closed_on_a_relocated_envelope() {
+        let id = apexmail_lib::id::generate_id("", 26);
+        let other_id = apexmail_lib::id::generate_id("", 26);
+        let envelope =
+            apexmail_lib::secret_at_rest::encrypt_at_rest("real-secret", &webhook_secret_aad(&id))
+                .expect("envelope");
+        // The envelope branch resolves BEFORE any query runs, so the pool is
+        // never dereferenced on this failure path.
+        let pool = pool_of_memory();
+        let result = webhook_signing_secret(&pool, &other_id, &envelope).await;
+        assert!(
+            matches!(result, Err(ApiError::Internal(_))),
+            "a relocated envelope must fail closed, got {result:?}"
+        );
+    }
+
+    fn pool_of_memory() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool")
     }
 
     async fn foreign_webhook_id(state: &AppState, _auth: &AuthUser, tenant_b: &str) -> String {

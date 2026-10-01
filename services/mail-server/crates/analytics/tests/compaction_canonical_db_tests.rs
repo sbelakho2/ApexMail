@@ -309,7 +309,12 @@ async fn cold_retention_removes_only_old_months() {
 /// Seed events with an explicit Rust-side timestamp so tests can compute the
 /// exact `{YYYY/MM}` directory compaction will use (same instant, no
 /// wall-clock drift between the INSERT and the assertion).
-async fn seed_events_at(pool: &PgPool, tenant: &str, ts: chrono::DateTime<Utc>, n: usize) -> Vec<String> {
+async fn seed_events_at(
+    pool: &PgPool,
+    tenant: &str,
+    ts: chrono::DateTime<Utc>,
+    n: usize,
+) -> Vec<String> {
     let mut ids = Vec::new();
     for i in 0..n {
         let id = format!("{tenant}-{i:012}-{}", uuid::Uuid::new_v4().simple());
@@ -346,7 +351,8 @@ async fn materialize_committed_batch(
     let file = format!("events_{batch_id}.jsonl");
     let mut bytes = Vec::new();
     for id in ids {
-        bytes.extend_from_slice(serde_json::to_string(&serde_json::json!({ "id": id }))?.as_bytes());
+        bytes
+            .extend_from_slice(serde_json::to_string(&serde_json::json!({ "id": id }))?.as_bytes());
         bytes.push(b'\n');
     }
     std::fs::write(dir.join(&file), &bytes)?;
@@ -358,7 +364,10 @@ async fn materialize_committed_batch(
             year: ts.year(),
             month: ts.month() as i32,
             object_key: format!("{tenant}/{}/{file}", ts.format("%Y/%m")),
-            manifest_key: format!("{tenant}/{}/events_{batch_id}.manifest.json", ts.format("%Y/%m")),
+            manifest_key: format!(
+                "{tenant}/{}/events_{batch_id}.manifest.json",
+                ts.format("%Y/%m")
+            ),
             event_count: ids.len() as i64,
             checksum: compute_checksum(&bytes),
             committed_at: Utc::now(),
@@ -429,8 +438,11 @@ async fn migration_231_ledger_is_the_commit_record() {
         "idx_compaction_batches_year_month",
         "idx_compaction_event_ids_tenant_event",
     ] {
-        let reg: Option<String> =
-            sqlx::query_scalar("SELECT to_regclass($1)::text").bind(rel).fetch_one(&pool).await.unwrap();
+        let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(rel)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(reg.is_some(), "migration 231 must create {rel}");
     }
     // DEFAULT NOW() commits a timestamp without the writer supplying one.
@@ -497,12 +509,22 @@ async fn same_millisecond_batches_get_distinct_cold_objects() {
     // One committed ledger row per batch, three covered ids.
     let committed = load_committed_batches(&pool, "tenant_ms").await.unwrap();
     assert_eq!(committed.len(), 3, "three batches = three commit rows");
-    let distinct_objects: HashSet<String> = committed.iter().map(|b| b.object_key.clone()).collect();
-    assert_eq!(distinct_objects.len(), 3, "object keys must be distinct: {distinct_objects:?}");
+    let distinct_objects: HashSet<String> =
+        committed.iter().map(|b| b.object_key.clone()).collect();
+    assert_eq!(
+        distinct_objects.len(),
+        3,
+        "object keys must be distinct: {distinct_objects:?}"
+    );
     for key in &distinct_objects {
         let name = key.rsplit('/').next().unwrap();
-        assert!(name.starts_with("events_") && name.ends_with(".jsonl"), "{name}");
-        let middle = name.trim_start_matches("events_").trim_end_matches(".jsonl");
+        assert!(
+            name.starts_with("events_") && name.ends_with(".jsonl"),
+            "{name}"
+        );
+        let middle = name
+            .trim_start_matches("events_")
+            .trim_end_matches(".jsonl");
         assert!(
             uuid::Uuid::parse_str(middle).is_ok(),
             "object identity must be a UUID, not wall-clock millis: {name}"
@@ -528,7 +550,10 @@ async fn same_millisecond_batches_get_distinct_cold_objects() {
     seen_ids.sort();
     let mut expected = ids.clone();
     expected.sort();
-    assert_eq!(seen_ids, expected, "every event must survive in exactly one object");
+    assert_eq!(
+        seen_ids, expected,
+        "every event must survive in exactly one object"
+    );
 
     std::fs::remove_dir_all(&storage).ok();
     pool.close().await;
@@ -559,14 +584,25 @@ async fn crash_after_object_write_before_commit_orphan_is_tolerated() {
 
     // The orphan: a complete object on disk with NO ledger row (crash in the
     // write→commit window). Same directory the rerun will write into.
-    let dir = storage.join("tenant_orph").join(ts.format("%Y/%m").to_string());
+    let dir = storage
+        .join("tenant_orph")
+        .join(ts.format("%Y/%m").to_string());
     std::fs::create_dir_all(&dir).unwrap();
     let orphan = dir.join(format!("events_{}.jsonl", uuid::Uuid::new_v4()));
     std::fs::write(&orphan, b"{\"id\":\"orphan-crashed-write\"}\n").unwrap();
 
-    let status = worker(&pool, &redis, &storage).run().await.expect("rerun after crash");
-    assert_eq!(status.rows_migrated, 2, "orphan ids are not covered — they are re-written");
-    assert_eq!(status.rows_deleted, 2, "hot rows deleted only after the fresh commit");
+    let status = worker(&pool, &redis, &storage)
+        .run()
+        .await
+        .expect("rerun after crash");
+    assert_eq!(
+        status.rows_migrated, 2,
+        "orphan ids are not covered — they are re-written"
+    );
+    assert_eq!(
+        status.rows_deleted, 2,
+        "hot rows deleted only after the fresh commit"
+    );
 
     // Events intact: every id is present in a COMMITTED object.
     let committed = load_committed_batches(&pool, "tenant_orph").await.unwrap();
@@ -580,12 +616,24 @@ async fn crash_after_object_write_before_commit_orphan_is_tolerated() {
 
     // The orphan is tolerated: still on disk, never swept, ages out with its
     // month directory under cold retention (documented residual duplicate).
-    assert!(orphan.exists(), "orphan objects are tolerated, not destroyed");
+    assert!(
+        orphan.exists(),
+        "orphan objects are tolerated, not destroyed"
+    );
 
     // Another rerun: nothing left to do, ledger coverage is stable.
-    let second = worker(&pool, &redis, &storage).run().await.expect("second rerun");
+    let second = worker(&pool, &redis, &storage)
+        .run()
+        .await
+        .expect("second rerun");
     assert_eq!(second.rows_migrated, 0);
-    assert_eq!(load_committed_batches(&pool, "tenant_orph").await.unwrap().len(), 1);
+    assert_eq!(
+        load_committed_batches(&pool, "tenant_orph")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     std::fs::remove_dir_all(&storage).ok();
     pool.close().await;
@@ -623,26 +671,37 @@ async fn crash_after_commit_before_delete_rerun_consults_ledger() {
             .expect("simulate commit-before-delete crash");
     assert!(!object_path.to_string_lossy().contains(".manifest.json"));
 
-    let status = worker(&pool, &redis, &storage).run().await.expect("rerun finishes the delete");
+    let status = worker(&pool, &redis, &storage)
+        .run()
+        .await
+        .expect("rerun finishes the delete");
     assert_eq!(
         status.rows_migrated, 0,
         "covered ids must NOT be re-written (ledger consulted, not the filesystem)"
     );
-    assert_eq!(status.rows_deleted, 2, "the interrupted DELETE is completed");
+    assert_eq!(
+        status.rows_deleted, 2,
+        "the interrupted DELETE is completed"
+    );
 
-    let hot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = 'tenant_pend'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let hot: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = 'tenant_pend'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(hot, 0);
 
     // Still exactly one committed batch, object untouched — no duplicates.
     let committed = load_committed_batches(&pool, "tenant_pend").await.unwrap();
     assert_eq!(committed.len(), 1);
     assert_eq!(committed[0].event_count, 2);
-    let cold_text = std::fs::read_to_string(committed_object_path(&storage, &committed[0])).unwrap();
+    let cold_text =
+        std::fs::read_to_string(committed_object_path(&storage, &committed[0])).unwrap();
     for id in &ids {
-        assert!(cold_text.contains(id), "cold copy must survive the delete: {id}");
+        assert!(
+            cold_text.contains(id),
+            "cold copy must survive the delete: {id}"
+        );
     }
     let total_objects = read_jsonl_lines(&storage).len();
     assert_eq!(total_objects, 2, "no duplicate cold rows for covered ids");
@@ -730,7 +789,10 @@ async fn ledger_coverage_equals_old_full_manifest_scan_property() {
             "ledger coverage must equal the old full-scan coverage for {tenant}"
         );
         for a in &absent {
-            assert!(!new_coverage.contains(a), "absent id {a} must not be covered");
+            assert!(
+                !new_coverage.contains(a),
+                "absent id {a} must not be covered"
+            );
         }
         assert_eq!(new_coverage.len(), all_ids.len());
         if tenant == "tenant_par1" {
@@ -742,7 +804,10 @@ async fn ledger_coverage_equals_old_full_manifest_scan_property() {
     // tenant_par2 (the old scan keyed on the directory tree too, but the
     // ledger must enforce it explicitly).
     let leaked = load_committed_event_ids(&pool, "tenant_par2", &first_tenant_ids).await;
-    assert!(leaked.is_empty(), "coverage must not leak across tenants: {leaked:?}");
+    assert!(
+        leaked.is_empty(),
+        "coverage must not leak across tenants: {leaked:?}"
+    );
 
     std::fs::remove_dir_all(&storage).ok();
     pool.close().await;
@@ -820,14 +885,16 @@ async fn ledger_retention_tracks_cold_retention() {
     );
     w.run().await.expect("run applies cold retention");
 
-    let old_gone: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM analytics_compaction_batches WHERE batch_id = $1",
-    )
-    .bind(old_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(old_gone, 0, "ledger rows must age out with their month directory");
+    let old_gone: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM analytics_compaction_batches WHERE batch_id = $1")
+            .bind(old_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        old_gone, 0,
+        "ledger rows must age out with their month directory"
+    );
     let old_ids: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM analytics_compaction_batch_event_ids WHERE batch_id = $1",
     )
@@ -837,13 +904,12 @@ async fn ledger_retention_tracks_cold_retention() {
     .unwrap();
     assert_eq!(old_ids, 0, "covered ids must cascade with their batch");
 
-    let recent_kept: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM analytics_compaction_batches WHERE batch_id = $1",
-    )
-    .bind(recent_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let recent_kept: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM analytics_compaction_batches WHERE batch_id = $1")
+            .bind(recent_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(recent_kept, 1, "in-window ledger rows survive");
 
     std::fs::remove_dir_all(&storage).ok();

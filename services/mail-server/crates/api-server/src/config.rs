@@ -1143,7 +1143,11 @@ impl Config {
             // side. Warn (do not fail the api-server boot): the affected
             // routes degrade honestly with a 500 either way.
             for (service, env_name, wired) in [
-                ("pdf-renderer (analytics PDF export)", "PDF_RENDERER_AUTH_TOKEN", true),
+                (
+                    "pdf-renderer (analytics PDF export)",
+                    "PDF_RENDERER_AUTH_TOKEN",
+                    true,
+                ),
                 // No api-server outbound call sites yet — the config fields
                 // exist so deployments can pre-provision; nothing to warn
                 // about while no call presents a credential.
@@ -1151,7 +1155,9 @@ impl Config {
                 ("devex-service", "DEVEX_AUTH_TOKEN", false),
                 ("ai-embeddings", "AI_EMBEDDINGS_AUTH_TOKEN", false),
             ] {
-                let dedicated_set = env::var(env_name).ok().is_some_and(|v| !v.trim().is_empty());
+                let dedicated_set = env::var(env_name)
+                    .ok()
+                    .is_some_and(|v| !v.trim().is_empty());
                 if wired && !dedicated_set {
                     tracing::warn!(
                         "{env_name} is not set — the outbound call to {service} still \

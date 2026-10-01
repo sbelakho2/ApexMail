@@ -50,6 +50,13 @@ use super::util::{
 /// not hold the session forever).
 const AUTH_LINE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Audit finding 11: wall-clock bound for the PRE-ADMISSION refusal write
+/// (the `421 Too many connections` line). A peer that connects, trips the
+/// per-IP cap, and never reads must not pin the refusal task on an
+/// unbounded `write_all().await` — the connection is refused either way, so
+/// a stalled receiver just gets the socket closed.
+const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Total deadline for receiving message DATA.
 const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -264,10 +271,15 @@ impl SubmissionServer {
                 self.rate_limit.max_connections_per_ip,
             )
         {
+            // Audit finding 11: the refusal write is bounded — the peer may
+            // never read; stalling here must not pin the task.
             let mut stream = BufStream::new(socket);
-            let _ = write_line(
-                &mut stream,
-                "421 4.7.0 Too many connections from your IP\r\n",
+            let _ = tokio::time::timeout(
+                REFUSAL_WRITE_TIMEOUT,
+                write_line(
+                    &mut stream,
+                    "421 4.7.0 Too many connections from your IP\r\n",
+                ),
             )
             .await;
             return;
@@ -2711,6 +2723,26 @@ mod tests {
         assert_eq!(extract_subject(&headers).chars().count(), 998);
     }
 
+    // ── audit finding 11: bounded pre-admission refusal write ──────────────
+
+    #[test]
+    fn pre_admission_refusal_write_is_time_bounded() {
+        // The 421 refusal at the per-IP connection cap must run under
+        // REFUSAL_WRITE_TIMEOUT: a peer that connects, trips the cap, and
+        // never readies for write must not pin the refusal task on an
+        // unbounded write. (The mechanism itself is exercised end-to-end by
+        // inbound.rs's `refusal_write_to_a_stalled_peer_times_out`.)
+        let source = include_str!("submission.rs");
+        assert!(
+            source.contains("REFUSAL_WRITE_TIMEOUT,\n                write_line("),
+            "the pre-admission refusal write must run under REFUSAL_WRITE_TIMEOUT"
+        );
+        assert!(
+            REFUSAL_WRITE_TIMEOUT <= Duration::from_secs(30),
+            "the refusal bound must stay tight"
+        );
+    }
+
     // ── P0/P1: submission admission policy (pure logic) ────────────────────
 
     #[test]
@@ -4722,6 +4754,19 @@ mod adversarial_db_tests {
         .await
         .expect("provisioning must succeed")
         .expect("TEST_DATABASE_URL is configured");
+        // The proxied pool connects as the `apexmail` APP role (the fault
+        // injector must see plaintext statements), mirroring a deployed
+        // environment where the migration role grants the app role its DML.
+        // A freshly provisioned database carries owner-only ACLs, so the
+        // fixture performs that grant itself before handing out the proxy.
+        sqlx::query("GRANT ALL ON ALL TABLES IN SCHEMA public TO apexmail")
+            .execute(&provisioned)
+            .await
+            .expect("grant tables to the app role");
+        sqlx::query("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO apexmail")
+            .execute(&provisioned)
+            .await
+            .expect("grant sequences to the app role");
         provisioned.close().await;
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
@@ -5727,10 +5772,7 @@ mod adversarial_db_tests {
         use tokio::io::AsyncWriteExt;
 
         // A bare-LF command line: refused in band, session stays open.
-        client
-            .write_all(b"EHLO client.test\n")
-            .await
-            .unwrap();
+        client.write_all(b"EHLO client.test\n").await.unwrap();
         client.flush().await.unwrap();
         let reply = super::tests::read_smtp_response(&mut client).await;
         assert!(
@@ -5739,13 +5781,13 @@ mod adversarial_db_tests {
         );
 
         // A well-formed CRLF command still works afterwards.
-        client
-            .write_all(b"NOOP\r\n")
-            .await
-            .unwrap();
+        client.write_all(b"NOOP\r\n").await.unwrap();
         client.flush().await.unwrap();
         let reply = super::tests::read_smtp_response(&mut client).await;
-        assert!(reply.starts_with("250"), "session survives a bare-LF attempt: {reply:?}");
+        assert!(
+            reply.starts_with("250"),
+            "session survives a bare-LF attempt: {reply:?}"
+        );
 
         // A resynchronisable over-long line (newline present): refused in
         // band, remainder drained, session CONTINUES.
@@ -5753,10 +5795,7 @@ mod adversarial_db_tests {
         client.write_all(flood.as_bytes()).await.unwrap();
         client.flush().await.unwrap();
         let reply = super::tests::read_smtp_response(&mut client).await;
-        assert!(
-            reply.starts_with("500 5.5.2 Line too long"),
-            "{reply:?}"
-        );
+        assert!(reply.starts_with("500 5.5.2 Line too long"), "{reply:?}");
         client.write_all(b"NOOP\r\n").await.unwrap();
         client.flush().await.unwrap();
         let reply = super::tests::read_smtp_response(&mut client).await;

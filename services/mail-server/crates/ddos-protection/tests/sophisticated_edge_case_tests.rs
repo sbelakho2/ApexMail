@@ -251,6 +251,7 @@ mod boundary_conditions {
         let config = CostLimiterConfig {
             default_tenant_budget: 0,
             system_capacity: 0,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -265,6 +266,7 @@ mod boundary_conditions {
         let config = CostLimiterConfig {
             default_tenant_budget: 100,
             system_capacity: 100,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -569,6 +571,7 @@ mod concurrency_tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 100000,
             system_capacity: 10000,
+            ..Default::default()
         };
         let limiter = Arc::new(CostBasedLimiter::new(config));
 

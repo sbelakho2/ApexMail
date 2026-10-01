@@ -215,7 +215,9 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePaylo
     // populate — mirroring billing-service's get_mrr_report pattern (tenants.plan
     // → plans pricing, ROUND(price_yearly / 12.0) yearly normalization).
     // The legacy `subscriptions` table has no writer and always read as zero.
-    let mrr = if table_exists(db, "stripe_subscriptions").await? && table_exists(db, "plans").await? {
+    let mrr = if table_exists(db, "stripe_subscriptions").await?
+        && table_exists(db, "plans").await?
+    {
         let has_billing_interval =
             crate::routes::helpers::column_exists(db, "stripe_subscriptions", "billing_interval")
                 .await?;
@@ -552,23 +554,18 @@ mod tests {
             let computations = Arc::clone(&computations);
             let gate = Arc::clone(&gate);
             handles.push(tokio::spawn(async move {
-                get_or_refresh(
-                    &cache,
-                    "platform".to_string(),
-                    SNAPSHOT_TTL,
-                    || {
-                        let computations = Arc::clone(&computations);
-                        let gate = Arc::clone(&gate);
-                        async move {
-                            computations.fetch_add(1, Ordering::SeqCst);
-                            // Serialized recompute: hold the winner here
-                            // until every other client is queued behind the
-                            // refresh lock.
-                            let _permit = gate.acquire().await.expect("gate opened");
-                            Ok(42u64)
-                        }
-                    },
-                )
+                get_or_refresh(&cache, "platform".to_string(), SNAPSHOT_TTL, || {
+                    let computations = Arc::clone(&computations);
+                    let gate = Arc::clone(&gate);
+                    async move {
+                        computations.fetch_add(1, Ordering::SeqCst);
+                        // Serialized recompute: hold the winner here
+                        // until every other client is queued behind the
+                        // refresh lock.
+                        let _permit = gate.acquire().await.expect("gate opened");
+                        Ok(42u64)
+                    }
+                })
                 .await
             }));
         }
@@ -731,10 +728,9 @@ mod tests {
 #[cfg(test)]
 mod adversarial_tests {
     use super::{
-        build_alerts_stream, cached_dashboard_snapshot, query_dashboard_snapshot,
-        query_new_alerts, sse_alerts, sse_dashboard, AlertPollFn, AlertSsePayload,
-        ALERTS_POLL_INTERVAL, MAX_CONSECUTIVE_POLL_ERRORS, MAX_STREAM_DURATION,
-        SNAPSHOT_COMPUTATIONS,
+        build_alerts_stream, cached_dashboard_snapshot, query_dashboard_snapshot, query_new_alerts,
+        sse_alerts, sse_dashboard, AlertPollFn, AlertSsePayload, ALERTS_POLL_INTERVAL,
+        MAX_CONSECUTIVE_POLL_ERRORS, MAX_STREAM_DURATION, SNAPSHOT_COMPUTATIONS,
     };
     use crate::middleware::auth::AuthUser;
     use axum::extract::State;
@@ -988,7 +984,10 @@ mod adversarial_tests {
         };
         let before = SNAPSHOT_COMPUTATIONS.load(std::sync::atomic::Ordering::SeqCst);
 
-        let (a, b) = tokio::join!(cached_dashboard_snapshot(&pool), cached_dashboard_snapshot(&pool));
+        let (a, b) = tokio::join!(
+            cached_dashboard_snapshot(&pool),
+            cached_dashboard_snapshot(&pool)
+        );
         let a = a.expect("snapshot a");
         let b = b.expect("snapshot b");
         assert!(
@@ -1035,10 +1034,12 @@ mod adversarial_tests {
         .execute(&pool)
         .await
         .expect("seed plan");
-        sqlx::query("UPDATE tenants SET plan = 'sparse-probe' WHERE id = 'system_internal_tenant01'")
-            .execute(&pool)
-            .await
-            .expect("set plan");
+        sqlx::query(
+            "UPDATE tenants SET plan = 'sparse-probe' WHERE id = 'system_internal_tenant01'",
+        )
+        .execute(&pool)
+        .await
+        .expect("set plan");
         sqlx::query(
             "INSERT INTO stripe_subscriptions
                 (id, tenant_id, stripe_subscription_id, status)
@@ -1106,8 +1107,7 @@ mod adversarial_tests {
             message.contains("does not exist"),
             "the propagated error names the real cause: {message}"
         );
-        let alerts = query_new_alerts(&pool, Utc::now() - chrono::Duration::hours(24))
-            .await;
+        let alerts = query_new_alerts(&pool, Utc::now() - chrono::Duration::hours(24)).await;
         assert!(
             alerts.is_err(),
             "the dropped alert table must propagate, never fabricate an empty feed"
@@ -1131,9 +1131,8 @@ mod adversarial_tests {
     /// failures, which is exactly the contract under test).
     async fn drain_sse(
         sse: axum::response::sse::Sse<
-            impl futures::Stream<
-                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
-                > + Send
+            impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>
+                + Send
                 + 'static,
         >,
     ) -> String {
@@ -1156,7 +1155,9 @@ mod adversarial_tests {
         };
         let state = crate::app::test_support::test_state_over(pool).await;
         // Warm the pool + capability probes in real time.
-        let warm = query_dashboard_snapshot(&state.db).await.expect("warm snapshot");
+        let warm = query_dashboard_snapshot(&state.db)
+            .await
+            .expect("warm snapshot");
         let _ = warm;
 
         tokio::time::pause();
@@ -1218,7 +1219,9 @@ mod adversarial_tests {
             .expect("stream");
         let frames = drain_sse(sse).await;
         let unavailable = frames.matches("dashboard-unavailable").count();
-        let closing = frames.matches("dashboard-unavailable-stream-closing").count();
+        let closing = frames
+            .matches("dashboard-unavailable-stream-closing")
+            .count();
         assert_eq!(
             frames.matches("event: dashboard").count(),
             0,
@@ -1249,7 +1252,9 @@ mod adversarial_tests {
             .expect("warm alerts");
 
         tokio::time::pause();
-        let sse = sse_alerts(State(state), wildcard_auth()).await.expect("stream");
+        let sse = sse_alerts(State(state), wildcard_auth())
+            .await
+            .expect("stream");
         let frames = drain_sse(sse).await;
         let successful = frames.matches("no-new-alerts").count();
         assert!(
@@ -1330,7 +1335,11 @@ mod adversarial_tests {
         ];
         let poll = alerting_poll(Arc::clone(&calls), alerts);
         let watermark = Arc::new(Mutex::new(Utc::now() - chrono::Duration::hours(1)));
-        let mut stream = Box::pin(build_alerts_stream(Vec::new(), Arc::clone(&watermark), poll));
+        let mut stream = Box::pin(build_alerts_stream(
+            Vec::new(),
+            Arc::clone(&watermark),
+            poll,
+        ));
 
         // The stream emits one SSE Event per alert (the unparseable one is
         // skipped for the watermark but still streamed? No: it is filtered
@@ -1361,7 +1370,11 @@ mod adversarial_tests {
             .expect("parse watermark")
             .with_timezone(&Utc);
         assert_eq!(*watermark.lock().await, later, "watermark advanced");
-        let second = stream.next().await.expect("second tick").expect("infallible");
+        let second = stream
+            .next()
+            .await
+            .expect("second tick")
+            .expect("infallible");
         assert!(format!("{second:?}").contains("a-old"), "{second:?}");
     }
 
@@ -1388,7 +1401,10 @@ mod adversarial_tests {
             assert!(frame.contains("alerts-unavailable"), "{frame}");
             plain += 1;
         }
-        assert!(closing, "the stream must signal closing after repeated failures");
+        assert!(
+            closing,
+            "the stream must signal closing after repeated failures"
+        );
         assert_eq!(
             plain,
             (MAX_CONSECUTIVE_POLL_ERRORS - 1) as usize,

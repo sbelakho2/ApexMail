@@ -685,7 +685,10 @@ impl CoordinatorHub {
         // Check for duplicate
         {
             let mut seen = self.seen_events.write().await;
-            let cutoff = Instant::now() - self.config.event_retention;
+            // Audit SM5 F4: monotonic-safe — a host younger than the
+            // retention window must not panic the ingest path.
+            let cutoff =
+                crate::adaptive::monotonic_cutoff(Instant::now(), self.config.event_retention);
             seen.retain(|_, seen_at| *seen_at >= cutoff);
             if seen.contains_key(&event.event_id) {
                 return false;
@@ -766,7 +769,10 @@ impl CoordinatorHub {
 
         // Cleanup seen events using the configured deduplication retention window.
         {
-            let cutoff = Instant::now() - self.config.event_retention;
+            // Audit SM5 F4: monotonic-safe — a host younger than the
+            // retention window must not panic the ingest path.
+            let cutoff =
+                crate::adaptive::monotonic_cutoff(Instant::now(), self.config.event_retention);
             let mut seen = self.seen_events.write().await;
             seen.retain(|_, seen_at| *seen_at >= cutoff);
         }

@@ -312,7 +312,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "legacy token still works"
+        );
     }
 
     #[tokio::test]

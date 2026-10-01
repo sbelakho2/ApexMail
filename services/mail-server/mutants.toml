@@ -1,9 +1,11 @@
 # Mutation Testing Configuration for cargo-mutants
 # https://mutants.rs/config.html
 #
-# PURPOSE: Mutation testing evaluates test quality by introducing small
-# bugs (mutants) and checking if tests catch them. If tests pass with
-# the mutant, the test suite has gaps.
+# STATUS (audit SM14 F13): INFORMATIONAL / MANUAL-ONLY. cargo-mutants is NOT
+# wired into CI — the historical `mutation-testing.yml` GitHub workflow is
+# MOVED-TO-ARCHIVE (ci/README.md: "3-hour cargo-mutants sweep, weekly by
+# design... Manual substitute"), and no ci/ stage reads this file. Nothing
+# "causes CI to fail" from this config; it shapes manual runs only:
 #
 # RUN LOCALLY:
 #   cargo install cargo-mutants
@@ -18,9 +20,8 @@
 # Timeout for each mutant test (in seconds)
 timeout = 120
 
-# Minimum mutation score (percentage of killed mutants) required
-# Values below this will cause CI to fail
-# Start at 60% and increase as test quality improves
+# Per-mutant minimum test time in seconds — runs finishing faster are
+# suspicious (the tests did not actually exercise the mutated code).
 minimum_test_timeout = 30
 
 # Maximum concurrent mutants to test

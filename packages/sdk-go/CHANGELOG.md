@@ -34,4 +34,10 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Cursor-based pagination support: `Cursor` field added to `Pagination` struct and all list options (`ListEmailsOptions`, `ListTemplatesOptions`, `ListSuppressionsOptions`, `ListEventsOptions`).
-- `Tag` filter on `ListSuppressionsOptions` for filtering suppressions by tag.
+
+### Deprecated
+
+- `ListSuppressionsOptions.Tag` — never accepted by the API (the server
+  query is `{limit, offset, cursor, reason}`); the field is retained for
+  source compatibility but is not sent. Suppressions can be filtered by
+  `Reason` only.

@@ -530,6 +530,7 @@ mod cost_limiter_edge_cases {
         let config = CostLimiterConfig {
             default_tenant_budget: 1,
             system_capacity: 1,
+            ..Default::default()
         };
 
         let limiter = CostBasedLimiter::new(config);
@@ -573,6 +574,7 @@ mod cost_limiter_edge_cases {
         let config = CostLimiterConfig {
             default_tenant_budget: 100000, // Enough for multiple requests
             system_capacity: 1000000,
+            ..Default::default()
         };
 
         let limiter = CostBasedLimiter::new(config);
@@ -695,6 +697,10 @@ mod decision_helper_tests {
             name: "test_cookie".to_string(),
             value: "cookie_value".to_string(),
             expires_at: 0, // Already expired
+            // Repair of pre-existing breakage: the struct gained a server-side
+            // signing secret; both these tests fail on expiry/HMAC before the
+            // secret matters, so a zero secret preserves their semantics.
+            signing_secret: [0u8; 32],
         };
 
         // Verification should fail due to expiration
@@ -708,6 +714,9 @@ mod decision_helper_tests {
             name: "test_cookie".to_string(),
             value: "correct_value".to_string(),
             expires_at: u64::MAX, // Far future
+            // Same pre-existing-breakage repair: a wrong value fails the
+            // HMAC check regardless of the secret.
+            signing_secret: [0u8; 32],
         };
 
         // Wrong value should fail

@@ -15,13 +15,14 @@
 #   J  ui terminology       tools/check_ui_terminology.py   (CI_UI_TERMINOLOGY_CHECK)
 #   K  ui strings catalog   tools/extract_ui_strings.py     (CI_UI_STRINGS_CATALOG_CHECK)
 #
-# ALL SIX GATES SHIP ADVISORY (default): the first run surfaced real P2 drift
-# (missing per-form CSRF inputs, duplicate control-plane h1s, tenant wording
-# in customer-facing flash strings, manifest link drift). Each gate flips to
-# REQUIRED with its CI_UI_*_CHECK=required once its findings are fixed —
-# exactly the fmt/clippy advisory→required convention (see ci/pipeline.conf).
-# A gate exiting non-zero under the default flags logs the violations and
-# NEVER fails the stage.
+# ALL SIX GATES ARE REQUIRED BY DEFAULT: every CI_UI_*_CHECK flag is set to
+# `required` in ci/pipeline.conf (the advisory→required flip happened after
+# the first runs surfaced real P2 drift — missing per-form CSRF inputs,
+# duplicate control-plane h1s, tenant wording in customer-facing flash
+# strings, manifest link drift — and the fixes landed). A gate failing under
+# the default flags FAILS THE STAGE. `advisory` remains available only as a
+# bounded triage-window override (set CI_UI_*_CHECK=advisory), mirroring the
+# fmt/clippy convention (see ci/pipeline.conf).
 #
 # Fixtures write ONLY into $RUN_DIR/ui-fixtures — never the working tree
 # (the in-repo baselines/rust-ui dir belongs to the pixel-parity tooling).
@@ -34,8 +35,9 @@ WS=$REPO_ROOT/services/mail-server
 UI_FIXTURES=$RUN_DIR/ui-fixtures
 
 # ui_gate <flag> <label> <cmd...> — run one UI gate honouring its
-# CI_UI_*_CHECK flag: `required` enforces the exit code, any other value
-# (the shipped default: advisory) records and swallows the failure.
+# CI_UI_*_CHECK flag: `required` (the default in ci/pipeline.conf) enforces
+# the exit code; any other value (a bounded triage-window override: advisory)
+# records and swallows the failure.
 ui_gate() {
     _ug_flag=$1 _ug_label=$2
     shift 2
@@ -121,7 +123,7 @@ stage_main() {
     ensure_marketing_output
     provision_ui_fixtures
     run_ui_gates
-    ci_info "ui: stage complete (gates advisory by default — see ci/pipeline.conf)"
+    ci_info "ui: stage complete (gates required by default — see ci/pipeline.conf)"
     return "$CI_EXIT_OK"
 }
 

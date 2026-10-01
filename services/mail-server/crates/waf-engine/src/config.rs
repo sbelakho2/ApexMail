@@ -77,6 +77,22 @@ impl Default for WafConfig {
 }
 
 impl WafConfig {
+    /// Validate the configuration (audit SM5 F14).
+    ///
+    /// `paranoia_level` outside `1..=4` silently DISARMS the engine: the
+    /// level-0 retain filter in `WafEngine::inspect` drops every match
+    /// (all catalog rules are level >= 1) while the engine reports
+    /// healthy. Construction paths must reject such configs.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=4).contains(&self.paranoia_level) {
+            return Err(format!(
+                "paranoia_level must be within 1..=4, got {} — 0 disarms every rule",
+                self.paranoia_level
+            ));
+        }
+        Ok(())
+    }
+
     /// Get the paranoia level enum
     pub fn paranoia(&self) -> ParanoiaLevel {
         match self.paranoia_level {

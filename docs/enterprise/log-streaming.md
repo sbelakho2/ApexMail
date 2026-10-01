@@ -1,497 +1,259 @@
-# Log Streaming & Real-Time Analytics
+# Log Streaming
 
-ApexMail's log streaming service provides real-time access to email events, enabling integration with your existing analytics, monitoring, and data infrastructure.
+Stream enterprise log batches to an external destination (SIEM, log
+aggregator, or your own HTTPS endpoint).
 
-## Overview
+> **Source of truth:** the shipped router and service —
+> `services/mail-server/crates/enterprise/src/routes.rs` (`/log-streams`
+> routes) and `services/mail-server/crates/enterprise/src/log_streaming.rs`.
+> This document was rewritten 2026-10-01 (audit SM15 verifier) to match the
+> shipped code; the previous revision described endpoints, request schemas
+> and an event vocabulary that the service does not implement.
 
-Log streaming enables:
+## What ships today
 
-- **Real-Time Event Delivery** - Stream events as they happen
-- **Multiple Destinations** - Send to S3, BigQuery, Kafka, and more
-- **Custom Filtering** - Stream only the events you need
-- **Data Transformation** - Transform payloads before delivery
-- **Reliability** - At-least-once delivery with retry logic
+- **Stream configuration CRUD** — create, get, update, delete, list,
+  pause, resume log streams (per-tenant, `ent_log_streams`).
+- **Three delivery paths** — `webhook`, `splunk`, and `datadog`. Any other
+  `destination_type` value is accepted at create time but **fails
+  verification and delivery** with
+  `unsupported destination type '<type>'`.
+- **Connectivity verification** — `POST /log-streams/{id}/verify` sends a
+  test payload to the destination through the same SSRF-guarded,
+  address-pinned HTTP client used for delivery.
+- **Heartbeat delivery cycle** — a periodic delivery cycle posts a heartbeat
+  batch to every active, verified stream and records per-batch delivery
+  statistics (`ent_stream_batches`).
 
-## Supported Destinations
+> **Not shipped yet:** per-event log payloads (email lifecycle events such
+> as `message.delivered`) are **not** streamed today — the delivery cycle
+> sends heartbeat batches only. The `log_categories` field is stored as a
+> free-form filter label (the server does not validate category names).
+> To stay forward-compatible with the platform event vocabulary, use the
+> canonical webhook event names for categories — see the
+> [webhooks endpoint docs](../api/endpoints/webhooks.md) or
+> `KNOWN_WEBHOOK_EVENTS` in
+> `services/mail-server/crates/api-server/src/routes/webhooks.rs`
+> (`message.*`, `recipient.unsubscribed`, `placement_test.completed`,
+> `inbound`, `*`).
 
-| Destination | Use Case | Latency |
-|-------------|----------|---------|
-| Amazon S3 | Long-term storage, analytics | ~5 min batches |
-| Google BigQuery | Real-time analytics | ~10 seconds |
-| Snowflake | Data warehousing | ~5 min batches |
-| Apache Kafka | Event streaming | Real-time |
-| Amazon Kinesis | AWS streaming | Real-time |
-| Elasticsearch | Search & visualization | ~30 seconds |
-| Datadog | Monitoring | Real-time |
-| Custom Webhook | Any HTTP endpoint | Real-time |
+## Authentication and scopes
 
-## Configuration
+All routes require an authenticated enterprise API key (see
+[README](./README.md) for the base URL `https://enterprise.apexmail.ee`).
 
-### Create Log Stream
+- Mutations (create, update, delete, pause, resume) require the
+  `log-streams:write` scope (or admin).
+- Reads and verify require tenant access to the stream's `tenant_id`.
+
+## Create a Log Stream
+
+The request body is strict (`deny_unknown_fields`): it accepts exactly
+
+```text
+{tenant_id*, name*, description?, destination_type*, destination_config?,
+ log_categories?, batch_size?, batch_interval_seconds?, compression_enabled?}
+```
+
+`destination_config` is a free-form JSON object interpreted per destination
+type (below). Secret-looking values in it (`token`, `api_key`, `secret`,
+`password`, `secret_key`, `access_key`, `client_secret`, `shared_key`) are
+encrypted at rest with the tenant id as additional authenticated data, and
+masked (`****` + last 4 characters) in every API response.
 
 ```bash
 curl -X POST https://enterprise.apexmail.ee/log-streams \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "accountId": "acc_xxx",
-    "name": "Production Event Stream",
-    "destination": {
-      "type": "s3",
-      "bucket": "apexmail-logs",
-      "region": "eu-central-1",
-      "prefix": "email-events/",
-      "credentials": {
-        "accessKeyId": "AKIA...",
-        "secretAccessKey": "..."
-      }
+    "tenant_id": "acc_parent",
+    "name": "SIEM stream",
+    "description": "Heartbeats to the security data lake",
+    "destination_type": "webhook",
+    "destination_config": {
+      "url": "https://siem.yourcompany.com/apexmail",
+      "secret": "whsec_stream_signing_secret"
     },
-    "events": [
-      "email.sent",
-      "email.delivered",
-      "email.opened",
-      "email.clicked",
-      "email.bounced",
-      "email.complained"
-    ],
-    "filters": {
-      "tags": ["production"],
-      "domains": ["yourcompany.com"]
-    },
-    "format": "json",
-    "batchSize": 1000,
-    "batchIntervalSeconds": 300
+    "log_categories": ["message.delivered", "message.bounced"],
+    "batch_size": 100,
+    "batch_interval_seconds": 30,
+    "compression_enabled": false
   }'
 ```
 
 ### Response
 
+Responses use the enterprise envelope `{success, data?, error?, code?}`.
+The stream resource looks like:
+
 ```json
 {
-  "stream": {
-    "id": "stream_abc123",
-    "name": "Production Event Stream",
+  "success": true,
+  "data": {
+    "id": "7f9c24e5-1b3d-4a2f-9c8e-6d5f0a1b2c3d",
+    "tenant_id": "acc_parent",
+    "name": "SIEM stream",
+    "description": "Heartbeats to the security data lake",
+    "destination_type": "webhook",
     "status": "active",
-    "destination": {
-      "type": "s3",
-      "bucket": "apexmail-logs"
+    "enabled": true,
+    "destination_config": {
+      "url": "https://siem.yourcompany.com/apexmail",
+      "secret": "****cret"
     },
-    "metrics": {
-      "eventsStreamed": 0,
-      "lastStreamedAt": null
-    },
-    "createdAt": "2024-01-15T10:30:00Z"
+    "log_categories": ["message.delivered", "message.bounced"],
+    "batch_size": 100,
+    "batch_interval_seconds": 30,
+    "compression_enabled": false,
+    "format": "json",
+    "total_events_delivered": 0,
+    "total_bytes_delivered": 0,
+    "delivery_failures_count": 0,
+    "last_delivery_at": null,
+    "last_error": null,
+    "last_error_at": null,
+    "created_at": "2026-01-15T10:30:00Z",
+    "updated_at": "2026-01-15T10:30:00Z"
   }
 }
 ```
 
-## Destination Configurations
+New streams are created `active` and `enabled`; `format` is always `json`.
 
-### Amazon S3
+## Destination Types
+
+### `webhook`
 
 ```json
 {
-  "destination": {
-    "type": "s3",
-    "bucket": "your-bucket",
-    "region": "eu-central-1",
-    "prefix": "apexmail/events/",
-    "credentials": {
-      "accessKeyId": "AKIA...",
-      "secretAccessKey": "..."
-    },
-    "compression": "gzip",
-    "fileFormat": "json_lines",
-    "partitioning": "date"
-  }
+  "url": "https://siem.yourcompany.com/apexmail",
+  "secret": "optional HMAC signing secret"
 }
 ```
 
-S3 path structure:
-```
-s3://your-bucket/apexmail/events/2024/01/15/events_1705320000.json.gz
-```
+- Batches are `POST`ed as a JSON array with
+  `Content-Type: application/json`.
+- When `secret` is configured, each delivery is HMAC-SHA256 signed in the
+  same `{timestamp}.{payload}` format as product webhooks and sent in the
+  `X-ApexMail-Signature: sha256=<hex>` header.
+- The URL is resolved through an SSRF guard and the connection is pinned to
+  the resolved address; private/reserved addresses are rejected.
 
-### Google BigQuery
+### `splunk`
 
 ```json
 {
-  "destination": {
-    "type": "bigquery",
-    "projectId": "your-project",
-    "datasetId": "email_analytics",
-    "tableId": "events",
-    "credentials": {
-      "type": "service_account",
-      "projectId": "your-project",
-      "privateKey": "-----BEGIN PRIVATE KEY-----\n...",
-      "clientEmail": "sa@your-project.iam.gserviceaccount.com"
-    },
-    "streaming": true
-  }
+  "url": "https://hec.yourcompany.com:8088",
+  "token": "your-hec-token"
 }
 ```
 
-BigQuery schema is automatically created with columns for event ID, event type, email ID, recipient, timestamp, metadata, and tags. The table is partitioned by date for efficient querying.
+Batches are `POST`ed to `<url>/services/collector/event` with
+`Authorization: Splunk <token>`.
 
-### Apache Kafka
+### `datadog`
 
 ```json
 {
-  "destination": {
-    "type": "kafka",
-    "brokers": ["kafka.yourcompany.com:9092", "kafka-2.yourcompany.com:9092"],
-    "topic": "email-events",
-    "authentication": {
-      "mechanism": "SASL_SSL",
-      "username": "...",
-      "password": "..."
-    },
-    "compression": "snappy",
-    "acks": "all"
-  }
+  "api_key": "your-datadog-api-key"
 }
 ```
 
-### Amazon Kinesis
+Batches are `POST`ed to the fixed Datadog logs intake
+(`https://http-intake.logs.datadoghq.com/api/v2/logs`) with the
+`DD-API-KEY` header.
+
+> S3, BigQuery, Snowflake, Kafka, Kinesis and Elasticsearch destinations
+> are **not implemented** — creating a stream with those `destination_type`
+> values succeeds, but verification returns
+> `{"verified": false, "reason": "unsupported destination type '...'"}` and
+> every delivery cycle records a failure.
+
+## What Is Delivered
+
+The shipped delivery cycle posts **heartbeat batches** — a JSON array of a
+single object:
 
 ```json
-{
-  "destination": {
-    "type": "kinesis",
-    "streamName": "email-events",
-    "region": "eu-central-1",
-    "credentials": {
-      "accessKeyId": "AKIA...",
-      "secretAccessKey": "..."
-    },
-    "partitionKey": "email_id"
+[
+  {
+    "ts": "2026-01-15T10:30:00Z",
+    "service": "enterprise",
+    "type": "heartbeat",
+    "stream_id": "7f9c24e5-1b3d-4a2f-9c8e-6d5f0a1b2c3d"
   }
-}
+]
 ```
 
-### Elasticsearch
+Per-event log payloads will reuse the platform's canonical event names
+(`message.*`, `recipient.unsubscribed`, `placement_test.completed`,
+`inbound`, `*`) when they ship; `log_categories` is the intended selector.
 
-```json
-{
-  "destination": {
-    "type": "elasticsearch",
-    "nodes": ["https://your-es-cluster.yourcompany.com:9200"],
-    "index": "email-events",
-    "authentication": {
-      "username": "...",
-      "password": "..."
-    }
-  }
-}
+## Verify a Destination
+
+`POST /log-streams/{id}/verify` sends a small connectivity-test payload to
+the destination:
+
+```bash
+curl -X POST https://enterprise.apexmail.ee/log-streams/{stream_id}/verify \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Datadog
+Responses (envelope-wrapped):
 
-```json
-{
-  "destination": {
-    "type": "datadog",
-    "apiKey": "dd_api_key",
-    "site": "datadoghq.com",
-    "service": "apexmail",
-    "tags": ["env:production"]
-  }
-}
-```
-
-### Custom Webhook
-
-```json
-{
-  "destination": {
-    "type": "webhook",
-    "url": "https://your-api.com/events",
-    "method": "POST",
-    "headers": {
-      "Authorization": "Bearer your-token",
-      "Content-Type": "application/json"
-    },
-    "batchSize": 100
-  }
-}
-```
-
-## Event Types
-
-### Available Events
-
-| Event | Description | Payload |
-|-------|-------------|---------|
-| `email.sent` | Email accepted for delivery | Full email metadata |
-| `email.delivered` | Email delivered to recipient | Delivery timestamp |
-| `email.opened` | Email opened by recipient | Open location, device |
-| `email.clicked` | Link clicked in email | Link URL, click data |
-| `email.bounced` | Email bounced | Bounce type, reason |
-| `email.complained` | Spam complaint received | Complaint details |
-| `email.unsubscribed` | Recipient unsubscribed | Unsubscribe method |
-| `email.deferred` | Delivery deferred | Retry schedule |
-
-### Event Payload Structure
-
-```json
-{
-  "eventId": "evt_abc123",
-  "eventType": "email.opened",
-  "timestamp": "2024-01-15T10:30:00.000Z",
-  "emailId": "msg_xyz789",
-  "accountId": "acc_xxx",
-  "recipient": "user@example.com",
-  "subject": "Your order confirmation",
-  "tags": ["transactional", "orders"],
-  "metadata": {
-    "orderId": "ORD-12345",
-    "userId": "user_123"
-  },
-  "eventData": {
-    "userAgent": "Mozilla/5.0...",
-    "ipAddress": "203.0.113.1",
-    "location": {
-      "country": "US",
-      "region": "CA",
-      "city": "San Francisco"
-    },
-    "device": {
-      "type": "desktop",
-      "os": "macOS",
-      "client": "Apple Mail"
-    }
-  }
-}
-```
-
-## Filtering
-
-### Filter by Event Type
-
-```json
-{
-  "filters": {
-    "events": ["email.bounced", "email.complained"]
-  }
-}
-```
-
-### Filter by Tags
-
-```json
-{
-  "filters": {
-    "tags": {
-      "include": ["production", "marketing"],
-      "exclude": ["test"]
-    }
-  }
-}
-```
-
-### Filter by Domain
-
-```json
-{
-  "filters": {
-    "domains": ["yourcompany.com", "brand.yourcompany.com"]
-  }
-}
-```
-
-### Filter by Recipient Pattern
-
-```json
-{
-  "filters": {
-    "recipientPatterns": [
-      "*@enterprise-client.com",
-      "*@vip-customers.com"
-    ]
-  }
-}
-```
-
-## Data Transformation
-
-### Field Selection
-
-Include only specific fields:
-
-```json
-{
-  "transform": {
-    "fields": [
-      "eventId",
-      "eventType",
-      "timestamp",
-      "emailId",
-      "recipient",
-      "eventData.location.country"
-    ]
-  }
-}
-```
-
-### Field Mapping
-
-Rename fields for your schema:
-
-```json
-{
-  "transform": {
-    "fieldMapping": {
-      "eventId": "id",
-      "eventType": "type",
-      "timestamp": "occurred_at",
-      "emailId": "message_id"
-    }
-  }
-}
-```
-
-### PII Redaction
-
-Automatically redact sensitive data:
-
-```json
-{
-  "transform": {
-    "redact": {
-      "fields": ["recipient", "eventData.ipAddress"],
-      "method": "hash_sha256"
-    }
-  }
-}
-```
+- `webhook`: `{"verified": true, "status": 200}` (HTTP status of the test
+  POST).
+- `splunk` / `datadog`: `{"verified": true}`.
+- Unsupported type: `{"verified": false, "reason": "unsupported destination
+  type '...'"}`.
+- Network/HTTP failures return
+  `{"success": false, "error": "...", "code": "VERIFICATION_FAILED"}`.
 
 ## Monitoring & Health
 
-### Check Stream Status
+`GET /log-streams/{id}/stats` returns the recorded delivery statistics:
 
-```bash
-curl https://enterprise.apexmail.ee/log-streams/{stream_id}/status \
-  -H "X-API-Key: YOUR_API_KEY"
-```
-
-Response:
 ```json
 {
-  "streamId": "stream_abc123",
-  "status": "healthy",
-  "metrics": {
-    "eventsStreamed24h": 1250000,
-    "eventsPerSecond": 145,
-    "lastStreamedAt": "2024-01-15T10:30:00Z",
-    "errorRate": 0.001,
-    "latencyP99Ms": 850
-  },
-  "destination": {
-    "status": "connected",
-    "lastSuccessfulWrite": "2024-01-15T10:29:55Z"
+  "success": true,
+  "data": {
+    "total_deliveries": 1234,
+    "total_events": 1234,
+    "total_bytes": 246800,
+    "avg_duration_ms": 84.5,
+    "success_rate": 0.998
   }
 }
 ```
 
-### Stream Metrics
-
-```bash
-curl https://enterprise.apexmail.ee/log-streams/{stream_id}/metrics \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -G -d "period=24h"
-```
-
-Response:
-```json
-{
-  "period": "24h",
-  "metrics": {
-    "totalEvents": 1250000,
-    "byEventType": {
-      "email.sent": 450000,
-      "email.delivered": 445000,
-      "email.opened": 125000,
-      "email.clicked": 32000,
-      "email.bounced": 5000
-    },
-    "deliveryLatency": {
-      "p50": 120,
-      "p95": 450,
-      "p99": 850
-    },
-    "errors": {
-      "total": 125,
-      "byType": {
-        "connection_timeout": 80,
-        "rate_limited": 45
-      }
-    }
-  }
-}
-```
-
-## Error Handling
-
-### Retry Behavior
-
-Failed log deliveries are automatically retried with exponential backoff. You can configure retry behavior in your stream settings.
-
-### Failed Events
-
-Events that fail delivery after all retries:
-
-```json
-{
-  "failedEvents": {
-    "enabled": true,
-    "destination": {
-      "type": "s3",
-      "bucket": "your-company-failed-events",
-      "prefix": "failed-events/"
-    },
-    "retentionDays": 30
-  }
-}
-```
-
-### Error Notifications
-
-```json
-{
-  "alerting": {
-    "errorThreshold": 100,
-    "errorWindowMinutes": 5,
-    "notify": {
-      "email": ["ops@yourcompany.com"],
-      "slack": "https://hooks.slack.com/...",
-      "pagerduty": "your-integration-key"
-    }
-  }
-}
-```
+The stream resource itself carries `total_events_delivered`,
+`total_bytes_delivered`, `delivery_failures_count`, `last_delivery_at`,
+`last_error` and `last_error_at`, so polling `GET /log-streams/{id}` is
+enough to watch health.
 
 ## API Reference
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/log-streams` | POST | Create stream |
-| `/log-streams` | GET | List streams |
+| `/log-streams` | POST | Create a stream (body above) |
 | `/log-streams/{id}` | GET | Get stream details |
-| `/log-streams/{id}` | PUT | Update stream |
-| `/log-streams/{id}` | DELETE | Delete stream |
-| `/log-streams/{id}/status` | GET | Get stream status |
-| `/log-streams/{id}/metrics` | GET | Get stream metrics |
-| `/log-streams/{id}/pause` | POST | Pause stream |
-| `/log-streams/{id}/resume` | POST | Resume stream |
-| `/log-streams/{id}/test` | POST | Test destination |
+| `/log-streams/{id}` | PUT | Update `{name?, description?, destination_config?, log_categories?}` |
+| `/log-streams/{id}` | DELETE | Delete the stream |
+| `/log-streams/tenant/{tenant_id}` | GET | List a tenant's streams |
+| `/log-streams/{id}/pause` | POST | Pause the stream |
+| `/log-streams/{id}/resume` | POST | Resume the stream |
+| `/log-streams/{id}/verify` | POST | Send a connectivity test to the destination |
+| `/log-streams/{id}/stats` | GET | Delivery statistics |
+
+There is no bare `GET /log-streams` — listing is tenant-scoped.
 
 ## Best Practices
 
-1. **Use Batching for S3/BigQuery** - Reduces costs and improves efficiency
-2. **Enable Compression** - Reduce bandwidth and storage costs
-3. **Filter at Source** - Only stream events you need
-4. **Monitor Error Rates** - Set up alerts for delivery failures
-5. **Enable Failed Event Storage** - Never lose events
-6. **Partition by Date** - Easier querying and retention management
-7. **Hash PII** - Comply with privacy regulations
+1. **Use `webhook` with an HMAC secret** — deliveries are signed, so your
+   endpoint can reject forgeries.
+2. **Call `verify` after create/update** — it exercises the exact SSRF
+   guard and HTTP path a real delivery uses.
+3. **Watch `delivery_failures_count` / `last_error`** on the stream
+   resource; the delivery cycle records every failure there.
+4. **Keep `log_categories` on the canonical event vocabulary** so category
+   selectors keep working when per-event payloads ship.

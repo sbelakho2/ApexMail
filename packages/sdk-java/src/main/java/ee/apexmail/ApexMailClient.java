@@ -49,6 +49,8 @@ import javax.crypto.spec.SecretKeySpec;
 public final class ApexMailClient implements AutoCloseable {
 
     private static final String DEFAULT_BASE_URL = "https://api.apexmail.ee";
+    /** SDK version reported in the User-Agent; must match the CHANGELOG head. */
+    public static final String SDK_VERSION = "1.0.1";
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final Duration DEFAULT_INITIAL_BACKOFF = Duration.ofMillis(500);
@@ -724,7 +726,7 @@ public final class ApexMailClient implements AutoCloseable {
             .header("X-API-Key", apiKey)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("User-Agent", "apexmail-java/1.0.0");
+            .header("User-Agent", "apexmail-java/" + SDK_VERSION);
 
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             // Header injection: strip control characters (CR/LF/NUL) from

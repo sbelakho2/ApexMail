@@ -35,7 +35,7 @@ import (
 const (
 	defaultBaseURL               = "https://api.apexmail.ee"
 	defaultTimeout               = 30 * time.Second
-	sdkVersion                   = "1.0.0"
+	sdkVersion                   = "1.0.1"
 	defaultMaxResponseBytes      = 20 * 1024 * 1024
 	defaultMaxRetries            = 3
 	defaultInitialBackoff        = 500 * time.Millisecond
@@ -1453,21 +1453,22 @@ func (a *DomainsAPI) Health(ctx context.Context, id string) (*Domain, error) {
 type WebhooksAPI struct{ client *Client }
 
 // KnownWebhookEvents lists the event names the server accepts
-// (webhooks.rs KNOWN_WEBHOOK_EVENTS) — anything else is a 422.
+// (webhooks.rs KNOWN_WEBHOOK_EVENTS, canonicalized 2026-09-08) —
+// anything else is a 422.
 var KnownWebhookEvents = []string{
-	"email.delivered",
-	"email.bounced",
-	"email.complained",
-	"message.sent",
+	"message.accepted",
+	"message.queued",
+	"message.attempted",
+	"message.deferred",
 	"message.delivered",
 	"message.bounced",
 	"message.complained",
+	"message.suppressed",
 	"message.opened",
 	"message.clicked",
+	"message.cancelled",
 	"recipient.unsubscribed",
 	"placement_test.completed",
-	"bounce",
-	"complaint",
 	"inbound",
 	"*",
 }

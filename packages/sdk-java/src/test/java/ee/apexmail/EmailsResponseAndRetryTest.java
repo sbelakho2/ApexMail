@@ -204,7 +204,7 @@ class EmailsResponseAndRetryTest {
     @Test
     void webhookSignatureMissingTimestampIsRejected() {
         long now = System.currentTimeMillis() / 1000L;
-        String payload = "{\"event\":\"message.sent\"}";
+        String payload = "{\"event\":\"message.delivered\"}";
         String secret = "whsec_test";
         String signature = hmacSha256(secret, now + "." + payload);
 

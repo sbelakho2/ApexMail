@@ -10,6 +10,7 @@
 //! | p90     | < 5 ms    | Tail latency under scheduler noise |
 //! | p99     | < 50 ms   | Worst-case outlier (GC pause, preemption) |
 
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use devex_service::sdk_manager::SdkManager;
@@ -92,7 +93,7 @@ fn test_metrics_recording_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         let op_start = Instant::now();
-        match i % 3 {
+        match black_box(i % 3) {
             0 => collector.record_counter("http_requests_total", 1.0, "Total HTTP requests"),
             1 => collector.record_histogram(
                 "http_request_duration_seconds",
@@ -103,6 +104,7 @@ fn test_metrics_recording_throughput() {
                 collector.record_gauge("active_connections", (i % 500) as f64, "Active connections")
             }
         }
+        black_box(());
         // Sample every 100th operation for latency measurement
         if i % 100 == 0 {
             latencies.record(op_start.elapsed());
@@ -134,8 +136,9 @@ fn test_sdk_registry_lookup_throughput() {
     let start = Instant::now();
     for i in 0..iterations {
         let op_start = Instant::now();
-        let lang = languages[i % languages.len()];
-        let _ = manager.get_sdk_info(lang);
+        let lang = black_box(languages[i % languages.len()]);
+        let info = black_box(manager.get_sdk_info(lang));
+        black_box(info.is_ok());
         // Sample every 100th operation for latency measurement
         if i % 100 == 0 {
             latencies.record(op_start.elapsed());

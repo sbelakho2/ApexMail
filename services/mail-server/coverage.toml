@@ -1,18 +1,29 @@
 # ==============================================================================
-# ApexMail Coverage Enforcement Configuration
+# ApexMail Coverage Targets — INFORMATIONAL, NOT ENFORCED BY CI
 # ==============================================================================
-# This file defines minimum coverage requirements that must be met for CI to pass.
-# Different packages have different requirements based on criticality.
+# Audit SM14 F13: this file previously claimed "minimum coverage requirements
+# that must be met for CI to pass". That was FALSE — nothing consumes this
+# file (no tool in the repo or CI reads coverage.toml), and a tool that did
+# (cargo-tarpaulin-style configs) is not installed anywhere. Editing the
+# numbers below changes NOTHING in CI.
+#
+# The OPERATIVE coverage gate is the ratchet in ci/stages/test.sh
+# run_coverage_gate: `cargo llvm-cov nextest --workspace` line coverage is
+# compared against ci/coverage-baseline.txt (a single float; below baseline
+# FAILS the run, CI_COVERAGE_CHECK=required). Raise the baseline in the same
+# PR that earns it.
+#
+# The tiers below are kept as internal QUALITY TARGETS only:
 #
 # Coverage types:
-# - lines: Lines of code executed 
+# - lines: Lines of code executed
 # - branches: Decision branches (if/else, match arms) covered
 # - functions: Functions called at least once
 #
 # Tiered approach:
-# - Tier 1 (Critical): Security crates - 90% required
-# - Tier 2 (Core): Business logic - 80% required
-# - Tier 3 (Support): Utilities & infrastructure - 70% required
+# - Tier 1 (Critical): Security crates - 90% target
+# - Tier 2 (Core): Business logic - 80% target
+# - Tier 3 (Support): Utilities & infrastructure - 70% target
 # ==============================================================================
 
 # Global minimum thresholds (applies to all code)
@@ -21,8 +32,9 @@ lines = 75
 branches = 70
 functions = 75
 
-# Fail CI if global thresholds are not met
-enforce = true
+# INFORMATIONAL ONLY — nothing consumes this file; see the header. The CI
+# ratchet gate is ci/coverage-baseline.txt + ci/stages/test.sh.
+enforce = false
 
 # ==============================================================================
 # Tier 1: Security-Critical Packages (90% required)

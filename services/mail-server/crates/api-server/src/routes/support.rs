@@ -69,8 +69,6 @@ pub struct ListTicketsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
-    pub cursor: Option<i64>,
-    #[serde(default)]
     pub status: Option<String>,
 }
 
@@ -142,7 +140,13 @@ async fn list_tickets(
 ) -> Result<Json<Vec<TicketResponse>>, ApiError> {
     require_scopes(&auth, &["support:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TicketRow>(
         "SELECT id, subject, description, priority, status, assigned_to, created_at, updated_at
          FROM support_tickets WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -632,7 +636,6 @@ mod adversarial_tests {
             Query(ListTicketsQuery {
                 limit: 1,
                 offset: 0,
-                cursor: None,
                 status: None,
             }),
         )
@@ -646,7 +649,6 @@ mod adversarial_tests {
             Query(ListTicketsQuery {
                 limit: -1,
                 offset: -9,
-                cursor: Some(-4),
                 status: Some("open".into()),
             }),
         )
@@ -835,7 +837,6 @@ mod adversarial_tests {
                 Query(ListTicketsQuery {
                     limit: 10,
                     offset: 0,
-                    cursor: None,
                     status: None,
                 }),
             )
@@ -850,7 +851,6 @@ mod adversarial_tests {
             Query(ListTicketsQuery {
                 limit: 50,
                 offset: 0,
-                cursor: None,
                 status: None,
             }),
         )
@@ -880,7 +880,6 @@ mod adversarial_tests {
                 Query(ListTicketsQuery {
                     limit: 1,
                     offset: 0,
-                    cursor: None,
                     status: None
                 })
             )

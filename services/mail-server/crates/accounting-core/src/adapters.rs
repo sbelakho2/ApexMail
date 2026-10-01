@@ -143,7 +143,10 @@ pub async fn post_invoice_issued_in(
         return Ok(PostOutcome::skipped());
     }
 
-    let legal_entity_id = crate::chart::default_legal_entity(conn).await?;
+    // SM7 F1: the posting path provisions its own preconditions — a fresh
+    // unprovisioned deployment gets the default entity + chart + open period
+    // created here (idempotently) instead of skipping every posting forever.
+    let legal_entity_id = crate::provisioning::ensure_default_entity_in(conn).await?;
     let currency = upper(&invoice.currency);
     let (net_cents, vat_cents) = invoice_net_cents(invoice.total, invoice.vat_total);
     let vat_rate_bp = invoice
@@ -155,7 +158,7 @@ pub async fn post_invoice_issued_in(
 
     let document_date = invoice.issued_at.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(conn, legal_entity_id, document_date).await?;
+        crate::provisioning::ensure_open_period_in(conn, legal_entity_id, document_date).await?;
 
     let ar = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_AR).await?;
     let revenue = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_REVENUE).await?;
@@ -366,11 +369,14 @@ pub async fn post_payment_allocation_in(
         return Ok(PostOutcome::skipped());
     }
 
-    let legal_entity_id = crate::chart::default_legal_entity(conn).await?;
+    // SM7 F1: provision (or reuse) the default entity and the covering open
+    // fiscal period instead of skipping the settlement on an unprovisioned
+    // ledger.
+    let legal_entity_id = crate::provisioning::ensure_default_entity_in(conn).await?;
     let currency = upper(&allocation.currency);
     let document_date = allocation.created_at.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(conn, legal_entity_id, document_date).await?;
+        crate::provisioning::ensure_open_period_in(conn, legal_entity_id, document_date).await?;
 
     let clearing = match allocation.source.as_str() {
         "stripe" => {
@@ -537,11 +543,14 @@ pub async fn post_credit_note_in(
 
     let (invoice_total, invoice_vat) = invoice_split.unwrap_or((0, 0));
 
-    let legal_entity_id = crate::chart::default_legal_entity(conn).await?;
+    // SM7 F1: provision (or reuse) the default entity and the covering open
+    // fiscal period instead of skipping the reversal on an unprovisioned
+    // ledger.
+    let legal_entity_id = crate::provisioning::ensure_default_entity_in(conn).await?;
     let currency = upper(&note.currency);
     let document_date = note.created_at.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(conn, legal_entity_id, document_date).await?;
+        crate::provisioning::ensure_open_period_in(conn, legal_entity_id, document_date).await?;
 
     let ar = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_AR).await?;
     let revenue = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_REVENUE).await?;
@@ -756,7 +765,7 @@ pub async fn post_operating_cost_in(
 
     let document_date = incurred_at.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, document_date)
+        crate::provisioning::ensure_open_period_in(&mut *conn, legal_entity_id, document_date)
             .await?;
 
     let expense =
@@ -867,7 +876,7 @@ pub async fn post_payroll_record_in(
 
     let document_date = pay_period.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, document_date)
+        crate::provisioning::ensure_open_period_in(&mut *conn, legal_entity_id, document_date)
             .await?;
 
     let expense =
@@ -1020,10 +1029,132 @@ pub async fn post_payroll_record_in(
 // Bank statement lines
 // ===========================================================================
 
-/// Post a bank statement line: positive amounts (receipts) Dr bank, Cr AR;
-/// negative amounts (payments) Dr operating expenses, Cr bank. The line's
-/// `journal_entry_id` is stamped, and `bank_reconciliations` can later match
-/// a receipt against the specific invoice entry.
+/// Best-effort classification of a bank statement line from its reference and
+/// counterparty text (audit SM7 F6). The statement says WHAT arrived, not what
+/// it was for; forcing every payment into operating expense and every receipt
+/// into AR misstates the books in classification while staying balanced. The
+/// adapter routes known counterparties to their accounts and leaves everything
+/// else in suspense for the human reconciliation workflow
+/// (`bank_reconciliations`) to reclassify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BankLineClassification {
+    /// Payroll settlement (salaries, wages, payroll run) — routes to the
+    /// net-wages payable account when the chart defines one.
+    Payroll,
+    /// Tax payment (income tax, VAT, the tax authority) — routes to the
+    /// income-tax payable account when the chart defines one.
+    Tax,
+    /// Unmatched: suspense, pending human review. Never silently AR or
+    /// operating expense.
+    Suspense,
+}
+
+/// Lowercased substring keywords that identify a payroll line (ASCII-safe
+/// Estonian included: "palk" = salary/wage).
+const BANK_PAYROLL_KEYWORDS: &[&str] = &[
+    "payroll", "salary", "salaries", "wage", "wages", "net pay", "palk",
+];
+
+/// Lowercased substring keywords that identify a tax payment (the Estonian
+/// tax authority is Maksu- ja Tolliamet — "emta"; "maks" is its root). VAT
+/// settlement ("kmd", "käibemaks") is deliberately NOT routed here: the tax
+/// account below is income-tax payable, and re-classifying a VAT payment into
+/// it would trade the old misclassification for a new one — such lines stay
+/// in suspense for the reconciliation workflow.
+const BANK_TAX_KEYWORDS: &[&str] = &["tax", "emta", "maksu", "maks"];
+
+/// Classify one line by its reference + counterparty text (pure — pinned by
+/// unit tests). Payroll is checked first: "payroll tax" context names the
+/// payroll relationship, and the payroll keyword set is the more specific.
+pub fn classify_bank_line(
+    reference: Option<&str>,
+    counterparty: Option<&str>,
+) -> BankLineClassification {
+    let mut text = String::new();
+    if let Some(reference) = reference {
+        text.push_str(&reference.to_lowercase());
+        text.push(' ');
+    }
+    if let Some(counterparty) = counterparty {
+        text.push_str(&counterparty.to_lowercase());
+    }
+    if text.trim().is_empty() {
+        return BankLineClassification::Suspense;
+    }
+    if BANK_PAYROLL_KEYWORDS.iter().any(|kw| text.contains(kw)) {
+        return BankLineClassification::Payroll;
+    }
+    if BANK_TAX_KEYWORDS.iter().any(|kw| text.contains(kw)) {
+        return BankLineClassification::Tax;
+    }
+    BankLineClassification::Suspense
+}
+
+/// |amount| in cents, computed with `checked_abs` (audit SM7 F10): for
+/// `i64::MIN` the magnitude is unrepresentable, and the wrap-around of the
+/// previous `unsigned_abs() as i64` produced an accidental (though at least
+/// loud) rejection. A designed typed error replaces the accident.
+fn bank_amount_magnitude(amount_cents: i64) -> Result<i64> {
+    amount_cents.checked_abs().ok_or_else(|| {
+        AccountingError::Invalid(format!(
+            "bank statement amount {amount_cents} has no representable magnitude \
+             (i64::MIN); no balanced journal can carry it"
+        ))
+    })
+}
+
+/// Resolve the counterparty account for a classified line: the role's account
+/// when the chart defines it, else suspense ("best-effort routing", SM7 F6 —
+/// a stripped-down chart must not abort the posting).
+async fn resolve_counterparty_account(
+    conn: &mut PgConnection,
+    legal_entity_id: Uuid,
+    classification: BankLineClassification,
+    document_date: chrono::NaiveDate,
+) -> Result<(Uuid, BankLineClassification)> {
+    let resolved = match classification {
+        BankLineClassification::Payroll => {
+            match crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_NET_WAGES_PAYABLE)
+                .await
+            {
+                Ok(account) => Some((account, BankLineClassification::Payroll)),
+                Err(AccountingError::MissingAccountRole { .. }) => None,
+                Err(other) => return Err(other),
+            }
+        }
+        BankLineClassification::Tax => {
+            match crate::chart::resolve_tax_account(
+                conn,
+                legal_entity_id,
+                "income_tax",
+                ROLE_INCOME_TAX_PAYABLE,
+                document_date,
+            )
+            .await
+            {
+                Ok(account) => Some((account, BankLineClassification::Tax)),
+                Err(AccountingError::MissingAccountRole { .. }) => None,
+                Err(other) => return Err(other),
+            }
+        }
+        BankLineClassification::Suspense => None,
+    };
+    if let Some(found) = resolved {
+        return Ok(found);
+    }
+    let account = crate::chart::resolve_account_role(conn, legal_entity_id, ROLE_SUSPENSE).await?;
+    Ok((account, BankLineClassification::Suspense))
+}
+
+/// Post a bank statement line: the amount's SIGN picks the bank side
+/// (receipts debit the bank, payments credit it) and the line's
+/// reference/counterparty text picks the counterparty account — payroll/tax
+/// routes to their payable accounts when the chart defines them, everything
+/// else lands in `ROLE_SUSPENSE` for human review (audit SM7 F6; the old
+/// blanket receipt→AR / payment→operating-expense classification misstated
+/// the books for every non-AR movement). The line's `journal_entry_id` is
+/// stamped, and `bank_reconciliations` can later reclassify a suspense entry
+/// against the specific invoice.
 ///
 /// The transaction-scoped variant is [`post_bank_statement_line_in`]; the
 /// sweep [`crate::sweeps::sweep_unposted_bank_statement_lines`] uses it to
@@ -1076,25 +1207,39 @@ pub async fn post_bank_statement_line_in(
         )));
     }
 
-    let currency = upper(&currency);
+    // SM7 F1: the covering open fiscal period is provisioned when missing, so
+    // an ingested line on a fresh ledger posts instead of failing forever.
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, statement_date)
+        crate::provisioning::ensure_open_period_in(&mut *conn, legal_entity_id, statement_date)
             .await?;
 
-    let ar = crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_AR).await?;
-    let expense =
-        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_EXPENSE_DEFAULT)
+    let classification = classify_bank_line(reference.as_deref(), counterparty.as_deref());
+    let (counterparty_account, routed_as) =
+        resolve_counterparty_account(&mut *conn, legal_entity_id, classification, statement_date)
             .await?;
 
-    let magnitude = amount_cents.unsigned_abs() as i64;
+    let magnitude = bank_amount_magnitude(amount_cents)?;
+    let currency = upper(&currency);
     let lines = if amount_cents > 0 {
         vec![
             JournalLine::debit(bank_ledger, magnitude, &currency).with_description("Bank receipt"),
-            JournalLine::credit(ar, magnitude, &currency).with_description("Receivable collected"),
+            JournalLine::credit(counterparty_account, magnitude, &currency).with_description(
+                match routed_as {
+                    BankLineClassification::Payroll => "Payroll settlement",
+                    BankLineClassification::Tax => "Tax payment settled",
+                    BankLineClassification::Suspense => "Unclassified receipt (suspense)",
+                },
+            ),
         ]
     } else {
         vec![
-            JournalLine::debit(expense, magnitude, &currency).with_description("Bank payment"),
+            JournalLine::debit(counterparty_account, magnitude, &currency).with_description(
+                match routed_as {
+                    BankLineClassification::Payroll => "Payroll payment",
+                    BankLineClassification::Tax => "Tax payment",
+                    BankLineClassification::Suspense => "Unclassified payment (suspense)",
+                },
+            ),
             JournalLine::credit(bank_ledger, magnitude, &currency).with_description("Bank payment"),
         ]
     };
@@ -1169,5 +1314,63 @@ mod tests {
         // Malformed VAT > total: VAT clamped, net zero, never negative.
         assert_eq!(invoice_net_cents(10, 50), (0, 10));
         assert_eq!(invoice_net_cents(0, 0), (0, 0));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit SM7 F6 — bank lines are classified, not force-classified.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bank_lines_route_payroll_and_tax_and_default_to_suspense() {
+        use BankLineClassification::{Payroll, Suspense, Tax};
+        // Payroll keywords win over everything (checked first).
+        assert_eq!(
+            classify_bank_line(Some("PAYROLL RUN 2026-09"), None),
+            Payroll
+        );
+        assert_eq!(classify_bank_line(None, Some("Acme Salaries OÜ")), Payroll);
+        assert_eq!(classify_bank_line(Some("monthly wages"), None), Payroll);
+        assert_eq!(classify_bank_line(Some("Palk makse"), None), Payroll);
+        // Tax authority keywords.
+        assert_eq!(
+            classify_bank_line(Some("Maksu- ja Tolliamet"), Some("EMTA")),
+            Tax
+        );
+        assert_eq!(classify_bank_line(Some("income tax Q3"), None), Tax);
+        // VAT settlement deliberately stays in suspense (income-tax payable
+        // would be the wrong account — see BANK_TAX_KEYWORDS docs).
+        assert_eq!(classify_bank_line(Some("KMD settlement"), None), Suspense);
+        // Everything else — an owner capital injection, an unknown transfer —
+        // is UNMATCHED: suspense, never AR or operating expense (SM7 F6).
+        assert_eq!(classify_bank_line(Some("INV-2026-042"), None), Suspense);
+        assert_eq!(classify_bank_line(None, Some("owner capital"),), Suspense);
+        assert_eq!(
+            classify_bank_line(Some("capital injection"), None),
+            Suspense
+        );
+        // No text at all: suspense.
+        assert_eq!(classify_bank_line(None, None), Suspense);
+        assert_eq!(classify_bank_line(Some("   "), Some("")), Suspense);
+    }
+
+    // ------------------------------------------------------------------
+    // Audit SM7 F10 — i64::MIN has no representable magnitude.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bank_amount_magnitude_rejects_i64_min_with_a_typed_error() {
+        assert_eq!(bank_amount_magnitude(12_345).expect("ordinary"), 12_345);
+        assert_eq!(
+            bank_amount_magnitude(-12_345).expect("ordinary negative"),
+            12_345
+        );
+        assert_eq!(bank_amount_magnitude(i64::MAX).expect("max"), i64::MAX);
+        // The old `unsigned_abs() as i64` wrapped i64::MIN back to a negative
+        // magnitude; the designed failure is a typed error, not an accident.
+        let error = bank_amount_magnitude(i64::MIN).expect_err("i64::MIN");
+        assert!(
+            error.to_string().contains("no representable magnitude"),
+            "{error}"
+        );
     }
 }

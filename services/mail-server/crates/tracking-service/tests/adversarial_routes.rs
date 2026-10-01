@@ -1043,7 +1043,9 @@ async fn prefs_post_survives_database_faults() {
             .starts_with("text/html"),
         "browser-facing prefs failures must render HTML (batch 2)"
     );
-    assert!(response.text().contains("Invalid or expired preferences link"));
+    assert!(response
+        .text()
+        .contains("Invalid or expired preferences link"));
 
     // (b) Dead database: BEGIN fails → 500 HTML error page (batch 2: was
     //     raw JSON; status preserved).

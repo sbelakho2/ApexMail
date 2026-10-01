@@ -10,10 +10,16 @@ billing-service = { path = "../billing-service" }
 ai-service = { path = "../ai-service" }
 pattern-matcher = { path = "../pattern-matcher" }
 observability-service = { path = "../observability-service" }
+# SM12 F2: the property suite exercises these PRODUCTION types directly
+# (SlidingWindowCounter, worker-processors CircuitBreaker) instead of the
+# local reimplementations the suite used to carry.
+apexmail-rate-limiter = { path = "../rate-limiter" }
+worker-processors = { path = "../worker-processors" }
 
 rand = { workspace = true }
 serde_json.workspace = true
 chrono.workspace = true
+base64.workspace = true
 
 # Property-based testing
 proptest = "1.4"

@@ -145,18 +145,18 @@ async fn render_handler(
     // option and the renderer semantics version, so any content or option
     // change rotates the key.
     let cache_key = source_render_cache_key(&req.source, &opts);
-        if let Some(mut cached) = state.cache.get(&cache_key) {
-            cached.metadata.cached = true;
-            return (
-                StatusCode::OK,
-                // coverage: justified — RenderResult is plain strings/numbers,
-                // so serde_json::to_value cannot fail; the fallback guards
-                // future field types only.
-                Json(serde_json::to_value(&cached).unwrap_or_else(|e| {
-                    serde_json::json!({"error": "serialization_failed", "message": e.to_string()})
-                })),
-            );
-        }
+    if let Some(mut cached) = state.cache.get(&cache_key) {
+        cached.metadata.cached = true;
+        return (
+            StatusCode::OK,
+            // coverage: justified — RenderResult is plain strings/numbers,
+            // so serde_json::to_value cannot fail; the fallback guards
+            // future field types only.
+            Json(serde_json::to_value(&cached).unwrap_or_else(
+                |e| serde_json::json!({"error": "serialization_failed", "message": e.to_string()}),
+            )),
+        );
+    }
 
     // The sandbox execute is CPU-bound (regex scans, html5ever parse,
     // minify). Running it inline on the async worker starves the runtime:
@@ -303,7 +303,9 @@ const READY_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 /// `/ready` runs a bounded `SELECT 1` against it and reports
 /// `{"status":"ready"}` (200) or `{"status":"degraded", ...}` (503) with the
 /// failing dependency named.
-async fn ready_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+async fn ready_handler(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let check = sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.db);
     match tokio::time::timeout(READY_CHECK_TIMEOUT, check).await {
         Ok(Ok(_)) => (
@@ -321,7 +323,10 @@ async fn ready_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<
             tracing::warn!(
                 "readiness check: database did not answer within {READY_CHECK_TIMEOUT:?}"
             );
-            degraded("timeout", &format!("no answer within {READY_CHECK_TIMEOUT:?}"))
+            degraded(
+                "timeout",
+                &format!("no answer within {READY_CHECK_TIMEOUT:?}"),
+            )
         }
     }
 }
@@ -798,7 +803,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "legacy token still works");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "legacy token still works"
+        );
     }
 
     // ── P1 #11: the HTTP /render path actually uses the cache ────────────
@@ -910,7 +919,10 @@ mod tests {
 
         let (_, json_a) = post_render(app.clone(), plain).await;
         let (_, json_b) = post_render(app.clone(), minified).await;
-        assert_eq!(json_b["metadata"]["cached"], false, "options change = new key");
+        assert_eq!(
+            json_b["metadata"]["cached"], false,
+            "options change = new key"
+        );
         assert_ne!(json_a["html"], json_b["html"]);
     }
 
@@ -1002,7 +1014,9 @@ mod tests {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let pool = sqlx::PgPool::connect(&database_url).await.expect("live pool");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("live pool");
 
         let config = test_config();
         let state = Arc::new(AppState {
@@ -1125,7 +1139,11 @@ mod tests {
             serde_json::json!({ "source": "<p>{{ process }}</p>" }),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "eval-ish is 400");
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "eval-ish is 400"
+        );
 
         // Timeout: a state whose sandbox budget is already spent → 504.
         let mut config = test_config();

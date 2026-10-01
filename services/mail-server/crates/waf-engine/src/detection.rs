@@ -588,6 +588,23 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
         }
     }
 
+    // Audit SM5 F16: string patterns miss rotated textual forms of the
+    // SAME internal IPv6 host (`http://[0:0:0:0:0:0:0:1]/`, `::ffff:10.0.0.1`
+    // in URL position). Parse every `://[host]` occurrence and compare the
+    // parsed address against the internal ranges instead of matching text.
+    // The string patterns above stay as belt-and-braces for non-parsing
+    // edge cases (zones, odd spellings) — this check is purely additive.
+    if ipv6_host_targets_internal_network(&lower) {
+        results.push(RuleMatch {
+            rule_id: 934200,
+            category: AttackCategory::Ssrf,
+            score: 5,
+            message: "SSRF: URL targeting internal/private IPv6 host".to_string(),
+            location: location.clone(),
+            matched_data: truncate(input, 80),
+        });
+    }
+
     // Cloud metadata endpoints
     let metadata_patterns = [
         "169.254.169.254",          // AWS/GCP/Azure metadata
@@ -610,6 +627,50 @@ pub fn analyze_ssrf(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     }
 
     results
+}
+
+/// Audit SM5 F16 helper: true when a bracketed IPv6 URL host parses to an
+/// address on an internal network — loopback, unspecified, unique-local
+/// (`fc00::/7`), link-local (`fe80::/10`), or an IPv4-mapped private /
+/// loopback address (`::ffff:10.0.0.1` and friends).
+///
+/// Textual patterns cannot cover every spelling of the same host
+/// (`[0:0:0:0:0:0:0:1]` is `[::1]`), so the host is parsed and compared
+/// against the ranges instead — the codebase canonicalizes IPs the same
+/// way in the DDoS allowlist paths.
+fn ipv6_host_targets_internal_network(input: &str) -> bool {
+    let mut rest = input;
+    while let Some(scheme_end) = rest.find("://[") {
+        rest = &rest[scheme_end + 4..];
+        let Some(end) = rest.find(']') else {
+            break;
+        };
+        let host = &rest[..end];
+        rest = &rest[end..];
+
+        // Strip a zone identifier (`fe80::1%eth0`, percent-encoded as
+        // `%25` inside URLs) before parsing.
+        let host = host.split('%').next().unwrap_or(host);
+        let Ok(addr) = host.parse::<std::net::Ipv6Addr>() else {
+            continue;
+        };
+        if addr.is_loopback()
+            || addr.is_unspecified()
+            || addr.is_unique_local()
+            || addr.is_unicast_link_local()
+        {
+            return true;
+        }
+        // IPv4-mapped (`::ffff:a.b.c.d`): the embedded v4 address must
+        // satisfy the same internal ranges the `://` string patterns
+        // already cover for plain IPv4 URLs.
+        if let Some(v4) = addr.to_ipv4_mapped() {
+            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Detect LDAP injection payloads in query/body fragments.
@@ -1093,5 +1154,77 @@ mod tests {
             r.iter().any(|m| m.rule_id == 911200),
             "TRACE should trigger XST rule"
         );
+    }
+
+    // ── Audit SM5 F16: rotated IPv6 textual forms must fire 934200 ──
+
+    #[test]
+    fn test_ssrf_uncompressed_ipv6_loopback_detected() {
+        // These spellings of ::1 matched NO string pattern before the
+        // parse-based check — the finding's exact bypass vectors.
+        for url in [
+            "http://[0:0:0:0:0:0:0:1]/admin",
+            "http://[0000:0000:0000:0000:0000:0000:0000:0001]:8080/x",
+            "http://[::1]/",
+        ] {
+            let r = analyze_ssrf(url, MatchLocation::QueryParam("url".into()));
+            assert!(
+                r.iter().any(|m| m.rule_id == 934200),
+                "{url:?} must fire 934200, got {:?}",
+                r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssrf_ipv4_mapped_ipv6_detected() {
+        // IPv4-mapped forms of internal v4 hosts, in URL position.
+        for url in [
+            "http://[::ffff:10.0.0.1]/metrics",
+            "http://[::ffff:192.168.1.1]/actuator",
+            "http://[0:0:0:0:0:ffff:172.16.0.5]/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            let r = analyze_ssrf(url, MatchLocation::QueryParam("url".into()));
+            assert!(
+                r.iter().any(|m| m.rule_id == 934200),
+                "{url:?} must fire 934200, got {:?}",
+                r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssrf_uncompressed_internal_ipv6_ranges_detected() {
+        for url in [
+            "http://[fc00:0000:0000:0000:0000:0000:0000:0001]/",
+            "http://[fd12:0000:0000:0000:0000:0000:0000:0001]/",
+            "http://[fe80:0000:0000:0000:0000:0000:0000:0001]/",
+        ] {
+            let r = analyze_ssrf(url, MatchLocation::QueryParam("url".into()));
+            assert!(
+                r.iter().any(|m| m.rule_id == 934200),
+                "{url:?} must fire 934200, got {:?}",
+                r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_ssrf_public_ipv6_host_not_flagged() {
+        // Public/documentation hosts must not trip the parse-based check
+        // (no new false positives on ordinary URLs).
+        for url in [
+            "http://[2001:db8::1]/",
+            "http://[2606:4700:4700::1111]/dns-query",
+            "https://example.com/[notanip]",
+        ] {
+            let r = analyze_ssrf(url, MatchLocation::QueryParam("url".into()));
+            assert!(
+                !r.iter().any(|m| m.rule_id == 934200),
+                "{url:?} must NOT fire 934200, got {:?}",
+                r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+            );
+        }
     }
 }

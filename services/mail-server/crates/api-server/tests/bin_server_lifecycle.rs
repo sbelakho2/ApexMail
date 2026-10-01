@@ -81,11 +81,17 @@ fn spawn_api_server(
         .env("DB_PORT", "5432")
         .env("DB_NAME", "apexmail_scratch_base")
         .env("DB_USER", "apexmail")
-        .env("DB_PASSWORD", "bebc8cefdc096e5247f8864e5c0edf78099df23058133321")
+        .env(
+            "DB_PASSWORD",
+            "bebc8cefdc096e5247f8864e5c0edf78099df23058133321",
+        )
         .env("REDIS_HOST", "127.0.0.1")
         .env("REDIS_PORT", "6379")
         .env("API_KEY_HASH_SECRET", "lifecycle-test-api-key-hash-secret")
-        .env("WEBHOOK_SIGNING_SECRET", "lifecycle-test-webhook-signing-secret")
+        .env(
+            "WEBHOOK_SIGNING_SECRET",
+            "lifecycle-test-webhook-signing-secret",
+        )
         .env("PLACEMENT_ENABLED", "false")
         .env("AWS_EC2_METADATA_DISABLED", "true")
         .env("RUST_LOG", "error")
@@ -122,7 +128,9 @@ fn wait_for_health(addr: SocketAddr) -> (u16, String) {
             return answer;
         }
         if Instant::now() > deadline {
-            panic!("the api-server never answered /health/live on {addr} within {STARTUP_DEADLINE:?}");
+            panic!(
+                "the api-server never answered /health/live on {addr} within {STARTUP_DEADLINE:?}"
+            );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -191,7 +199,11 @@ fn api_server_serves_health_and_metrics_and_sigterm_exits_cleanly() {
         .output()
         .expect("kill utility");
     let exit = reap(&mut child, STOP_DEADLINE);
-    assert_eq!(exit.code(), Some(0), "SIGTERM must drain cleanly, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGTERM must drain cleanly, got {exit}"
+    );
 }
 
 /// A missing required variable (JWT private key) must refuse startup with
@@ -201,7 +213,11 @@ fn api_server_refuses_an_incomplete_configuration() {
     let port = reserve_addr();
     let mut child = spawn_api_server(port.port(), 0, true, &[]);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
     let output = output_of(&mut child);
     assert!(
         output.contains("JWT_PRIVATE_KEY_PEM"),
@@ -217,5 +233,9 @@ fn api_server_refuses_a_taken_port() {
     let _occupant = TcpListener::bind(addr).expect("occupy the port");
     let mut child = spawn_api_server(addr.port(), 0, false, &[]);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
 }

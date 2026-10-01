@@ -58,8 +58,7 @@ fn wait_for_health(addr: SocketAddr) -> (u16, String) {
 
 /// Plain HTTP/1.0 GET over a raw socket; None on any connection failure.
 fn http_get(addr: SocketAddr, path: &str) -> Option<(u16, String)> {
-    let mut stream =
-        TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
     stream
         .write_all(format!("GET {path} HTTP/1.0\r\n\r\n").as_bytes())
         .ok()?;
@@ -160,7 +159,11 @@ fn daemon_sigint_exits_cleanly() {
         .output()
         .expect("kill utility");
     let exit = reap(&mut child, STOP_DEADLINE);
-    assert_eq!(exit.code(), Some(0), "SIGINT must drain cleanly, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGINT must drain cleanly, got {exit}"
+    );
 }
 
 /// A malformed DATABASE_URL must fail fast with exit code 1 and an error
@@ -178,7 +181,11 @@ fn daemon_fails_fast_on_a_malformed_database_url() {
         .spawn()
         .expect("spawn the outbound-mta binary");
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
     let stderr = stderr_of(&mut child);
     assert!(
         stderr.contains("failed to connect to DATABASE_URL"),
@@ -198,7 +205,11 @@ fn daemon_refuses_a_taken_health_port() {
     let _occupant = TcpListener::bind(addr).expect("occupy the port");
     let mut child = spawn_daemon(&database_url, addr);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_eq!(exit.code(), Some(1), "expected an honest failure, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(1),
+        "expected an honest failure, got {exit}"
+    );
     let stderr = stderr_of(&mut child);
     assert!(
         stderr.contains("failed to bind health listener") && stderr.contains(&addr.to_string()),

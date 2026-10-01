@@ -111,7 +111,7 @@
    ```
 
 4. **Verify connection budget:**
-   Review `DATABASE_POOL_MAX` per service in [`docker-compose.yml`](../../docker-compose.yml) / [`configuration.md`](../deployment/configuration.md). Ensure `SUM(services × pool_max) < DB max_connections - 10%`.
+   Review `DATABASE_POOL_MAX` per service in [`docker-compose.yml`](../../../docker-compose.yml) / [`configuration.md`](../../deployment/configuration.md). Ensure `SUM(services × pool_max) < DB max_connections - 10%`.
 
 5. **Temporarily increase `max_connections`** if needed (requires restart):
    ```bash

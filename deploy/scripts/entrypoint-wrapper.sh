@@ -68,6 +68,11 @@ export_from_file WEBHOOK_SIGNING_SECRET   || true
 export_from_file TRACKING_SECRET_KEY      || true
 export_from_file INTERNAL_SERVICE_TOKEN   || true
 export_from_file SERVICE_AUTH_TOKEN       || true
+# F9 (audit): per-workload dedicated credential for pdf-renderer. The
+# pdf-renderer binary REFUSES to boot in production (APP_ENV unset counts
+# as production) without PDF_RENDERER_AUTH_TOKEN, and the api-server caller
+# presents exactly this token on the analytics PDF export.
+export_from_file PDF_RENDERER_AUTH_TOKEN  || true
 export_from_file SESSION_SECRET           || true
 export_from_file CP_SESSION_SECRET       || true
 export_from_file IMPERSONATION_SECRET     || true

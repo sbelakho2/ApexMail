@@ -83,8 +83,7 @@ async fn run_(
     service_token: String,
     shutdown_rx: tokio::sync::watch::Receiver<()>,
 ) -> anyhow::Result<()> {
-    if let Err(reason) = sales_autopilot::config::require_system_tenant_scope(&cfg, is_production)
-    {
+    if let Err(reason) = sales_autopilot::config::require_system_tenant_scope(&cfg, is_production) {
         anyhow::bail!("refusing to start: {reason}");
     }
     if cfg.enrichment_api_key.is_empty() {
@@ -188,20 +187,18 @@ async fn run_(
     // PERF #24: a failed HTTP-client construction makes the enrichment
     // integration UNAVAILABLE (every lookup fails with a typed error naming
     // the reason), never a fall back to an unbounded default client.
-    let enrichment = match HttpEnrichmentProvider::try_new(
-        &cfg.enrichment_api_url,
-        &cfg.enrichment_api_key,
-    ) {
-        Ok(provider) => EnrichmentService::new(Arc::new(provider)),
-        Err(reason) => {
-            tracing::error!(
-                %reason,
-                "enrichment gateway HTTP client could not be constructed — enrichment \
-                 integration is UNAVAILABLE (PERF #24)"
-            );
-            EnrichmentService::new(Arc::new(UnavailableEnrichmentProvider::new(reason)))
-        }
-    };
+    let enrichment =
+        match HttpEnrichmentProvider::try_new(&cfg.enrichment_api_url, &cfg.enrichment_api_key) {
+            Ok(provider) => EnrichmentService::new(Arc::new(provider)),
+            Err(reason) => {
+                tracing::error!(
+                    %reason,
+                    "enrichment gateway HTTP client could not be constructed — enrichment \
+                     integration is UNAVAILABLE (PERF #24)"
+                );
+                EnrichmentService::new(Arc::new(UnavailableEnrichmentProvider::new(reason)))
+            }
+        };
 
     let state = AppState {
         config: cfg.clone(),

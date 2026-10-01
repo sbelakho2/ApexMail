@@ -6,11 +6,8 @@ edition = "2021"
 [[bin]]
 name = "smtp-auth-proxy"
 
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-# Path typo fixed: the crate directory/package is `apexmail-lib`
-# (`services/mail-server/crates/apexmail-lib`), previously declared as
-# `apxmail-lib`, which made even `cargo metadata` fail for this package.
-apexmail-lib = { path = "../../services/mail-server/crates/apexmail-lib" }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid"] }
-uuid = "1"
+# Intentionally NO [dependencies]: this package is a packaging stub whose
+# binary only prints a pointer to the real implementation and exits. The
+# production SMTP AUTH proxy lives in the mail-server workspace at
+# `services/mail-server/crates/mta` (bin `mta-server`); keeping this stub
+# dependency-free decouples packages/ from the services tree.

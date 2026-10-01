@@ -755,7 +755,10 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     });
     expect(de.lang).toBe('de');
     expect(de.label).toContain('Sicherheitspr');
-    expect(de.badge).toBe('Erfolgreich');
+    // The canonical de pack's badgeSuccess wording (widget-locales.js —
+    // the badge set was reworded, "Erfolgreich" -> "Verifiziert.", in
+    // 0a0eda21; the exact-equality pin follows the parity-gated asset).
+    expect(de.badge).toBe('Verifiziert.');
     expect(de.retryText).toBe('Erneut');
     expect(de.overflowX).toBe(false);
   });

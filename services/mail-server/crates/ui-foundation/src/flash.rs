@@ -9,11 +9,14 @@
 //!
 //! - [`encode_flash_cookie`] / [`decode_flash_cookie`]: HMAC-SHA256-signed
 //!   cookie payload (`v1.<base64url(json)>.<base64url(hmac)>`).
-//! - [`sign_confirmation`] / [`verify_confirmation`]: HMAC over
-//!   `intent + resource id + expiry` for the GET `/confirm` flow used by
-//!   destructive actions (delete campaign/list/domain/…). The signature
-//!   proves the confirmation link was produced by this server for this
-//!   exact action and has not expired.
+//! - [`sign_confirmation`] / [`verify_confirmation`]: HMAC over the
+//!   canonical JSON tuple `[intent, resource id, expiry]` for the GET
+//!   `/confirm` flow used by destructive actions (delete
+//!   campaign/list/domain/…). The signature proves the confirmation link
+//!   was produced by this server for this exact action and has not
+//!   expired. The tuple serialization is delimiter-unambiguous: a
+//!   `intent:id` pair containing the separator characters cannot alias a
+//!   different (intent, id) split.
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -148,18 +151,33 @@ pub fn flash_clear_cookie(secure: bool) -> String {
     )
 }
 
+/// Canonical signed payload for a confirmation: the JSON tuple
+/// `[intent, resource_id, expires_at_unix]`. Unlike the historical
+/// `{intent}:{resource_id}:{expires_at}` concatenation, this serialization
+/// is unambiguous — ids or intents containing `:` cannot produce a byte
+/// string identical to another (intent, id) split.
+fn confirmation_payload(intent: &str, resource_id: &str, expires_at_unix: i64) -> Vec<u8> {
+    serde_json::to_vec(&(intent, resource_id, expires_at_unix))
+        .expect("confirmation payload must serialize (plain strings + i64)")
+}
+
 /// Produce the signed confirmation token for a destructive intent.
 /// `expires_at_unix` bounds the link's validity; the token binds the exact
 /// `intent` (e.g. `delete-campaign`) and `resource_id`, so a token for one
 /// action cannot be replayed against another.
+///
+/// Note: changing the signed payload construction (audit SM11 F9) invalidates
+/// every previously minted confirmation link. Confirmation TTLs are 15
+/// minutes, so outstanding links simply expire within that window — accepted
+/// as part of the fix.
 pub fn sign_confirmation(
     secret: &str,
     intent: &str,
     resource_id: &str,
     expires_at_unix: i64,
 ) -> String {
-    let payload = format!("{intent}:{resource_id}:{expires_at_unix}");
-    let sig = sign(secret, payload.as_bytes());
+    let payload = confirmation_payload(intent, resource_id, expires_at_unix);
+    let sig = sign(secret, &payload);
     format!("{expires_at_unix}.{sig}")
 }
 
@@ -181,8 +199,8 @@ pub fn verify_confirmation(
     if now_unix > expires_at {
         return false;
     }
-    let payload = format!("{intent}:{resource_id}:{expires_at}");
-    verify_signature(secret, payload.as_bytes(), sig)
+    let payload = confirmation_payload(intent, resource_id, expires_at);
+    verify_signature(secret, &payload, sig)
 }
 
 /// Convenience wrapper that signs with `now + ttl`.
@@ -318,5 +336,57 @@ mod tests {
         let a = sign_confirmation(SECRET, "delete-campaign", "a", 5_000);
         let b = sign_confirmation(SECRET, "delete-campaign", "b", 5_000);
         assert_ne!(a, b);
+    }
+
+    /// Regression (audit SM11 F9): the signed payload must be
+    /// delimiter-unambiguous. The old `{intent}:{resource_id}:{exp}`
+    /// concatenation made a token for ("delete-campaign", "c:1") verify for
+    /// ("delete-campaign:c", "1") — both produced the same byte string. The
+    /// canonical JSON tuple removes that alias class.
+    #[test]
+    fn confirmation_signature_is_delimiter_unambiguous() {
+        let token = sign_confirmation(SECRET, "delete-campaign", "c:1", 5_000);
+        // Same expiry, but the intent/id boundary shifted by the colon:
+        // must NOT verify cross-intent.
+        assert!(!verify_confirmation(
+            SECRET,
+            &token,
+            "delete-campaign:c",
+            "1",
+            4_999
+        ));
+        // The exact bound pair still verifies.
+        assert!(verify_confirmation(
+            SECRET,
+            &token,
+            "delete-campaign",
+            "c:1",
+            4_999
+        ));
+        // And the mirrored alias is equally rejected.
+        let mirror = sign_confirmation(SECRET, "delete-campaign:c", "1", 5_000);
+        assert!(!verify_confirmation(
+            SECRET,
+            &mirror,
+            "delete-campaign",
+            "c:1",
+            4_999
+        ));
+    }
+
+    /// The payload function is total for control characters and non-UTF8
+    /// boundaries: serde_json escapes them, so no input can forge a
+    /// different tuple's serialization.
+    #[test]
+    fn confirmation_payload_escapes_separator_characters() {
+        let a = confirmation_payload("delete-campaign", "c:1", 7);
+        let b = confirmation_payload("delete-campaign:c", "1", 7);
+        assert_ne!(a, b);
+        // Round-trips back to the exact tuple.
+        let decoded: (String, String, i64) = serde_json::from_slice(&a).unwrap();
+        assert_eq!(
+            decoded,
+            ("delete-campaign".to_string(), "c:1".to_string(), 7)
+        );
     }
 }

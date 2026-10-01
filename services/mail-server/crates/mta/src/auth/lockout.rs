@@ -74,21 +74,31 @@ struct RedisFailStore {
     prefix: String,
 }
 
+/// Build the counter-increment pipeline as ONE atomic MULTI/EXEC block
+/// (audit finding 8): INCR and EXPIRE must apply together or not at all.
+/// The old separate INCR-then-EXPIRE calls left a counter WITHOUT a TTL
+/// behind whenever the process died (or EXPIRE errored) in between — an
+/// immortal counter that trends the (IP, account) pair toward a permanent
+/// lockout.
+fn incr_expire_pipeline(full_key: &str, ttl_secs: i64) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .cmd("INCR")
+        .arg(full_key)
+        .cmd("EXPIRE")
+        .arg(full_key)
+        .arg(ttl_secs);
+    pipe
+}
+
 #[async_trait::async_trait]
 impl FailStore for RedisFailStore {
     async fn incr(&self, key: &str, ttl: Duration) -> anyhow::Result<i64> {
         let mut conn = self.pool.get().await?;
         let full = format!("{}{key}", self.prefix);
-        let value: i64 = redis::cmd("INCR")
-            .arg(&full)
+        let (value, _): (i64, i64) = incr_expire_pipeline(&full, ttl.as_secs() as i64)
             .query_async(&mut *conn)
             .await?;
-        let expire: i64 = redis::cmd("EXPIRE")
-            .arg(&full)
-            .arg(ttl.as_secs() as i64)
-            .query_async(&mut *conn)
-            .await?;
-        let _ = expire;
         Ok(value)
     }
 
@@ -373,8 +383,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        normalize_account, verify_against_dummy, AuthError, AuthFailTracker, FailStore,
-        SharedMemoryFailStore, MAX_AUTH_FAILURES_PER_ACCOUNT, MAX_AUTH_FAILURES_PER_IP,
+        incr_expire_pipeline, normalize_account, verify_against_dummy, AuthError, AuthFailTracker,
+        FailStore, SharedMemoryFailStore, MAX_AUTH_FAILURES_PER_ACCOUNT, MAX_AUTH_FAILURES_PER_IP,
     };
 
     fn ip(octet: u8) -> IpAddr {
@@ -642,6 +652,29 @@ mod tests {
         for _ in 0..MAX_AUTH_FAILURES_PER_ACCOUNT {
             first.record_failure(ip(20), "alice@example.com").await;
         }
+        // Audit finding 8: the durable counter MUST carry a TTL. The atomic
+        // INCR+EXPIRE block guarantees a counter can never exist without
+        // its expiry (the old separate commands left immortal counters
+        // behind on a crash between them).
+        match pool.get().await {
+            Ok(mut conn) => {
+                let key = format!("{prefix}acct:{}|alice@example.com", ip(20));
+                let ttl: i64 = redis::cmd("TTL")
+                    .arg(&key)
+                    .query_async(&mut *conn)
+                    .await
+                    .expect("TTL probe");
+                assert!(
+                    ttl > 0,
+                    "the durable counter must carry a TTL (got {ttl}); an immortal counter \
+                     trends the pair toward a permanent lockout"
+                );
+            }
+            Err(error) => {
+                eprintln!("skipping TTL probe: pool unavailable ({error})");
+                return;
+            }
+        }
         // "Restart": a brand-new tracker (empty caches) over the same Redis.
         let second = AuthFailTracker::with_redis_prefix(pool, &prefix);
         assert!(
@@ -651,6 +684,38 @@ mod tests {
         // Cleanup + reset semantics against live Redis.
         second.reset(ip(20), "alice@example.com").await;
         assert!(!second.is_locked(ip(20), "alice@example.com").await);
+    }
+
+    #[test]
+    fn durable_counter_increment_is_a_single_atomic_multi_exec_block() {
+        // Audit finding 8 (hermetic half): INCR and EXPIRE must be applied
+        // atomically. The wire encoding proves the wrap — the server parses
+        // MULTI first and EXEC last, so it applies both commands or neither.
+        // The old separate calls could persist an increment WITHOUT its TTL
+        // when the process died (or EXPIRE errored) in between: an immortal
+        // counter trending the (IP, account) pair toward a permanent
+        // lockout.
+        let packed = String::from_utf8(
+            incr_expire_pipeline("mta:authfail:acct:203.0.113.9|a@example.com", 300)
+                .get_packed_pipeline(),
+        )
+        .expect("the pipeline encoding is valid UTF-8");
+        assert!(
+            packed.contains("$4\r\nINCR\r\n"),
+            "the block increments: {packed:?}"
+        );
+        assert!(
+            packed.contains("$6\r\nEXPIRE\r\n"),
+            "the block sets the TTL: {packed:?}"
+        );
+        assert!(
+            packed.contains("$5\r\nMULTI\r\n"),
+            "the INCR+EXPIRE pair must be wrapped in MULTI: {packed:?}"
+        );
+        assert!(
+            packed.ends_with("$4\r\nEXEC\r\n"),
+            "the MULTI block must be closed by EXEC: {packed:?}"
+        );
     }
 
     #[test]

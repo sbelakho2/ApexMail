@@ -6,6 +6,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 
 /**
  * Manage webhook endpoint registrations.
@@ -14,6 +15,8 @@ import java.util.Map;
  */
 public final class Webhooks {
 
+    private static final Logger LOGGER = Logger.getLogger(Webhooks.class.getName());
+
     private final ApexMailClient client;
 
     public Webhooks(ApexMailClient client) {
@@ -21,23 +24,23 @@ public final class Webhooks {
     }
 
     /**
-     * Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS) —
-     * anything else is rejected with 422.
+     * Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS,
+     * canonicalized 2026-09-08) — anything else is rejected with 422.
      */
     public static final List<String> KNOWN_WEBHOOK_EVENTS = List.of(
-        "email.delivered",
-        "email.bounced",
-        "email.complained",
-        "message.sent",
+        "message.accepted",
+        "message.queued",
+        "message.attempted",
+        "message.deferred",
         "message.delivered",
         "message.bounced",
         "message.complained",
+        "message.suppressed",
         "message.opened",
         "message.clicked",
+        "message.cancelled",
         "recipient.unsubscribed",
         "placement_test.completed",
-        "bounce",
-        "complaint",
         "inbound",
         "*"
     );
@@ -65,8 +68,11 @@ public final class Webhooks {
         }
         for (Object event : events) {
             if (!KNOWN_WEBHOOK_EVENTS.contains(String.valueOf(event))) {
-                throw new IllegalArgumentException(
-                    "Unknown webhook event type: " + event + ". Valid events: " + KNOWN_WEBHOOK_EVENTS);
+                // Advisory only (audit SM15 F1): the server owns the
+                // vocabulary and 422s unknown names — a hard client-side
+                // gate would brick the SDK when the server adds events.
+                LOGGER.warning("Unknown webhook event type: " + event
+                    + ". Known events: " + KNOWN_WEBHOOK_EVENTS);
             }
         }
         Map<String, Object> body = Map.of(
@@ -113,8 +119,9 @@ public final class Webhooks {
             Object events = params.get("events");
             for (Object event : (List<?>) events) {
                 if (!KNOWN_WEBHOOK_EVENTS.contains(String.valueOf(event))) {
-                    throw new IllegalArgumentException(
-                        "Unknown webhook event type: " + event + ". Valid events: " + KNOWN_WEBHOOK_EVENTS);
+                    // Advisory only (audit SM15 F1) — see create.
+                    LOGGER.warning("Unknown webhook event type: " + event
+                        + ". Known events: " + KNOWN_WEBHOOK_EVENTS);
                 }
             }
             body.put("events", events);

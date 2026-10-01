@@ -306,8 +306,26 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('.g-recaptcha [data-kiwi-retry]')).toBeVisible();
     // Exactly once: no further callback invocation after the terminal state.
-    await page.waitForTimeout(4000);
-    await expect(page.locator('#out')).toHaveText('err-cb');
+    // The shim resolves `data-error-callback` to a function reference at
+    // render time, so the observable is #out: any further callback (or a
+    // re-render) rewrites it ('cb:…'/'expired-cb') or changes the widget
+    // state. Sample that actual condition with expect.poll over a bounded
+    // window instead of one fixed sleep (audit F19).
+    const samples = [];
+    await expect
+      .poll(
+        async () => {
+          samples.push(await page.locator('#out').textContent());
+          return samples.length;
+        },
+        { intervals: [1_000, 2_000], timeout: 8_000 },
+      )
+      .toBeGreaterThanOrEqual(3);
+    expect(
+      samples.every((text) => text === 'err-cb'),
+      `the error callback must fire exactly once — every sample must still read 'err-cb': ${JSON.stringify(samples)}`
+    ).toBe(true);
+    await expect(page.locator('.g-recaptcha [data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
   });
 
   test('reCAPTCHA v2: reset during an in-flight challenge cancels generation 1', async ({ page }) => {
@@ -585,8 +603,24 @@ test.describe('KiwiCaptcha migration compatibility', () => {
     });
     expect(typeof id).toBe('string');
     await expect(page.locator('#ts-exec [data-kiwi-widget]')).toHaveAttribute('data-state', 'pending');
-    await page.waitForTimeout(2500);
-    expect(challengeHits, 'a pending execution=execute widget must issue ZERO challenge requests').toBe(baseline);
+    // A pending execution=execute widget must issue ZERO challenge requests.
+    // The state attribute alone cannot prove a NEGATIVE, so sample the
+    // request counter with expect.poll over a bounded window (audit F19):
+    // every sample must still observe the baseline, no fixed sleep.
+    const pendingSamples = [];
+    await expect
+      .poll(
+        async () => {
+          pendingSamples.push(challengeHits);
+          return pendingSamples.length;
+        },
+        { intervals: [800, 1_500], timeout: 6_000 },
+      )
+      .toBeGreaterThanOrEqual(3);
+    expect(
+      pendingSamples.every((hits) => hits === baseline),
+      `a pending execution=execute widget must issue ZERO challenge requests: ${JSON.stringify(pendingSamples)} vs baseline ${baseline}`
+    ).toBe(true);
     const token = await page.evaluate(async (wid) => window.turnstile.execute(wid), id);
     expect(token.length).toBeGreaterThan(10);
     expect(challengeHits).toBeGreaterThan(baseline);

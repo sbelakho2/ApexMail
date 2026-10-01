@@ -841,10 +841,7 @@ mod tests {
         fn gate_router(state: AppState) -> axum::Router {
             axum::Router::new()
                 .route("/v1/admin/probe", axum::routing::get(|| async { "ok" }))
-                .route(
-                    "/web/admin/probe",
-                    axum::routing::post(|| async { "ok" }),
-                )
+                .route("/web/admin/probe", axum::routing::post(|| async { "ok" }))
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     require_cp_auth,
@@ -1561,10 +1558,7 @@ mod tests {
             };
 
             // Without the extension: rejected.
-            let (mut parts, _) = Request::builder()
-                .body(())
-                .expect("request")
-                .into_parts();
+            let (mut parts, _) = Request::builder().body(()).expect("request").into_parts();
             let err = CpAuthUser::from_request_parts(&mut parts, &state)
                 .await
                 .expect_err("no extension is a rejection");

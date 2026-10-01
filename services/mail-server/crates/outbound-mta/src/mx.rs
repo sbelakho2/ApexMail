@@ -78,13 +78,24 @@ pub trait MxResolver: Send + Sync {
 /// Production resolver backed by `crates/dns-resolver`.
 pub struct DnsMxResolver {
     lookup: DnsLookup,
+    /// SSRF escape hatch for loopback test setups (env
+    /// `RELAY_ALLOW_PRIVATE_MX`, default FALSE): when true, MX addresses in
+    /// private/loopback/link-local/reserved ranges are delivered to anyway.
+    /// Production must keep this off — recipient domains are tenant
+    /// controlled, so an MX that resolves to an internal IP is a
+    /// server-side-request-forgery surface (the relay opens SMTP sessions,
+    /// with attacker-influenced content, against whatever the address is).
+    allow_private_addresses: bool,
 }
 
 impl DnsMxResolver {
     /// Build with the system resolver configuration.
     pub fn new() -> Result<Self, MxError> {
         DnsLookup::new()
-            .map(|lookup| Self { lookup })
+            .map(|lookup| Self {
+                lookup,
+                allow_private_addresses: false,
+            })
             .map_err(|error| MxError::Transient {
                 domain: "<system-resolver>".to_string(),
                 message: error.to_string(),
@@ -93,7 +104,22 @@ impl DnsMxResolver {
 
     /// Build from an existing lookup wrapper (tests, custom config).
     pub fn from_lookup(lookup: DnsLookup) -> Self {
-        Self { lookup }
+        Self {
+            lookup,
+            allow_private_addresses: false,
+        }
+    }
+
+    /// Opt out of the private/reserved MX address filter (loopback test
+    /// setups ONLY). Production binaries must not pass `true`.
+    pub fn with_allow_private_addresses(mut self, allowed: bool) -> Self {
+        self.allow_private_addresses = allowed;
+        self
+    }
+
+    /// Whether private/reserved MX addresses are currently deliverable.
+    pub fn allows_private_addresses(&self) -> bool {
+        self.allow_private_addresses
     }
 }
 
@@ -120,6 +146,17 @@ impl MxResolver for DnsMxResolver {
             let mut addresses = resolve_addresses(&self.lookup, &exchange).await;
             addresses.sort();
             addresses.dedup();
+            let resolved = addresses.len();
+            addresses = filter_deliverable_addresses(addresses, self.allow_private_addresses);
+            if addresses.len() < resolved {
+                tracing::warn!(
+                    domain,
+                    exchange,
+                    dropped = resolved - addresses.len(),
+                    "MX host resolved to private/reserved address(es); refused by the SSRF \
+                     filter (RELAY_ALLOW_PRIVATE_MX=true overrides for loopback test setups)"
+                );
+            }
             if addresses.is_empty() {
                 tracing::warn!(
                     domain,
@@ -250,6 +287,25 @@ fn is_usable_address(ip: &IpAddr) -> bool {
         IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_broadcast() && !v4.is_multicast(),
         IpAddr::V6(v6) => !v6.is_unspecified() && !v6.is_multicast(),
     }
+}
+
+/// SSRF layer for resolved MX addresses: every address must survive the
+/// shared `mail_common::ssrf` predicate (loopback, RFC1918, CGNAT,
+/// link-local incl. the cloud-metadata endpoint, documentation/reserved
+/// space, unique-local v6, and IPv4-mapped v6 forms of all of them) unless
+/// the operator's loopback-test escape hatch is set. Pure step, exposed for
+/// tests.
+pub fn filter_deliverable_addresses(
+    addresses: Vec<SocketAddr>,
+    allow_private: bool,
+) -> Vec<SocketAddr> {
+    if allow_private {
+        return addresses;
+    }
+    addresses
+        .into_iter()
+        .filter(|address| !mail_common::ssrf::is_private_or_reserved_ip(address.ip()))
+        .collect()
 }
 
 /// In-memory resolver for tests: static domain -> targets (or error) map.
@@ -429,10 +485,51 @@ mod tests {
             let ip: IpAddr = bad.parse().expect("ip");
             assert!(!is_usable_address(&ip), "{bad} must be refused");
         }
-        for good in ["127.0.0.1", "203.0.113.9", "::1", "2606:4700::1111"] {
+        for good in ["203.0.113.9", "2606:4700::1111"] {
             let ip: IpAddr = good.parse().expect("ip");
             assert!(is_usable_address(&ip), "{good} must be usable");
         }
+    }
+
+    /// The audit regression: MX addresses in private/loopback/link-local
+    /// ranges were explicitly usable — a tenant could publish an MX
+    /// resolving at an internal IP (incl. 169.254.169.254) and drive the
+    /// relay into opening SMTP sessions against internal services. Resolved
+    /// MX addresses are now filtered through the shared
+    /// `mail_common::ssrf` predicate unless `RELAY_ALLOW_PRIVATE_MX` is
+    /// set (loopback test setups only).
+    #[test]
+    fn private_and_reserved_mx_addresses_are_filtered_unless_the_escape_hatch_is_set() {
+        let addresses = || {
+            vec![
+                "127.0.0.1:25".parse().expect("addr"),
+                "10.0.0.5:25".parse().expect("addr"),
+                "172.16.9.9:25".parse().expect("addr"),
+                "192.168.1.10:25".parse().expect("addr"),
+                "169.254.169.254:25".parse().expect("addr"),
+                "[::1]:25".parse().expect("addr"),
+                "[::ffff:169.254.169.254]:25".parse().expect("addr"),
+                "8.8.8.8:25".parse().expect("addr"),
+                "[2606:4700::1111]:25".parse().expect("addr"),
+            ]
+        };
+
+        let deliverable = filter_deliverable_addresses(addresses(), false);
+        assert_eq!(
+            deliverable,
+            vec![
+                "8.8.8.8:25".parse::<SocketAddr>().expect("addr"),
+                "[2606:4700::1111]:25".parse::<SocketAddr>().expect("addr"),
+            ],
+            "only public space survives the SSRF filter"
+        );
+
+        let escaped = filter_deliverable_addresses(addresses(), true);
+        assert_eq!(
+            escaped.len(),
+            9,
+            "the escape hatch restores the unfiltered behavior for loopback test setups"
+        );
     }
 
     #[test]

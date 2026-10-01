@@ -2166,7 +2166,11 @@ mod reply_http {
         let second = fx
             .app
             .clone()
-            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "accidental second"))
+            .oneshot(reply_request(
+                fx.inbox_id,
+                &fx.tenant_id,
+                "accidental second",
+            ))
             .await
             .unwrap();
         assert_eq!(
@@ -2313,7 +2317,11 @@ mod reply_http {
         let resp = fx
             .app
             .clone()
-            .oneshot(reply_request(fx.inbox_id, &fx.tenant_id, "cannot send this"))
+            .oneshot(reply_request(
+                fx.inbox_id,
+                &fx.tenant_id,
+                "cannot send this",
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -2348,14 +2356,12 @@ mod reply_http {
         };
         // The correspondent opted out of CAMPAIGNS (crate-local list only,
         // NOT the platform suppressions table).
-        sqlx::query(
-            "INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)",
-        )
-        .bind(&fx.tenant_id)
-        .bind(&fx.correspondent)
-        .execute(&fx.db)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&fx.tenant_id)
+            .bind(&fx.correspondent)
+            .execute(&fx.db)
+            .await
+            .unwrap();
 
         let resp = fx
             .app

@@ -22,6 +22,7 @@ pub mod analytics;
 pub mod automations;
 pub mod common;
 pub mod email;
+pub mod fence;
 pub mod reply_handler;
 pub mod webhook;
 

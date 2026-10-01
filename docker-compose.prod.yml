@@ -131,8 +131,8 @@ services:
     # the /var/www/certbot/reload-requested sentinel (mtime-compared, because
     # the volume is read-only here) and runs `nginx -s reload` when certbot
     # renewed the TLS material — no socket, no new infrastructure.
-    # If the nginx master dies the loop exits non-zero so restart_policy /
-    # restart: unless-stopped replaces the container.
+    # If the nginx master dies the loop exits non-zero so the container's
+    # restart: unless-stopped policy replaces it.
     command:
       - /bin/sh
       - -c
@@ -202,6 +202,16 @@ services:
     networks:
       - apexmail_frontend
     logging: *default-logging
+    # F13 (audit): cap the renewal loop like its nginx sibling (256M) — the
+    # ACME renewal bursts well above a 128M sidecar when crypto/CertBot
+    # machinery runs, so the limit matches the nginx service above.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
 
   observability:
     image: ghcr.io/sbelakho2/apexmail/observability:latest
@@ -264,10 +274,19 @@ services:
     # Production: Do NOT expose Redis port to host
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     # SECURITY: Password from Docker secret, not environment variable
+    # F7 (audit): maxmemory gets ~75% headroom under the 1G container cap —
+    # at 1gb == 1G there was no room for the AOF-rewrite fork / copy-on-write,
+    # the classic path to a cgroup OOM-kill of the shared Redis. Policy is
+    # noeviction: the durable tracking WAL/DLQ lists (apexmail:events:pending
+    # / apexmail:events:dead) carry NO TTL, so volatile-lru could never evict
+    # them anyway (RPUSHes failed at the cap) while silently dropping TTL'd
+    # keys — the worst of both. noeviction makes backpressure LOUD (write
+    # errors) instead of silent data loss; RedisMemoryPressure /
+    # RedisMemoryCritical (deploy/alerting-rules.yml) page before the cap.
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      REDIS_MAXMEMORY: "1gb"
-      REDIS_MAXMEMORY_POLICY: "volatile-lru"
+      REDIS_MAXMEMORY: "768mb"
+      REDIS_MAXMEMORY_POLICY: "noeviction"
     secrets:
       - redis_password
     deploy:
@@ -318,7 +337,11 @@ services:
       - jwt_public_key_pem
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3001' 2>/dev/null || exit 1"]
+      # F12 (audit): application-level probe — GET /health proves the axum
+      # router actually serves (DB/Redis/ClickHouse pools wired), not merely
+      # that the port is bound. The tracking image ships wget
+      # (deploy/Dockerfile.tracking).
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3001/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -331,10 +354,6 @@ services:
           cpus: '1.0'
         reservations:
           memory: 256M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   api-server:
     image: ghcr.io/sbelakho2/apexmail/api-server:latest
@@ -370,6 +389,19 @@ services:
       # rate limiting keys on the real client IP instead of the nginx
       # container IP (which would make every user share one global bucket).
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.18.0.0/16,172.20.0.0/16,172.21.0.0/16}
+      # F8 (audit): the DDoS/WAF layer reads DDOS_TRUSTED_PROXIES (the base
+      # file's empty default = "headers never trusted"), which keyed every
+      # client onto the nginx container IP — one global rate-limit bucket,
+      # degenerate per-client brute-force limits and WAF keying. Derive it
+      # from the SAME value as TRUSTED_PROXIES so the two can never drift
+      # (the compose networks are pinned to these exact subnets below).
+      DDOS_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.18.0.0/16,172.20.0.0/16,172.21.0.0/16}
+      # HA data-plane fencing (audit SM10 F4): when TRUE, mutating requests are
+      # refused with 503 while this node is fenced via the ha service
+      # (Redis key ha:fenced:<node>). Default false = zero fence traffic.
+      # Requires REDIS_URL reachable from this service and a node id that
+      # matches the ha service's fencing key (see crates/ha/src/fence.rs).
+      APEXMAIL_HA_FENCING: ${APEXMAIL_HA_FENCING:-false}
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
@@ -391,6 +423,12 @@ services:
       IMPERSONATION_SECRET_FILE: /run/secrets/impersonation_secret
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
       DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE: /run/secrets/dkim_private_key_encryption_key
+      # F9 (audit): caller side of the per-workload credential — the
+      # analytics PDF export presents PDF_RENDERER_AUTH_TOKEN (exactly what
+      # pdf-renderer accepts; the universal token is refused and loudly
+      # logged over there). Same secret as the pdf-renderer service mounts.
+      PDF_RENDERER_AUTH_TOKEN: ""
+      PDF_RENDERER_AUTH_TOKEN_FILE: /run/secrets/pdf_renderer_auth_token
       # Set true once to generate encrypted platform-sender DKIM material.
       # It remains pending until the exact returned DNS records are verified.
       SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP: ${SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP:-false}
@@ -446,8 +484,11 @@ services:
       - apexmail_backend
       - apexmail_data_internal
     healthcheck:
-      # Use /dev/tcp bash built-in instead of nc — distroless/minimal images may not ship netcat
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
+      # F12 (audit): GET /health (nested router in api-server app.rs) instead
+      # of a bare TCP connect — the port can be bound while the router is
+      # wedged or the DB pool is dead. wget is installed in the runtime-base
+      # stage of services/mail-server/Dockerfile.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -459,10 +500,6 @@ services:
           cpus: '1.0'
         reservations:
           memory: 256M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
     secrets:
       - postgres_password
       - redis_password
@@ -470,6 +507,7 @@ services:
       - webhook_signing_secret
       - tracking_secret_key
       - internal_service_token
+      - pdf_renderer_auth_token
       - jwt_private_key_pem
       - jwt_public_key_pem
       - session_secret
@@ -553,7 +591,9 @@ services:
       - internal_service_token
       - sales_unsubscribe_secret
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3010' 2>/dev/null || nc -z 127.0.0.1 3010"]
+      # F12 (audit): GET /health (sales-autopilot routes.rs) instead of a
+      # bare TCP connect.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3010/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -571,10 +611,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # COMPLIANCE SERVICE (audit log, DSR/GDPR automation, secrets rotation)
@@ -593,6 +629,13 @@ services:
   # (Stripe webhooks, admin invoices, the overage sweep) renders through it.
   # It was previously dev-profile-only, so production invoice PDFs silently
   # failed. The base service is profile-gated; !override [] activates it here.
+  # F9 (audit): the per-workload dedicated token IS wired — pdf-renderer
+  # REFUSES to boot in production (unset APP_ENV counts as production) with
+  # only the universal INTERNAL_SERVICE_TOKEN, so it crash-looped before this
+  # bridge existed. The credential arrives via the pdf_renderer_auth_token
+  # Docker secret, bridged by the entrypoint wrapper
+  # (PDF_RENDERER_AUTH_TOKEN_FILE); the api-server and billing-service
+  # callers present the same secret (see their blocks below).
   pdf-renderer:
     profiles: !override []
     image: ghcr.io/sbelakho2/apexmail/pdf-renderer:latest
@@ -604,11 +647,14 @@ services:
       PDF_HOST: 0.0.0.0
       PDF_PORT: "3004"
       RUST_LOG: ${PDF_LOG_LEVEL:-info}
-      # Blank the env so the wrapper bridges the secret file.
+      # Blank the env so the wrapper bridges the secret files.
       INTERNAL_SERVICE_TOKEN: ""
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      PDF_RENDERER_AUTH_TOKEN: ""
+      PDF_RENDERER_AUTH_TOKEN_FILE: /run/secrets/pdf_renderer_auth_token
     secrets:
       - internal_service_token
+      - pdf_renderer_auth_token
     networks:
       - apexmail_backend
     logging: *default-logging
@@ -665,17 +711,20 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # Production: the Redis password reaches the exporter via a JSON-map
   # Docker secret (the exporter's only file-based auth format — see the
   # note on the base service) instead of a plaintext env value visible in
   # `docker inspect`. The map contains the SAME password as the plain
   # redis_password secret; rotation must update both files.
+  # F15 (audit): the base file's load-secret-env.sh bridge is PINNED OUT
+  # here (entrypoint replaced with the bare exporter) — the wrapper would
+  # otherwise export the password into the process environment, which is
+  # exactly what this JSON-map flag avoids. The explicit
+  # --redis.password-file flag below also takes precedence over the
+  # REDIS_PASSWORD_FILE env inherited from the base.
   redis-exporter:
+    entrypoint: ["/redis_exporter"]
     command:
       - --redis.addr=redis://redis:6379
       - --redis.password-file=/run/secrets/redis_password_map
@@ -723,7 +772,9 @@ services:
       - ai_admin_token
       - ai_model_api_key
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 3012"]
+      # F12 (audit): GET /health (ai-service public router) instead of a bare
+      # TCP connect.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3012/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -740,10 +791,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   compliance:
     image: ghcr.io/sbelakho2/apexmail/compliance:latest
@@ -800,7 +847,9 @@ services:
       - compliance_secrets_kdf_salt
       - compliance_consent_signing_key
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3011' 2>/dev/null || nc -z 127.0.0.1 3011"]
+      # F12 (audit): GET /health (compliance routes.rs) instead of a bare
+      # TCP connect.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3011/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -817,10 +866,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # HA SERVICE (failover / health-check / backup / replication orchestrator)
@@ -895,10 +940,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # ISOLATION SERVICE (tenant isolation: quotas, per-tenant keys, RLS policy)
@@ -969,10 +1010,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # MIGRATOR (one-shot database migration job — runs BEFORE `up`)
@@ -1040,6 +1077,9 @@ services:
       - apexmail_data_internal
     logging: *default-logging
     healthcheck:
+      # F12 (audit): stays a bare TCP connect on purpose — the status-server
+      # (auth-server binary) serves no /health route, so there is no
+      # application-level probe to upgrade to.
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
@@ -1053,10 +1093,6 @@ services:
           cpus: '0.25'
         reservations:
           memory: 64M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # MTA (Mail Transfer Agent)
@@ -1074,7 +1110,17 @@ services:
     # SIGKILL — the default 10s kills accepted-but-unpersisted submission
     # DATA on every deploy.
     stop_grace_period: 90s
-    ports:
+    # !override (SM13 verifier repair): compose APPENDS port lists across
+    # overlay files, so the base file's new loopback-bound dev MTA mappings
+    # ("${SMTP_EDGE_BIND:-127.0.0.1}:25:25", F14) merged with the prod list
+    # below into DUPLICATE host-port bindings (127.0.0.1:25 AND 0.0.0.0:25 on
+    # the same container) — Docker refuses that with "address already in use"
+    # and the production MTA never starts (verified live: `docker run -p
+    # 127.0.0.1:2599:80 -p 2599:80` → "failed to bind host port ... address
+    # already in use"). This prod list is now AUTHORITATIVE: the production
+    # MX is intentionally public on all interfaces, which exactly replaces
+    # the dev loopback bindings.
+    ports: !override
       - "25:25"
       - "587:587"
       - "465:465"
@@ -1098,6 +1144,9 @@ services:
       RUST_LOG: info
       DB_PASSWORD_FILE: /run/secrets/postgres_password
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # HA data-plane fencing (audit SM10 F4): when TRUE, inbound MAIL commands
+      # are refused with 421 while this node is fenced. Default false.
+      APEXMAIL_HA_FENCING: ${APEXMAIL_HA_FENCING:-false}
       METRICS_ENABLED: "true"
       METRICS_PORT: "9090"
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
@@ -1169,10 +1218,6 @@ services:
           cpus: '2.0'
         reservations:
           memory: 512M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
 
   # ===========================================================================
@@ -1187,7 +1232,13 @@ services:
     environment:
       RUST_LOG: info
       DB_PASSWORD_FILE: /run/secrets/postgres_password
-      OUTBOUND_MTA_HEALTH_ADDR: 127.0.0.1:8093
+      # F2 (audit): bind the health/metrics listener on ALL interfaces — it
+      # is reachable only on the internal compose networks (no host ports),
+      # and the previous 127.0.0.1 bind was unreachable from the Prometheus
+      # container, leaving OutboundMtaDown /
+      # OutboundMtaPendingOldestAgeSlo as dead rules with zero coverage on
+      # the only component draining outbound_relay_ledger.
+      OUTBOUND_MTA_HEALTH_ADDR: 0.0.0.0:8093
       OUTBOUND_MTA_POLL_SECS: "5"
       OUTBOUND_MTA_BATCH_SIZE: "100"
       OUTBOUND_MTA_MAX_ATTEMPTS: "12"
@@ -1279,10 +1330,6 @@ services:
           cpus: '1.0'
         reservations:
           memory: 256M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # MAILSTORE (gRPC mail storage backend for IMAP)
@@ -1332,18 +1379,17 @@ services:
           cpus: '1.0'
         reservations:
           memory: 256M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   enterprise:
     image: ghcr.io/sbelakho2/apexmail/enterprise:latest
     environment:
       RUST_LOG: info
-      # Production bind: the dev overlay defaults PORT to 3002 — override it
-      # here so the container matches the prod healthcheck (127.0.0.1:3008)
-      # and the nginx vhost upstream (enterprise:3008).
+      # Production bind: kept explicit here so the container port can never
+      # drift from the prod healthcheck (127.0.0.1:3008), the nginx vhost
+      # upstream (enterprise:3008) and the static `enterprise:3008` scrape
+      # target in deploy/prometheus.yml (F11: the base file historically
+      # bound a different dev port, which left EnterpriseServiceDown firing
+      # forever on dev machines running the monitoring profile).
       HOST: 0.0.0.0
       PORT: 3008
       NODE_ENV: production
@@ -1364,7 +1410,9 @@ services:
       - jwt_public_key_pem
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3008' 2>/dev/null || exit 1"]
+      # F12 (audit): GET /health (enterprise routes.rs) instead of a bare TCP
+      # connect.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3008/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1377,10 +1425,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # WORKER (Background job processing)
@@ -1399,6 +1443,10 @@ services:
     environment:
       RUST_LOG: info
       DB_HOST: postgres
+      # HA data-plane fencing (audit SM10 F4): when TRUE, all five queue claim
+      # loops skip claiming while this node is fenced (ha:fenced:<node> in
+      # Redis). Default false = zero fence traffic. Uses REDIS_HOST/PORT.
+      APEXMAIL_HA_FENCING: ${APEXMAIL_HA_FENCING:-false}
       DB_PORT: 5432
       DB_NAME: ${POSTGRES_DB:-apexmail}
       DB_USER: ${POSTGRES_USER:-apexmail}
@@ -1470,7 +1518,10 @@ services:
       - tracking_secret_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9093' 2>/dev/null || exit 1"]
+      # F12 (audit): the worker serves GET /health on the SAME injected
+      # listener as /metrics (worker-processors worker.rs run_health_server),
+      # so the HTTP probe replaces the bare TCP connect.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9093/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1487,10 +1538,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   # ===========================================================================
   # BILLING SERVICE (plans, metering, invoices, Stripe webhooks)
@@ -1525,9 +1572,15 @@ services:
       # Override the development default before the wrapper loads the secret.
       SERVICE_AUTH_TOKEN: ""
       SERVICE_AUTH_TOKEN_FILE: /run/secrets/internal_service_token
-      # Invoice rendering also authenticates to pdf-renderer with this same
-      # shared service token.
-      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+      # F9 (audit): invoice rendering authenticates to pdf-renderer, which
+      # in production accepts ONLY its dedicated per-workload token —
+      # billing's invoices.rs presents the value of INTERNAL_SERVICE_TOKEN
+      # as the pdf-renderer x-api-key credential. Point this var at the
+      # pdf_renderer_auth_token secret so invoice renders survive the
+      # per-workload boundary; billing's own inbound auth keeps the
+      # universal token via SERVICE_AUTH_TOKEN above.
+      INTERNAL_SERVICE_TOKEN: ""
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/pdf_renderer_auth_token
       # ── Stripe (secrets via wrapper-managed _FILE bridging) ────────────────
       STRIPE_SECRET_KEY: ""
       STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret_key
@@ -1541,12 +1594,13 @@ services:
       - postgres_password
       - redis_password
       - internal_service_token
+      - pdf_renderer_auth_token
       - stripe_secret_key
       - stripe_webhook_secret
     healthcheck:
-      # netcat-openbsd ships in the runtime-base image (same probe as the
-      # Dockerfile HEALTHCHECK).
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 4100"]
+      # F12 (audit): GET /health (billing-service routes.rs) instead of a
+      # bare TCP connect; wget ships in the runtime-base image.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:4100/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1559,10 +1613,6 @@ services:
           cpus: '0.5'
         reservations:
           memory: 128M
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 5
 
   postgres-backup:
     # Stock image + openssl/rsync baked in (the runtime `apk add` fallback is
@@ -1899,12 +1949,32 @@ volumes:
 # leave the host — with only the internal network attached, backups could
 # never leave. Keeping this as a separate, minimal-membership network means
 # the data plane itself still has no egress.
+#
+# F8 (audit): the three client-facing bridges are PINNED to the exact
+# subnets the code and .env.production.example document (172.18/20/21) —
+# the api-server TRUSTED_PROXIES / DDOS_TRUSTED_PROXIES defaults hardcode
+# those CIDRs, and leaving them to Docker's allocation order let the
+# trusted set silently point at the wrong bridges. The remaining networks
+# (apexmail_data_internal, apexmail_monitoring, apexmail_backup_egress)
+# stay auto-allocated: nothing hardcodes their addresses.
 networks:
   apexmail_data_internal:
     driver: bridge
     internal: true
   apexmail_backup_egress:
     driver: bridge
+  apexmail_frontend:
+    ipam:
+      config:
+        - subnet: 172.18.0.0/16
+  apexmail_backend:
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  apexmail_data:
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 
 secrets:
   ai_model_api_key:
@@ -1931,6 +2001,13 @@ secrets:
     file: ${PROD_TRACKING_SECRET_KEY_FILE:?PROD_TRACKING_SECRET_KEY_FILE is required in production}
   internal_service_token:
     file: ${PROD_INTERNAL_SERVICE_TOKEN_FILE:?PROD_INTERNAL_SERVICE_TOKEN_FILE is required in production}
+  # F9 (audit) — pdf-renderer's dedicated per-workload credential (P1 #6).
+  # The pdf-renderer binary refuses to boot in production without it and
+  # both callers (api-server analytics export, billing invoice rendering)
+  # present exactly this value. REQUIRED: with :? a deployment missing the
+  # file fails at compose-render time instead of crash-looping the renderer.
+  pdf_renderer_auth_token:
+    file: ${PROD_PDF_RENDERER_AUTH_TOKEN_FILE:?PROD_PDF_RENDERER_AUTH_TOKEN_FILE is required in production}
   jwt_secret:
     file: ${PROD_JWT_SECRET_FILE:?PROD_JWT_SECRET_FILE is required in production}
   jwt_private_key_pem:

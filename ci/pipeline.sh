@@ -75,6 +75,66 @@ USAGE
     exit "${1:-0}"
 }
 
+# --- blessing contract (audit SM14 F3) ---------------------------------------------
+# A .last-good-sha blessing is RELEASE EVIDENCE: fetch.sh skip-unchanged
+# no-ops every later poll for the recorded sha, so "blessed" must mean
+# "every required stage actually finished ok in THIS run". These helpers are
+# top-level (not cmd_run-internal) so `selftest` can exercise the contract
+# directly.
+#
+# The stages a FULL blessing must have ACTUALLY passed — status ok — this
+# run. Anything else (skip, advisory-fail, timeout, unchanged, fail, or a
+# stage that never ran) must never be recorded as passed.
+REQUIRED_BLESS_STAGES="validate ui test security"
+
+# blessing_statuses_ok <"stage=status" ...> — print the required stages whose
+# recorded status is exactly `ok`, one per line.
+blessing_statuses_ok() {
+    for _bs_req in $REQUIRED_BLESS_STAGES; do
+        for _bs_pair in "$@"; do
+            if [ "$_bs_pair" = "$_bs_req=ok" ]; then
+                printf '%s\n' "$_bs_req"
+                break
+            fi
+        done
+    done
+}
+
+# blessing_refused_reason <"stage=status" ...> — print one "<stage>: <status>"
+# line for every required stage that did NOT finish ok (nothing when all
+# did). Exit status: 0 = refusal reasons found, 1 = blessing allowed.
+blessing_refused_reason() {
+    _br_found=0
+    for _br_req in $REQUIRED_BLESS_STAGES; do
+        _br_status=not-run
+        for _br_pair in "$@"; do
+            case $_br_pair in
+                "$_br_req="*) _br_status=${_br_pair#"$_br_req="} ;;
+            esac
+        done
+        if [ "$_br_status" != ok ]; then
+            printf '%s: %s\n' "$_br_req" "$_br_status"
+            _br_found=$((_br_found + 1))
+        fi
+    done
+    [ "$_br_found" -gt 0 ]
+}
+
+# blessing_passed_json <"stage=status" ...> — the passedStages JSON array of
+# the required stages that genuinely finished ok (audit SM14 F3: derived
+# from the run's ACTUAL per-stage statuses, never a hardcoded list).
+blessing_passed_json() {
+    _bp_json=''
+    for _bp_st in $(blessing_statuses_ok "$@"); do
+        if [ -z "$_bp_json" ]; then
+            _bp_json="\"$_bp_st\""
+        else
+            _bp_json="$_bp_json,\"$_bp_st\""
+        fi
+    done
+    printf '[%s]' "$_bp_json"
+}
+
 # --- list -------------------------------------------------------------------------
 cmd_list() {
     printf '%-10s %-8s %-9s %s\n' STAGE TIMEOUT ADVISORY SCRIPT
@@ -264,13 +324,21 @@ cmd_run() {
     _overall=ok
     _failed_stage=''
     _last=''
+    # Audit SM14 F3: record EVERY stage's actual outcome ("stage=status")
+    # so the blessing can be derived from what really ran, not from the
+    # requested stage list. execute_stage prints exactly the manifest's
+    # status word (ok/skip/advisory-fail/unchanged/timeout/fail).
+    _statuses=''
     for st in $_run_list; do
         _status=$(execute_stage "$st")
+        _statuses="$_statuses $st=$_status"
         _last=$st
         case $_status in
             ok|skip|advisory-fail) ;;
             unchanged)
                 # fetch detected no new work (CI_SKIP_UNCHANGED): green no-op.
+                # The existing .last-good-sha blessing (same sha, same config
+                # hash) stays authoritative — nothing new is claimed here.
                 ci_info "nothing to do since the last green run"
                 break
                 ;;
@@ -293,24 +361,49 @@ cmd_run() {
     if [ "$_overall" = ok ]; then
         rm -f "$CI_DIR/.last-failure" 2>/dev/null || true
         # Remember the sha so --skip-unchanged polls can no-op cheaply — but
-        # ONLY when this run exercised EVERY mandatory stage (a partial
-        # --stages run must never bless an untested sha; the old test-OR-
-        # security condition let a manual test-only run create a full-lane
-        # blessing). The record is a release-gate MANIFEST, not a naked sha:
-        # it names the pipeline config and every stage that passed, so a
-        # later policy change cannot silently validate stale blessings.
+        # ONLY when this run exercised EVERY mandatory stage AND every one of
+        # them actually finished ok. Two independent guards (commit 24234a5e
+        # added the first; audit SM14 F3 the second):
+        #   1. MEMBERSHIP — a partial --stages run must never bless an
+        #      untested sha;
+        #   2. OUTCOMES — a stage that ended skip/advisory-fail/timeout (via
+        #      --advisory, CI_ADVISORY_STAGES in /etc/apexmail/pipeline.conf,
+        #      or a hard timeout) is NOT a pass: writing passedStages for it
+        #      would let fetch.sh skip-unchanged no-op every later poll for a
+        #      sha whose security/ui lane never really went green.
         _required_stages_full=true
-        for _stage in validate ui test security; do
+        for _stage in $REQUIRED_BLESS_STAGES; do
             case " $_run_list " in
                 *" $_stage "*) ;;
                 *) _required_stages_full=false ;;
             esac
         done
-        if [ "$_required_stages_full" = true ]; then
-            _pipeline_hash=$(cat "$CI_ROOT/pipeline.conf" "$CI_ROOT"/stages/*.sh 2>/dev/null | sha256sum | cut -d' ' -f1)
-            printf '{"sha":"%s","pipelineConfigHash":"%s","passedStages":["validate","ui","test","security"],"completedAt":"%s"}\n' \
-                "$CI_SHA" "$_pipeline_hash" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                >"$RUNS_DIR/.last-good-sha"
+        # A DRY-RUN "passes" without executing a single gate — it must never
+        # create or refresh a blessing, or the next real --skip-unchanged
+        # poll would no-op on evidence that was only echoed (audit SM14 F3
+        # family: blessings record what RAN).
+        _bless_allowed=true
+        if [ "${CI_DRY_RUN:-0}" = 1 ]; then
+            ci_info "dry-run: .last-good-sha blessing deliberately NOT written (nothing executed)"
+            _bless_allowed=false
+        fi
+        if [ "$_required_stages_full" = true ] && [ "$_bless_allowed" = true ]; then
+            # shellcheck disable=SC2086  # _statuses is an intentional
+            # "stage=status" word list (statuses are single shell words).
+            _bless_refused=$(blessing_refused_reason $_statuses || true)
+            if [ -n "$_bless_refused" ]; then
+                ci_warn "NOT blessing $CI_SHA — a required stage did not finish ok:"
+                printf '%s\n' "$_bless_refused" | while IFS= read -r _br_line; do
+                    ci_warn "  blessing refused: $_br_line"
+                done
+                ci_warn "run recorded $_overall, but .last-good-sha is left untouched (skip-unchanged keeps honouring the previous blessing)"
+            else
+                _pipeline_hash=$(ci_pipeline_config_hash)
+                printf '{"sha":"%s","pipelineConfigHash":"%s","passedStages":%s,"completedAt":"%s"}\n' \
+                    "$CI_SHA" "$_pipeline_hash" "$(blessing_passed_json $_statuses)" \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    >"$RUNS_DIR/.last-good-sha"
+            fi
         fi
     fi
     cleanup
@@ -331,7 +424,7 @@ cmd_run() {
 # enforcement, lock exclusivity.
 cmd_selftest() {
     _sf_fail=0
-    ci_info "selftest (1/8): syntax + shellcheck of every ci/ script"
+    ci_info "selftest (1/10): syntax + shellcheck of every ci/ script"
     for f in "$CI_DIR/pipeline.sh" "$CI_DIR/lib.sh" "$CI_DIR/check-pr.sh" \
              "$CI_DIR/install.sh" "$CI_DIR"/stages/*.sh "$CI_DIR"/units/*.sh; do
         [ -f "$f" ] || continue
@@ -350,24 +443,26 @@ cmd_selftest() {
         ci_warn "shellcheck not installed — syntax-only check"
     fi
 
-    ci_info "selftest (2/8): stage contract (exists, executable, defines stage_main)"
+    ci_info "selftest (2/10): stage contract (exists, executable, defines stage_main)"
     for st in $(printf '%s' "$CI_STAGES" | tr ',' ' '); do
         s="$CI_DIR/stages/$st.sh"
         [ -x "$s" ] || { ci_err "missing/not executable: $s"; _sf_fail=1; }
         grep -q 'stage_main' "$s" 2>/dev/null || { ci_err "no stage_main in $s"; _sf_fail=1; }
     done
 
-    ci_info "selftest (3/8): test-stage lane contract (lanes + flags present)"
+    ci_info "selftest (3/10): test-stage lane contract (lanes + flags present)"
     # The SDK/satellite/static-lint lanes (F-wave enterprise coverage): the
     # lane functions must exist in the test stage and their required-by-
     # default flags in pipeline.conf — checked the same way the stage
     # contract above is, so a refactor cannot silently drop a lane.
     _ts="$CI_DIR/stages/test.sh"
     for fn in run_php_tests run_sdk_tests run_satellite_crates run_static_lint_gates \
+              run_pre_commit_lane provision_contrast_node_modules \
               lane_tool_status provision_composer_vendor provision_sdk_python_venv; do
         grep -q "$fn()" "$_ts" 2>/dev/null || { ci_err "test stage lost lane/helper: $fn"; _sf_fail=1; }
     done
-    for fl in CI_PHP_CHECK CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR; do
+    for fl in CI_PHP_CHECK CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR \
+              CI_PRE_COMMIT_CHECK; do
         grep -q "$fl" "$CI_DIR/pipeline.conf" 2>/dev/null \
             || { ci_err "pipeline.conf lost flag: $fl"; _sf_fail=1; }
     done
@@ -377,7 +472,7 @@ cmd_selftest() {
     # 2026-09-10 enterprise lanes: the artifacts the new gates depend on must
     # exist and be well-formed — checked statically so the selftest stays
     # infrastructure-free, exactly like the sections around it.
-    ci_info "selftest (3/8): enterprise-lane artifacts (coverage baseline, migration lint, deny/trivy triage)"
+    ci_info "selftest (4/10): enterprise-lane artifacts (coverage baseline, migration lint, deny/trivy triage)"
     _base=$CI_ROOT/coverage-baseline.txt
     if [ ! -f "$_base" ]; then
         ci_err "missing ci/coverage-baseline.txt (coverage ratchet gate)"
@@ -412,13 +507,13 @@ cmd_selftest() {
         ci_warn "python3 missing — migration-lint selftest skipped"
     fi
 
-    ci_info "selftest (4/8): full dry-run through the real runner"
+    ci_info "selftest (5/10): full dry-run through the real runner"
     if ! "$CI_DIR/pipeline.sh" run --dry-run --stages "$CI_STAGES" --lock-wait 10; then
         ci_err "dry-run pipeline run failed"
         _sf_fail=1
     fi
 
-    ci_info "selftest (5/8): manifest + per-stage logs of the dry run are valid"
+    ci_info "selftest (6/10): manifest + per-stage logs of the dry run are valid"
     _latest=$(cd "$RUNS_DIR" 2>/dev/null && \
         ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
         | sort -r | head -1 || true)
@@ -436,7 +531,7 @@ cmd_selftest() {
         done
     fi
 
-    ci_info "selftest (6/8): timeout wrapper stops a runaway command"
+    ci_info "selftest (7/10): timeout wrapper stops a runaway command"
     _sf_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
     printf '#!/bin/sh\nsleep 30\n' >"$_sf_tmp/slow.sh"
     chmod +x "$_sf_tmp/slow.sh"
@@ -451,7 +546,7 @@ cmd_selftest() {
     fi
     rm -rf "$_sf_tmp"
 
-    ci_info "selftest (7/8): run lock excludes a concurrent holder"
+    ci_info "selftest (8/10): run lock excludes a concurrent holder"
     if ci_lock_acquire selftest 0; then
         if CI_ROOT="$CI_DIR" sh -c '. "$CI_ROOT/lib.sh"; ci_lock_acquire selftest 1' >/dev/null 2>&1; then
             # With flock both acquires share fd 9 in THIS process; only the
@@ -464,6 +559,65 @@ cmd_selftest() {
         ci_err "could not acquire the selftest lock at all"
         _sf_fail=1
     fi
+
+    ci_info "selftest (9/10): RUSTSEC ledger lockstep (audit SM14 F11)"
+    # pipeline.conf:73-74 contract: CI_CARGO_AUDIT_IGNORES mirrors
+    # services/mail-server/deny.toml [advisories].ignore EXACTLY. The lists
+    # only LOOK equal to a naive grep (pipeline.conf mentions IDs in
+    # comments); this assertion parses BOTH and fails on any drift.
+    if command -v awk >/dev/null 2>&1 && [ -f "$REPO_ROOT/services/mail-server/deny.toml" ]; then
+        _sl_deny_ids=$(awk '
+            /^\[advisories\]/   { in_adv = 1; next }
+            /^\[/               { in_adv = 0 }
+            in_adv && /^ignore = \[/ { in_ign = 1; next }
+            in_adv && in_ign && /^\]/ { in_ign = 0 }
+            in_adv && in_ign {
+                line = $0
+                while (match(line, /"(RUSTSEC|CVE|GHSA)-[A-Za-z0-9.-]+"/)) {
+                    print substr(line, RSTART + 1, RLENGTH - 2)
+                    line = substr(line, RSTART + RLENGTH)
+                }
+            }' "$REPO_ROOT/services/mail-server/deny.toml" | sort)
+        _sl_conf_ids=$(printf '%s\n' $CI_CARGO_AUDIT_IGNORES | sort)
+        _sl_a=$(mktemp "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
+        _sl_b=$(mktemp "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
+        printf '%s\n' "$_sl_deny_ids" >"$_sl_a"
+        printf '%s\n' "$_sl_conf_ids" >"$_sl_b"
+        if cmp -s "$_sl_a" "$_sl_b"; then
+            _sl_n=$(printf '%s\n' "$_sl_deny_ids" | grep -c . || true)
+            ci_info "PASS: RUSTSEC ledgers in EXACT lockstep ($_sl_n entries)"
+        else
+            ci_err "RUSTSEC ledgers DIVERGED: services/mail-server/deny.toml \
+[advisories].ignore vs CI_CARGO_AUDIT_IGNORES (pipeline.conf) — restore EXACT \
+lockstep (pipeline.conf:73-74). '-' = deny.toml, '+' = pipeline.conf:"
+            diff -u "$_sl_a" "$_sl_b" >&2 || true
+            _sf_fail=1
+        fi
+        rm -f "$_sl_a" "$_sl_b"
+    else
+        ci_warn "deny.toml missing — RUSTSEC lockstep selftest skipped"
+    fi
+
+    ci_info "selftest (10/10): blessing contract (audit SM14 F3 — outcomes gate)"
+    # A .last-good-sha blessing must require every required stage to have
+    # ACTUALLY finished ok: advisory-fail/skip/timeout/fail/not-run can never
+    # bless, and passedStages is derived from the real statuses.
+    if blessing_refused_reason validate=ok ui=ok test=ok security=ok >/dev/null; then
+        ci_err "blessing contract: refused an all-ok run"
+        _sf_fail=1
+    fi
+    for _bl_bad in advisory-fail skip timeout fail not-run unchanged; do
+        if ! blessing_refused_reason validate=ok ui=ok test=ok "security=$_bl_bad" >/dev/null; then
+            ci_err "blessing contract: ALLOWED a blessing with security=$_bl_bad"
+            _sf_fail=1
+        fi
+    done
+    _bl_json=$(blessing_passed_json validate=ok ui=ok test=ok security=ok)
+    [ "$_bl_json" = '["validate","ui","test","security"]' ] \
+        || { ci_err "blessing contract: passedStages JSON wrong: $_bl_json"; _sf_fail=1; }
+    _bl_json=$(blessing_passed_json validate=ok ui=skip test=ok security=ok)
+    [ "$_bl_json" = '["validate","test","security"]' ] \
+        || { ci_err "blessing contract: passedStages must only list ACTUAL ok stages, got: $_bl_json"; _sf_fail=1; }
 
     if [ "$_sf_fail" -eq 0 ]; then
         ci_info "selftest: ALL OK"

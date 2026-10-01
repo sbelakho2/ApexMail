@@ -18,6 +18,14 @@ use crate::types::{EnqueueOptions, Job, JobStatus, QueueError, QueueStats};
 const HMAC_FIELD: &str = "__hmac__";
 const MAX_RETRY_BACKOFF_SECS: i64 = 3600;
 
+/// Dead-letter reason recorded when a dequeued payload's signature does not
+/// match its content.
+const HMAC_MISMATCH_MESSAGE: &str =
+    "HMAC verification failed; manual replay requires trusted payload re-signing";
+/// Dead-letter reason recorded when a dequeued payload carries no signature.
+const HMAC_MISSING_MESSAGE: &str =
+    "Missing HMAC signature; manual replay requires trusted payload re-signing";
+
 /// HMAC‑SHA256 signing provider.
 type HmacSha256 = Hmac<Sha256>;
 
@@ -250,7 +258,10 @@ impl PostgresQueueProvider {
         rows.sort_by(|a, b| {
             let key = |r: &JobRow| {
                 let age_hours = (now - r.created_at).num_seconds() as f64 / 3600.0;
-                ((r.priority as f64 + age_hours.min(100.0)) as i32, r.created_at)
+                (
+                    (r.priority as f64 + age_hours.min(100.0)) as i32,
+                    r.created_at,
+                )
             };
             let (eff_a, created_a) = key(a);
             let (eff_b, created_b) = key(b);
@@ -275,20 +286,11 @@ impl PostgresQueueProvider {
                             job_id = %row.id,
                             "HMAC verification failed – payload tampered, skipping job"
                         );
-                        // Revert to pending so it can be inspected via dead letter
-                        let _ = sqlx::query(
-                            r#"
-                            UPDATE queue_jobs
-                            SET status = 'dead_letter',
-                                error_message = 'HMAC verification failed; manual replay requires trusted payload re-signing',
-                                updated_at = $2
-                            WHERE id = $1
-                            "#,
-                        )
-                        .bind(row.id)
-                        .bind(now)
-                        .execute(&self.db)
-                        .await;
+                        // Dead-letter under THIS dequeue's lease fence (see
+                        // `dead_letter_tampered_job`) so the tampered payload
+                        // can be inspected and manually replayed.
+                        self.dead_letter_tampered_job(&row, HMAC_MISMATCH_MESSAGE)
+                            .await;
                         continue;
                     }
                 } else {
@@ -296,19 +298,8 @@ impl PostgresQueueProvider {
                         job_id = %row.id,
                         "Missing HMAC signature – payload tampered or migration, skipping job"
                     );
-                    let _ = sqlx::query(
-                        r#"
-                        UPDATE queue_jobs
-                        SET status = 'dead_letter',
-                            error_message = 'Missing HMAC signature; manual replay requires trusted payload re-signing',
-                            updated_at = $2
-                        WHERE id = $1
-                        "#,
-                    )
-                    .bind(row.id)
-                    .bind(now)
-                    .execute(&self.db)
-                    .await;
+                    self.dead_letter_tampered_job(&row, HMAC_MISSING_MESSAGE)
+                        .await;
                     continue;
                 }
             }
@@ -323,6 +314,31 @@ impl PostgresQueueProvider {
             info!(count = jobs.len(), queue = queue, "Dequeued jobs");
         }
         Ok(jobs)
+    }
+
+    /// Dead-letter a job whose payload failed HMAC verification at dequeue
+    /// time (audit finding 9: the old inline comment said "revert to pending"
+    /// while the SQL dead-letters, and that UPDATE — unlike `complete`/`fail`/
+    /// `dead_letter` — carried no lease fence). This now goes through the same
+    /// fenced [`Self::dead_letter`] transition as every other terminal path:
+    /// it requires `status = 'processing' AND lease_token = $token`, so a job
+    /// whose lease was already lost (visibility timeout recovered and
+    /// re-dequeued under a new token) is left to its current owner.
+    async fn dead_letter_tampered_job(&self, row: &JobRow, reason: &str) {
+        let Some(lease_token) = row.lease_token else {
+            warn!(
+                job_id = %row.id,
+                "cannot dead-letter a tampered job without a dequeue lease token"
+            );
+            return;
+        };
+        if let Err(error) = self.dead_letter(row.id, lease_token, reason).await {
+            warn!(
+                job_id = %row.id,
+                error = %error,
+                "failed to dead-letter a tampered job"
+            );
+        }
     }
 
     /// Replay a dead-lettered job after manual inspection by replacing its
@@ -1178,6 +1194,26 @@ mod tests {
         // never re-match.
         assert!(source.contains("SET status = 'pending', lease_token = NULL"));
         assert!(source.contains("lease_token = gen_random_uuid()"));
+        // Audit finding 9: the dequeue-time HMAC dead-letter path must go
+        // through the SAME fenced transition (`dead_letter`), never an
+        // unfenced ad-hoc UPDATE — and its comment must not lie about the
+        // SQL ("revert to pending" while dead-lettering).
+        assert!(
+            source.contains("self.dead_letter(row.id, lease_token, reason)"),
+            "the HMAC tampered-job path must dead-letter through the fenced transition"
+        );
+        // The drifted comment must be gone. (The needle is assembled at
+        // runtime so this assert cannot match its own literal in the
+        // include_str!'d source.)
+        let drifted_comment = [
+            "Revert to pending so it can be inspected",
+            " via dead letter",
+        ]
+        .concat();
+        assert!(
+            !source.contains(&drifted_comment),
+            "the dead-letter comment must match the SQL it documents"
+        );
     }
 
     // ── J: zombie routing ──────────────────────────────────────────────────
@@ -1206,24 +1242,24 @@ mod tests {
     // ── DB-gated lease fencing (skipped without TEST_DATABASE_URL) ────────
 
     /// Release-mode soft-skip contract (audit CI-2): under
-/// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a hard
-/// panic naming the variable, never a silent skip. (This crate does not
-/// depend on `migrator`, so the workspace guard is mirrored here rather than
-/// reused; a variable that IS set passes straight through.)
-fn assert_soft_skip_allowed(env_var: &str) {
-    if std::env::var(env_var)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
-        panic!(
-            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+    /// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a hard
+    /// panic naming the variable, never a silent skip. (This crate does not
+    /// depend on `migrator`, so the workspace guard is mirrored here rather than
+    /// reused; a variable that IS set passes straight through.)
+    fn assert_soft_skip_allowed(env_var: &str) {
+        if std::env::var(env_var)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
+            panic!(
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
              release CI must not skip infrastructure tests"
-        );
+            );
+        }
     }
-}
 
     /// Connect to the test database when TEST_DATABASE_URL is set, following
     /// the workspace convention of skipping (not failing) when absent.
@@ -1557,22 +1593,30 @@ fn assert_soft_skip_allowed(env_var: &str) {
         bad.queue = "email".into();
         bad.max_attempts = 0;
         let err = provider.enqueue(bad.clone()).await.err().unwrap();
-        assert!(err.to_string().contains("max_attempts must be positive"), "{err}");
+        assert!(
+            err.to_string().contains("max_attempts must be positive"),
+            "{err}"
+        );
         bad.max_attempts = -5;
         let err = provider.enqueue(bad.clone()).await.err().unwrap();
-        assert!(err.to_string().contains("max_attempts must be positive"), "{err}");
+        assert!(
+            err.to_string().contains("max_attempts must be positive"),
+            "{err}"
+        );
 
         bad.max_attempts = 3;
         bad.visibility_timeout = 0;
         let err = provider.enqueue(bad.clone()).await.err().unwrap();
         assert!(
-            err.to_string().contains("visibility_timeout must be positive"),
+            err.to_string()
+                .contains("visibility_timeout must be positive"),
             "{err}"
         );
         bad.visibility_timeout = -1;
         let err = provider.enqueue(bad).await.err().unwrap();
         assert!(
-            err.to_string().contains("visibility_timeout must be positive"),
+            err.to_string()
+                .contains("visibility_timeout must be positive"),
             "{err}"
         );
     }
@@ -1646,9 +1690,11 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let queue = format!("w6a-signed-{}", Uuid::new_v4());
 
         let job = provider
-            .enqueue(
-                opts(&queue, serde_json::json!({"to": "user@example.com", "n": 3}), 3)
-            )
+            .enqueue(opts(
+                &queue,
+                serde_json::json!({"to": "user@example.com", "n": 3}),
+                3,
+            ))
             .await
             .unwrap();
 
@@ -1690,7 +1736,11 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let queue = format!("w6a-tamper-{}", Uuid::new_v4());
 
         let job = provider
-            .enqueue(opts(&queue, serde_json::json!({"to": "victim@example.com"}), 3))
+            .enqueue(opts(
+                &queue,
+                serde_json::json!({"to": "victim@example.com"}),
+                3,
+            ))
             .await
             .unwrap();
 
@@ -1713,7 +1763,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let (status, error, _) = row_status(&pool, job.id).await;
         assert_eq!(status, "dead_letter");
         assert!(
-            error.as_deref().unwrap_or_default().contains("HMAC verification failed"),
+            error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("HMAC verification failed"),
             "unexpected error_message: {error:?}"
         );
 
@@ -1739,16 +1792,26 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let queue = format!("w6a-unsigned-row-{}", Uuid::new_v4());
 
         let job = unsigned
-            .enqueue(opts(&queue, serde_json::json!({"to": "user@example.com"}), 3))
+            .enqueue(opts(
+                &queue,
+                serde_json::json!({"to": "user@example.com"}),
+                3,
+            ))
             .await
             .unwrap();
 
         let got = signing.dequeue(&queue, 10).await.unwrap();
-        assert!(got.is_empty(), "unsigned row must not be delivered under signing");
+        assert!(
+            got.is_empty(),
+            "unsigned row must not be delivered under signing"
+        );
         let (status, error, _) = row_status(&pool, job.id).await;
         assert_eq!(status, "dead_letter");
         assert!(
-            error.as_deref().unwrap_or_default().contains("Missing HMAC signature"),
+            error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Missing HMAC signature"),
             "unexpected error_message: {error:?}"
         );
 
@@ -1766,7 +1829,11 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let queue = format!("w6a-replay-{}", Uuid::new_v4());
 
         let job = provider
-            .enqueue(opts(&queue, serde_json::json!({"to": "victim@example.com"}), 3))
+            .enqueue(opts(
+                &queue,
+                serde_json::json!({"to": "victim@example.com"}),
+                3,
+            ))
             .await
             .unwrap();
         sqlx::query(
@@ -1796,7 +1863,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(stored.get(HMAC_FIELD).is_some(), "replayed payload must be re-signed");
+        assert!(
+            stored.get(HMAC_FIELD).is_some(),
+            "replayed payload must be re-signed"
+        );
 
         let got = provider.dequeue(&queue, 10).await.unwrap();
         assert_eq!(got.len(), 1);
@@ -1825,11 +1895,18 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let provider = PostgresQueueProvider::new(pool.clone());
         let queue = format!("w6a-fail-{}", Uuid::new_v4());
 
-        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 2)).await.unwrap();
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 1}), 2))
+            .await
+            .unwrap();
 
         // Unknown job: NotFound.
         assert!(matches!(
-            provider.fail(Uuid::new_v4(), Uuid::new_v4(), "ghost").await.err().unwrap(),
+            provider
+                .fail(Uuid::new_v4(), Uuid::new_v4(), "ghost")
+                .await
+                .err()
+                .unwrap(),
             QueueError::NotFound { .. }
         ));
 
@@ -1860,14 +1937,19 @@ fn assert_soft_skip_allowed(env_var: &str) {
         ));
 
         // Attempt 2 fails → attempts (2) >= max_attempts (2) → dead letter.
-        sqlx::query("UPDATE queue_jobs SET scheduled_at = NOW() - INTERVAL '1 second' WHERE id = $1")
-            .bind(job.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE queue_jobs SET scheduled_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(job.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         let attempt2 = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         assert_eq!(attempt2.attempts, 2);
-        provider.fail(job.id, attempt2.lease_token.unwrap(), "fatal").await.unwrap();
+        provider
+            .fail(job.id, attempt2.lease_token.unwrap(), "fatal")
+            .await
+            .unwrap();
         let (status, error, token) = row_status(&pool, job.id).await;
         assert_eq!(status, "dead_letter");
         assert_eq!(error.as_deref(), Some("fatal"));
@@ -1885,12 +1967,18 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let provider = PostgresQueueProvider::new(pool.clone());
         let queue = format!("w6a-dl-fence-{}", Uuid::new_v4());
 
-        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 3)).await.unwrap();
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 1}), 3))
+            .await
+            .unwrap();
         let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         let token = claimed.lease_token.unwrap();
 
         // Stale token: no-op, job stays processing.
-        provider.dead_letter(job.id, Uuid::new_v4(), "stale").await.unwrap();
+        provider
+            .dead_letter(job.id, Uuid::new_v4(), "stale")
+            .await
+            .unwrap();
         assert_eq!(row_status(&pool, job.id).await.0, "processing");
 
         // Live token: moves to dead letter.
@@ -1936,14 +2024,24 @@ fn assert_soft_skip_allowed(env_var: &str) {
             claimed.extend(handle.await.expect("worker join"));
         }
 
-        assert_eq!(claimed.len(), JOBS, "every job must be claimed exactly once");
+        assert_eq!(
+            claimed.len(),
+            JOBS,
+            "every job must be claimed exactly once"
+        );
         let mut ids: Vec<Uuid> = claimed.iter().map(|j| j.id).collect();
         ids.sort();
         let distinct = ids.len();
-        assert_eq!(distinct, JOBS, "SKIP LOCKED must never double-claim: {ids:?}");
+        assert_eq!(
+            distinct, JOBS,
+            "SKIP LOCKED must never double-claim: {ids:?}"
+        );
         for job in &claimed {
             assert_eq!(job.status, JobStatus::Processing);
-            assert_eq!(job.attempts, 1, "a claimed job must have exactly one attempt");
+            assert_eq!(
+                job.attempts, 1,
+                "a claimed job must have exactly one attempt"
+            );
             assert!(job.lease_token.is_some());
         }
         let stats = provider.stats(&queue).await.unwrap();
@@ -1988,7 +2086,11 @@ fn assert_soft_skip_allowed(env_var: &str) {
         }
         let batch = provider.dequeue(&queue, 10).await.unwrap();
         let priorities: Vec<i32> = batch.iter().map(|j| j.priority).collect();
-        assert_eq!(priorities, vec![10, 5, 1, 0], "dequeue must order by priority desc, FIFO last");
+        assert_eq!(
+            priorities,
+            vec![10, 5, 1, 0],
+            "dequeue must order by priority desc, FIFO last"
+        );
 
         // FIFO within equal priority (created_at asc), and the future job
         // stays put while it is not yet due.
@@ -2008,7 +2110,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
         assert_eq!(seq, vec![0, 1, 2], "equal-priority jobs must dequeue FIFO");
 
         let stats = provider.stats(&queue).await.unwrap();
-        assert_eq!(stats.pending, 1, "only the future-scheduled job stays pending");
+        assert_eq!(
+            stats.pending, 1,
+            "only the future-scheduled job stays pending"
+        );
 
         cleanup_queue(&pool, &queue).await;
         cleanup_queue(&pool, &queue2).await;
@@ -2028,7 +2133,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let provider = PostgresQueueProvider::new(pool.clone());
         let queue = format!("w6a-toctou-{}", Uuid::new_v4());
 
-        let job = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 5)).await.unwrap();
+        let job = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 1}), 5))
+            .await
+            .unwrap();
         let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         let token1 = claimed.lease_token.unwrap();
 
@@ -2043,9 +2151,8 @@ fn assert_soft_skip_allowed(env_var: &str) {
         // fail() SELECTs (still sees token1) and then BLOCKS on the locked
         // row inside its fenced UPDATE.
         let worker = PostgresQueueProvider::new(pool.clone());
-        let worker = tokio::spawn(async move {
-            worker.fail(job.id, token1, "raced failure").await
-        });
+        let worker =
+            tokio::spawn(async move { worker.fail(job.id, token1, "raced failure").await });
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         // While fail() is parked on the row lock, the lease rotates (the
@@ -2066,8 +2173,15 @@ fn assert_soft_skip_allowed(env_var: &str) {
             .expect("fail must return Ok on lost race");
 
         let (status, error, stored_token) = row_status(&pool, job.id).await;
-        assert_eq!(status, "processing", "the raced fail must not touch the job");
-        assert_eq!(stored_token, Some(new_token), "the new owner's lease survives");
+        assert_eq!(
+            status, "processing",
+            "the raced fail must not touch the job"
+        );
+        assert_eq!(
+            stored_token,
+            Some(new_token),
+            "the new owner's lease survives"
+        );
         assert_eq!(error, None, "the raced error message must not be written");
         let attempts: i32 = sqlx::query_scalar("SELECT attempts FROM queue_jobs WHERE id = $1")
             .bind(job.id)
@@ -2089,7 +2203,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
         let queue = format!("w6a-recover-{}", Uuid::new_v4());
 
         // (a) Expired processing job AT the attempt limit → dead letter.
-        let exhausted = provider.enqueue(opts(&queue, serde_json::json!({"n": "a"}), 1)).await.unwrap();
+        let exhausted = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": "a"}), 1))
+            .await
+            .unwrap();
         provider.dequeue(&queue, 1).await.unwrap();
         sqlx::query(
             "UPDATE queue_jobs SET started_at = NOW() - INTERVAL '700 seconds' WHERE id = $1",
@@ -2100,7 +2217,10 @@ fn assert_soft_skip_allowed(env_var: &str) {
         .unwrap();
 
         // (b) Pending zombie (crash between fail() and the retry write).
-        let zombie = provider.enqueue(opts(&queue, serde_json::json!({"n": "b"}), 1)).await.unwrap();
+        let zombie = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": "b"}), 1))
+            .await
+            .unwrap();
         sqlx::query("UPDATE queue_jobs SET attempts = 1, status = 'pending' WHERE id = $1")
             .bind(zombie.id)
             .execute(&pool)
@@ -2123,23 +2243,36 @@ fn assert_soft_skip_allowed(env_var: &str) {
         .unwrap();
 
         let recovered = provider.recover_stale().await.unwrap();
-        assert!(recovered >= 3, "expected at least the 3 fixtures, got {recovered}");
+        assert!(
+            recovered >= 3,
+            "expected at least the 3 fixtures, got {recovered}"
+        );
 
         let (status, error, _) = row_status(&pool, exhausted.id).await;
         assert_eq!(status, "dead_letter", "exhausted zombie must dead-letter");
-        assert!(error.unwrap_or_default().contains("visibility timeout expired"));
+        assert!(error
+            .unwrap_or_default()
+            .contains("visibility timeout expired"));
 
         let (status, error, _) = row_status(&pool, zombie.id).await;
         assert_eq!(status, "dead_letter", "pending zombie must be swept");
-        assert!(error.unwrap_or_default().contains("max attempts exceeded while pending"));
+        assert!(error
+            .unwrap_or_default()
+            .contains("max attempts exceeded while pending"));
 
         let (status, _, token) = row_status(&pool, expired.id).await;
-        assert_eq!(status, "pending", "expired lease below the limit must recover");
+        assert_eq!(
+            status, "pending",
+            "expired lease below the limit must recover"
+        );
         assert_eq!(token, None, "recovery must clear the token");
 
         // The stale worker cannot fail the recovered job; the re-claim gets a
         // fresh attempt.
-        provider.fail(expired.id, stale_token, "stale after recovery").await.unwrap();
+        provider
+            .fail(expired.id, stale_token, "stale after recovery")
+            .await
+            .unwrap();
         assert_eq!(row_status(&pool, expired.id).await.0, "pending");
         let again = provider.dequeue(&queue, 1).await.unwrap();
         assert_eq!(again.len(), 1);
@@ -2160,16 +2293,31 @@ fn assert_soft_skip_allowed(env_var: &str) {
 
         let empty = provider.stats(&queue).await.unwrap();
         assert_eq!(
-            (empty.pending, empty.processing, empty.completed, empty.failed, empty.dead_letter),
+            (
+                empty.pending,
+                empty.processing,
+                empty.completed,
+                empty.failed,
+                empty.dead_letter
+            ),
             (0, 0, 0, 0, 0)
         );
 
         for i in 0..3 {
-            provider.enqueue(opts(&queue, serde_json::json!({"i": i}), 3)).await.unwrap();
+            provider
+                .enqueue(opts(&queue, serde_json::json!({"i": i}), 3))
+                .await
+                .unwrap();
         }
         let batch = provider.dequeue(&queue, 2).await.unwrap();
-        provider.complete(batch[0].id, batch[0].lease_token.unwrap()).await.unwrap();
-        provider.fail(batch[1].id, batch[1].lease_token.unwrap(), "boom").await.unwrap();
+        provider
+            .complete(batch[0].id, batch[0].lease_token.unwrap())
+            .await
+            .unwrap();
+        provider
+            .fail(batch[1].id, batch[1].lease_token.unwrap(), "boom")
+            .await
+            .unwrap();
 
         let stats = provider.stats(&queue).await.unwrap();
         assert_eq!(stats.completed, 1);
@@ -2194,24 +2342,45 @@ fn assert_soft_skip_allowed(env_var: &str) {
 
         // Finished + old → purged. Each job is claimed right after its own
         // enqueue (FIFO would otherwise hand the claim to a later job).
-        let old_done = provider.enqueue(opts(&queue, serde_json::json!({"n": 1}), 3)).await.unwrap();
+        let old_done = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 1}), 3))
+            .await
+            .unwrap();
         let claimed = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         assert_eq!(claimed.id, old_done.id);
-        provider.complete(old_done.id, claimed.lease_token.unwrap()).await.unwrap();
+        provider
+            .complete(old_done.id, claimed.lease_token.unwrap())
+            .await
+            .unwrap();
 
         // Dead-lettered + old → purged.
-        let old_dead = provider.enqueue(opts(&queue, serde_json::json!({"n": 4}), 3)).await.unwrap();
+        let old_dead = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 4}), 3))
+            .await
+            .unwrap();
         let dead_claim = provider.dequeue(&queue, 1).await.unwrap().remove(0);
         assert_eq!(dead_claim.id, old_dead.id);
-        provider.dead_letter(old_dead.id, dead_claim.lease_token.unwrap(), "junk").await.unwrap();
+        provider
+            .dead_letter(old_dead.id, dead_claim.lease_token.unwrap(), "junk")
+            .await
+            .unwrap();
 
         // Finished + old in ANOTHER queue → NOT purged by `queue`'s sweep.
-        let other_done = provider.enqueue(opts(&other, serde_json::json!({"n": 2}), 3)).await.unwrap();
+        let other_done = provider
+            .enqueue(opts(&other, serde_json::json!({"n": 2}), 3))
+            .await
+            .unwrap();
         let other_claim = provider.dequeue(&other, 1).await.unwrap().remove(0);
-        provider.complete(other_done.id, other_claim.lease_token.unwrap()).await.unwrap();
+        provider
+            .complete(other_done.id, other_claim.lease_token.unwrap())
+            .await
+            .unwrap();
 
         // Pending + old → never purged.
-        let old_pending = provider.enqueue(opts(&queue, serde_json::json!({"n": 3}), 3)).await.unwrap();
+        let old_pending = provider
+            .enqueue(opts(&queue, serde_json::json!({"n": 3}), 3))
+            .await
+            .unwrap();
 
         // NOTE: the production schema carries trg_queue_jobs_updated_at, a
         // BEFORE UPDATE trigger that stamps updated_at = NOW() on every

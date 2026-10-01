@@ -1,7 +1,7 @@
 //! Redis-backed distributed rate limiter using a token bucket in Lua.
 //!
 //! Provides a token bucket rate limiter that shares state across all pods
-//! via Redis. Falls back to in-memory governor-based limiting when Redis
+//! via Redis. Falls back to in-memory keyed per-tenant limiting when Redis
 //! is unreachable, with automatic recovery when Redis comes back online.
 //!
 //! ## Architecture
@@ -13,10 +13,11 @@
 //! └──────────────┘     └───────────────────┘     └─────────────┘
 //!                             │  fallback
 //!                             ▼
-//!                      ┌──────────────┐
-//!                      │ GovernorLimiter│
-//!                      │ (in-memory)   │
-//!                      └──────────────┘
+//!                      ┌──────────────────┐
+//!                      │ KeyedRateLimiter │
+//!                      │ (in-memory,      │
+//!                      │  per-tenant)     │
+//!                      └──────────────────┘
 //! ```
 //!
 //! ## Lua Script (Token Bucket)
@@ -35,8 +36,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::config::RateLimitConfig;
-use crate::governor_limiter::GovernorLimiter;
+use crate::config::{KeyedConfig, RateLimitConfig};
+use crate::keyed::KeyedRateLimiter;
 use crate::types::Decision;
 
 /// Interval at which fallback warning logs are emitted (debounce).
@@ -44,6 +45,11 @@ const FALLBACK_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Default sliding window size in seconds.
 const DEFAULT_WINDOW_SECS: u64 = 1;
+
+/// Capacity of the in-memory fallback's per-tenant key map. During a Redis
+/// outage every distinct tenant gets its own bucket; this caps the memory a
+/// key-space explosion can cause (LRU eviction with tombstones applies).
+const FALLBACK_MAX_KEYS: usize = 10_000;
 
 /// Environment variable dividing the fallback budget across the expected
 /// number of pods sharing the limit.
@@ -194,8 +200,16 @@ pub struct RedisLimiter {
     max_requests: u64,
     /// Sustained refill rate (tokens per second).
     refill_per_sec: u64,
-    /// In-memory fallback limiter used when Redis is unreachable.
-    fallback: GovernorLimiter,
+    /// In-memory fallback used when Redis is unreachable.
+    ///
+    /// Audit F5: this used to be ONE un-keyed `GovernorLimiter`, so a Redis
+    /// outage collapsed every tenant sharing the pod into a single
+    /// `burst/2` global bucket — one noisy tenant exhausted it and every
+    /// other tenant's legitimate traffic was denied. It is now a
+    /// `KeyedRateLimiter` (LRU + eviction tombstones) scoped by tenant in
+    /// [`RedisLimiter::check_n_for_tenant`], preserving per-tenant
+    /// isolation in fallback mode.
+    fallback: KeyedRateLimiter,
     /// The original rate configuration (used to rebuild the fallback when
     /// the pod-share divisor changes).
     base_config: RateLimitConfig,
@@ -232,13 +246,36 @@ impl RedisLimiter {
             window_secs: DEFAULT_WINDOW_SECS,
             max_requests: config.effective_burst().get() as u64,
             refill_per_sec: config.requests_per_second.get() as u64,
-            fallback: GovernorLimiter::new(&divided_config(config, shares)),
+            fallback: keyed_fallback(config, shares),
             base_config: config.clone(),
             fallback_shares: shares,
             script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
             peek_script: redis::Script::new(TOKEN_PEEK_SCRIPT),
             in_fallback: AtomicBool::new(false),
             last_warn: Mutex::new(tokio::time::Instant::now()),
+        }
+    }
+
+    /// Connect to Redis at `url` and build a limiter (bounded 2 s connect
+    /// attempt). Returns `None` when the URL is malformed or the server is
+    /// unreachable — callers proceed on the in-memory keyed fallback alone.
+    pub async fn connect(config: &RateLimitConfig, url: &str) -> Option<Self> {
+        let client = redis::Client::open(url).ok()?;
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            redis::aio::ConnectionManager::new(client),
+        )
+        .await
+        {
+            Ok(Ok(cm)) => Some(Self::new(config, cm)),
+            Ok(Err(err)) => {
+                warn!(%err, "Redis rate limiter connect failed — in-memory keyed fallback only");
+                None
+            }
+            Err(_) => {
+                warn!("Redis rate limiter connect timed out — in-memory keyed fallback only");
+                None
+            }
         }
     }
 
@@ -261,8 +298,7 @@ impl RedisLimiter {
     /// limit stays ≈100 req/s while Redis is unavailable.
     pub fn with_fallback_shares(mut self, pods: u64) -> Self {
         self.fallback_shares = pods.max(1);
-        self.fallback =
-            GovernorLimiter::new(&divided_config(&self.base_config, self.fallback_shares));
+        self.fallback = keyed_fallback(&self.base_config, self.fallback_shares);
         self
     }
 
@@ -281,7 +317,7 @@ impl RedisLimiter {
             window_secs: DEFAULT_WINDOW_SECS,
             max_requests: config.effective_burst().get() as u64,
             refill_per_sec: config.requests_per_second.get() as u64,
-            fallback: GovernorLimiter::new(&divided_config(config, shares)),
+            fallback: keyed_fallback(config, shares),
             base_config: config.clone(),
             fallback_shares: shares,
             script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
@@ -308,7 +344,7 @@ impl RedisLimiter {
             window_secs,
             max_requests: config.effective_burst().get() as u64,
             refill_per_sec: config.requests_per_second.get() as u64,
-            fallback: GovernorLimiter::new(config),
+            fallback: keyed_fallback(config, 1),
             base_config: config.clone(),
             fallback_shares: 1,
             script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
@@ -337,10 +373,13 @@ impl RedisLimiter {
     /// Check if `n` requests are allowed for a specific tenant and increment the counter.
     ///
     /// Scopes the rate limit key by `tenant_id` to prevent cross-tenant key collisions.
+    /// The in-memory fallback taken on any Redis error is scoped by the SAME
+    /// tenant id (audit F5): a Redis outage must not collapse per-tenant
+    /// isolation into one global pod-wide bucket.
     pub async fn check_n_for_tenant(&self, tenant_id: Option<&str>, n: u32) -> Decision {
         let key_scope = tenant_id.unwrap_or("default");
         if self.cm.is_none() {
-            return self.fallback.check_n(n);
+            return self.fallback.check_n(&fallback_scope_key(key_scope), n);
         }
 
         let key = format!("{}{}", self.key_prefix, key_scope);
@@ -355,7 +394,7 @@ impl RedisLimiter {
             Err(err) => {
                 debug!(%err, "Redis rate limiter error, falling back to in-memory");
                 self.enter_fallback().await;
-                self.fallback.check_n(n)
+                self.fallback.check_n(&fallback_scope_key(key_scope), n)
             }
         }
     }
@@ -564,6 +603,23 @@ fn divided_config(config: &RateLimitConfig, shares: u64) -> RateLimitConfig {
     divided
 }
 
+/// Build the pod-divided, per-tenant keyed fallback limiter (audit F5).
+fn keyed_fallback(config: &RateLimitConfig, shares: u64) -> KeyedRateLimiter {
+    KeyedRateLimiter::new(KeyedConfig {
+        per_key: divided_config(config, shares),
+        max_keys: FALLBACK_MAX_KEYS,
+        cleanup_interval_secs: 60,
+        eviction_tombstone_ttl_secs: 60,
+    })
+}
+
+/// Namespace for fallback keys so a tenant id can never collide with the
+/// unscoped `"default"` bucket (and so the fallback layout is distinguishable
+/// from the Redis key layout in diagnostics).
+fn fallback_scope_key(tenant_scope: &str) -> String {
+    format!("tenant:{tenant_scope}")
+}
+
 impl std::fmt::Debug for RedisLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisLimiter")
@@ -649,6 +705,69 @@ mod tests {
         let limiter = RedisLimiter::fallback_only(&config);
 
         assert!(limiter.is_in_fallback());
+    }
+
+    // ── Audit F5: the fallback must stay per-tenant ────────────────
+
+    /// A Redis outage must NOT collapse per-tenant isolation into one
+    /// global pod bucket: one tenant exhausting the fallback must leave
+    /// every other tenant's budget untouched, and the fallback must apply
+    /// the same pod-share division as before (default ÷2).
+    #[tokio::test]
+    async fn fallback_scopes_by_tenant_and_keeps_the_share_division() {
+        let config = RateLimitConfig::new(2).with_burst(2);
+        // shares=1 → per-tenant burst is exactly 2 for this test.
+        let limiter = RedisLimiter::fallback_only(&config).with_fallback_shares(1);
+
+        // Tenant A exhausts its whole fallback bucket.
+        assert!(limiter
+            .check_n_for_tenant(Some("tenant-a"), 2)
+            .await
+            .is_allowed());
+        assert!(
+            limiter
+                .check_n_for_tenant(Some("tenant-a"), 1)
+                .await
+                .is_denied(),
+            "tenant-a must be denied once its own bucket is drained"
+        );
+
+        // Tenant B is unaffected — the pre-fix single GovernorLimiter would
+        // have denied this too (shared global bucket).
+        assert!(
+            limiter
+                .check_n_for_tenant(Some("tenant-b"), 2)
+                .await
+                .is_allowed(),
+            "tenant-b must keep its own isolated fallback budget"
+        );
+
+        // The unscoped default bucket is independent of both tenants.
+        assert!(limiter.check_n_for_tenant(None, 2).await.is_allowed());
+    }
+
+    /// F5: the pod-share division must still apply per tenant (not just
+    /// globally) — with shares=4 and burst 16 each tenant gets 4.
+    #[tokio::test]
+    async fn fallback_share_division_applies_per_tenant() {
+        let config = RateLimitConfig::new(100).with_burst(16);
+        let limiter = RedisLimiter::fallback_only(&config).with_fallback_shares(4);
+
+        let mut allowed = 0;
+        for _ in 0..16 {
+            if limiter
+                .check_n_for_tenant(Some("tenant-c"), 1)
+                .await
+                .is_allowed()
+            {
+                allowed += 1;
+            }
+        }
+        assert!(
+            allowed <= 5, // ceil(16/4)=4 + refill headroom
+            "divided fallback must allow ~4 per tenant, got {allowed}"
+        );
+        assert!(allowed >= 4, "expected at least the divided burst");
     }
 
     #[tokio::test]

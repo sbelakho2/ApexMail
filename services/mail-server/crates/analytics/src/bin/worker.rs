@@ -115,11 +115,10 @@ async fn main() -> anyhow::Result<()> {
     let pool_r = pool.clone();
     let redis_r = redis.clone();
 
-    // Compaction task (runs at configured hour, default 2 AM)
-    // Uses exponential backoff on failure to avoid tight retry loops (M-48).
+    // Compaction task (runs at configured hour, default 2 AM).
+    // Failures retry in place under exponential backoff (M-48); the daily
+    // scheduler is only re-entered after success or the retry cap (SM10 F10).
     let compaction_handle = tokio::spawn(async move {
-        let mut backoff: u64 = 30; // 30s initial
-
         loop {
             let now = chrono::Utc::now();
             let target_hour = compaction_config.schedule_hour;
@@ -132,37 +131,41 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(delay).await;
 
             if compaction_config.enabled {
-                let worker = analytics::compaction::CompactionWorker::new(
-                    pool_c.clone(),
-                    redis_c.clone(),
-                    compaction_config.clone(),
-                    storage_path.clone(),
-                );
-                match worker.run().await {
+                let attempt = || {
+                    let pool = pool_c.clone();
+                    let redis = redis_c.clone();
+                    let compaction_config = compaction_config.clone();
+                    let storage_path = storage_path.clone();
+                    async move {
+                        analytics::compaction::CompactionWorker::new(
+                            pool,
+                            redis,
+                            compaction_config,
+                            storage_path,
+                        )
+                        .run()
+                        .await
+                    }
+                };
+                match run_scheduled_with_retry("compaction", attempt).await {
                     Ok(result) => {
                         info!(
                             "Compaction complete: migrated={}, bytes={}",
                             result.rows_migrated, result.bytes_written
                         );
-                        backoff = 30; // reset backoff on success
                     }
                     Err(e) => {
-                        error!("Compaction failed: {e}, retrying in {backoff}s");
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                        backoff = backoff_after_failure(backoff);
-                        continue; // skip the long sleep, retry sooner
+                        error!("Compaction failed after all in-place retries; handing back to the scheduler: {e}");
                     }
                 }
             }
         }
     });
 
-    // Reconciliation task (runs at configured hour, default 3 AM)
-    // Uses exponential backoff on failure to avoid tight retry loops (M-48).
+    // Reconciliation task (runs at configured hour, default 3 AM).
+    // Same in-place retry contract as compaction (M-48 + SM10 F10).
     let reconciliation_config = config.reconciliation.clone();
     let reconciliation_handle = tokio::spawn(async move {
-        let mut backoff: u64 = 30; // 30s initial
-
         loop {
             let now = chrono::Utc::now();
             let target_hour = reconciliation_config.schedule_hour;
@@ -175,23 +178,24 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(delay).await;
 
             if reconciliation_config.enabled {
-                let worker = analytics::reconciliation::ReconciliationWorker::new(
-                    pool_r.clone(),
-                    redis_r.clone(),
-                );
-                match worker.run().await {
+                let attempt = || {
+                    let pool = pool_r.clone();
+                    let redis = redis_r.clone();
+                    async move {
+                        analytics::reconciliation::ReconciliationWorker::new(pool, redis)
+                            .run()
+                            .await
+                    }
+                };
+                match run_scheduled_with_retry("reconciliation", attempt).await {
                     Ok(result) => {
                         info!(
                             "Reconciliation: {} discrepancies found",
                             result.discrepancies_found
                         );
-                        backoff = 30; // reset backoff on success
                     }
                     Err(e) => {
-                        error!("Reconciliation failed: {e}, retrying in {backoff}s");
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                        backoff = backoff_after_failure(backoff);
-                        continue; // skip the long sleep, retry sooner
+                        error!("Reconciliation failed after all in-place retries; handing back to the scheduler: {e}");
                     }
                 }
             }
@@ -276,6 +280,59 @@ fn backoff_after_failure(current_backoff_secs: u64) -> u64 {
     (current_backoff_secs * 2).min(MAX_BACKOFF_SECS)
 }
 
+/// First in-place retry wait after a scheduled run failed.
+const INITIAL_TASK_BACKOFF_SECS: u64 = 30;
+/// In-place retries allowed after the initial failure before a scheduled
+/// slot gives up and hands back to the daily scheduler (SM10 F10). Five
+/// retries under the doubling backoff span ~15.5 minutes — long enough to
+/// ride out a DB/Redis blip, short enough that a failed nightly compaction
+/// never waits a full day to run while the hot `events` table keeps growing.
+const MAX_TASK_RETRIES: u32 = 5;
+
+/// Run one scheduled task with IN-PLACE retries (SM10 F10).
+///
+/// The nightly loops used to `continue` back into the scheduler on failure,
+/// whose first act was recomputing `next_scheduled_time` → tomorrow — so the
+/// exponential backoff was dead in effect and a failed run was retried at
+/// most once per day. This helper retries the task DIRECTLY (attempt, then
+/// up to [`MAX_TASK_RETRIES`] retries under [`backoff_after_failure`]) and
+/// only returns to the scheduler after success or retry exhaustion.
+async fn run_scheduled_with_retry<T, E, F, Fut>(task_name: &str, mut task: F) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut result = task().await;
+    if result.is_ok() {
+        return result;
+    }
+
+    let mut backoff = INITIAL_TASK_BACKOFF_SECS;
+    for retry in 1..=MAX_TASK_RETRIES {
+        error!(
+            task = task_name,
+            retry,
+            max_retries = MAX_TASK_RETRIES,
+            backoff_secs = backoff,
+            "scheduled task failed; retrying in place"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+        backoff = backoff_after_failure(backoff);
+        result = task().await;
+        if result.is_ok() {
+            return result;
+        }
+    }
+
+    error!(
+        task = task_name,
+        retries = MAX_TASK_RETRIES,
+        "scheduled task still failing after all in-place retries"
+    );
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +407,100 @@ mod tests {
             seen.push(backoff);
         }
         assert_eq!(seen, vec![30, 60, 120, 240, 480, 960, 1920, 3600, 3600]);
+    }
+
+    // ── run_scheduled_with_retry: the SM10 F10 in-place retry contract ────
+
+    /// A success on the first attempt must go straight back to the
+    /// scheduler: exactly one attempt, no retry sleeps.
+    #[tokio::test(start_paused = true)]
+    async fn retry_helper_returns_to_scheduler_after_first_try_success() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let result: Result<&str, String> = run_scheduled_with_retry("ok-first-try", || {
+            let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Ok("done")
+                } else {
+                    Err("must not be re-attempted".to_string())
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok("done"));
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a first-try success must not be retried"
+        );
+    }
+
+    /// THE F10 regression: a failure must re-attempt the task DIRECTLY (not
+    /// hand back to the daily scheduler) until it succeeds — the old loop's
+    /// `continue` re-entered the scheduler, which slept ~24 h before the
+    /// "retry", rendering the backoff dead.
+    #[tokio::test(start_paused = true)]
+    async fn retry_helper_re_attempts_in_place_until_success() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let result: Result<(), String> = run_scheduled_with_retry("flaky", || {
+            let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if n < 3 {
+                    Err(format!("transient failure {n}"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "one initial attempt plus in-place retries — never a scheduler round-trip"
+        );
+    }
+
+    /// Retry exhaustion: after the cap the helper gives the slot back to the
+    /// scheduler with the last error instead of retrying forever.
+    #[tokio::test(start_paused = true)]
+    async fn retry_helper_hands_back_to_scheduler_after_the_cap() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let result: Result<(), String> = run_scheduled_with_retry("dead", || {
+            let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Err(format!("permanent failure after attempt {n}")) }
+        })
+        .await;
+        assert!(result.is_err(), "exhausted retries surface the last error");
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1 + MAX_TASK_RETRIES as usize,
+            "exactly the initial attempt plus MAX_TASK_RETRIES retries"
+        );
+    }
+
+    /// The retry waits honor the same exponential backoff ladder the M-48
+    /// cap test pins: sleeps observed on a paused clock total the ladder
+    /// sum, proving no rung was skipped or repeated.
+    #[tokio::test(start_paused = true)]
+    async fn retry_helper_sleeps_the_backoff_ladder_between_attempts() {
+        let expected: u64 = (0..MAX_TASK_RETRIES)
+            .scan(INITIAL_TASK_BACKOFF_SECS, |acc, _| {
+                let cur = *acc;
+                *acc = backoff_after_failure(*acc);
+                Some(cur)
+            })
+            .sum();
+        let started = tokio::time::Instant::now();
+        let _ = run_scheduled_with_retry::<(), String, _, _>("timed", || async move {
+            Err("always fails".to_string())
+        })
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            elapsed,
+            std::time::Duration::from_secs(expected),
+            "the in-place retries must sleep exactly the M-48 backoff ladder"
+        );
     }
 }

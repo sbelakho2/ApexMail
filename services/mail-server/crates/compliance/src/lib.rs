@@ -19,6 +19,7 @@ pub mod governance;
 pub mod hipaa;
 pub mod ledger_sweep;
 pub mod legal_archive;
+pub mod legal_hold;
 pub mod obligations;
 pub mod registry_monitor;
 pub mod retention;

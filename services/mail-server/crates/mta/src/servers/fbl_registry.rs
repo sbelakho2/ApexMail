@@ -513,7 +513,10 @@ mod tests {
             (FblValidationMethod::RdnsFcrcdns, "rdns_fcrcdns"),
             (FblValidationMethod::WebhookHmac, "webhook_hmac"),
             (FblValidationMethod::DkimSignature, "dkim_signature"),
-            (FblValidationMethod::SourceIpAllowlist, "source_ip_allowlist"),
+            (
+                FblValidationMethod::SourceIpAllowlist,
+                "source_ip_allowlist",
+            ),
             (FblValidationMethod::Unknown, "unknown"),
         ] {
             assert_eq!(method.as_str(), text);

@@ -57,6 +57,30 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
 }
 
+/// Posted debit/credit totals for one chart role in one fiscal period
+/// (`v_accounting_period_movement` groups by account_type only, so the
+/// per-role figures read the posted journal lines directly).
+async fn posted_role_movement(
+    pool: &PgPool,
+    entity: Uuid,
+    period_id: Uuid,
+    role: &str,
+) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT COALESCE(SUM(l.debit_cents),0)::bigint, COALESCE(SUM(l.credit_cents),0)::bigint \
+         FROM journal_lines l \
+         JOIN journal_entries e ON e.id = l.entry_id AND e.posted_at IS NOT NULL \
+         JOIN chart_of_accounts a ON a.id = l.account_id \
+         WHERE e.legal_entity_id = $1 AND e.fiscal_period_id = $2 AND a.account_role = $3",
+    )
+    .bind(entity)
+    .bind(period_id)
+    .bind(role)
+    .fetch_one(pool)
+    .await
+    .expect("role movement")
+}
+
 async fn seed_entity(pool: &PgPool, tag: &str) -> Uuid {
     let mut conn = pool.acquire().await.expect("pool acquire");
     let entity = chart::create_legal_entity(
@@ -542,27 +566,56 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
     .fetch_one(&pool)
     .await
     .expect("movement");
-    // receipts 125000 + 100000 Dr bank / Cr AR; payment 9950 Dr expense /
-    // Cr bank.
+    // receipts 125000 + 100000 Dr bank / Cr suspense (unclassified, audit
+    // SM7 F6); payment 9950 Dr suspense / Cr bank.
     assert_eq!(
         movement,
         (234_950, 234_950),
         "view must show the posted entries balanced"
     );
-    let bank_movement: (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(debit_cents),0)::bigint, COALESCE(SUM(credit_cents),0)::bigint \
-         FROM v_accounting_period_movement \
-         WHERE legal_entity_id = $1 AND fiscal_period_id = $2 AND account_type = 'asset'",
-    )
-    .bind(entity)
-    .bind(period_id)
-    .fetch_one(&pool)
-    .await
-    .expect("asset movement");
+
+    // Audit SM7 F6: an unmatched line lands in SUSPENSE for human review —
+    // never silently in Accounts Receivable (receipts) or operating expense
+    // (payments). The suspense account carries BOTH unclassified sides.
     assert_eq!(
-        bank_movement,
-        (225_000, 234_950),
-        "asset side: bank debited 225000; bank credited 9950 and AR credited 225000"
+        posted_role_movement(&pool, entity, period_id, "bank").await,
+        (225_000, 9_950),
+        "bank account: receipts debited 225000, the payment credited 9950"
+    );
+    assert_eq!(
+        posted_role_movement(&pool, entity, period_id, "suspense").await,
+        (9_950, 225_000),
+        "suspense: the unclassified payment debited 9950, the unclassified receipts credited 225000"
+    );
+    for (role, why) in [
+        (
+            "ar",
+            "a receipt with an unmatched counterparty must NOT be forced into AR (audit SM7 F6)",
+        ),
+        (
+            "expense_default",
+            "a payment with an unmatched counterparty must NOT be forced into operating \
+             expense (audit SM7 F6)",
+        ),
+    ] {
+        assert_eq!(
+            posted_role_movement(&pool, entity, period_id, role).await,
+            (0, 0),
+            "{role}: {why}"
+        );
+    }
+
+    // The sweep classified the fixture's reference/counterparty text: none of
+    // it names payroll or tax, so every line resolved to Suspense.
+    assert_eq!(
+        posted_role_movement(&pool, entity, period_id, "net_wages_payable").await,
+        (0, 0),
+        "no fixture line names payroll — none may route to the wages-payable account"
+    );
+    assert_eq!(
+        posted_role_movement(&pool, entity, period_id, "income_tax_payable").await,
+        (0, 0),
+        "no fixture line names tax — none may route to the tax-payable account"
     );
     assert_eq!(outcome.line_count, 4);
 }

@@ -345,6 +345,27 @@ manifest_finish() {
     printf '%s %s %s\n' "$CI_RUN_ID" "$_mf_status" "$RUN_DIR" >>"$RUNS_DIR/history.log"
 }
 
+# ci_pipeline_config_hash — sha256 over EVERYTHING that defines what a run
+# enforces: pipeline.conf, lib.sh, every stage script, the Woodpecker adapter
+# layer, the repo's .woodpecker.yml and every tools/*.py gate checker.
+# Audit SM14 F10: the blessing hash used to cover only pipeline.conf +
+# stages/*.sh, so a policy change in lib.sh, a Woodpecker-side wrapper or a
+# tools/*.py checker did not invalidate an existing .last-good-sha blessing
+# (fetch.sh skip-unchanged kept honouring it). ONE function, used by BOTH
+# call sites (ci/pipeline.sh writes the hash, ci/stages/fetch.sh compares it)
+# so the two can never drift again. Missing files are skipped (dev machines
+# without a full checkout still hash the core), but the glob order is
+# deterministic so the same tree always yields the same hash.
+ci_pipeline_config_hash() {
+    cat "$CI_ROOT/pipeline.conf" \
+        "$CI_ROOT/lib.sh" \
+        "$CI_ROOT"/stages/*.sh \
+        "$CI_ROOT"/woodpecker/*.sh \
+        "$REPO_ROOT"/tools/*.py \
+        "$REPO_ROOT/.woodpecker.yml" 2>/dev/null \
+        | sha256sum | cut -d' ' -f1
+}
+
 # --- docker / ephemeral services ------------------------------------------------------
 ci_docker_ok() {
     [ "${CI_DRY_RUN:-0}" = "1" ] && return "$CI_EXIT_OK"

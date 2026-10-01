@@ -113,8 +113,18 @@ async fn main() -> anyhow::Result<()> {
     // universal INTERNAL_SERVICE_TOKEN is then refused, loudly logged), the
     // universal token only as the non-production legacy fallback. Production
     // boots REFUSE without the dedicated token.
-    let service_auth = ai_embeddings::auth::ServiceAuth::from_env()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let service_auth =
+        ai_embeddings::auth::ServiceAuth::from_env().map_err(|e| anyhow::anyhow!("{e}"))?;
+    // SM9 #6: tenant identity on /vectors + /search is gateway-asserted
+    // (x-apexmail-tenant-id). The body-trust escape hatch is DEV-ONLY and
+    // loudly logged when enabled.
+    let trust_body_tenant = ai_embeddings::config::trust_body_tenant_from_env();
+    if trust_body_tenant {
+        tracing::warn!(
+            "AI_EMBEDDINGS_TRUST_BODY_TENANT=true — trusting the request-body tenant_id \
+             WITHOUT gateway assertion. DEV-ONLY: never enable in production."
+        );
+    }
     let state = Arc::new(AppState {
         embedding_service,
         vector_store: VectorStore::new(
@@ -125,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         config,
         service_auth,
+        trust_body_tenant,
     });
 
     let app = routes::router(state);

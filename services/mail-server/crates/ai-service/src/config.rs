@@ -38,7 +38,11 @@ pub struct AiConfig {
     /// hex-encoded 32-byte AES-256-GCM key for bandit state encryption (O-10.1).
     /// Leave empty to disable encryption (plaintext JSON).
     pub bandit_encryption_key: String,
-    /// Whether to sanitize AI-generated HTML output with ammonia (O-10.2).
+    /// Whether model output is sanitized with the ammonia allowlist before
+    /// it is returned or persisted (O-10.2). Default `true`. `false` is a
+    /// FAIL-CLOSED refusal: generative answers are refused with an honest
+    /// error (chat returns 503) — disabling sanitization never creates an
+    /// unsanitized output path.
     pub sanitize_ai_output: bool,
     /// Interval in seconds between periodic training checkpoint writes (O-10.3).
     pub checkpoint_interval_secs: u64,
@@ -180,6 +184,22 @@ impl AiConfig {
         {
             return Err("AI_MODEL_ENDPOINT must be http/https".into());
         }
+        // SM9 #10: a bearer API key must never transit plaintext HTTP to a
+        // non-loopback host. `http://` stays legitimate for the default
+        // local sidecar (127.0.0.1), but anywhere else on the wire the
+        // credential is network-observable — refuse the boot rather than
+        // leak the key (fail closed).
+        if self.model_enabled
+            && !self.model_api_key.trim().is_empty()
+            && is_non_loopback_http_endpoint(&self.model_endpoint)
+        {
+            return Err(
+                "AI_MODEL_ENDPOINT uses plaintext http:// with a non-empty AI_MODEL_API_KEY: \
+                 the bearer credential would transit the network unencrypted — use https:// \
+                 or a loopback endpoint"
+                    .into(),
+            );
+        }
         if self.model_enabled && self.model_name.trim().is_empty() {
             return Err("AI_MODEL_NAME must not be empty when AI_MODEL_ENABLED=true".into());
         }
@@ -247,6 +267,40 @@ pub fn is_production_mode() -> bool {
     std::env::var("APP_ENV")
         .map(|v| v.eq_ignore_ascii_case("production"))
         .unwrap_or(true)
+}
+
+/// SM9 #10: true when `endpoint` is an `http://` URL whose host is NOT a
+/// proven loopback address (`localhost`, `127.0.0.0/8`, `::1`). Loopback
+/// plaintext is the supported local-sidecar configuration; a hostname that
+/// cannot be proven loopback is treated as remote (fail closed).
+fn is_non_loopback_http_endpoint(endpoint: &str) -> bool {
+    let Some(rest) = endpoint.trim().strip_prefix("http://") else {
+        // https:// is always fine; schemeless values are rejected elsewhere.
+        return false;
+    };
+    // Cut path/query/fragment, then drop userinfo if present.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    // Bracketed IPv6 literal first (a port follows the closing bracket).
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped)
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if host.is_empty() {
+        return true; // malformed authority: assume remote
+    }
+    if host == "localhost" {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
+        return !ip.is_loopback();
+    }
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return !ip.is_loopback();
+    }
+    true
 }
 
 fn env_bool(name: &str, default: bool) -> Result<bool, String> {
@@ -326,6 +380,58 @@ mod tests {
         assert!(env_bool_value("maybe").is_err());
     }
 
+    /// SM9 #10: the gate recognizes exactly the loopback shapes (the
+    /// supported local-sidecar configuration) and treats everything else —
+    /// remote hostnames, remote IPs, malformed authorities — as remote.
+    #[test]
+    fn plaintext_http_gate_flags_only_non_loopback_hosts() {
+        // Loopback plaintext stays allowed.
+        assert!(!is_non_loopback_http_endpoint("http://127.0.0.1:8081/v1"));
+        assert!(!is_non_loopback_http_endpoint("http://localhost/v1"));
+        assert!(!is_non_loopback_http_endpoint("http://LOCALHOST:9000"));
+        assert!(!is_non_loopback_http_endpoint("http://[::1]:9000/v1"));
+        assert!(!is_non_loopback_http_endpoint("http://127.9.8.7/v1"));
+        // https is never flagged.
+        assert!(!is_non_loopback_http_endpoint("https://model.internal/v1"));
+        // Everything else is remote.
+        assert!(is_non_loopback_http_endpoint(
+            "http://model.internal:8080/v1"
+        ));
+        assert!(is_non_loopback_http_endpoint("http://10.0.0.7:8080/v1"));
+        assert!(is_non_loopback_http_endpoint("http://213.239.200.1/v1"));
+        assert!(is_non_loopback_http_endpoint(
+            "http://[2620:0:2d0:200::7]/v1"
+        ));
+        assert!(is_non_loopback_http_endpoint("http:///v1"), "empty host");
+    }
+
+    /// SM9 #10: a non-loopback http:// endpoint configured with an API key
+    /// refuses to boot (the credential would transit plaintext); the same
+    /// endpoint on loopback, or without a key, still loads.
+    #[test]
+    fn validate_refuses_api_key_over_plaintext_non_loopback_http() {
+        let _serial = ENV_SERIAL.blocking_lock();
+        let _guard = EnvGuard::with(&[("APP_ENV", Some("development"))]);
+        let mut cfg = AiConfig {
+            model_enabled: true,
+            model_api_key: "sk-secret".into(),
+            ..AiConfig::default()
+        };
+        cfg.model_endpoint = "http://model.internal:8080/v1".into();
+        let err = cfg
+            .validate()
+            .expect_err("remote plaintext + key must refuse to boot");
+        assert!(err.contains("http"), "the error names the problem: {err}");
+
+        cfg.model_endpoint = "http://127.0.0.1:8081/v1".into();
+        cfg.validate().expect("loopback plaintext stays allowed");
+
+        cfg.model_endpoint = "http://model.internal:8080/v1".into();
+        cfg.model_api_key = String::new();
+        cfg.validate()
+            .expect("no credential, no plaintext-key exposure");
+    }
+
     /// P1-SECURITY: production boot refuses without the dedicated AI-admin
     /// credential — an unset APP_ENV counts as production (fail closed), and
     /// a loaded production config carries the credential.
@@ -339,10 +445,7 @@ mod tests {
             "production without AI_ADMIN_TOKEN must refuse to boot"
         );
         // Explicit production likewise.
-        let _guard = EnvGuard::with(&[
-            ("APP_ENV", Some("production")),
-            ("AI_ADMIN_TOKEN", None),
-        ]);
+        let _guard = EnvGuard::with(&[("APP_ENV", Some("production")), ("AI_ADMIN_TOKEN", None)]);
         assert!(AiConfig::from_env().is_err());
         // With the credential set, production config loads and carries it.
         let _guard = EnvGuard::with(&[
@@ -352,10 +455,7 @@ mod tests {
         let cfg = AiConfig::from_env().expect("production config with AI_ADMIN_TOKEN");
         assert_eq!(cfg.ai_admin_token, "admin-secret");
         // A non-production deployment still loads without the credential.
-        let _guard = EnvGuard::with(&[
-            ("APP_ENV", Some("development")),
-            ("AI_ADMIN_TOKEN", None),
-        ]);
+        let _guard = EnvGuard::with(&[("APP_ENV", Some("development")), ("AI_ADMIN_TOKEN", None)]);
         assert!(AiConfig::from_env().is_ok());
         // And the credential is never serialized into status/config output.
         let json = serde_json::to_string(&cfg).unwrap();

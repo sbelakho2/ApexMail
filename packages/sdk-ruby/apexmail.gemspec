@@ -1,6 +1,6 @@
 Gem::Specification.new do |spec|
   spec.name          = "apexmail"
-  spec.version       = "1.0.0"
+  spec.version       = "1.0.1"
   spec.summary       = "Official Ruby SDK for the ApexMail transactional email API"
   spec.description   = "Send transactional email, manage domains, webhooks and templates via the ApexMail API."
   spec.authors       = ["ApexMail"]

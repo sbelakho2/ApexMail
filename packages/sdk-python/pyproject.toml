@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "apexmail"
-version = "1.0.0"
+version = "1.0.1"
 description = "Official Python SDK for ApexMail - Transactional Email API"
 readme = "README.md"
 license = "MIT"

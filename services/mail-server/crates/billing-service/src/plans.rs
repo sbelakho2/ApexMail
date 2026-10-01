@@ -511,7 +511,10 @@ pub async fn get_active_plans(pool: &PgPool) -> Result<Vec<Plan>, sqlx::Error> {
     for row in rows {
         // Fix #10: one corrupt row fails the whole listing rather than
         // silently rendering that plan with repaired/default features.
-        plans.push(row.try_into_plan().map_err(BillingError::into_sqlx_decode)?);
+        plans.push(
+            row.try_into_plan()
+                .map_err(BillingError::into_sqlx_decode)?,
+        );
     }
     Ok(plans)
 }
@@ -1264,7 +1267,10 @@ mod tests {
         }
         impl std::io::Write for CaptureWriter {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.inner.lock().expect("log buffer lock").extend_from_slice(buf);
+                self.inner
+                    .lock()
+                    .expect("log buffer lock")
+                    .extend_from_slice(buf);
                 Ok(buf.len())
             }
             fn flush(&mut self) -> std::io::Result<()> {
@@ -1307,7 +1313,10 @@ mod tests {
 
     #[test]
     fn try_into_plan_rejects_corrupt_features_with_typed_error_and_alert_log() {
-        let row = plan_row("growth", Some(serde_json::json!({"webhooks_enabled": true})));
+        let row = plan_row(
+            "growth",
+            Some(serde_json::json!({"webhooks_enabled": true})),
+        );
         let (dispatch, buffer) = error_capture();
         let result = tracing::subscriber::with_default(dispatch, || row.try_into_plan());
 
@@ -1343,7 +1352,9 @@ mod tests {
     #[test]
     fn try_into_plan_null_features_is_documented_legacy_default() {
         let row = plan_row("legacy-null", None);
-        let plan = row.try_into_plan().expect("NULL features is not corruption");
+        let plan = row
+            .try_into_plan()
+            .expect("NULL features is not corruption");
         // PlanFeatures has no PartialEq — compare canonical serializations.
         assert_eq!(
             serde_json::to_value(&plan.features).expect("serializes"),
@@ -1793,8 +1804,12 @@ mod coverage_adversarial {
             .expect("seed plan");
         // A partial object fails `PlanFeatures` deserialization (no
         // #[serde(default)] on the struct).
-        corrupt_plan_features(&env.pool, "plcov_corrupt", serde_json::json!({"webhooks_enabled": true}))
-            .await;
+        corrupt_plan_features(
+            &env.pool,
+            "plcov_corrupt",
+            serde_json::json!({"webhooks_enabled": true}),
+        )
+        .await;
 
         let by_name = get_plan_by_name(&env.pool, "plcov_corrupt")
             .await

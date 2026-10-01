@@ -381,6 +381,7 @@ dependencies = [
  "email-grader",
  "form_urlencoded",
  "futures",
+ "ha",
  "hex",
  "hmac 0.12.1",
  "http 1.4.0",
@@ -624,7 +625,9 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "auth-server"
 version = "0.1.0"
 dependencies = [
+ "apexmail-db",
  "apexmail-lib",
+ "apexmail-rate-limiter",
  "argon2",
  "axum 0.8.9",
  "chrono",
@@ -3009,7 +3012,9 @@ version = "0.1.0"
 dependencies = [
  "ai-service",
  "apexmail-lib",
+ "apexmail-rate-limiter",
  "ato-protection",
+ "base64 0.22.1",
  "billing-service",
  "chrono",
  "dlp-engine",
@@ -3023,6 +3028,7 @@ dependencies = [
  "spam-filter",
  "threat-intel",
  "waf-engine",
+ "worker-processors",
 ]
 
 [[package]]
@@ -4339,15 +4345,19 @@ version = "0.1.0"
 dependencies = [
  "ai-service",
  "apexmail-lib",
+ "apexmail-rate-limiter",
  "billing-service",
  "chrono",
  "observability-service",
  "pattern-matcher",
+ "queue-provider",
  "rand 0.9.4",
  "sales-autopilot",
+ "serde_json",
  "tokio",
  "tracing",
  "uuid",
+ "worker-processors",
 ]
 
 [[package]]
@@ -4549,6 +4559,7 @@ dependencies = [
  "clap",
  "futures",
  "governor",
+ "hkdf",
  "mail-common",
  "mail-parser 0.10.2",
  "mail-proto",
@@ -4782,6 +4793,7 @@ dependencies = [
  "deadpool-redis",
  "dotenvy",
  "futures",
+ "ha",
  "hex",
  "hickory-resolver 0.26.1",
  "hmac 0.12.1",
@@ -5420,10 +5432,12 @@ version = "0.1.0"
 dependencies = [
  "ai-service",
  "apexmail-lib",
+ "billing-entitlements",
  "billing-service",
  "devex-service",
  "observability-service",
  "pattern-matcher",
+ "serde_json",
 ]
 
 [[package]]
@@ -6746,6 +6760,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -9182,6 +9197,7 @@ dependencies = [
  "deadpool-redis",
  "dlp-engine",
  "futures",
+ "ha",
  "hex",
  "hickory-resolver 0.26.1",
  "hmac 0.12.1",

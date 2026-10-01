@@ -105,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
     // REFUSE (the per-workload pattern is complete for this service) and
     // non-production boots fall back to the universal token with a
     // required-soon warning.
-    let service_auth = ServiceAuth::from_env()
-        .map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
+    let service_auth =
+        ServiceAuth::from_env().map_err(|reason| anyhow::anyhow!("refusing to start: {reason}"))?;
     if service_auth.dedicated_configured() {
         tracing::info!(
             "per-workload auth active: {} is the only accepted credential",

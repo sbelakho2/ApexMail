@@ -2097,7 +2097,10 @@ mod dane_wire_tests {
             "the re-fetch must decide: {:?}",
             result.errors
         );
-        assert_eq!(result.tlsa_records[0].certificate_association_data.len(), 64);
+        assert_eq!(
+            result.tlsa_records[0].certificate_association_data.len(),
+            64
+        );
         assert_ne!(
             result.tlsa_records[0].certificate_association_data,
             "e".repeat(64),

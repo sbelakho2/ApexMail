@@ -114,8 +114,10 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
     let data = match state.codec.decode(&tracking_id) {
         Some(d) => d,
         None => {
+            // SM2-F4: the id is percent-decoded UTF-8; a fixed-offset slice
+            // used to panic when byte 20 split a multi-byte character.
             warn!(
-                id_prefix = &tracking_id[..tracking_id.len().min(20)],
+                id_prefix = crate::token_shape::token_log_prefix(&tracking_id, 20),
                 "Pixel: invalid tracking token"
             );
             return;

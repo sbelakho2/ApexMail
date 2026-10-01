@@ -295,8 +295,7 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
 
     // Under-length id → refused before any decode.
@@ -334,14 +333,58 @@ async fn hostile_click_tokens_redirect_to_fallback_and_record_nothing() {
     assert_eq!(location_of(resp).await, "https://fallback.test.example/");
 }
 
+/// SM2-F4: 19 ASCII bytes + a two-byte `é` places byte 20 INSIDE the
+/// character — the exact shape that panicked the `debug!`/`warn!`
+/// `id_prefix = &id[..id.len().min(20)]` slices ("byte index 20 is not a
+/// char boundary") and killed the connection task per request. With a
+/// subscriber installed the log FIELD expressions actually evaluate; the
+/// handler must survive them and still answer the fallback redirect.
+/// Hermetic: the invalid-shape id fails `decode` before any Redis/DB call,
+/// so the dead pools are never contacted.
+#[tokio::test]
+async fn multibyte_click_id_at_slice_boundary_never_panics() {
+    use tracing_subscriber::EnvFilter;
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new("tracking_service=debug"))
+        .with_test_writer()
+        .try_init();
+
+    let state = state(lazy_dead_db(), dead_redis(), "redis://127.0.0.1:1");
+
+    // 51 bytes: passes the 10..=4096 length gate, splits `é` at byte 20.
+    let hostile = format!("{}é{}", "a".repeat(19), "x".repeat(30));
+    assert_eq!(hostile.len(), 51);
+
+    // The debug! field evaluates on EVERY in-bounds request…
+    let resp = handle_click(
+        State(state.clone()),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(hostile.clone()),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+
+    // …and the invalid-token warn! field on the decode-failure arm.
+    let resp = handle_click(
+        State(state),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(hostile),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+}
+
 #[tokio::test]
 async fn oversized_and_non_http_targets_are_refused() {
     let Some(redis) = live_redis() else {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_len");
 
@@ -411,8 +454,7 @@ async fn bot_click_still_redirects_but_records_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_bot");
     let message = unique("msg");
@@ -473,8 +515,7 @@ async fn per_link_url_cache_failure_does_not_break_the_redirect() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_lnk");
     let message = unique("msg");
@@ -531,8 +572,7 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
 
     // Cached "0" → deny, with a DEAD database proving the DB is not consulted.
     let tenant = unique("tn_c0");
@@ -580,8 +620,7 @@ async fn database_error_denies_for_one_request_and_caches_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let tenant = unique("tn_dberr");
     let message = unique("msg");
     let domain = "never-seen-before.example";
@@ -624,8 +663,7 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let Some(db) = live_pg("click_domain_auth").await else {
         eprintln!("skipping: set TEST_DATABASE_URL");
         return;
@@ -758,8 +796,7 @@ async fn fallback_host_is_authorized_without_any_database() {
         eprintln!("skipping: set TEST_REDIS_URL");
         return;
     };
-    let redis_url =
-        crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_fb");
     let message = unique("msg");

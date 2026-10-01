@@ -10,7 +10,7 @@ fn fuzz_metrics_record_no_panic() {
     let collector = MetricsCollector::new(vec![
         0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
     ]);
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
         let name = random_string(rng.random_range(1..50));
         let value: f64 = rng.random_range(-1e12..1e12);

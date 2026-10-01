@@ -99,16 +99,18 @@ mod apexmail_db_tests {
 
     #[test]
     fn test_db_migrations_schema() {
-        let schema = apexmail_db::migrations::SCHEMA;
-        assert!(!schema.is_empty(), "SCHEMA should be non-empty");
-        assert!(
-            schema.contains("CREATE TABLE"),
-            "SCHEMA should contain CREATE TABLE statements"
-        );
-        assert!(
-            schema.contains("tenants"),
-            "SCHEMA should define the tenants table"
-        );
+        // Audit F6: the monolithic `apexmail_db::migrations::SCHEMA` constant
+        // was deleted (it drifted from the canonical migration chain and
+        // could never execute against a fresh database). The canonical
+        // schema lives in `services/mail-server/migrations/` applied via the
+        // `migrator` crate; the per-table DDL constants remain for isolated
+        // test setup. Pin the smoke-test surface on those constants.
+        let tenants = apexmail_db::migrations::CREATE_TENANTS;
+        let users = apexmail_db::migrations::CREATE_USERS;
+        assert!(tenants.contains("CREATE TABLE"), "tenants DDL must exist");
+        assert!(tenants.contains("tenants"), "tenants DDL names its table");
+        assert!(users.contains("CREATE TABLE"), "users DDL must exist");
+        assert!(users.contains("users"), "users DDL names its table");
     }
 
     #[tokio::test]
@@ -228,26 +230,11 @@ mod billing_tests {
         assert_eq!(total, email_cost);
     }
 
-    #[test]
-    fn test_billing_vat_calculation() {
-        // Estonian customer:full 24% VAT
-        let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "EE", None);
-        assert_eq!(rate, 24.0);
-        assert_eq!(amount, 2_400);
-
-        // EU B2B with a structurally valid VAT number but NO VIES evidence:
-        // the destination rate applies. A well-formed number alone must never
-        // zero-rate a supply.
-        let (rate, amount) =
-            billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
-        assert_eq!(rate, 19.0);
-        assert_eq!(amount, 1_900);
-
-        // Non-EU:0%
-        let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "US", None);
-        assert_eq!(rate, 0.0);
-        assert_eq!(amount, 0);
-    }
+    // Audit F13: the smoke `test_billing_vat_calculation` was deleted — it
+    // re-ran a subset of the VAT cases that `functional-tests`'s
+    // `functional_billing.rs` owns (EE 24%, EU-B2B-without-evidence 19%,
+    // non-EU 0%, plus FR B2C, negative/zero/overflow guards). One suite must
+    // own the VAT behavior; look there.
 }
 
 // ============================================================================
@@ -522,10 +509,11 @@ mod compliance_tests {
     }
 
     #[test]
-    fn test_compliance_modules_compile() {
-        // Verify we can reference modules from the compliance crate
+    fn test_compliance_risk_level_type_exists() {
+        // Compile-only existence check — the name now says exactly that
+        // (audit F13). Behavior lives in the compliance crate's own tests
+        // and `test_compliance_risk_level` above.
         let _ = std::any::type_name::<compliance::types::RiskLevel>();
-        // The crate compiles and exports these modules
     }
 }
 
@@ -536,28 +524,25 @@ mod compliance_tests {
 #[cfg(test)]
 mod enterprise_tests {
     #[test]
-    fn test_enterprise_types() {
-        // Verify SSO types exist and can be referenced
+    fn test_enterprise_sso_type_exists() {
+        // Compile-only existence check — the name now says exactly that
+        // (audit F13).
         let _ = std::any::type_name::<enterprise::types::SSOConfiguration>();
         let _ = std::any::type_name::<enterprise::types::SSOSession>();
     }
 
     #[test]
-    fn test_enterprise_modules_compile() {
-        // Verify all enterprise modules compile
-        let _ = std::any::type_name::<fn()>();
-        // We can access the modules
-        let modules = [
-            "enterprise::sso",
-            "enterprise::compliance",
-            "enterprise::log_streaming",
-            "enterprise::sub_accounts",
-            "enterprise::whitelabel",
-        ];
-        assert!(
-            modules.len() >= 5,
-            "enterprise should have at least 5 modules"
-        );
+    fn test_enterprise_module_type_exists() {
+        // Compile-only existence check (audit F13): each enterprise module's
+        // service type must RESOLVE as a path. The previous body asserted
+        // `modules.len() >= 5` on a hardcoded 5-element string array — an
+        // assertion that could never fail and proved nothing about the
+        // crate.
+        let _ = std::any::type_name::<enterprise::sso::SSOService>();
+        let _ = std::any::type_name::<enterprise::compliance::ComplianceService>();
+        let _ = std::any::type_name::<enterprise::log_streaming::LogStreamingService>();
+        let _ = std::any::type_name::<enterprise::sub_accounts::SubAccountService>();
+        let _ = std::any::type_name::<enterprise::whitelabel::WhiteLabelService>();
     }
 }
 
@@ -606,10 +591,20 @@ mod isolation_tests {
 #[cfg(test)]
 mod mta_tests {
     #[test]
-    fn test_mta_config_type() {
-        // Verify MtaConfig exists and can be referenced
-        let _ = std::any::type_name::<mta::MtaConfig>();
-        // The crate compiles with all auth modules
+    fn test_mta_config_type_exists_and_validates() {
+        // Existence (audit F13) plus one REAL behavior assertion: the
+        // default configuration must pass its own validator, and the
+        // production decision must follow the NODE_ENV aliases.
+        let mut cfg = mta::MtaConfig::default();
+        cfg.node_env = "development".into();
+        assert!(
+            cfg.validate().is_ok(),
+            "the default MTA configuration must validate: {:?}",
+            cfg.validate()
+        );
+        assert!(!cfg.is_production(), "development must not be production");
+        cfg.node_env = "prod".into();
+        assert!(cfg.is_production(), "'prod' is a production alias");
     }
 }
 
@@ -620,9 +615,10 @@ mod mta_tests {
 #[cfg(test)]
 mod edge_cases_tests {
     #[test]
-    fn test_edge_cases_config_type() {
+    fn test_edge_cases_config_type_exists() {
+        // Compile-only existence check — the name now says exactly that
+        // (audit F13).
         let _ = std::any::type_name::<edge_cases::config::EdgeCasesConfig>();
-        // Verify the services module is accessible
     }
 }
 
@@ -633,8 +629,9 @@ mod edge_cases_tests {
 #[cfg(test)]
 mod worker_processors_tests {
     #[test]
-    fn test_worker_processors_types() {
-        // Verify key re-exported types exist
+    fn test_worker_processors_type_exists() {
+        // Compile-only existence check — the name now says exactly that
+        // (audit F13).
         let _ = std::any::type_name::<worker_processors::ProcessorConfig>();
         let _ = std::any::type_name::<worker_processors::ProcessorError>();
         let _ = std::any::type_name::<worker_processors::ReplyClassification>();
@@ -663,12 +660,14 @@ mod template_renderer_tests {
 #[cfg(test)]
 mod ai_embeddings_tests {
     #[test]
-    fn test_ai_embeddings_types() {
+    fn test_ai_embeddings_type_exists() {
+        // Compile-only existence check (audit F13) — plus one REAL
+        // behavior assertion kept from the previous body: the error
+        // variant's user-facing message.
         let _ = std::any::type_name::<ai_embeddings::types::EmbeddingVector>();
         let _ = std::any::type_name::<ai_embeddings::types::SearchResult>();
         let _ = std::any::type_name::<ai_embeddings::types::EmbeddingError>();
 
-        // Verify error variants
         let err = ai_embeddings::types::EmbeddingError::EmptyText;
         assert_eq!(format!("{}", err), "Empty text input");
     }
@@ -681,14 +680,14 @@ mod ai_embeddings_tests {
 #[cfg(test)]
 mod pattern_matcher_tests {
     #[test]
-    fn test_pattern_matcher_compile_and_match() {
-        // Verify the PatternMatcher and Rule types exist
+    fn test_pattern_matcher_type_exists() {
+        // Compile-only existence check (audit F13 — the previous name
+        // claimed a `match` that never ran; real matching behavior is
+        // covered by `functional-tests`' `functional_pattern.rs`).
         let _ = std::any::type_name::<pattern_matcher::PatternMatcher>();
         let _ = std::any::type_name::<pattern_matcher::Rule>();
         let _ = std::any::type_name::<pattern_matcher::RuleCategory>();
-
-        let severity = pattern_matcher::Severity::High;
-        assert!(matches!(severity, pattern_matcher::Severity::High));
+        let _ = std::any::type_name::<pattern_matcher::Severity>();
     }
 }
 
@@ -719,7 +718,10 @@ mod rate_limiter_tests {
 #[cfg(test)]
 mod dns_resolver_tests {
     #[test]
-    fn test_dns_resolver_types() {
+    fn test_dns_resolver_type_exists() {
+        // Compile-only existence check (audit F13). The parsing/cache
+        // behavior lives in `test_dns_resolver_parses_records_and_caches`
+        // below.
         let _ = std::any::type_name::<apexmail_dns_resolver::DnsCache>();
         let _ = std::any::type_name::<apexmail_dns_resolver::DnsConfig>();
         let _ = std::any::type_name::<apexmail_dns_resolver::MxRecord>();
@@ -727,6 +729,56 @@ mod dns_resolver_tests {
         let _ = std::any::type_name::<apexmail_dns_resolver::DkimRecord>();
         let _ = std::any::type_name::<apexmail_dns_resolver::DmarcPolicy>();
         let _ = std::any::type_name::<apexmail_dns_resolver::TlsaRecord>();
+    }
+
+    /// REAL behavior (audit F13): record parsing and the cache round-trip
+    /// the resolver's lookup path depends on — no network, no services.
+    #[test]
+    fn test_dns_resolver_parses_records_and_caches() {
+        use apexmail_dns_resolver::cache::CachedResult;
+        use apexmail_dns_resolver::{DnsCache, DnsConfig, DmarcPolicy, SpfRecord};
+
+        // SPF: a well-formed record parses with its `all` qualifier; a
+        // look-alike version prefix ("v=spf1evil") is NOT an SPF record
+        // (RFC 7208 §12) and must not shadow a real one.
+        let spf = SpfRecord::parse("v=spf1 mx include:_spf.example.com -all")
+            .expect("a well-formed SPF record must parse");
+        assert!(spf.is_hard_fail(), "-all must parse as a hard fail");
+        assert!(!spf.is_soft_fail());
+        assert!(
+            SpfRecord::parse("v=spf1evil mx -all").is_none(),
+            "a version-prefix look-alike must not parse as SPF"
+        );
+
+        // DMARC: p=reject parses as a reject policy that subdomains inherit
+        // when no explicit sp= is published.
+        let dmarc = DmarcPolicy::parse("v=DMARC1; p=reject; pct=100")
+            .expect("a well-formed DMARC record must parse");
+        assert!(dmarc.is_reject());
+        assert_eq!(dmarc.effective_subdomain_policy(), "reject");
+
+        // Cache round-trip: positive records, negative (NXDOMAIN) results
+        // and invalidation.
+        let cache = DnsCache::new(&DnsConfig::default());
+        let key = "mx:cache-roundtrip.example.com";
+        cache.insert(key, vec!["10 mail.example.com".to_string()]);
+        match cache.get(key) {
+            Some(CachedResult::Records(records)) => {
+                assert_eq!(records, vec!["10 mail.example.com".to_string()]);
+            }
+            other => panic!("expected the cached MX records, got {other:?}"),
+        }
+        let missing = "a:missing.cache-roundtrip.example.com";
+        cache.insert_negative(missing);
+        assert!(
+            matches!(cache.get(missing), Some(CachedResult::NxDomain)),
+            "a negative entry must read back as NXDOMAIN"
+        );
+        cache.invalidate(key);
+        assert!(
+            cache.get(key).is_none(),
+            "invalidation must drop the cached entry"
+        );
     }
 }
 

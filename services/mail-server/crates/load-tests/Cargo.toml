@@ -11,9 +11,16 @@ ai-service = { path = "../ai-service" }
 sales-autopilot = { path = "../sales-autopilot" }
 pattern-matcher = { path = "../pattern-matcher" }
 observability-service = { path = "../observability-service" }
+# SM12 F4/F10: the isolation test drives the REAL production multi-tenant
+# rate limiter; the stress tests drive the real queue fair-scheduler, the
+# worker backpressure controller, and the webhook retry types.
+apexmail-rate-limiter = { path = "../rate-limiter" }
+queue-provider = { path = "../queue-provider" }
+worker-processors = { path = "../worker-processors" }
 
 tokio = { workspace = true, features = ["full", "test-util"] }
 rand = { workspace = true }
 chrono.workspace = true
 uuid.workspace = true
+serde_json.workspace = true
 tracing = { workspace = true }

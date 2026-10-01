@@ -381,11 +381,10 @@ async fn sweep_subscription_periods(
             // one, so the aging metric under-reported the real backlog.
             // "Oldest unresolved" is the MAXIMUM age across both states.
             let age_secs = (Utc::now() - oldest_end).num_seconds().max(0);
-            result.oldest_unresolved_age_secs =
-                Some(match result.oldest_unresolved_age_secs {
-                    Some(existing) => existing.max(age_secs),
-                    None => age_secs,
-                });
+            result.oldest_unresolved_age_secs = Some(match result.oldest_unresolved_age_secs {
+                Some(existing) => existing.max(age_secs),
+                None => age_secs,
+            });
         }
     }
 
@@ -1128,12 +1127,29 @@ async fn process_payg_month(
     }
 
     if !tenant_has_billing_address(tenant_id, &mut *tx).await? {
+        // Audit SM7 F5: the claim is COMMITTED as `needs_review`, not rolled
+        // back. The PAYG sweep only ever considers the last two completed
+        // months (the metering TTL), so a rolled-back claim made an
+        // address-less month CEASE TO EXIST once it left that window: the
+        // usage aged out and the revenue was silently forgone with no
+        // `needs_review` state and no counter. Committed, the month stays
+        // visible for reconciliation — the parity the subscription half
+        // already has.
         result.skipped_no_address += 1;
         warn!(
             tenant_id = tenant_id,
-            "PAYG usage accrued but no billing address on file — invoice deferred"
+            "PAYG usage accrued but no billing address on file — month committed as \
+             needs_review for reconciliation, never silently dropped"
         );
-        let _ = tx.rollback().await;
+        mark_period_needs_review(
+            &mut tx,
+            period_id,
+            "no billing address on file — PAYG month retained for reconciliation",
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("payg sweep: claim commit failed: {e}"))?;
         return Ok(());
     }
 
@@ -1573,14 +1589,18 @@ fn first_of_month(at: DateTime<Utc>) -> DateTime<Utc> {
 /// The snapshotted overage rate rendered as "X.YZ CUR per 1,000 emails"
 /// (integer math — 40 millicents/email is 40 cents per 1 000 emails,
 /// i.e. "0.40"). The invoice text must quote the rate actually charged in
-/// the period's SNAPSHOT currency, never a hardcoded "€0.40" (audit F32).
+/// the period's SNAPSHOT currency, never a hardcoded "€0.40" (audit F32),
+/// and the symbol must follow the currency: a legal document quoting
+/// "€0.40 USD" misquotes the money (audit SM7 F9), so the amount carries NO
+/// symbol — the ISO code next to it is the currency statement.
 fn format_rate_per_thousand_emails(rate_millicents: i64, currency: &str) -> String {
     // 1 000 emails × rate millicents = rate cents = rate/100 major units.
-    let cents_per_thousand = rate_millicents.max(0);
+    let cents_per_thousand = rate_millicents.max(0) as u64;
     format!(
-        "{} {}",
-        billing_common::proration::cents_to_eur_string(cents_per_thousand),
-        currency.to_uppercase()
+        "{}.{:02} {}",
+        cents_per_thousand / 100,
+        cents_per_thousand % 100,
+        currency.trim().to_uppercase()
     )
 }
 
@@ -1663,10 +1683,32 @@ async fn collect_usage_invoice(
     // wallet-lock transaction (audit F33). A Stripe failure is a
     // retryable error: the outbox keeps the work and backs off — the
     // invoice is NOT pushed to done on the back of a failure.
+    //
+    // Audit SM7 F3: the collection amount is FROZEN on the outbox payload at
+    // the first Stripe attempt and every retry reuses the frozen figure —
+    // hence the EXACT same idempotency keys. Recomputing the live remainder
+    // per attempt used to mint a NEW key (and a SECOND Stripe invoice for
+    // the delta) whenever an allocation landed between attempts.
+    let outbox_payload = collection_outbox_payload(&state.db, invoice.id).await?;
+    let collection_cents = match frozen_collection_amount(outbox_payload.as_ref()) {
+        Some(frozen) => {
+            if frozen != remaining_cents {
+                warn!(
+                    invoice_id = %invoice.id,
+                    frozen,
+                    live_outstanding = remaining_cents,
+                    "usage invoice collection: reusing the frozen Stripe collection amount — \
+                     the live outstanding moved after the first attempt"
+                );
+            }
+            frozen
+        }
+        None => freeze_collection_amount(&state.db, invoice.id, remaining_cents).await?,
+    };
     let stripe = match create_and_finalize_stripe_usage_invoice(
         state,
         invoice,
-        remaining_cents,
+        collection_cents,
         &invoice.currency,
         description,
         period_start,
@@ -1741,6 +1783,77 @@ async fn collect_usage_invoice(
 /// How long a collection lease is held before a crashed collector's work
 /// becomes reclaimable (audit F33).
 const COLLECTION_LEASE_SECS: i64 = 600;
+
+/// The outbox-payload key that freezes the external collection amount at the
+/// first Stripe attempt (audit SM7 F3).
+const FROZEN_COLLECTION_AMOUNT_KEY: &str = "stripeCollectionCents";
+
+/// The frozen collection amount carried by an outbox payload (pure — audit
+/// SM7 F3, pinned by unit tests). `Some(cents)` ONLY for a positive integer
+/// figure; anything else (absent, non-integer, non-positive) reads as "not
+/// frozen yet" and the caller freezes the live remainder instead.
+fn frozen_collection_amount(payload: Option<&serde_json::Value>) -> Option<i64> {
+    payload
+        .and_then(|payload| payload.get(FROZEN_COLLECTION_AMOUNT_KEY))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|cents| *cents > 0)
+}
+
+/// The outbox payload for an invoice's collection operation (`None` when the
+/// operation row is missing — the freeze then also writes nothing).
+async fn collection_outbox_payload(
+    db: &sqlx::PgPool,
+    invoice_id: Uuid,
+) -> Result<Option<serde_json::Value>, String> {
+    sqlx::query_scalar(
+        "SELECT payload FROM invoice_collection_outbox \
+         WHERE invoice_id = $1 AND operation = 'collect_usage_invoice'",
+    )
+    .bind(invoice_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("collection payload read failed: {error}"))
+}
+
+/// Freeze the external collection amount on the outbox payload (audit
+/// SM7 F3). The FIRST freeze wins: a concurrent collector that took over an
+/// expired lease mid-attempt cannot move the figure — and with it the Stripe
+/// idempotency keys — once another attempt has frozen it. Returns the
+/// EFFECTIVE frozen amount: the caller's proposal only when this call
+/// performed the freeze, the pre-existing frozen figure otherwise (the
+/// caller must collect under THAT amount so every attempt shares one key).
+async fn freeze_collection_amount(
+    db: &sqlx::PgPool,
+    invoice_id: Uuid,
+    amount_cents: i64,
+) -> Result<i64, String> {
+    let frozen = sqlx::query(
+        r#"
+        UPDATE invoice_collection_outbox
+        SET payload = COALESCE(payload, '{}'::jsonb) || jsonb_build_object($2::text, to_jsonb($3::bigint)),
+            updated_at = NOW()
+        WHERE invoice_id = $1 AND operation = 'collect_usage_invoice'
+          AND NOT COALESCE(payload, '{}'::jsonb) ? $2
+        "#,
+    )
+    .bind(invoice_id)
+    .bind(FROZEN_COLLECTION_AMOUNT_KEY)
+    .bind(amount_cents)
+    .execute(db)
+    .await
+    .map_err(|error| format!("freezing the collection amount failed: {error}"))?;
+    if frozen.rows_affected() > 0 {
+        return Ok(amount_cents);
+    }
+    // Another attempt froze first — its figure owns the idempotency keys.
+    let payload = collection_outbox_payload(db, invoice_id).await?;
+    frozen_collection_amount(payload.as_ref()).ok_or_else(|| {
+        "the frozen collection amount vanished between the conditional freeze and \
+         the read — the outbox row cannot be lost while this collector owns the \
+         operation"
+            .to_string()
+    })
+}
 
 /// Outbox claim: pending/in_progress -> in_progress with a bumped attempt
 /// counter AND an exclusive owner/lease (audit F33). Returns
@@ -2553,17 +2666,81 @@ mod tests {
 
     #[test]
     fn rate_text_formats_the_configured_rate_with_the_snapshot_currency() {
-        // 40 millicents/email = 40 cents per 1 000 = 0.40.
-        assert_eq!(format_rate_per_thousand_emails(40, "EUR"), "€0.40 EUR");
+        // 40 millicents/email = 40 cents per 1 000 = 0.40. The amount carries
+        // NO hardcoded symbol: the ISO code is the currency statement, so a
+        // non-EUR snapshot can never be prefixed with a euro sign
+        // (audit F32 + SM7 F9).
+        assert_eq!(format_rate_per_thousand_emails(40, "EUR"), "0.40 EUR");
         // A doubled rate renders doubled, never the old constant.
-        assert_eq!(format_rate_per_thousand_emails(80, "EUR"), "€0.80 EUR");
-        assert_eq!(format_rate_per_thousand_emails(125, "EUR"), "€1.25 EUR");
+        assert_eq!(format_rate_per_thousand_emails(80, "EUR"), "0.80 EUR");
+        assert_eq!(format_rate_per_thousand_emails(125, "EUR"), "1.25 EUR");
         // A non-EUR snapshot currency is rendered, not coerced to EUR
-        // (audit F32).
-        assert_eq!(format_rate_per_thousand_emails(40, "usd"), "€0.40 USD");
+        // (audit F32) — and never mixed with a € symbol (SM7 F9).
+        assert_eq!(format_rate_per_thousand_emails(40, "usd"), "0.40 USD");
         // Degenerate rates never render negative.
-        assert_eq!(format_rate_per_thousand_emails(0, "EUR"), "€0.00 EUR");
-        assert_eq!(format_rate_per_thousand_emails(-5, "EUR"), "€0.00 EUR");
+        assert_eq!(format_rate_per_thousand_emails(0, "EUR"), "0.00 EUR");
+        assert_eq!(format_rate_per_thousand_emails(-5, "EUR"), "0.00 EUR");
+    }
+
+    // ------------------------------------------------------------------
+    // Audit SM7 F3 — the collection amount is frozen on the outbox payload
+    // at the first Stripe attempt; retries reuse it (hence the EXACT
+    // idempotency keys) instead of re-deriving a moved remainder.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn frozen_collection_amount_reads_only_positive_frozen_figures() {
+        let payload = serde_json::json!({
+            "periodStart": "2026-08-01T00:00:00+00:00",
+            "usageKind": "payg",
+            "stripeCollectionCents": 4_321,
+        });
+        assert_eq!(frozen_collection_amount(Some(&payload)), Some(4_321));
+
+        // Not frozen yet: the key is absent (first attempt).
+        let unfrozen = serde_json::json!({
+            "periodStart": "2026-08-01T00:00:00+00:00",
+            "usageKind": "payg",
+        });
+        assert_eq!(frozen_collection_amount(Some(&unfrozen)), None);
+        assert_eq!(frozen_collection_amount(None), None);
+
+        // A non-integer or non-positive "frozen" figure is corruption, not a
+        // freeze — the caller re-freezes the live remainder.
+        let float_payload = serde_json::json!({ "stripeCollectionCents": 4_321.5 });
+        assert_eq!(frozen_collection_amount(Some(&float_payload)), None);
+        let zero_payload = serde_json::json!({ "stripeCollectionCents": 0 });
+        assert_eq!(frozen_collection_amount(Some(&zero_payload)), None);
+        let negative_payload = serde_json::json!({ "stripeCollectionCents": -7 });
+        assert_eq!(frozen_collection_amount(Some(&negative_payload)), None);
+        let string_payload = serde_json::json!({ "stripeCollectionCents": "4321" });
+        assert_eq!(frozen_collection_amount(Some(&string_payload)), None);
+    }
+
+    /// The frozen amount is the idempotency-key seed: the SAME (invoice,
+    /// usage kind, amount, currency) tuple must derive the SAME key, which is
+    /// what makes a changed remainder unable to mint a second Stripe invoice.
+    /// The seed format itself is pinned here (it is load-bearing across
+    /// attempts).
+    #[test]
+    fn stripe_collection_key_seed_is_stable_per_frozen_amount() {
+        let invoice_id = Uuid::parse_str("0123456789abcdef0123456789abcdef").expect("uuid");
+        let seed = |amount_cents: i64, usage_kind: &str, currency: &str| {
+            format!(
+                "usageinv_{}_{}_{}c_{}",
+                invoice_id.simple(),
+                usage_kind,
+                amount_cents,
+                currency.trim().to_lowercase()
+            )
+        };
+        let first_attempt = seed(5_000, "payg", "EUR");
+        // Retry after an allocation landed: the frozen amount (5_000) — not
+        // the live remainder (3_000) — feeds the key.
+        assert_eq!(seed(5_000, "payg", "EUR"), first_attempt);
+        assert_ne!(seed(3_000, "payg", "EUR"), first_attempt);
+        assert_ne!(seed(5_000, "overage", "EUR"), first_attempt);
+        assert_ne!(seed(5_000, "payg", "usd"), first_attempt);
     }
 
     // ------------------------------------------------------------------
@@ -3214,6 +3391,45 @@ mod coverage_adversarial {
         assert_eq!((attempts, error, next), (0, None, None));
     });
 
+    // The freeze itself is FIRST-writer-wins (audit SM7 F3): a collector
+    // that took over an expired lease mid-attempt cannot move the figure —
+    // and with it the idempotency keys — once another attempt froze first;
+    // it is handed the frozen amount back to collect under.
+    env_test!(freeze_collection_amount_first_freeze_wins, |env| {
+        let tenant = "ovcov_freeze";
+        seed_tenant(env, tenant, "growth").await;
+        let invoice_id = seed_invoice(env, tenant, 10_000, "EUR").await;
+        seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
+
+        // The first attempt freezes the live remainder…
+        let effective = freeze_collection_amount(&env.pool, invoice_id, 6_000)
+            .await
+            .expect("first freeze");
+        assert_eq!(effective, 6_000);
+
+        // …a concurrent collector re-deriving a moved remainder (an
+        // allocation landed: 4_000) must NOT move the freeze — it collects
+        // under the first attempt's figure so both share ONE Stripe key.
+        let effective = freeze_collection_amount(&env.pool, invoice_id, 4_000)
+            .await
+            .expect("second freeze");
+        assert_eq!(
+            effective, 6_000,
+            "the first freeze owns the idempotency keys"
+        );
+        let stored: serde_json::Value =
+            sqlx::query_scalar("SELECT payload FROM invoice_collection_outbox WHERE invoice_id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("payload");
+        assert_eq!(
+            frozen_collection_amount(Some(&stored)),
+            Some(6_000),
+            "the payload still carries the first frozen amount"
+        );
+    });
+
     env_test!(collection_failure_backs_off_then_dead_letters, |env| {
         let tenant = "ovcov_collect_fail";
         seed_tenant(env, tenant, "growth").await;
@@ -3819,8 +4035,13 @@ mod coverage_adversarial {
 
     // ---------------- PAYG month state ----------------
 
+    // Audit SM7 F5: an address-less PAYG month is COMMITTED as `needs_review`
+    // (visible, retained for reconciliation), never rolled back into
+    // nonexistence — the sweep only revisits the last two completed months,
+    // so a rolled-back claim used to make the month (and its revenue) vanish
+    // when usage aged out.
     env_test!(
-        payg_month_defers_without_address_and_bills_after_backfill,
+        payg_month_without_address_is_committed_for_review_not_dropped,
         |env| {
             let tenant = "ovcov_payg";
             seed_tenant(env, tenant, "payg").await;
@@ -3844,28 +4065,35 @@ mod coverage_adversarial {
             .expect("first pass");
             assert_eq!(result.skipped_no_address, 1);
             assert_eq!(result.payg_invoices_created, 0, "{result:?}");
-            let periods: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM billing_periods
-             WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
+            let (periods, state, last_error): (i64, String, Option<String>) = sqlx::query_as(
+                "SELECT COUNT(*), COALESCE(MAX(invoice_state::text), 'missing'),
+                        MAX(last_sweep_error)
+                 FROM billing_periods
+                 WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
             )
             .bind(tenant)
             .bind(month_start)
             .fetch_one(&env.pool)
             .await
-            .expect("period count");
-            assert_eq!(
-                periods, 0,
-                "a deferred claim is rolled back whole: nothing is half-recorded"
+            .expect("period row");
+            assert_eq!(periods, 1, "the claim is COMMITTED, not rolled back");
+            assert_eq!(state, "needs_review", "{last_error:?}");
+            let last_error = last_error.expect("a needs_review month carries its reason");
+            assert!(
+                last_error.contains("billing address"),
+                "the review reason names the gate that fired: {last_error}"
             );
-            let invoices_before: i64 =
+            let invoices: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
                     .bind(tenant)
                     .fetch_one(&env.pool)
                     .await
                     .expect("invoice count");
-            assert_eq!(invoices_before, 0, "no invoice without a billing address");
+            assert_eq!(invoices, 0, "no invoice without a billing address");
 
-            // Address backfilled: the same month now bills exactly once.
+            // Even with the address backfilled, the review state is terminal
+            // for the sweep: the month is RETAINED for human reconciliation —
+            // visible, never silently re-billed, never dropped.
             sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
                 .bind(tenant)
                 .execute(&env.pool)
@@ -3881,55 +4109,24 @@ mod coverage_adversarial {
             )
             .await
             .expect("second pass");
-            assert_eq!(result.payg_invoices_created, 1, "{result:?}");
-            let (subtotal, vat, total, status, currency): (i64, i64, i64, String, String) =
-                sqlx::query_as(
-                    "SELECT COALESCE(subtotal, amount)::bigint, COALESCE(vat_total, 0)::bigint,
-                            COALESCE(total, amount)::bigint, status, UPPER(currency)
-                     FROM invoices WHERE tenant_id = $1",
-                )
-                .bind(tenant)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
-            assert_eq!(subtotal, 500, "5 000 PAYG emails at 100 millicents");
-            assert_eq!(
-                total,
-                subtotal + vat,
-                "the invoice total reconciles with its own VAT line"
-            );
-            assert_eq!(status, "pending");
-            assert_eq!(currency, "EUR");
-            let period_state: String = sqlx::query_scalar(
+            assert_eq!(result.payg_invoices_created, 0, "review is not auto-billed");
+            let state: String = sqlx::query_scalar(
                 "SELECT invoice_state::text FROM billing_periods
-             WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
+                 WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
             )
             .bind(tenant)
             .bind(month_start)
             .fetch_one(&env.pool)
             .await
             .expect("period");
-            assert_eq!(period_state, "invoiced");
-
-            // Replay: completed periods are excluded by the state recheck.
-            process_payg_month(
-                &env.state,
-                tenant,
-                month_start,
-                month_end,
-                &pricing,
-                &mut result,
-            )
-            .await
-            .expect("replay");
-            assert_eq!(result.payg_invoices_created, 1, "never bills twice");
-
-            // The sweep over the tenant pages through the same single month.
-            let mut sweep_result = OverageSweepResult::default();
-            sweep_payg_calendar_months(&env.state, &mut sweep_result)
-                .await
-                .expect("payg sweep");
-            assert_eq!(sweep_result.payg_invoices_created, 0);
+            assert_eq!(state, "needs_review", "the month stays surfaced");
+            let invoices: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoices");
+            assert_eq!(invoices, 0, "nothing was billed behind the review gate");
         }
     );
 
@@ -3993,11 +4190,9 @@ mod coverage_adversarial {
     }
 
     async fn restore_table(env: &Env, table: &str) {
-        let _ = sqlx::query(&format!(
-            "ALTER TABLE {table}_w6c_broken RENAME TO {table}"
-        ))
-        .execute(&env.pool)
-        .await;
+        let _ = sqlx::query(&format!("ALTER TABLE {table}_w6c_broken RENAME TO {table}"))
+            .execute(&env.pool)
+            .await;
     }
 
     async fn seed_plan(env: &Env, name: &str, limit: i64, features: serde_json::Value) {
@@ -4347,13 +4542,15 @@ mod coverage_adversarial {
         restore_table(env, "invoices").await;
         assert!(error.contains("invoice creation failed"), "{error}");
         assert_eq!(result.invoices_created, 0);
-        assert_eq!(period_state(env, period.id).await, "unbilled",
-            "the failed claim rolled back whole — the period is retried next sweep");
-        let outbox: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM invoice_collection_outbox")
-                .fetch_one(&env.pool)
-                .await
-                .expect("outbox");
+        assert_eq!(
+            period_state(env, period.id).await,
+            "unbilled",
+            "the failed claim rolled back whole — the period is retried next sweep"
+        );
+        let outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_collection_outbox")
+            .fetch_one(&env.pool)
+            .await
+            .expect("outbox");
         assert_eq!(outbox, 0, "no collection is enqueued for a failed claim");
     });
 
@@ -4361,77 +4558,83 @@ mod coverage_adversarial {
     // it is ADOPTED (single collection) — and when its stored amount
     // disagrees with the recomputed snapshot pricing the mismatch is
     // surfaced loudly instead of silently swallowed.
-    env_test!(existing_invoice_amount_mismatch_is_adopted_and_flagged, |env| {
-        let tenant = "ovcov_mismatch";
-        seed_tenant(env, tenant, "growth").await;
-        sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
-            .bind(tenant)
-            .execute(&env.pool)
-            .await
-            .expect("address");
-        let period = seed_billing_period(
-            env,
-            tenant,
-            Some("growth"),
-            Some(1000),
-            Some(35),
-            "EUR",
-            Utc::now() - chrono::Duration::days(2),
-        )
-        .await;
-        send_emails(env, tenant, 1500, Utc::now() - chrono::Duration::days(3)).await;
+    env_test!(
+        existing_invoice_amount_mismatch_is_adopted_and_flagged,
+        |env| {
+            let tenant = "ovcov_mismatch";
+            seed_tenant(env, tenant, "growth").await;
+            sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+                .bind(tenant)
+                .execute(&env.pool)
+                .await
+                .expect("address");
+            let period = seed_billing_period(
+                env,
+                tenant,
+                Some("growth"),
+                Some(1000),
+                Some(35),
+                "EUR",
+                Utc::now() - chrono::Duration::days(2),
+            )
+            .await;
+            send_emails(env, tenant, 1500, Utc::now() - chrono::Duration::days(3)).await;
 
-        // A pre-existing invoice for THIS period, in USD and for a stale
-        // amount — the constraint fires, the invoice is adopted once, and
-        // the disagreement is reported.
-        let existing = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+            // A pre-existing invoice for THIS period, in USD and for a stale
+            // amount — the constraint fires, the invoice is adopted once, and
+            // the disagreement is reported.
+            let existing = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
                                    subtotal, vat_total, total, issued_at, due_at,
                                    period_start, period_end, overage_period,
                                    created_at, updated_at)
              VALUES ($1, $2, 999, 'USD', 'draft', $3, 999, 0, 999, NOW(), NOW(),
                      $4, $5, $4, NOW(), NOW())",
-        )
-        .bind(existing)
-        .bind(tenant)
-        .bind(format!("W6C-MISMATCH-{}", existing.simple()))
-        .bind(period.period_start)
-        .bind(period.period_end)
-        .execute(&env.pool)
-        .await
-        .expect("existing invoice");
-
-        let mut result = OverageSweepResult::default();
-        process_subscription_period(&env.state, &period, &mut result)
+            )
+            .bind(existing)
+            .bind(tenant)
+            .bind(format!("W6C-MISMATCH-{}", existing.simple()))
+            .bind(period.period_start)
+            .bind(period.period_end)
+            .execute(&env.pool)
             .await
-            .expect("adopt existing invoice");
-        assert_eq!(result.conflicts_existing, 1, "{result:?}");
-        assert_eq!(
-            result.existing_invoice_mismatches, 1,
-            "the USD/999 invoice disagrees with the EUR snapshot: {result:?}"
-        );
-        let invoices: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&env.pool)
+            .expect("existing invoice");
+
+            let mut result = OverageSweepResult::default();
+            process_subscription_period(&env.state, &period, &mut result)
                 .await
-                .expect("invoices");
-        assert_eq!(invoices, 1, "the existing invoice was reused, not duplicated");
-        assert_eq!(period_state(env, period.id).await, "invoiced");
-        let (linked, outbox): (Uuid, i64) = sqlx::query_as(
-            "SELECT invoice_id, (
+                .expect("adopt existing invoice");
+            assert_eq!(result.conflicts_existing, 1, "{result:?}");
+            assert_eq!(
+                result.existing_invoice_mismatches, 1,
+                "the USD/999 invoice disagrees with the EUR snapshot: {result:?}"
+            );
+            let invoices: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoices");
+            assert_eq!(
+                invoices, 1,
+                "the existing invoice was reused, not duplicated"
+            );
+            assert_eq!(period_state(env, period.id).await, "invoiced");
+            let (linked, outbox): (Uuid, i64) = sqlx::query_as(
+                "SELECT invoice_id, (
                 SELECT COUNT(*) FROM invoice_collection_outbox o
                 WHERE o.invoice_id = p.invoice_id AND o.operation = 'collect_usage_invoice')
              FROM billing_periods p WHERE p.id = $1",
-        )
-        .bind(period.id)
-        .fetch_one(&env.pool)
-        .await
-        .expect("period linkage");
-        assert_eq!(linked, existing, "the period points at the ADOPTED invoice");
-        assert_eq!(outbox, 1, "exactly one collection for the adopted invoice");
-    });
+            )
+            .bind(period.id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("period linkage");
+            assert_eq!(linked, existing, "the period points at the ADOPTED invoice");
+            assert_eq!(outbox, 1, "exactly one collection for the adopted invoice");
+        }
+    );
 
     // PAYG claims adopt an existing month invoice through the same
     // savepoint recovery — one collection, never two.
@@ -4574,13 +4777,15 @@ mod coverage_adversarial {
             .await
             .expect("wallet");
         assert_eq!(balance, 9999, "a done operation never re-debits");
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
-                .bind(invoice_id)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
-        assert_eq!(status, "draft", "an unowned ladder must not flip the invoice");
+        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("invoice");
+        assert_eq!(
+            status, "draft",
+            "an unowned ladder must not flip the invoice"
+        );
     });
 
     // An unreadable wallet is a RETRYABLE collection failure: the error is
@@ -4612,15 +4817,14 @@ mod coverage_adversarial {
         .expect_err("wallet read failure must propagate");
         restore_table(env, "wallets").await;
         assert!(error.contains("wallet application failed"), "{error}");
-        let (status, last_error, owner): (String, Option<String>, Option<String>) =
-            sqlx::query_as(
-                "SELECT status, last_error, owner_token FROM invoice_collection_outbox
+        let (status, last_error, owner): (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, last_error, owner_token FROM invoice_collection_outbox
                  WHERE invoice_id = $1",
-            )
-            .bind(invoice_id)
-            .fetch_one(&env.pool)
-            .await
-            .expect("outbox");
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
         assert_eq!(status, "pending", "the failure stays retryable");
         assert_eq!(owner, None, "the lease was released");
         let recorded = last_error.unwrap_or_default();
@@ -4726,12 +4930,11 @@ mod coverage_adversarial {
             .await
             .expect("wallet");
         let invoice_id = seed_invoice(env, tenant, 3000, "EUR").await;
-        let wallet_id: Uuid =
-            sqlx::query_scalar("SELECT id FROM wallets WHERE tenant_id = $1")
-                .bind(tenant)
-                .fetch_one(&env.pool)
-                .await
-                .expect("wallet id");
+        let wallet_id: Uuid = sqlx::query_scalar("SELECT id FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet id");
         let tx_id: Uuid = sqlx::query_scalar(
             "INSERT INTO wallet_transactions
                  (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
@@ -4820,13 +5023,15 @@ mod coverage_adversarial {
             .expect("resume");
         assert_eq!(stats.resumed, 2, "{stats:?}");
 
-        let paid_status: String =
-            sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
-                .bind(paid)
-                .fetch_one(&env.pool)
-                .await
-                .expect("invoice");
-        assert_eq!(paid_status, "paid", "the manual settlement was not overwritten");
+        let paid_status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(paid)
+            .fetch_one(&env.pool)
+            .await
+            .expect("invoice");
+        assert_eq!(
+            paid_status, "paid",
+            "the manual settlement was not overwritten"
+        );
         let dunning: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records WHERE tenant_id = $1")
                 .bind(tenant)
@@ -4837,13 +5042,12 @@ mod coverage_adversarial {
             dunning, 1,
             "only the stranded-pending invoice enters dunning — a settled one never does"
         );
-        let retry: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT next_retry_at FROM dunning_records WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("dunning retry");
+        let retry: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT next_retry_at FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning retry");
         assert!(retry.is_some(), "the dunning retry is scheduled");
         let statuses: Vec<(String, String)> = sqlx::query_as(
             "SELECT i.status::text, o.status FROM invoices i
@@ -4944,13 +5148,11 @@ mod coverage_adversarial {
         .await
         .expect("subscription");
         let invoice_id = seed_invoice(env, tenant, 1000, "EUR").await;
-        sqlx::query(
-            "UPDATE invoices SET stripe_invoice_id = 'in_prior' WHERE id = $1",
-        )
-        .bind(invoice_id)
-        .execute(&env.pool)
-        .await
-        .expect("pre-bind");
+        sqlx::query("UPDATE invoices SET stripe_invoice_id = 'in_prior' WHERE id = $1")
+            .bind(invoice_id)
+            .execute(&env.pool)
+            .await
+            .expect("pre-bind");
         seed_outbox(env, invoice_id, tenant, "pending", 0, None).await;
 
         let stats = resume_pending_collections(&env.state)
@@ -5064,7 +5266,11 @@ mod coverage_adversarial {
         .await
         .expect_err("failed finalize");
         assert!(error.contains("finalize returned 500"), "{error}");
-        assert_eq!(mock.call_count("/v1/invoiceitems"), 3, "each attempt posts the item");
+        assert_eq!(
+            mock.call_count("/v1/invoiceitems"),
+            3,
+            "each attempt posts the item"
+        );
 
         match previous {
             (Some(key), Some(url)) => {
@@ -5112,7 +5318,11 @@ mod coverage_adversarial {
         .await
         .expect("no customer is not an error");
         assert!(none.is_none(), "no Stripe customer → wallet+dunning path");
-        assert_eq!(mock.call_count("/v1/invoiceitems"), 0, "no HTTP call was made");
+        assert_eq!(
+            mock.call_count("/v1/invoiceitems"),
+            0,
+            "no HTTP call was made"
+        );
 
         match previous {
             (Some(key), Some(url)) => {
@@ -5154,13 +5364,11 @@ mod coverage_adversarial {
         );
 
         // Downgrade: the cache still answers true until invalidated.
-        sqlx::query(
-            "UPDATE stripe_subscriptions SET status = 'canceled' WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("cancel");
+        sqlx::query("UPDATE stripe_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("cancel");
         assert!(
             tenant_has_active_paid_subscription(&env.pool, tenant)
                 .await

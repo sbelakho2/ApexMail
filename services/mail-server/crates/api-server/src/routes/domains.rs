@@ -313,8 +313,6 @@ pub struct ListDomainsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    #[serde(default)]
-    pub cursor: Option<i64>,
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -445,7 +443,13 @@ async fn list_domains(
 ) -> Result<Json<Vec<DomainResponse>>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, DomainRow>(
         "SELECT id::text AS id, name, status, ses_verified, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
          FROM domains WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -2358,9 +2362,8 @@ mod adversarial_handler_tests {
         // Batch fix (billing fail-closed decode): a partial features document
         // is present-but-invalid and now (correctly) fails the plan decode —
         // seed a VALID full PlanFeatures with the zero-domain override.
-        let mut features =
-            serde_json::to_value(billing_service::types::PlanFeatures::default())
-                .expect("default features serialize");
+        let mut features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+            .expect("default features serialize");
         features["max_sending_domains"] = json!(0);
         sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
             .bind(unique("pid"))
@@ -2467,10 +2470,23 @@ mod adversarial_handler_tests {
             "cross-tenant domain leaked into the list: {names:?}"
         );
 
-        // Cursor behaves like an offset.
+        // SM3 (audit F8): the mislabeled integer `cursor` is GONE from the
+        // contract — the unknown query field is refused loudly
+        // (deny_unknown_fields), never silently honoured as an offset. The
+        // honest `offset` parameter paginates.
         let response = app
             .clone()
             .oneshot(api_request(Method::GET, "/v1/domains?cursor=1", &key, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "the removed cursor param must be refused, not honoured"
+        );
+        let response = app
+            .clone()
+            .oneshot(api_request(Method::GET, "/v1/domains?offset=1", &key, None))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

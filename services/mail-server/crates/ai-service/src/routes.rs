@@ -436,7 +436,9 @@ fn required_tenant_identity(headers: &HeaderMap) -> Result<String, TenantIdentit
     if raw.is_empty() {
         return Err(TenantIdentityError::Missing);
     }
-    validate_tenant_identity(raw).map(str::to_string).map_err(TenantIdentityError::Invalid)
+    validate_tenant_identity(raw)
+        .map(str::to_string)
+        .map_err(TenantIdentityError::Invalid)
 }
 
 /// Shared charset/length validation for a trimmed tenant identity value.
@@ -1667,7 +1669,10 @@ mod tests {
                 .insert("x-apexmail-tenant-id", "t1".parse().unwrap());
             request
         };
-        assert_eq!(status_of(&app, with_tenant(ok.clone())).await, StatusCode::OK);
+        assert_eq!(
+            status_of(&app, with_tenant(ok.clone())).await,
+            StatusCode::OK
+        );
         assert_eq!(
             status_of(&app, with_tenant(ok)).await,
             StatusCode::TOO_MANY_REQUESTS
@@ -1807,11 +1812,7 @@ mod tests {
         // History WITHOUT the tenant header is a 401 — P1-SECURITY: the old
         // body-carried tenant_id (and its 400 for absence) is gone.
         assert_eq!(
-            status_of(
-                &app,
-                history_request(None, serde_json::json!({"limit": 5}))
-            )
-            .await,
+            status_of(&app, history_request(None, serde_json::json!({"limit": 5}))).await,
             StatusCode::UNAUTHORIZED
         );
         // A tenant_id in the body is an unknown field → 422: the body can no
@@ -1877,8 +1878,10 @@ mod tests {
                     .header("authorization", "Bearer test-key")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::to_vec(&serde_json::json!({"model_id":"apexmail-assistant","epochs":1}))
-                            .unwrap()
+                        serde_json::to_vec(
+                            &serde_json::json!({"model_id":"apexmail-assistant","epochs":1})
+                        )
+                        .unwrap()
                     ))
                     .unwrap()
             )
@@ -2019,10 +2022,7 @@ mod tests {
         .await;
 
         let response = app
-            .oneshot(admin_json_request(
-                "/admin/reindex",
-                serde_json::json!({}),
-            ))
+            .oneshot(admin_json_request("/admin/reindex", serde_json::json!({})))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

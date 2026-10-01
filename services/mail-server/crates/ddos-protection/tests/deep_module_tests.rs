@@ -118,6 +118,7 @@ mod bug_fix_verification {
         let config = CostLimiterConfig {
             default_tenant_budget: 10000,
             system_capacity: 1000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -635,6 +636,7 @@ mod cost_tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 10000,
             system_capacity: 100000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -652,6 +654,7 @@ mod cost_tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 500, // Small budget
             system_capacity: 100000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -672,7 +675,8 @@ mod cost_tests {
     fn cost_system_overload() {
         let config = CostLimiterConfig {
             default_tenant_budget: 10000,
-            system_capacity: 100, // Tiny system capacity
+            system_capacity: 100, // Tiny system capacity,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -690,6 +694,7 @@ mod cost_tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 1000,
             system_capacity: 100000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -710,6 +715,7 @@ mod cost_tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 10000,
             system_capacity: 100000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 

@@ -93,10 +93,8 @@ fn build_cors(origins: &[String]) -> tower_http::cors::CorsLayer {
     if origins.iter().any(|o| o == "*") {
         tower_http::cors::CorsLayer::permissive()
     } else {
-        let allowed: Vec<axum::http::HeaderValue> = origins
-            .iter()
-            .filter_map(|o| o.parse().ok())
-            .collect();
+        let allowed: Vec<axum::http::HeaderValue> =
+            origins.iter().filter_map(|o| o.parse().ok()).collect();
         tower_http::cors::CorsLayer::new()
             .allow_origin(allowed)
             .allow_methods([
@@ -185,9 +183,9 @@ async fn run(
 
     // Start HTTP server
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|error| {
-        anyhow::anyhow!("failed to bind isolation server on {addr}: {error}")
-    })?;
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to bind isolation server on {addr}: {error}"))?;
     info!("Isolation server listening on {}", addr);
 
     axum::serve(listener, app)
@@ -290,6 +288,9 @@ mod tests {
             environment: "test".to_string(),
             internal_api_key: "test-internal-api-key".to_string(),
             internal_api_keys: vec!["test-internal-api-key".to_string()],
+            // Audit SM5 F15: tests exercise the permissive (internal-call) mode
+            // explicitly; the claim-required path is covered in routes tests.
+            require_org_claim: false,
             database: DatabaseConfig {
                 host: "127.0.0.1".to_string(),
                 port: 5432,
@@ -386,7 +387,9 @@ mod tests {
         // postgresql://USER:PASSWORD@HOST:PORT/DATABASE
         migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
         let url = std::env::var("TEST_DATABASE_URL").ok()?;
-        let rest = url.strip_prefix("postgresql://").or_else(|| url.strip_prefix("postgres://"))?;
+        let rest = url
+            .strip_prefix("postgresql://")
+            .or_else(|| url.strip_prefix("postgres://"))?;
         let (credentials, host_db) = rest.split_once('@')?;
         let (_user, password) = credentials.split_once(':')?;
         let (_host, rest) = host_db.split_once(':')?;
@@ -462,7 +465,10 @@ mod tests {
         assert!(result.is_ok(), "clean drain: {result:?}");
 
         let rebinding = tokio::net::TcpListener::bind(("127.0.0.1", port)).await;
-        assert!(rebinding.is_ok(), "the drained server must release its port");
+        assert!(
+            rebinding.is_ok(),
+            "the drained server must release its port"
+        );
     }
 
     /// Duplicate-instance conflict: a second server on the same port must
@@ -486,7 +492,9 @@ mod tests {
         let result = run(config, Some(port), std::future::pending()).await;
         let error = result.expect_err("an occupied port must refuse startup");
         assert!(
-            error.to_string().contains("failed to bind isolation server")
+            error
+                .to_string()
+                .contains("failed to bind isolation server")
                 && error.to_string().contains(&port.to_string()),
             "error: {error}"
         );

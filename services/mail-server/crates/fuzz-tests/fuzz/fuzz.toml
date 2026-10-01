@@ -1,0 +1,21 @@
+# cargo-fuzz run configuration (https://github.com/rust-fuzz/cargo-fuzz).
+#
+# Every fuzzing session is TIME-CAPPED: CI and developers must never run an
+# unbounded session. `cargo fuzz run <target>` honors this file; the same
+# cap is available on the CLI as `-max_total_time=600`.
+
+[fuzz]
+# Seconds per `cargo fuzz run` invocation (10 minutes) when nothing else
+# is configured. CI jobs pass --max-total-time explicitly to override.
+max_total_time = 600
+# Reasonable memory ceiling for these parsers (16 GB arena is absurd for
+# wire parsers; 2 GB catches OOM regressions).
+rss_limit_mb = 2048
+
+[fuzz.fuzz_mail_proto]
+max_total_time = 600
+max_input_size = 65536
+
+[fuzz.fuzz_imap_response]
+max_total_time = 600
+max_input_size = 65536

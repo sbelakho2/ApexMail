@@ -726,6 +726,61 @@ async fn verify_google_id_token(
     id_token: &str,
     expected_client_id: &str,
 ) -> Result<VerifiedGoogleProfile, ApiError> {
+    // SM3 (audit F10): verify the RS256 signature LOCALLY against Google's
+    // published JWKS (fetched once, cached with rotation). The previous
+    // implementation round-tripped every Google login through the network
+    // `tokeninfo` endpoint — an endpoint Google documents as not intended
+    // for production use — coupling every login's availability and latency
+    // to a third-party service.
+    match verify_google_id_token_via_jwks(http_client, id_token, expected_client_id).await {
+        Ok(profile) => Ok(profile),
+        Err(local_error) if google_tokeninfo_fallback_enabled() => {
+            tracing::warn!(
+                error = %local_error,
+                "local JWKS verification failed — falling back to Google tokeninfo \
+                 (GOOGLE_TOKENINFO_FALLBACK is enabled)"
+            );
+            verify_google_id_token_via_tokeninfo(http_client, id_token, expected_client_id).await
+        }
+        Err(local_error) => Err(local_error),
+    }
+}
+
+async fn verify_google_id_token_via_jwks(
+    http_client: &reqwest::Client,
+    id_token: &str,
+    expected_client_id: &str,
+) -> Result<VerifiedGoogleProfile, ApiError> {
+    let now = chrono::Utc::now();
+    // Two passes: the cached JWKS, then ONE forced refresh (Google rotates
+    // signing keys — an unknown `kid` must trigger a re-fetch before the
+    // login is refused).
+    let mut last_error = ApiError::Unauthorized("invalid Google ID token".into());
+    for attempt in 0..2 {
+        let jwks = cached_google_jwks(http_client, attempt > 0).await?;
+        match verify_google_token_with_jwks(id_token, &jwks, expected_client_id, now.timestamp()) {
+            Ok(profile) => return Ok(profile),
+            Err(GoogleLocalVerifyError::UnknownSigningKey) => {
+                last_error = ApiError::Unauthorized("invalid Google ID token".into());
+                continue;
+            }
+            Err(GoogleLocalVerifyError::Invalid) => {
+                return Err(ApiError::Unauthorized("invalid Google ID token".into()));
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// The legacy network verification path — kept ONLY as an opt-in fallback
+/// behind `GOOGLE_TOKENINFO_FALLBACK` (default OFF). Still fails closed on
+/// non-2xx (a tokeninfo rejection is an authentication failure, never a
+/// passthrough).
+async fn verify_google_id_token_via_tokeninfo(
+    http_client: &reqwest::Client,
+    id_token: &str,
+    expected_client_id: &str,
+) -> Result<VerifiedGoogleProfile, ApiError> {
     let token_info_resp = http_client
         .get("https://oauth2.googleapis.com/tokeninfo")
         .query(&[("id_token", id_token)])
@@ -748,6 +803,234 @@ async fn verify_google_id_token(
         expected_client_id,
         chrono::Utc::now().timestamp(),
     )
+}
+
+// ─── Local RS256 verification against Google's JWKS (SM3 audit F10) ────
+
+/// Google's OIDC signing-key set (the documented `jwks_uri` from
+/// https://accounts.google.com/.well-known/openid-configuration).
+const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
+
+/// How long a fetched JWKS stays authoritative. Google rotates signing keys
+/// on a roughly day-scale cadence; an hour keeps rotations well covered (and
+/// an unknown `kid` forces an immediate refresh regardless of the TTL).
+const GOOGLE_JWKS_CACHE_TTL_SECS: i64 = 3600;
+
+/// The exact error a JWKS verification can produce. `UnknownSigningKey`
+/// (the token's `kid` is not in the served set) is the ONLY outcome that
+/// justifies a forced JWKS refresh; everything else is a hard refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoogleLocalVerifyError {
+    UnknownSigningKey,
+    Invalid,
+}
+
+#[derive(Debug, Clone)]
+struct CachedGoogleJwks {
+    jwks: jsonwebtoken::jwk::JwkSet,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+static GOOGLE_JWKS_CACHE: std::sync::OnceLock<parking_lot::RwLock<Option<CachedGoogleJwks>>> =
+    std::sync::OnceLock::new();
+
+fn jwks_cache_slot() -> &'static parking_lot::RwLock<Option<CachedGoogleJwks>> {
+    GOOGLE_JWKS_CACHE.get_or_init(|| parking_lot::RwLock::new(None))
+}
+
+/// Is the cached JWKS too old to serve? A missing cache is always stale;
+/// an entry at or beyond the TTL is stale (and still served as a fallback
+/// if Google cannot be reached — a stale PUBLIC key set is sound to verify
+/// against, an unreachable one is not a reason to fail every login).
+fn jwks_stale(cached: Option<&CachedGoogleJwks>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match cached {
+        None => true,
+        Some(entry) => now.timestamp() - entry.fetched_at.timestamp() >= GOOGLE_JWKS_CACHE_TTL_SECS,
+    }
+}
+
+/// Fetch (or serve from cache) Google's JWKS. `force_refresh` bypasses a
+/// fresh cache (the unknown-`kid` rotation path). A failed refresh that
+/// still has ANY cached set serves the stale set — availability of an
+/// otherwise-sound public key set beats a hard outage; with no cache at all
+/// the failure is propagated (Internal, never a bypass).
+async fn cached_google_jwks(
+    http_client: &reqwest::Client,
+    force_refresh: bool,
+) -> Result<jsonwebtoken::jwk::JwkSet, ApiError> {
+    let now = chrono::Utc::now();
+    if !force_refresh {
+        let slot = jwks_cache_slot().read();
+        if let Some(entry) = slot.as_ref() {
+            if !jwks_stale(Some(entry), now) {
+                return Ok(entry.jwks.clone());
+            }
+        }
+    }
+
+    let fetch = async {
+        let response = http_client
+            .get(GOOGLE_JWKS_URL)
+            .send()
+            .await
+            .map_err(|e| format!("fetch failed: {e}"))?;
+        let response = response
+            .error_for_status()
+            .map_err(|e| format!("status: {e}"))?;
+        let jwks: jsonwebtoken::jwk::JwkSet = response
+            .json()
+            .await
+            .map_err(|e| format!("parse failed: {e}"))?;
+        Ok::<jsonwebtoken::jwk::JwkSet, String>(jwks)
+    }
+    .await;
+
+    match fetch {
+        Ok(jwks) => {
+            *jwks_cache_slot().write() = Some(CachedGoogleJwks {
+                jwks: jwks.clone(),
+                fetched_at: now,
+            });
+            Ok(jwks)
+        }
+        Err(error) => {
+            // Stale-cache fallback (sound: these are Google's previously
+            // published public keys; verification stays exact).
+            let slot = jwks_cache_slot().read();
+            if let Some(entry) = slot.as_ref() {
+                tracing::warn!(
+                    error = %error,
+                    "Google JWKS refresh failed — serving the stale cached key set"
+                );
+                return Ok(entry.jwks.clone());
+            }
+            tracing::error!(
+                error = %error,
+                "Google JWKS fetch failed with no cached key set"
+            );
+            Err(ApiError::Internal(
+                "Google sign-in is temporarily unavailable".into(),
+            ))
+        }
+    }
+}
+
+/// SM3 (audit F10) fallback flag: the network `tokeninfo` endpoint is kept
+/// only for deployments that explicitly opt back in. Default OFF — local
+/// JWKS verification is the path.
+fn google_tokeninfo_fallback_enabled() -> bool {
+    match std::env::var("GOOGLE_TOKENINFO_FALLBACK") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
+/// Verify a Google `id_token` LOCALLY: RS256 signature against the served
+/// JWKS (kid-selected), then the same audience/issuer/expiry/profile checks
+/// the tokeninfo path enforces (`validate_google_token_info`) — aud and iss
+/// via the JWT validation policy, expiry via the standard `exp` check with
+/// the same refusal shape.
+fn verify_google_token_with_jwks(
+    id_token: &str,
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    expected_client_id: &str,
+    now_timestamp: i64,
+) -> Result<VerifiedGoogleProfile, GoogleLocalVerifyError> {
+    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+
+    let header =
+        jsonwebtoken::decode_header(id_token).map_err(|_| GoogleLocalVerifyError::Invalid)?;
+    // Google signs id_tokens with RS256 and always names the `kid`; anything
+    // else is not a Google token.
+    if header.alg != Algorithm::RS256 {
+        return Err(GoogleLocalVerifyError::Invalid);
+    }
+    let Some(kid) = header.kid.as_deref() else {
+        return Err(GoogleLocalVerifyError::Invalid);
+    };
+
+    let mut saw_key = false;
+    for jwk in &jwks.keys {
+        if jwk.common.key_id.as_deref() != Some(kid) {
+            continue;
+        }
+        saw_key = true;
+        let Ok(key) = DecodingKey::from_jwk(jwk) else {
+            continue;
+        };
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[expected_client_id]);
+        // Same issuer set the tokeninfo path accepts (both spellings).
+        validation.set_issuer(&["accounts.google.com", "https://accounts.google.com"]);
+        validation.set_required_spec_claims(&["exp", "sub", "iss", "aud"]);
+
+        if let Ok(token_data) = decode::<GoogleIdTokenClaims>(id_token, &key, &validation) {
+            let claims = token_data.claims;
+            // Explicit expiry against the caller's clock (the validation
+            // policy already enforces `exp`; this restates it against the
+            // verification timestamp so the contract is visible and
+            // clock-independent of the decoder's leeway).
+            if claims.exp <= now_timestamp {
+                return Err(GoogleLocalVerifyError::Invalid);
+            }
+            if !google_claims_email_verified(claims.email_verified.as_ref()) {
+                return Err(GoogleLocalVerifyError::Invalid);
+            }
+            let email = claims
+                .email
+                .filter(|value| !value.trim().is_empty())
+                .ok_or(GoogleLocalVerifyError::Invalid)?;
+            // `sub` is the only takeover-proof identifier (mirrors the
+            // tokeninfo path's contract).
+            if claims.sub.trim().is_empty() {
+                return Err(GoogleLocalVerifyError::Invalid);
+            }
+            return Ok(VerifiedGoogleProfile {
+                subject: claims.sub,
+                email,
+                name: claims.name.unwrap_or_default(),
+            });
+        }
+    }
+
+    if saw_key {
+        // The kid EXISTS in the served set but the token did not verify
+        // (bad signature, wrong audience/expiry): a refresh cannot help.
+        Err(GoogleLocalVerifyError::Invalid)
+    } else {
+        Err(GoogleLocalVerifyError::UnknownSigningKey)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GoogleIdTokenClaims {
+    // `iss` and `aud` are deliberately NOT fields here: their membership is
+    // enforced by the decode validation policy (set_issuer / set_audience +
+    // required_spec_claims), which reads them from the raw token claims —
+    // deserializing them into the struct would only duplicate the check.
+    sub: String,
+    exp: i64,
+    #[serde(default)]
+    email: Option<String>,
+    /// Bool in Google JWTs; deserialized untyped so both spellings are
+    /// recognised (`google_claims_email_verified`).
+    #[serde(default)]
+    email_verified: Option<serde_json::Value>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Same acceptance as the tokeninfo path's `google_email_verified`: Google
+/// encodes the JWT claim as a bool, the tokeninfo field as a string.
+fn google_claims_email_verified(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(true)) => true,
+        Some(serde_json::Value::String(raw)) => google_email_verified(Some(raw)),
+        _ => false,
+    }
 }
 
 fn validate_google_token_info(
@@ -931,6 +1214,213 @@ fn clear_state_cookie(response: &mut Response, name: &str, secure: bool) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SM3 (audit F10): local JWKS verification ──────────────────
+
+    /// A fresh RSA keypair + the JWKS document that publishes it, built with
+    /// the same DKIM-keypair generator every other RSA test in this crate
+    /// uses (no network, no fixed fixtures).
+    fn test_jwks(kid: &str) -> (String, jsonwebtoken::jwk::JwkSet) {
+        use base64::Engine;
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+            .expect("valid PKCS8 private key");
+        let public_key = private_key.to_public_key();
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let jwks: jsonwebtoken::jwk::JwkSet = serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "alg": "RS256",
+                "use": "sig",
+                "kid": kid,
+                "n": b64(&public_key.n().to_bytes_be()),
+                "e": b64(&public_key.e().to_bytes_be()),
+            }]
+        }))
+        .expect("jwks document");
+        (key_pair.private_key_pem.to_string(), jwks)
+    }
+
+    fn mint_google_token(private_key_pem: &str, kid: &str, overrides: serde_json::Value) -> String {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let now = chrono::Utc::now().timestamp();
+        let mut claims = serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": "client-123",
+            "sub": "google-sub-1",
+            "exp": now + 600,
+            "iat": now,
+            "email": "user@example.com",
+            "email_verified": true,
+            "name": "Test User",
+        });
+        if let serde_json::Value::Object(map) = overrides {
+            for (key, value) in map {
+                claims[key] = value;
+            }
+        }
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_key_pem.as_bytes()).expect("encoding key");
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_string());
+        jsonwebtoken::encode(&header, &claims, &encoding_key).expect("token")
+    }
+
+    #[test]
+    fn jwks_verification_accepts_a_wellformed_google_token() {
+        let (pem, jwks) = test_jwks("signing-key-1");
+        let token = mint_google_token(&pem, "signing-key-1", serde_json::json!({}));
+        let now = chrono::Utc::now().timestamp();
+        let profile = verify_google_token_with_jwks(&token, &jwks, "client-123", now)
+            .expect("valid token verifies locally");
+        assert_eq!(profile.subject, "google-sub-1");
+        assert_eq!(profile.email, "user@example.com");
+        assert_eq!(profile.name, "Test User");
+    }
+
+    #[test]
+    fn jwks_verification_enforces_audience_issuer_expiry_and_verification() {
+        let (pem, jwks) = test_jwks("signing-key-1");
+        let now = chrono::Utc::now().timestamp();
+
+        // Wrong audience (another OAuth client's token).
+        let token = mint_google_token(
+            &pem,
+            "signing-key-1",
+            serde_json::json!({ "aud": "someone-elses-client" }),
+        );
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+
+        // Wrong issuer (a forged lookalike).
+        let token = mint_google_token(
+            &pem,
+            "signing-key-1",
+            serde_json::json!({ "iss": "https://evil.example" }),
+        );
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+
+        // Expired.
+        let token = mint_google_token(&pem, "signing-key-1", serde_json::json!({ "exp": now - 1 }));
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+
+        // Unverified email is refused (the tokeninfo path's contract).
+        let token = mint_google_token(
+            &pem,
+            "signing-key-1",
+            serde_json::json!({ "email_verified": false }),
+        );
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+
+        // A tampered payload (signature no longer matches) is refused.
+        let token = mint_google_token(&pem, "signing-key-1", serde_json::json!({}));
+        let mut parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "jwt shape");
+        parts[1] = "eyJzdWIiOiJvdGhlciJ9"; // {"sub":"other"} — unsigned swap
+        let tampered = parts.join(".");
+        assert_eq!(
+            verify_google_token_with_jwks(&tampered, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+    }
+
+    #[test]
+    fn jwks_verification_distinguishes_unknown_keys_from_bad_tokens() {
+        let (pem, jwks) = test_jwks("signing-key-1");
+        let now = chrono::Utc::now().timestamp();
+
+        // A key Google has rotated OUT of the served set: the only outcome
+        // that triggers a forced JWKS refresh before the login is refused.
+        let (other_pem, _other_jwks) = test_jwks("rotated-away");
+        let token = mint_google_token(&other_pem, "rotated-away", serde_json::json!({}));
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::UnknownSigningKey),
+        );
+
+        // A known kid with a forged signature is a hard refusal (a refresh
+        // cannot help; the verifier must not retry forever).
+        let token = {
+            use jsonwebtoken::{Algorithm, EncodingKey, Header};
+            let mut header = Header::new(Algorithm::RS256);
+            header.kid = Some("signing-key-1".into());
+            let claims = serde_json::json!({ "sub": "x", "exp": now + 60 });
+            let wrong_key = EncodingKey::from_rsa_pem(other_pem.as_bytes()).expect("key");
+            jsonwebtoken::encode(&header, &claims, &wrong_key).expect("token")
+        };
+        assert_eq!(
+            verify_google_token_with_jwks(&token, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+
+        // No `kid` at all is not a Google token.
+        let token = mint_google_token(&pem, "signing-key-1", serde_json::json!({}));
+        let unsigned_kid = format!("{}..{}", token.split('.').next().expect("head"), {
+            let parts: Vec<&str> = token.split('.').collect();
+            parts[2]
+        });
+        assert_eq!(
+            verify_google_token_with_jwks(&unsigned_kid, &jwks, "client-123", now),
+            Err(GoogleLocalVerifyError::Invalid),
+        );
+    }
+
+    #[test]
+    fn jwks_staleness_tracks_the_cache_ttl() {
+        let now = chrono::Utc::now();
+        assert!(jwks_stale(None, now), "no cache is always stale");
+
+        let fresh = CachedGoogleJwks {
+            jwks: serde_json::from_value(serde_json::json!({ "keys": [] })).expect("empty jwks"),
+            fetched_at: now - chrono::Duration::seconds(GOOGLE_JWKS_CACHE_TTL_SECS - 1),
+        };
+        assert!(!jwks_stale(Some(&fresh), now), "inside the TTL is fresh");
+
+        let stale = CachedGoogleJwks {
+            jwks: fresh.jwks.clone(),
+            fetched_at: now - chrono::Duration::seconds(GOOGLE_JWKS_CACHE_TTL_SECS),
+        };
+        assert!(
+            jwks_stale(Some(&stale), now),
+            "at the TTL boundary is stale"
+        );
+    }
+
+    #[test]
+    fn tokeninfo_fallback_defaults_off() {
+        // SM3 (audit F10): the network tokeninfo path is opt-in only.
+        let _guard = GOOGLE_TOKENINFO_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::remove_var("GOOGLE_TOKENINFO_FALLBACK");
+        assert!(!google_tokeninfo_fallback_enabled(), "default is OFF");
+        for on in ["1", "true", "TRUE", "yes"] {
+            std::env::set_var("GOOGLE_TOKENINFO_FALLBACK", on);
+            assert!(google_tokeninfo_fallback_enabled(), "{on} enables");
+        }
+        for off in ["0", "false", "", "garbage"] {
+            std::env::set_var("GOOGLE_TOKENINFO_FALLBACK", off);
+            assert!(!google_tokeninfo_fallback_enabled(), "{off} stays off");
+        }
+        std::env::remove_var("GOOGLE_TOKENINFO_FALLBACK");
+    }
+
+    /// Serializes tests that mutate GOOGLE_TOKENINFO_FALLBACK.
+    static GOOGLE_TOKENINFO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // ── Sanitize redirect tests ───────────────────────────────────
 

@@ -161,6 +161,44 @@ async fn run(config: Config) -> anyhow::Result<()> {
     let heartbeat =
         apexmail_lib::heartbeat::spawn_service_heartbeat(state.db.clone(), heartbeat_config);
 
+    // ── Account-deletion retention sweeper (SM3 audit F1) ────
+    // Executes the erasure promise `POST /v1/account` makes: every tenant
+    // whose 30-day grace period elapsed without a cancellation is purged via
+    // the control-plane's GDPR deletion machinery (actor-attributed audit
+    // entry, evidence tables preserved). Failures are logged and retried on
+    // the next tick, never fatal.
+    {
+        let sweeper_db = state.db.clone();
+        let is_production = config.environment.is_production();
+        const SWEEP_INTERVAL_SECS: u64 = 6 * 60 * 60; // four sweeps a day
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));
+            loop {
+                interval.tick().await;
+                match api_server::routes::account::sweep_due_account_deletions(
+                    &sweeper_db,
+                    is_production,
+                )
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(swept) => {
+                        tracing::info!(swept, "account-deletion retention sweep completed")
+                    }
+                    Err(error) => tracing::error!(
+                        error = %error,
+                        "account-deletion retention sweep failed — retrying next interval"
+                    ),
+                }
+            }
+        });
+        tracing::info!(
+            interval_secs = SWEEP_INTERVAL_SECS,
+            "account-deletion retention sweeper started"
+        );
+    }
+
     // The migration only creates a pending platform domain. Provisioning is
     // opt-in so a deployment never invents DNS state, but operators can safely
     // request encrypted per-domain key material during a controlled rollout.
@@ -331,7 +369,9 @@ mod tests {
 
     #[test]
     fn system_sender_bootstrap_is_opt_in_and_validates_its_value() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Absent → off: provisioning must never invent DNS state by default.
         clear_bootstrap_env();

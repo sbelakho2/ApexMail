@@ -86,9 +86,7 @@ fn chrome_nav(html: &str) -> Option<String> {
                 .find('>')
                 .is_some_and(|end| block[..end].contains("data-sidebar=\"primary\""))
         })
-        .map(|block| {
-            strip_class_attributes(&block.replace(" aria-current=\"page\"", ""))
-        })
+        .map(|block| strip_class_attributes(&block.replace(" aria-current=\"page\"", "")))
 }
 
 /// The page's footer chrome, normalized for comparison (absence is a value:
@@ -262,7 +260,10 @@ fn chrome_exempt_list_is_empty_or_justified() {
             "exemption (\"{surface}\", \"{path}\", \"{divergence}\") is dead — every covered document already satisfies the assertion. Delete the entry.",
         );
     }
-    println!("CHROME_EXEMPT worklist for batch 2 ({} entries):", CHROME_EXEMPT.len());
+    println!(
+        "CHROME_EXEMPT worklist for batch 2 ({} entries):",
+        CHROME_EXEMPT.len()
+    );
     for (surface, path, divergence) in CHROME_EXEMPT {
         println!("  - [{surface}] {path}: {divergence}");
     }

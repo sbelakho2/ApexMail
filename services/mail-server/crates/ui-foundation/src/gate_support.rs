@@ -270,10 +270,8 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
 
 /// Browser endpoints registered for GET that appear as form submission
 /// targets (`formmethod="get"` submit buttons / export links).
-pub(crate) const REGISTERED_BROWSER_GET_FORM_ROUTES: &[&str] = &[
-    "/web/contacts/export.csv",
-    "/web/admin/audit/export",
-];
+pub(crate) const REGISTERED_BROWSER_GET_FORM_ROUTES: &[&str] =
+    &["/web/contacts/export.csv", "/web/admin/audit/export"];
 
 /// Does `action` match a registered browser form endpoint? `:name` segments
 /// match exactly one non-empty path segment.

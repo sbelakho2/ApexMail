@@ -24,7 +24,9 @@ API_BILLING_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/bi
 UI_ROUTER = ROOT / "services/mail-server/crates/ui-foundation/src/axum_router.rs"
 UI_VIEWS = ROOT / "services/mail-server/crates/ui-foundation/src/leptos_views.rs"
 STRIPE_WEBHOOKS = ROOT / "services/mail-server/crates/billing-service/src/stripe_webhooks.rs"
-ROOT_CANONICAL_RUST = ROOT / "compliance/src/legal_entity.rs"
+# The root compliance/ package was removed in the 2026-09-30 audit campaign
+# (SM8 F9: dead drifted duplicate); the live legal-entity module is the crate copy.
+ROOT_CANONICAL_RUST = ROOT / "services/mail-server/crates/compliance/src/legal_entity.rs"
 ROOT_CANONICAL_JSON = ROOT / "apps/marketing-zola/data/canonical.json"
 MARKETING_PRICING_JSON = ROOT / "apps/marketing-zola/data/pricing.json"
 MARKETING_PLANS = ROOT / "apps/marketing-zola/templates/partials/pricing/plans.html"

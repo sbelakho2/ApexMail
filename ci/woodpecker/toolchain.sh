@@ -1,3 +1,4 @@
+#!/bin/sh
 # =============================================================================
 # ci/woodpecker/toolchain.sh — first-stage toolchain assertion.
 # =============================================================================
@@ -47,6 +48,10 @@ check trivy          'trivy --version'
 check semgrep        'semgrep --version'
 check shellcheck     'shellcheck --version'
 check hadolint       'hadolint --version'
+# docker CLI + compose plugin (audit SM14 F5): the compose-contract gate is a
+# CLIENT-SIDE `docker compose config` render — required on the executor too.
+check docker         'docker --version'
+check compose        'docker compose version'
 
 # Languages the SDK/marketing lanes need.
 check python3        'python3 --version'

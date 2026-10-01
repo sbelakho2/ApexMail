@@ -58,6 +58,10 @@ pub struct AppState {
     /// Prometheus recorder handle rendered by the unauthenticated `/metrics`
     /// endpoint for the monitoring network.
     pub metrics_handle: PrometheusHandle,
+    /// Audit F11: per-IP fixed-window limiter for the unauthenticated SSO
+    /// login initiators, whose staging INSERTs are otherwise an unbounded
+    /// anonymous DB-row write.
+    pub sso_login_limiter: crate::rate_limit::FixedWindowRateLimiter,
 }
 
 impl AppState {
@@ -95,17 +99,44 @@ impl AppState {
             db,
             http_client,
             metrics_handle,
+            sso_login_limiter: crate::rate_limit::FixedWindowRateLimiter::new(
+                crate::rate_limit::SSO_LOGIN_MAX_PER_WINDOW,
+                crate::rate_limit::SSO_LOGIN_WINDOW_SECS,
+            ),
         }
     }
 }
 
 type S = Arc<AppState>;
 
+// ── RBAC scopes (audit F8) ─────────────────────────────────────────────
+//
+// The canonical JWT carries a `scopes` vector minted per role
+// (`canonical_scopes_for_role` in sso.rs; `*` for admin/owner). Enterprise
+// authorization used to reduce to the binary `admin` claim + tenant
+// membership, leaving control-plane mutations available to every tenant
+// member. These scope strings gate the security-relevant control-plane
+// mutations: a caller passes with the admin claim OR the explicit scope
+// (`require_scope`). Scope-issuing for non-admin principals is a jwt-minter
+// concern — until a minter hands out e.g. `compliance:write`, the gates
+// degrade to admin-only, never wider than before.
+
+/// Compliance control plane: enable frameworks, sign the BAA, enable
+/// zero-retention.
+pub const SCOPE_COMPLIANCE_WRITE: &str = "compliance:write";
+/// Whitelabel configuration writes (branding, `custom_css`, support contacts).
+pub const SCOPE_WHITELABEL_WRITE: &str = "whitelabel:write";
+/// Log-stream destination CRUD, pause/resume.
+pub const SCOPE_LOG_STREAMS_WRITE: &str = "log-streams:write";
+/// Dedicated IP allocation.
+pub const SCOPE_DEDICATED_IPS_WRITE: &str = "dedicated-ips:write";
+
 #[derive(Debug, Clone)]
 struct AuthContext {
     user_id: String,
     tenant_id: String,
     is_admin: bool,
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +145,11 @@ struct JwtClaims {
     tenant_id: String,
     #[serde(default)]
     admin: bool,
+    /// Fine-grained authorities minted with the token (audit F8). Absent on
+    /// legacy tokens — decoded as empty, which keeps those tokens exactly as
+    /// powerful as the old binary model (no wider).
+    #[serde(default)]
+    scopes: Vec<String>,
     #[serde(default)]
     #[allow(
         dead_code,
@@ -206,6 +242,7 @@ async fn auth_middleware(
         user_id: claims.sub,
         tenant_id: claims.tenant_id,
         is_admin: claims.admin,
+        scopes: claims.scopes,
     });
 
     next.run(req).await
@@ -402,6 +439,10 @@ pub struct AuditLogBody {
 #[serde(deny_unknown_fields)]
 pub struct DataAccessBody {
     pub tenant_id: String,
+    /// Accepted for wire compatibility but NOT authoritative: the stored
+    /// requester is the authenticated caller (audit F3 — separation of
+    /// duties is only sound when the filer's identity is server-derived).
+    #[allow(dead_code)]
     pub requester_id: String,
     pub requester_email: String,
     pub request_type: String,
@@ -421,6 +462,9 @@ pub struct DataAccessApproveBody {
 #[serde(deny_unknown_fields)]
 pub struct DataDeletionBody {
     pub tenant_id: String,
+    /// Accepted for wire compatibility but NOT authoritative (audit F3 —
+    /// see [`DataAccessBody::requester_id`]).
+    #[allow(dead_code)]
     pub requester_id: String,
     pub requester_email: String,
     pub identifiers: Option<serde_json::Value>,
@@ -937,6 +981,93 @@ fn require_admin(auth: &AuthContext) -> Option<(StatusCode, Json<serde_json::Val
     }
 }
 
+/// Audit F8: require the admin claim OR the explicit scope string. `*` (the
+/// admin/owner scope set) grants every scope. `Some(err)` is the 403 to
+/// return; `None` authorizes the call.
+fn require_scope(auth: &AuthContext, scope: &str) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let granted = auth.is_admin || auth.scopes.iter().any(|held| held == "*" || held == scope);
+    if granted {
+        None
+    } else {
+        Some(err_json(
+            StatusCode::FORBIDDEN,
+            "Admin access or the required scope is missing",
+        ))
+    }
+}
+
+/// Audit F7: emit a SERVER-SIDE audit entry for a security-relevant mutation.
+///
+/// The enterprise service used to write audit entries only when a client
+/// remembered to POST /compliance/audit; the trail for HIPAA/SOC2-relevant
+/// control-plane actions must not be optional. Identity columns are
+/// server-derived (the same policy `compliance_log_audit` demonstrates): the
+/// actor is the authenticated token subject, the ip is the connection peer
+/// (absent when the deployment serves without `connect_info`), the
+/// user-agent is the request header.
+///
+/// Best-effort: a failed audit write is logged loudly but never fails the
+/// (already authorized and completed) mutation — EXCEPT the PHI-decryption
+/// path, which awaits this result and fails closed (see `decrypt_field`).
+#[allow(clippy::too_many_arguments)]
+async fn audit_server_action(
+    state: &AppState,
+    tenant_id: &str,
+    auth: &AuthContext,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &HeaderMap,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    details: serde_json::Value,
+) -> Result<(), String> {
+    let ip_address = connect_info.map(|ci| ci.0.ip().to_string());
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    state
+        .compliance
+        .log_audit(
+            tenant_id.to_string(),
+            Some(&auth.user_id),
+            action,
+            resource_type,
+            resource_id,
+            None,
+            Some(details),
+            ip_address.as_deref(),
+            user_agent.as_deref(),
+            None,
+            None,
+            Some(serde_json::json!({
+                "emitted_by": "enterprise-server",
+                "actor_tenant_id": auth.tenant_id,
+            })),
+        )
+        .await
+}
+
+/// Derive the rate-limit key for an unauthenticated request (audit F11): the
+/// connection peer when available, else the front-of-list `X-Forwarded-For`
+/// entry, else a shared bucket (never "no limit").
+fn unauthenticated_client_ip(
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &HeaderMap,
+) -> String {
+    if let Some(ci) = connect_info {
+        return ci.0.ip().to_string();
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|list| list.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "unattributed".to_string())
+}
+
 /// Types fetched by ID whose owning tenant must be checked against the
 /// authenticated caller before the resource is returned or mutated (fix A:
 /// by-ID handlers previously resolved any UUID across tenants).
@@ -1353,6 +1484,7 @@ async fn contract_submit(
 async fn contract_sign(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     Path(contract_id): Path<Uuid>,
     Json(body): Json<ContractSignBody>,
@@ -1362,11 +1494,16 @@ async fn contract_sign(
         Err(error) => return error,
     };
 
+    // Audit F7: signer identity for the trail — captured before the body is
+    // consumed by the service call.
+    let signer_name = body.signer_name.clone();
+    let signer_title = body.signer_title.clone();
+
     // Fix D: non-admin callers can only record a tenant-side signature —
     // activation and the `tenants.plan` change require the platform-admin
     // counter-signature path below.
     if !auth.is_admin {
-        return match state
+        let result = state
             .contracts
             .sign_contract(
                 &tenant_id,
@@ -1378,8 +1515,29 @@ async fn contract_sign(
                     signed_at: body.signed_at,
                 },
             )
+            .await;
+        // Audit F7: a contract signature is a binding commercial event.
+        if let Some(contract) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
+            if let Err(error) = audit_server_action(
+                &state,
+                &contract.tenant_id,
+                &auth,
+                connect_info,
+                &headers,
+                "contract_signed",
+                "contract",
+                Some(&contract_id.to_string()),
+                serde_json::json!({
+                    "signer_name": signer_name,
+                    "signer_title": signer_title,
+                }),
+            )
             .await
-        {
+            {
+                tracing::error!(error = %error, "failed to audit contract_signed");
+            }
+        }
+        return match result {
             Ok(result) => match unwrap_contract_result(result) {
                 Ok(contract) => json_status(StatusCode::OK, contract),
                 Err(error) => error,
@@ -1390,7 +1548,28 @@ async fn contract_sign(
 
     // Platform-admin counter-signature: activates the contract and promotes
     // the tenant plan. Requires a tenant signature to already exist.
-    match state.contracts.counter_sign_contract(contract_id).await {
+    let result = state.contracts.counter_sign_contract(contract_id).await;
+    // Audit F7: the counter-signature activates the contract and changes the
+    // tenant plan — recorded against the contract owner's trail (the owning
+    // tenant comes from the contract; the platform admin is not a member).
+    if let Some(contract) = result.as_ref().ok().and_then(|r| r.data.as_ref()) {
+        if let Err(error) = audit_server_action(
+            &state,
+            &contract.tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "contract_counter_signed",
+            "contract",
+            Some(&contract_id.to_string()),
+            serde_json::json!({ "counter_signed_by": auth.user_id }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, "failed to audit contract_counter_signed");
+        }
+    }
+    match result {
         Ok(result) => match unwrap_contract_result(result) {
             Ok(contract) => json_status(StatusCode::OK, contract),
             Err(error) => error,
@@ -1578,8 +1757,19 @@ async fn contract_purchase_order(
 async fn sso_configure(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<SSOConfigureRequest>,
 ) -> impl IntoResponse {
+    // Audit F8 (verifier repair): SSO (re)configuration decides WHO can log
+    // in to the tenant — IdP certificate, entity id, SSO URL, enforce_sso.
+    // Left to plain tenant membership, any member (a viewer) could repoint
+    // the tenant's federation at an IdP they control. This gate is part of
+    // the admin-only class the audit records (`sso_configure`,
+    // `template_approve`, `sso_cleanup_sessions`, contract counter-sign).
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
@@ -1587,7 +1777,33 @@ async fn sso_configure(
     // secret, SAML certificate) never leave the server.
     match state.sso.configure(body).await {
         Ok(r) => match r.data {
-            Some(config) => ok_json(SSOPublicConfig::from(config)),
+            Some(config) => {
+                // Audit F7: an SSO (re)configuration changes who can log in
+                // to the tenant — it is recorded server-side with the
+                // authenticated actor, never left to the client to report.
+                if let Err(error) = audit_server_action(
+                    &state,
+                    &config.tenant_id,
+                    &auth,
+                    connect_info,
+                    &headers,
+                    "sso_configure",
+                    "sso_config",
+                    Some(&config.tenant_id),
+                    serde_json::json!({
+                        "provider_type": config.provider_type,
+                        "domain": config.domain,
+                        "enabled": config.enabled,
+                        "enforce_sso": config.enforce_sso,
+                        "session_duration_hours": config.session_duration_hours,
+                    }),
+                )
+                .await
+                {
+                    tracing::error!(error = %error, "failed to audit sso_configure");
+                }
+                ok_json(SSOPublicConfig::from(config))
+            }
             None => err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "SSO configuration failed",
@@ -1635,11 +1851,7 @@ async fn sso_get_config_by_domain(
 
 /// Build the 302 that hands the browser to the IdP.
 fn redirect_to(url: &str) -> Response {
-    (
-        StatusCode::FOUND,
-        [(LOCATION, url.to_string())],
-    )
-        .into_response()
+    (StatusCode::FOUND, [(LOCATION, url.to_string())]).into_response()
 }
 
 /// Map a service-level [`crate::types::ApiResult`] refusal to its status:
@@ -1689,9 +1901,21 @@ struct SsoLoginQuery {
 
 async fn sso_saml_login(
     State(state): State<S>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(domain): Path<String>,
     Query(query): Query<SsoLoginQuery>,
 ) -> impl IntoResponse {
+    // Audit F11: the initiator stages a DB row per call and is
+    // unauthenticated by protocol — bound the writes per client IP.
+    let client_ip = unauthenticated_client_ip(connect_info, &headers);
+    if !state.sso_login_limiter.check(&client_ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many SSO login initiations; retry later",
+        )
+            .into_response();
+    }
     match state
         .sso
         .initiate_saml_login(&domain, query.return_to.as_deref())
@@ -1721,9 +1945,20 @@ async fn sso_saml_login(
 /// refused with 404.
 async fn sso_oidc_login(
     State(state): State<S>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(domain): Path<String>,
     Query(query): Query<SsoLoginQuery>,
 ) -> impl IntoResponse {
+    // Audit F11: same staging-write bound as the SAML initiator.
+    let client_ip = unauthenticated_client_ip(connect_info, &headers);
+    if !state.sso_login_limiter.check(&client_ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many SSO login initiations; retry later",
+        )
+            .into_response();
+    }
     match state
         .sso
         .initiate_oidc_login(&domain, query.return_to.as_deref())
@@ -1790,11 +2025,7 @@ async fn sso_saml_acs_domain_less(
     sso_saml_acs_inner(state, None, body).await
 }
 
-async fn sso_saml_acs_inner(
-    state: S,
-    path_domain: Option<String>,
-    body: SamlAcsBody,
-) -> Response {
+async fn sso_saml_acs_inner(state: S, path_domain: Option<String>, body: SamlAcsBody) -> Response {
     let domain = path_domain
         .or(body.relay_state.clone())
         .map(|value| value.trim().to_string())
@@ -1825,15 +2056,19 @@ async fn sso_saml_acs_inner(
             return err_json(StatusCode::UNAUTHORIZED, "SAML not configured for domain")
                 .into_response()
         }
-        Err(error) => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response()
-        }
+        Err(error) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &error).into_response(),
     };
 
     // The assertion is trusted here: NameID identifies the user, attributes
-    // carry the profile. Email falls back to the NameID (the common
-    // email-as-NameID IdP shape); display name and groups come from the
-    // standard attribute names.
+    // carry the profile. Audit F2: the asserted email must pass the SAME
+    // assurance the OIDC callback enforces (`validate_asserted_email` —
+    // valid syntax + belongs to the configured SSO domain). The old
+    // `attribute("email").unwrap_or_else(|| name_id)` fallback let an IdP
+    // assert `victim@anydomain.com` (or an opaque NameID) straight into
+    // `resolve_or_provision_sso_user`, whose first-link fallback binds it to
+    // an existing same-tenant account and inherits its role — a JIT
+    // account-linking hijack. An opaque NameID is `external_user_id` only
+    // and never provisions a `users.email`.
     let attribute = |name: &str| {
         validated
             .attributes
@@ -1841,7 +2076,33 @@ async fn sso_saml_acs_inner(
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.clone())
     };
-    let email = attribute("email").unwrap_or_else(|| validated.name_id.clone());
+    let email = match attribute("email").as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => {
+            match crate::sso::validate_asserted_email(raw, &config) {
+                Ok(email) => email,
+                Err(reason) => {
+                    return err_json(StatusCode::UNAUTHORIZED, &reason).into_response()
+                }
+            }
+        }
+        _ => {
+            return err_json(
+                StatusCode::UNAUTHORIZED,
+                "The SAML assertion must carry a valid email attribute; the NameID is never used as an email address",
+            )
+            .into_response()
+        }
+    };
+    // Audit F2 (same bar as OIDC): an IdP that ASSERTS a verification flag
+    // must not assert it false. SAML has no standardized verified attribute,
+    // so an absent flag is accepted — `asserted_email_flag_is_verified`.
+    if !crate::sso::asserted_email_flag_is_verified(attribute("email_verified").as_deref()) {
+        return err_json(
+            StatusCode::UNAUTHORIZED,
+            "The SAML assertion's email_verified flag is false",
+        )
+        .into_response();
+    }
     let display_name = attribute("displayName").or_else(|| attribute("display_name"));
     let groups = {
         let values: Vec<String> = validated
@@ -1931,7 +2192,11 @@ async fn sso_oidc_callback_domain_less(
     sso_oidc_callback_inner(state, None, query).await
 }
 
-async fn sso_oidc_callback_inner(state: S, path_domain: Option<String>, query: OidcCallbackQuery) -> Response {
+async fn sso_oidc_callback_inner(
+    state: S,
+    path_domain: Option<String>,
+    query: OidcCallbackQuery,
+) -> Response {
     let code = query
         .code
         .map(|value| value.trim().to_string())
@@ -2022,6 +2287,10 @@ async fn compliance_enable(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<ComplianceEnableBody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the compliance scope.
+    if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
@@ -2051,33 +2320,89 @@ async fn compliance_get_config(
 async fn compliance_sign_baa(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<BAABody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the compliance scope.
+    if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
-    service_result(
-        state
-            .compliance
-            .sign_baa(
-                body.tenant_id,
-                &body.signatory_name,
-                &body.signatory_title,
-                &body.signatory_email,
-            )
-            .await,
-    )
+    let result = state
+        .compliance
+        .sign_baa(
+            body.tenant_id.clone(),
+            &body.signatory_name,
+            &body.signatory_title,
+            &body.signatory_email,
+        )
+        .await;
+    // Audit F7: a BAA signature is a contractual HIPAA attestation — the
+    // server records who signed, not just the client's optional echo.
+    if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+        if let Err(error) = audit_server_action(
+            &state,
+            &body.tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "baa_signed",
+            "compliance_config",
+            Some(&body.tenant_id),
+            serde_json::json!({
+                "signatory_name": body.signatory_name,
+                "signatory_title": body.signatory_title,
+            }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, "failed to audit baa_signed");
+        }
+    }
+    service_result(result)
 }
 
 async fn compliance_zero_retention(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(tenant_id): Path<String>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the compliance scope.
+    if let Some(e) = require_scope(&auth, SCOPE_COMPLIANCE_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
         return e;
     }
-    service_result(state.compliance.enable_zero_retention(tenant_id).await)
+    let result = state
+        .compliance
+        .enable_zero_retention(tenant_id.clone())
+        .await;
+    // Audit F7: enabling zero-retention directly changes purge behavior —
+    // exactly the kind of action that must be in the tamper-evident trail.
+    if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+        if let Err(error) = audit_server_action(
+            &state,
+            &tenant_id,
+            &auth,
+            connect_info,
+            &headers,
+            "zero_retention_enabled",
+            "compliance_config",
+            Some(&tenant_id),
+            serde_json::json!({ "zero_retention_mode": true }),
+        )
+        .await
+        {
+            tracing::error!(error = %error, "failed to audit zero_retention_enabled");
+        }
+    }
+    service_result(result)
 }
 
 async fn compliance_log_audit(
@@ -2177,12 +2502,20 @@ async fn compliance_data_access(
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+    // Audit F3 (verifier repair): the STORED requester is the authenticated
+    // caller — never the body's `requester_id`. The separation-of-duties
+    // check on approval compares the approver against the stored requester,
+    // so a body-controlled requester_id ("someone-else") would let a member
+    // file a grant and then approve it themselves. The body field stays
+    // accepted for wire compatibility but is not authoritative (the same
+    // server-derived-identity policy as `approved_by`, fix J-3).
+    let requester_id = auth.user_id.clone();
     service_result(
         state
             .compliance
             .request_data_access(
                 body.tenant_id,
-                &body.requester_id,
+                &requester_id,
                 &body.requester_email,
                 &body.request_type,
                 body.resource_type.as_deref(),
@@ -2206,6 +2539,20 @@ async fn compliance_approve_access(
         return e;
     }
 
+    // Audit F3: separation of duties. The requester can never approve their
+    // own grant — a tenant member used to be able to file a request and then
+    // self-approve it into a time-boxed access token. Only an admin may
+    // self-approve (a platform-level exception), everyone else needs a
+    // DIFFERENT approver.
+    if let Some(request) = existing.ok().and_then(|r| r.data) {
+        if !auth.is_admin && request.requester_id == auth.user_id {
+            return err_json(
+                StatusCode::FORBIDDEN,
+                "A data-access request cannot be approved by its requester (separation of duties)",
+            );
+        }
+    }
+
     // Fix J-3: the approver identity is derived from the authenticated token
     // claims — the body-supplied `approved_by` is never trusted — and the
     // granted duration is clamped to 1..=1440 minutes (max 24 h).
@@ -2217,16 +2564,12 @@ async fn compliance_approve_access(
         .approve_data_access(id, &approved_by, duration_minutes)
         .await
     {
-        Ok(mut result) => {
-            // J-3: the raw access token is never echoed back to the client;
-            // only a non-guessable reference to the grant is returned.
-            if let Some(ref mut request) = result.data {
-                if request.access_token.is_some() {
-                    request.access_token = Some(format!("ref:{}", request.id));
-                }
-            }
-            service_result(Ok(result))
-        }
+        // Audit F3: the raw access token is returned EXACTLY ONCE — in this
+        // approval response, as the approver's handoff to the requester. The
+        // database persists only its SHA-256 digest (the SSO bearer-token
+        // model), so re-approving a completed request can never mint or
+        // recover a usable token, and a DB read cannot leak one.
+        Ok(result) => service_result(Ok(result)),
         Err(e) => service_result::<crate::types::DataAccessRequest>(Err(e)),
     }
 }
@@ -2239,12 +2582,15 @@ async fn compliance_data_deletion(
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+    // Audit F3 (verifier repair): same server-derived identity as the
+    // data-access filer — the stored requester is the authenticated caller.
+    let requester_id = auth.user_id.clone();
     service_result(
         state
             .compliance
             .request_data_deletion(
                 body.tenant_id,
-                &body.requester_id,
+                &requester_id,
                 &body.requester_email,
                 body.identifiers,
             )
@@ -2389,23 +2735,62 @@ async fn encrypt_field(
 #[serde(deny_unknown_fields)]
 struct DecryptFieldBody {
     pub tenant_id: String,
-    #[expect(
-        dead_code,
-        reason = "field is accepted for encrypted-field migration tooling request compatibility"
-    )]
     pub field_name: String,
     pub value: String,
 }
 
 /// Decrypt a single field value (for testing/migration tooling).
+///
+/// Audit F1: this is a PHI-decryption oracle. It now (a) requires the admin
+/// claim — tenant membership alone let a low-privilege insider bulk-decrypt
+/// every ciphertext of their own tenant, and (b) writes a MANDATORY audit
+/// entry per call (actor, field_name, tenant). The audit write happens
+/// BEFORE any decryption and its failure fails the call closed: an
+/// unauditable decryption must not happen.
 async fn decrypt_field(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Json(body): Json<DecryptFieldBody>,
 ) -> impl IntoResponse {
+    if let Some(e) = require_admin(&auth) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
+
+    // Audit F1: mandatory per-call trail (attempt, outcome-bearing details,
+    // never the ciphertext or plaintext). Fail closed on audit errors.
+    if let Err(error) = audit_server_action(
+        &state,
+        &body.tenant_id,
+        &auth,
+        connect_info,
+        &headers,
+        "decrypt_field",
+        "phi_field",
+        Some(&body.tenant_id),
+        serde_json::json!({
+            "field_name": body.field_name,
+            "is_phi_field": crate::field_encryption::PHI_FIELDS
+                .contains(&body.field_name.as_str()),
+        }),
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "AUDIT_WRITE_FAILED",
+                    "message": format!("the decryption could not be audited; refusing to decrypt: {error}")
+                }
+            })),
+        );
+    }
+
     let encryptor = match managed_field_encryptor(&state.config) {
         Ok(encryptor) => encryptor,
         Err(error) => {
@@ -2450,6 +2835,10 @@ async fn log_stream_create(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<LogStreamCreateBody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
@@ -2489,6 +2878,10 @@ async fn log_stream_update(
     Path(id): Path<Uuid>,
     Json(body): Json<LogStreamUpdateBody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
+        return e;
+    }
     let existing = state.log_streaming.get(id).await;
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
@@ -2512,6 +2905,10 @@ async fn log_stream_delete(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
+        return e;
+    }
     let existing = state.log_streaming.get(id).await;
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
@@ -2535,6 +2932,10 @@ async fn log_stream_pause(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
+        return e;
+    }
     let existing = state.log_streaming.get(id).await;
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
@@ -2547,6 +2948,10 @@ async fn log_stream_resume(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the log-streams scope.
+    if let Some(e) = require_scope(&auth, SCOPE_LOG_STREAMS_WRITE) {
+        return e;
+    }
     let existing = state.log_streaming.get(id).await;
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
@@ -2673,6 +3078,10 @@ async fn ip_allocate(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<DedicatedIPBody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the dedicated-IPs scope.
+    if let Some(e) = require_scope(&auth, SCOPE_DEDICATED_IPS_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
@@ -2954,28 +3363,53 @@ async fn sub_account_stats(
 async fn sub_account_api_key(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<ApiKeyCreateBody>,
 ) -> impl IntoResponse {
     // Verify parent tenant ownership first by looking up the sub-account
-    match state.sub_accounts.get(id).await {
-        Ok(api_result) => {
-            if let Some(ref sub) = api_result.data {
+    let parent_tenant = match state.sub_accounts.get(id).await {
+        Ok(api_result) => match api_result.data {
+            Some(ref sub) => {
                 if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
                     return e;
                 }
-            } else {
-                return service_result::<SubAccount>(Ok(api_result));
+                Some(sub.parent_id.clone())
+            }
+            None => return service_result::<SubAccount>(Ok(api_result)),
+        },
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    };
+    let result = state
+        .sub_accounts
+        .create_api_key(id, &body.name, body.permissions, body.rate_limit)
+        .await;
+    // Audit F7: API-key minting widens who can act as the tenant — recorded
+    // server-side. The key material itself is never written to the trail.
+    if let Some(parent_tenant) = parent_tenant {
+        if result.as_ref().ok().and_then(|r| r.data.as_ref()).is_some() {
+            if let Err(error) = audit_server_action(
+                &state,
+                &parent_tenant,
+                &auth,
+                connect_info,
+                &headers,
+                "sub_account_api_key_minted",
+                "sub_account_api_key",
+                Some(&id.to_string()),
+                serde_json::json!({
+                    "sub_account_id": id.to_string(),
+                    "name": body.name,
+                }),
+            )
+            .await
+            {
+                tracing::error!(error = %error, "failed to audit sub_account_api_key_minted");
             }
         }
-        Err(e) => return service_result::<SubAccount>(Err(e)),
     }
-    service_result(
-        state
-            .sub_accounts
-            .create_api_key(id, &body.name, body.permissions, body.rate_limit)
-            .await,
-    )
+    service_result(result)
 }
 
 /// GET /sub-accounts/:id/api-keys — list a sub-account's API keys
@@ -3360,6 +3794,10 @@ async fn whitelabel_update_config(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<WhiteLabelConfigBody>,
 ) -> impl IntoResponse {
+    // Audit F8: control-plane mutation — admin or the whitelabel scope.
+    if let Some(e) = require_scope(&auth, SCOPE_WHITELABEL_WRITE) {
+        return e;
+    }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
     }
@@ -3681,9 +4119,11 @@ async fn render_pdf(
 async fn dpa_generate_pdf(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: HeaderMap,
     Path(tenant_id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     if auth.tenant_id != tenant_id && !auth.is_admin {
         return Err((StatusCode::FORBIDDEN, "Tenant access denied".to_string()));
     }
@@ -3717,6 +4157,24 @@ async fn dpa_generate_pdf(
     });
 
     let pdf_bytes = render_pdf(&state, &payload).await?;
+
+    // Audit F7: DPA paper trail — a generated (signed-form) DPA document is
+    // a compliance attestation artifact; the server records its issuance.
+    if let Err(error) = audit_server_action(
+        &state,
+        &tenant_id,
+        &auth,
+        connect_info,
+        &headers,
+        "dpa_document_generated",
+        "dpa",
+        Some(&tenant_id),
+        serde_json::json!({ "template": "dpa" }),
+    )
+    .await
+    {
+        tracing::error!(error = %error, "failed to audit dpa_document_generated");
+    }
 
     Ok((
         StatusCode::OK,
@@ -4128,6 +4586,17 @@ mod tests {
 
     /// Mint an admin JWT the router's auth middleware accepts.
     fn mint_sso_admin_token(tenant_id: &str, subject: &str) -> String {
+        mint_sso_token(tenant_id, subject, true)
+    }
+
+    /// Mint a member (non-admin) JWT the router's auth middleware accepts
+    /// (audit F3: the separation-of-duties guard is exercised with a
+    /// non-admin principal).
+    fn mint_sso_member_token(tenant_id: &str, subject: &str) -> String {
+        mint_sso_token(tenant_id, subject, false)
+    }
+
+    fn mint_sso_token(tenant_id: &str, subject: &str, admin: bool) -> String {
         #[derive(serde::Serialize)]
         struct Claims<'a> {
             sub: &'a str,
@@ -4135,14 +4604,13 @@ mod tests {
             admin: bool,
             exp: usize,
         }
-        let key =
-            jsonwebtoken::EncodingKey::from_rsa_pem(JWT_TEST_PRIVATE_PEM.as_bytes()).unwrap();
+        let key = jsonwebtoken::EncodingKey::from_rsa_pem(JWT_TEST_PRIVATE_PEM.as_bytes()).unwrap();
         jsonwebtoken::encode(
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
             &Claims {
                 sub: subject,
                 tenant_id,
-                admin: true,
+                admin,
                 exp: (Utc::now() + TimeDelta::try_hours(1).unwrap()).timestamp() as usize,
             },
             &key,
@@ -4157,9 +4625,7 @@ mod tests {
     async fn get_request(app: &Router, path: &str) -> axum::response::Response {
         send_request(
             app,
-            Request::get(path)
-                .body(Body::empty())
-                .expect("GET request"),
+            Request::get(path).body(Body::empty()).expect("GET request"),
         )
         .await
     }
@@ -4276,7 +4742,9 @@ mod tests {
     }
 
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|window| window == needle)
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
     }
 
     /// A minimal but REAL OpenID Provider on 127.0.0.1: discovery metadata, a
@@ -4302,10 +4770,10 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let issuer = format!("http://{}", listener.local_addr().unwrap());
 
-            let jwk_n = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(signing_key.modulus_be());
-            let jwk_e = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(signing_key.exponent_be());
+            let jwk_n =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing_key.modulus_be());
+            let jwk_e =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing_key.exponent_be());
             let jwks = serde_json::json!({
                 "keys": [{
                     "kty": "RSA",
@@ -4412,12 +4880,11 @@ mod tests {
                             })
                             .collect();
                         *recorded_task.lock().unwrap() = pairs;
-                        let id_token =
-                            if tamper_task.load(std::sync::atomic::Ordering::Relaxed) {
-                                tampered_id_token.clone()
-                            } else {
-                                valid_id_token.clone()
-                            };
+                        let id_token = if tamper_task.load(std::sync::atomic::Ordering::Relaxed) {
+                            tampered_id_token.clone()
+                        } else {
+                            valid_id_token.clone()
+                        };
                         (
                             "200 OK",
                             serde_json::json!({
@@ -4536,16 +5003,28 @@ mod tests {
         assert_eq!(staged.as_deref(), Some(tenant.as_str()));
 
         // 2. A valid, genuinely signed response → session issued. The
-        //    InResponseTo names the staged request from step 1.
+        //    InResponseTo names the staged request from step 1. The asserted
+        //    email is IN the configured SSO domain (audit F2: the ACS applies
+        //    the OIDC email-domain assurance, so an out-of-domain assertion
+        //    is refused).
+        let asserted_email = "alice.smith@saml-e2e.routes.example.com";
         let mut signed = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         signed.in_response_to = Some(request_id.clone());
+        signed.name_id = asserted_email.to_string();
+        signed.attributes = vec![
+            ("email".to_string(), asserted_email.to_string()),
+            ("group".to_string(), "engineering".to_string()),
+        ];
         let form = saml_acs_form(&signed.render(sso_flow_idp_key()), domain);
         let response = post_form(&app, &format!("/sso/acs/{domain}"), &form).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["is_new_user"], true, "{body}");
-        assert_eq!(body["session"]["email"], "alice.smith@example.com");
-        assert_eq!(body["session"]["groups"], serde_json::json!(["engineering"]));
+        assert_eq!(body["session"]["email"], asserted_email);
+        assert_eq!(
+            body["session"]["groups"],
+            serde_json::json!(["engineering"])
+        );
         let session_token = body["session"]["session_token"]
             .as_str()
             .expect("session token")
@@ -4556,7 +5035,7 @@ mod tests {
         let response = get_bearer(&app, "/sso/validate", &session_token).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        assert_eq!(body["email"], "alice.smith@example.com");
+        assert_eq!(body["email"], asserted_email);
 
         // 4. The same assertion replayed is refused (the correlation stage
         //    is re-inserted so the failure demonstrably lands on the replay
@@ -4573,12 +5052,95 @@ mod tests {
             "{body}"
         );
 
+        // 4b. Audit F2 (verifier repair): a SIGNED assertion claiming an
+        //     OUT-OF-DOMAIN email — the exact JIT account-linking hijack the
+        //     finding describes (`victim@anydomain.com` binds to a same-
+        //     tenant local account and inherits its role) — is refused with
+        //     401 AFTER the signature validates. Pins the ACS's email gate
+        //     wiring end-to-end.
+        let mut hijack = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
+        hijack.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
+        hijack.name_id = "victim@anydomain.com".to_string();
+        hijack.attributes = vec![("email".to_string(), "victim@anydomain.com".to_string())];
+        stage_saml_authn_request(
+            &state,
+            &tenant,
+            domain,
+            hijack
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
+        )
+        .await;
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&hijack.render(sso_flow_idp_key()), domain),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a signed out-of-domain assertion must be refused"
+        );
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not belong to the configured SSO domain"),
+            "{body}"
+        );
+
+        // 4c. An assertion with NO email attribute (opaque NameID only) is
+        //     refused too — the NameID is an external_user_id, never an
+        //     email, and must not fall back into `users.email`.
+        let mut opaque = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
+        opaque.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
+        opaque.name_id = "opaque-subject-id-9f2c".to_string();
+        opaque.attributes = vec![];
+        stage_saml_authn_request(
+            &state,
+            &tenant,
+            domain,
+            opaque
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
+        )
+        .await;
+        let response = post_form(
+            &app,
+            &format!("/sso/acs/{domain}"),
+            &saml_acs_form(&opaque.render(sso_flow_idp_key()), domain),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "an opaque NameID must never be used as an email"
+        );
+        let body = response_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must carry a valid email attribute"),
+            "{body}"
+        );
+
         // 5. A tampered (digest-flipped) response is refused at the signature gate.
         let mut tamperable = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
-        tamperable.name_id = "tamper-check@example.com".into();
+        // Audit F2: the untouched twin must still complete (200), so its
+        // asserted email is IN the configured SSO domain — the tamper arm
+        // itself is refused at the signature gate before any email check.
+        tamperable.name_id = asserted_email.to_string();
+        tamperable.attributes = vec![("email".to_string(), asserted_email.to_string())];
         let signed_document = tamperable.render(sso_flow_idp_key());
         let marker = "<ds:DigestValue>";
-        let position = signed_document.find(marker).expect("signed doc has a digest");
+        let position = signed_document
+            .find(marker)
+            .expect("signed doc has a digest");
         let digest_start = position + marker.len();
         let mut tampered = signed_document.clone();
         let original_char = tampered.as_bytes()[digest_start] as char;
@@ -4605,7 +5167,10 @@ mod tests {
             &state,
             &tenant,
             domain,
-            tamperable.in_response_to.as_deref().expect("fixture InResponseTo"),
+            tamperable
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
         )
         .await;
         let response = post_form(
@@ -4639,7 +5204,10 @@ mod tests {
             &state,
             &tenant_b,
             domain_b,
-            foreign.in_response_to.as_deref().expect("fixture InResponseTo"),
+            foreign
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
         )
         .await;
         let response = post_form(
@@ -4666,7 +5234,10 @@ mod tests {
             &state,
             &tenant,
             domain,
-            expired.in_response_to.as_deref().expect("fixture InResponseTo"),
+            expired
+                .in_response_to
+                .as_deref()
+                .expect("fixture InResponseTo"),
         )
         .await;
         let response = post_form(
@@ -4711,6 +5282,10 @@ mod tests {
         //     the tenant domain from RelayState and issues a session.
         let mut domain_less = SamlFixture::valid(idp_entity_id, &sp_entity_id, &acs_url);
         domain_less.in_response_to = Some(format!("_saml_{}", Uuid::new_v4()));
+        // Audit F2: the asserted email must be in the configured SSO domain
+        // for the ACS to link the session (same bar as step 2).
+        domain_less.name_id = asserted_email.to_string();
+        domain_less.attributes = vec![("email".to_string(), asserted_email.to_string())];
         stage_saml_authn_request(
             &state,
             &tenant,
@@ -4734,10 +5309,7 @@ mod tests {
         let response = post_form(
             &app,
             "/sso/acs",
-            &format!(
-                "SAMLResponse={}",
-                urlencoding::encode("e30=")
-            ),
+            &format!("SAMLResponse={}", urlencoding::encode("e30=")),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -4803,7 +5375,10 @@ mod tests {
             "response_type=code",
             "code_challenge_method=S256",
         ] {
-            assert!(location.contains(expected), "missing {expected}: {location}");
+            assert!(
+                location.contains(expected),
+                "missing {expected}: {location}"
+            );
         }
         let login_state = query_param(&location, "state").expect("state");
         let code_challenge = query_param(&location, "code_challenge").expect("code_challenge");
@@ -4835,7 +5410,8 @@ mod tests {
 
         // 3. Callback → the code is exchanged with the verifier and a session
         //    is issued from the validated id_token.
-        let callback = format!("/sso/callback/oidc/{domain}?code=routes-code-1&state={login_state}");
+        let callback =
+            format!("/sso/callback/oidc/{domain}?code=routes-code-1&state={login_state}");
         let response = get_request(&app, &callback).await;
         let callback_status = response.status();
         let body = response_json(response).await;
@@ -4844,10 +5420,7 @@ mod tests {
             StatusCode::OK,
             "callback status with body: {body}"
         );
-        assert_eq!(
-            body["is_new_user"], true,
-            "callback result: {body}"
-        );
+        assert_eq!(body["is_new_user"], true, "callback result: {body}");
         assert_eq!(
             body["session"]["email"],
             "riley@oidc-e2e.routes.example.com"
@@ -4869,9 +5442,15 @@ mod tests {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
         };
-        assert_eq!(form_pair("grant_type").as_deref(), Some("authorization_code"));
+        assert_eq!(
+            form_pair("grant_type").as_deref(),
+            Some("authorization_code")
+        );
         assert_eq!(form_pair("code").as_deref(), Some("routes-code-1"));
-        assert_eq!(form_pair("code_verifier").as_deref(), Some(verifier.as_str()));
+        assert_eq!(
+            form_pair("code_verifier").as_deref(),
+            Some(verifier.as_str())
+        );
         assert_eq!(form_pair("client_id").as_deref(), Some(client_id));
         assert_eq!(form_pair("client_secret").as_deref(), Some(client_secret));
 
@@ -4954,5 +5533,452 @@ mod tests {
         // 10. Unconfigured domains refuse login initiation with 404.
         let response = get_request(&app, "/sso/login/oidc/no-such.routes.example.com").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Audit F3: data-access approval guards — separation of duties, the
+    // `AND status = 'pending'` state guard, digest-at-rest and the one-time
+    // raw-token handoff.
+    // ═════════════════════════════════════════════════════════════════════
+
+    /// Soft-skip variant of [`provision_sso_router`] for the data-access
+    /// guards: identical env + JWT wiring, but `None` (skip) when
+    /// TEST_DATABASE_URL is not configured.
+    async fn provision_data_access_router(tag: &str) -> Option<(Router, Arc<AppState>)> {
+        if std::env::var("SSO_ENCRYPTION_KEY").is_err() {
+            std::env::set_var("SSO_ENCRYPTION_KEY", "sso-routes-coverage-key-0123456789");
+        }
+        if std::env::var("LOG_STREAM_ENCRYPTION_KEY").is_err() {
+            std::env::set_var(
+                "LOG_STREAM_ENCRYPTION_KEY",
+                "log-stream-routes-coverage-key-0123456789",
+            );
+        }
+        let pool =
+            migrator::test_support::fresh_canonical_pool(tag, &format!("routes_data_access_{tag}"))
+                .await
+                .expect("provision canonical pool")?;
+        let mut config = Config::from_env().unwrap();
+        config.jwt_public_key_pem = JWT_TEST_PUBLIC_PEM.to_string();
+        config.jwt_audience = None;
+        config.jwt_issuer = None;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let state = Arc::new(AppState::new(pool, config, recorder.handle()));
+        Some((router(state.clone()), state))
+    }
+
+    /// Seed one pending data-access request row and return its id.
+    async fn seed_pending_data_access(state: &AppState, tenant: &str, requester_id: &str) -> Uuid {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO ent_data_access_requests
+                 (tenant_id, type, status, requester_id, requester_email)
+             VALUES ($1, 'data_access', 'pending', $2, $3) RETURNING id",
+        )
+        .bind(tenant)
+        .bind(requester_id)
+        .bind(format!("{requester_id}@data-access.test"))
+        .fetch_one(&state.db)
+        .await
+        .expect("seed pending data-access request");
+        id
+    }
+
+    async fn seed_data_access_tenant(state: &AppState, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("Data Access Tenant {tenant}"))
+        .bind(format!("data-access-{tenant}"))
+        .execute(&state.db)
+        .await
+        .expect("seed data-access tenant");
+    }
+
+    fn approve_body() -> serde_json::Value {
+        serde_json::json!({ "approved_by": "ignored-by-j-3", "duration_minutes": 60 })
+    }
+
+    /// The requester — a plain tenant member — must NOT be able to approve
+    /// their own access request (separation of duties). A different member
+    /// of the SAME tenant can. An admin self-approval remains the explicit
+    /// platform exception.
+    #[tokio::test]
+    async fn data_access_requester_cannot_self_approve() {
+        let Some((app, state)) = provision_data_access_router("sod").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = "da-sod-tenant";
+        seed_data_access_tenant(&state, tenant).await;
+
+        // The requester self-approving is a 403 — and the row stays pending.
+        let request_id = seed_pending_data_access(&state, tenant, "member-self").await;
+        let response = post_json(
+            &app,
+            &format!("/compliance/data-access/{request_id}/approve"),
+            &mint_sso_member_token(tenant, "member-self"),
+            &approve_body(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a requester must never approve their own grant"
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM ent_data_access_requests WHERE id = $1")
+                .bind(request_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("request row");
+        assert_eq!(
+            status, "pending",
+            "a refused self-approval must not mutate the row"
+        );
+
+        // A DIFFERENT member of the same tenant approves successfully.
+        let other_request = seed_pending_data_access(&state, tenant, "member-a").await;
+        let response = post_json(
+            &app,
+            &format!("/compliance/data-access/{other_request}/approve"),
+            &mint_sso_member_token(tenant, "member-b"),
+            &approve_body(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["success"], serde_json::json!(true));
+    }
+
+    /// Audit F3 (verifier repair): the STORED requester is the authenticated
+    /// filer — the body's `requester_id` is never authoritative. A member who
+    /// files through the route claiming `requester_id: "someone-else"` used
+    /// to defeat the separation-of-duties comparison (stored requester ≠
+    /// approver) and self-approve into a live grant token.
+    #[tokio::test]
+    async fn forged_body_requester_id_cannot_enable_self_approval() {
+        let Some((app, state)) = provision_data_access_router("forge").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = "da-forge-tenant";
+        seed_data_access_tenant(&state, tenant).await;
+
+        // The member files THROUGH the route, attributing the request to
+        // someone else.
+        let response = post_json(
+            &app,
+            "/compliance/data-access",
+            &mint_sso_member_token(tenant, "member-forge"),
+            &serde_json::json!({
+                "tenant_id": tenant,
+                "requester_id": "someone-else",
+                "requester_email": "member-forge@data-access.test",
+                "request_type": "export",
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let request_id = body["data"]["id"].as_str().expect("request id").to_string();
+
+        // The stored requester is the token subject, not the forged value.
+        let stored: String =
+            sqlx::query_scalar("SELECT requester_id FROM ent_data_access_requests WHERE id = $1")
+                .bind(Uuid::parse_str(&request_id).unwrap())
+                .fetch_one(&state.db)
+                .await
+                .expect("request row");
+        assert_eq!(
+            stored, "member-forge",
+            "the stored requester must be server-derived from the token"
+        );
+
+        // Self-approval under the forged attribution is therefore refused.
+        let response = post_json(
+            &app,
+            &format!("/compliance/data-access/{request_id}/approve"),
+            &mint_sso_member_token(tenant, "member-forge"),
+            &approve_body(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a forged requester_id must not enable self-approval"
+        );
+    }
+
+    /// Approval stores ONLY the SHA-256 digest at rest; the raw token rides
+    /// the approval response exactly once; reads mask it as `ref:{id}`.
+    #[tokio::test]
+    async fn data_access_approval_stores_digest_and_returns_raw_once() {
+        let Some((_app, state)) = provision_data_access_router("digest").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = "da-digest-tenant";
+        seed_data_access_tenant(&state, tenant).await;
+        let request_id = seed_pending_data_access(&state, tenant, "member-d").await;
+
+        // Approve through the service the route delegates to (the route
+        // returns this ApiResult verbatim — the raw token is in `data`).
+        let result = state
+            .compliance
+            .approve_data_access(request_id, "member-e", 60)
+            .await
+            .expect("approval succeeds");
+        let raw_token = result
+            .data
+            .as_ref()
+            .and_then(|r| r.access_token.clone())
+            .expect("the approval response carries the raw token ONCE");
+
+        // At rest: only the digest — the raw token never touches the row.
+        let stored: String =
+            sqlx::query_scalar("SELECT access_token FROM ent_data_access_requests WHERE id = $1")
+                .bind(request_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("approved row");
+        assert_ne!(
+            stored, raw_token,
+            "the raw grant token must not be stored verbatim"
+        );
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(raw_token.as_bytes());
+        assert_eq!(
+            stored,
+            hex::encode(hasher.finalize()),
+            "the stored value must be the token's SHA-256 digest"
+        );
+
+        // Reads mask the digest as a non-guessable grant reference.
+        let read_back = state
+            .compliance
+            .get_data_access_request(request_id)
+            .await
+            .expect("read succeeds");
+        assert_eq!(
+            read_back
+                .data
+                .as_ref()
+                .and_then(|r| r.access_token.as_deref()),
+            Some(format!("ref:{request_id}")).as_deref(),
+            "reads must never surface token material"
+        );
+    }
+
+    /// The UPDATE carries `AND status = 'pending'`: an already-approved
+    /// request cannot be re-approved to mint a fresh token.
+    #[tokio::test]
+    async fn completed_data_access_request_cannot_be_reapproved() {
+        let Some((_app, state)) = provision_data_access_router("reapprove").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let tenant = "da-reapprove-tenant";
+        seed_data_access_tenant(&state, tenant).await;
+        let request_id = seed_pending_data_access(&state, tenant, "member-f").await;
+
+        let first = state
+            .compliance
+            .approve_data_access(request_id, "admin-1", 60)
+            .await
+            .expect("the first approval succeeds");
+        assert!(first.success, "the first approval is the real one");
+
+        let second = state
+            .compliance
+            .approve_data_access(request_id, "admin-1", 60)
+            .await
+            .expect("the guard is a clean ApiResult error, not an infrastructure failure");
+        assert!(
+            !second.success,
+            "a second approval of a completed request must be refused"
+        );
+        assert_eq!(second.code.as_deref(), Some("INVALID_STATE"));
+        // The original grant is untouched (same digest, same expiry).
+        let stored: String =
+            sqlx::query_scalar("SELECT access_token FROM ent_data_access_requests WHERE id = $1")
+                .bind(request_id)
+                .fetch_one(&state.db)
+                .await
+                .expect("approved row");
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(
+            first
+                .data
+                .as_ref()
+                .and_then(|r| r.access_token.clone())
+                .expect("first approval carried the raw token")
+                .as_bytes(),
+        );
+        assert_eq!(stored, hex::encode(hasher.finalize()));
+    }
+}
+
+/// Compile-time-pattern guard for audit F8 (modeled on api-server's
+/// `routes/admin/mod.rs` scope scan): the control-plane routes that must
+/// carry an explicit scope are enumerated here together with the scope
+/// constant their handler is required to declare. A handler that loses its
+/// `require_scope` call — or a new control-plane route added without a
+/// scope gate — fails this test, so RBAC regressions are caught by
+/// `cargo test`, not by a penetration test.
+#[cfg(test)]
+mod rbac_scope_guards {
+    use super::*;
+
+    /// (handler function name, required scope constant) pairs. The scope is
+    /// matched literally inside the extracted handler body.
+    fn scoped_handlers() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("compliance_enable", "SCOPE_COMPLIANCE_WRITE"),
+            ("compliance_sign_baa", "SCOPE_COMPLIANCE_WRITE"),
+            ("compliance_zero_retention", "SCOPE_COMPLIANCE_WRITE"),
+            ("whitelabel_update_config", "SCOPE_WHITELABEL_WRITE"),
+            ("log_stream_create", "SCOPE_LOG_STREAMS_WRITE"),
+            ("log_stream_update", "SCOPE_LOG_STREAMS_WRITE"),
+            ("log_stream_delete", "SCOPE_LOG_STREAMS_WRITE"),
+            ("log_stream_pause", "SCOPE_LOG_STREAMS_WRITE"),
+            ("log_stream_resume", "SCOPE_LOG_STREAMS_WRITE"),
+            ("ip_allocate", "SCOPE_DEDICATED_IPS_WRITE"),
+        ]
+    }
+
+    /// Extract the body of `async fn <name>` from the routes source.
+    fn handler_body(source: &str, handler: &str) -> Option<String> {
+        let marker = format!("async fn {handler}(");
+        let start = source.find(&marker)? + marker.len();
+        let rest = &source[start..];
+        // The body extends to the next top-level `async fn ` (handlers are
+        // declared back-to-back in this file).
+        let end = rest.find("\nasync fn ").unwrap_or(rest.len());
+        Some(rest[..end].to_string())
+    }
+
+    #[test]
+    fn every_control_plane_handler_declares_its_scope() {
+        let source = include_str!("routes.rs");
+        let mut failures = Vec::new();
+        for (handler, scope) in scoped_handlers() {
+            let body = handler_body(source, handler)
+                .unwrap_or_else(|| panic!("handler {handler} disappeared from routes.rs"));
+            if !body.contains(&format!("require_scope(&auth, {scope})")) {
+                failures.push(format!("{handler} must require {scope}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "control-plane handlers missing scope gates: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn scope_guards_flag_violations() {
+        let source = "async fn good() { require_scope(&auth, SCOPE_COMPLIANCE_WRITE) }\nasync fn evil() { verify_tenant_access(&auth, tenant) }";
+        assert!(handler_body(source, "good")
+            .expect("good body")
+            .contains("require_scope(&auth, SCOPE_COMPLIANCE_WRITE)"));
+        assert!(!handler_body(source, "evil")
+            .expect("evil body")
+            .contains("require_scope(&auth,"));
+    }
+
+    /// The PHI-decryption oracle (audit F1) must keep its admin gate and its
+    /// mandatory audit emission — the scan pattern pins both.
+    #[test]
+    fn decrypt_field_keeps_admin_gate_and_audit() {
+        let source = include_str!("routes.rs");
+        let body = handler_body(source, "decrypt_field")
+            .expect("decrypt_field handler disappeared from routes.rs");
+        assert!(
+            body.contains("require_admin(&auth)"),
+            "decrypt_field must require the admin claim"
+        );
+        assert!(
+            body.contains("audit_server_action("),
+            "decrypt_field must write its mandatory audit entry"
+        );
+    }
+
+    /// Audit F8 (verifier repair): SSO (re)configuration decides who can log
+    /// in to the tenant — it belongs to the admin-only handler class. A
+    /// `require_admin` line silently dropped from `sso_configure` fails here.
+    #[test]
+    fn sso_configure_requires_admin() {
+        let source = include_str!("routes.rs");
+        let body = handler_body(source, "sso_configure")
+            .expect("sso_configure handler disappeared from routes.rs");
+        assert!(
+            body.contains("require_admin(&auth)"),
+            "sso_configure must require the admin claim"
+        );
+    }
+
+    /// Audit F7: the enterprise service must emit its OWN server-side audit
+    /// entries for security-relevant mutations — SSO (re)configuration and
+    /// zero-retention enablement at the minimum (both change who can act or
+    /// what is purged), plus the other contractual/key-minting actions the
+    /// work order names. A handler that loses its `audit_server_action` call
+    /// — or its action literal — fails here.
+    #[test]
+    fn security_mutations_emit_server_side_audit() {
+        let source = include_str!("routes.rs");
+        for (handler, action) in [
+            ("sso_configure", "sso_configure"),
+            ("compliance_zero_retention", "zero_retention_enabled"),
+            ("compliance_sign_baa", "baa_signed"),
+            ("decrypt_field", "decrypt_field"),
+            ("sub_account_api_key", "sub_account_api_key_minted"),
+            ("contract_sign", "contract_signed"),
+            ("dpa_generate_pdf", "dpa_document_generated"),
+        ] {
+            let body = handler_body(source, handler)
+                .unwrap_or_else(|| panic!("handler {handler} disappeared from routes.rs"));
+            assert!(
+                body.contains("audit_server_action("),
+                "{handler} must emit its server-side audit entry"
+            );
+            assert!(
+                body.contains(&format!("\"{action}\"")),
+                "{handler} must record the '{action}' action string"
+            );
+        }
+    }
+
+    /// require_scope semantics: the admin claim passes, the exact scope
+    /// passes, the wildcard scope passes, anything else is refused.
+    #[test]
+    fn require_scope_accepts_admin_exact_and_wildcard_only() {
+        fn ctx(is_admin: bool, scopes: &[&str]) -> AuthContext {
+            AuthContext {
+                user_id: "u".into(),
+                tenant_id: "t".into(),
+                is_admin,
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        assert!(require_scope(&ctx(true, &[]), SCOPE_COMPLIANCE_WRITE).is_none());
+        assert!(require_scope(
+            &ctx(false, &[SCOPE_COMPLIANCE_WRITE]),
+            SCOPE_COMPLIANCE_WRITE
+        )
+        .is_none());
+        assert!(require_scope(&ctx(false, &["*"]), SCOPE_LOG_STREAMS_WRITE).is_none());
+        assert!(require_scope(&ctx(false, &[]), SCOPE_COMPLIANCE_WRITE).is_some());
+        assert!(
+            require_scope(
+                &ctx(false, &[SCOPE_WHITELABEL_WRITE]),
+                SCOPE_COMPLIANCE_WRITE
+            )
+            .is_some(),
+            "an unrelated scope must not satisfy the gate"
+        );
     }
 }

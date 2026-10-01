@@ -117,7 +117,7 @@ impl TrackingCodec {
 
     /// Encode `TrackingData` into a URL-safe tracking token.
     pub fn encode(&self, data: &TrackingData) -> Result<String> {
-        let payload = serialize_tracking_data(data);
+        let payload = serialize_tracking_data(data)?;
         let (iv, tag, ciphertext) = self.aes128gcm_encrypt(&payload)?;
 
         let mut combined = Vec::with_capacity(IV_LEN + AUTH_TAG_LEN + ciphertext.len());
@@ -224,7 +224,7 @@ impl TrackingCodec {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let payload = serialize_unsub_payload_v2(tenant_id, recipient, message_id, ts_ms);
+        let payload = serialize_unsub_payload_v2(tenant_id, recipient, message_id, ts_ms)?;
         let (iv, tag, ciphertext) = self.aes128gcm_encrypt(&payload)?;
 
         let mut combined = Vec::with_capacity(IV_LEN + AUTH_TAG_LEN + ciphertext.len());
@@ -438,15 +438,31 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 const UNSUB_PAYLOAD_V2_MAGIC: &[u8; 4] = b"AXU2";
 
 /// Serialize a v2 (message-attributed) unsubscribe payload.
+///
+/// SM2-F9: every length-prefixed field must fit `u16::MAX` — the previous
+/// silent `as u16` truncation produced a structurally corrupt payload that
+/// could never decode, minting a dead unsubscribe token with no error.
 fn serialize_unsub_payload_v2(
     tenant_id: &str,
     recipient: &str,
     message_id: &str,
     ts_ms: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let tid = tenant_id.as_bytes();
     let rec = recipient.as_bytes();
     let mid = message_id.as_bytes();
+    for (name, field) in [
+        ("tenant_id", tid.len()),
+        ("recipient", rec.len()),
+        ("message_id", mid.len()),
+    ] {
+        if field > u16::MAX as usize {
+            return Err(anyhow!(
+                "unsubscribe payload field `{name}` is {field} bytes; the u16 length prefix caps fields at {}",
+                u16::MAX
+            ));
+        }
+    }
     let ts = ts_ms.to_string();
 
     let mut buf = Vec::with_capacity(4 + 6 + tid.len() + rec.len() + mid.len() + ts.len());
@@ -458,7 +474,7 @@ fn serialize_unsub_payload_v2(
     write_u16be(&mut buf, mid.len() as u16);
     buf.extend_from_slice(mid);
     buf.extend_from_slice(ts.as_bytes());
-    buf
+    Ok(buf)
 }
 
 /// Parse a decrypted v2 unsubscribe payload. `None` on any structural
@@ -560,7 +576,13 @@ fn write_u16be(buf: &mut Vec<u8>, v: u16) {
     buf.push((v & 0xff) as u8);
 }
 
-fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
+/// SM2-F9: every length-prefixed field must fit `u16::MAX` — an
+/// `original_url` (or recipient/message id) longer than 65 535 bytes used to
+/// have its length prefix silently truncated (`as u16`), minting a token
+/// that could never decode; the click route only enforced URL length at
+/// CLICK time, so the link dead-ended at the fallback with no mint-time
+/// error. `encode` now fails loudly instead.
+fn serialize_tracking_data(data: &TrackingData) -> Result<Vec<u8>> {
     let tid = data.tenant_id.as_bytes();
     let mid = data.message_id.as_bytes();
     let rec = data.recipient.as_bytes();
@@ -568,6 +590,27 @@ fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
     let url = data.original_url.as_deref().unwrap_or("").as_bytes();
 
     let version: u8 = if data.original_url.is_some() { 3 } else { 2 };
+
+    for (name, len) in [
+        ("tenant_id", tid.len()),
+        ("message_id", mid.len()),
+        ("recipient", rec.len()),
+        ("link_id", lid.len()),
+    ] {
+        if len > u16::MAX as usize {
+            return Err(anyhow!(
+                "tracking payload field `{name}` is {len} bytes; the u16 length prefix caps fields at {}",
+                u16::MAX
+            ));
+        }
+    }
+    if version == 3 && url.len() > u16::MAX as usize {
+        return Err(anyhow!(
+            "tracking payload field `original_url` is {} bytes; the u16 length prefix caps fields at {} — enforce max_redirect_url_len at MINT time",
+            url.len(),
+            u16::MAX
+        ));
+    }
 
     let mut buf = Vec::with_capacity(
         1 + 2
@@ -605,7 +648,7 @@ fn serialize_tracking_data(data: &TrackingData) -> Vec<u8> {
         buf.extend_from_slice(url);
     }
 
-    buf
+    Ok(buf)
 }
 
 // `pos` is advanced inside read_field! macros; the final increment after the
@@ -859,7 +902,8 @@ mod tests {
     #[test]
     fn v2_unsubscribe_payload_rejects_structural_corruption() {
         // Valid frame, then truncate each field region.
-        let mut buf = serialize_unsub_payload_v2("tenant", "u@x.com", "msg", 1_700_000_000_000);
+        let mut buf =
+            serialize_unsub_payload_v2("tenant", "u@x.com", "msg", 1_700_000_000_000).unwrap();
         let full = buf.clone();
         let full_ts = "1700000000000";
         for cut in 1..full.len() {
@@ -972,6 +1016,96 @@ mod tests {
         assert_eq!(data.recipient, "usr");
         assert_eq!(data.link_id, None);
         assert!(data.original_url.is_none());
+    }
+
+    /// SM2-F9: a field longer than the u16 length prefix can hold must make
+    /// `encode` FAIL at mint time — the old `len as u16` truncation minted a
+    /// structurally corrupt token that could never decode, so a click link
+    /// silently dead-ended at the fallback with no error surfaced.
+    #[test]
+    fn encode_rejects_fields_exceeding_u16_length_prefix() {
+        let codec = make_codec();
+
+        let mk = |tenant: String, message: String, recipient: String, url: Option<String>| {
+            TrackingData {
+                tenant_id: tenant,
+                message_id: message,
+                recipient,
+                link_id: None,
+                original_url: url,
+            }
+        };
+
+        // Oversized original_url (the realistic case: a very long link).
+        let oversized_url = mk(
+            "t".into(),
+            "m".into(),
+            "u@x.com".into(),
+            Some("https://x.test/".repeat(6_000)), // 90 000 bytes > 65 535
+        );
+        let err = codec
+            .encode(&oversized_url)
+            .expect_err("oversized original_url must fail at mint time");
+        assert!(
+            err.to_string().contains("original_url"),
+            "error names the offending field: {err}"
+        );
+        // And the serializer the public API wraps.
+        assert!(serialize_tracking_data(&oversized_url).is_err());
+
+        // Every other length-prefixed field is guarded too.
+        let oversized_tenant = mk("x".repeat(70_000), "m".into(), "u@x.com".into(), None);
+        let oversized_message = mk("t".into(), "x".repeat(70_000), "u@x.com".into(), None);
+        let oversized_recipient = mk("t".into(), "m".into(), "x".repeat(70_000), None);
+        for data in [&oversized_tenant, &oversized_message, &oversized_recipient] {
+            assert!(
+                codec.encode(data).is_err(),
+                "a >u16::MAX field must fail encode, not truncate"
+            );
+        }
+
+        // Sanity: the exact boundary (65 535 bytes) is exactly representable
+        // and round-trips at the payload layer. (The full token path caps
+        // tokens at 4096 chars by design — a 65 KB URL exceeds it and the
+        // routes reject it; the point here is that the SERIALIZER is honest
+        // at the boundary instead of truncating.)
+        let boundary_url = mk(
+            "t".into(),
+            "m".into(),
+            "u@x.com".into(),
+            Some(format!("https://x.test/{}", "a".repeat(65_535 - 15))),
+        );
+        let payload = serialize_tracking_data(&boundary_url)
+            .expect("a 65 535-byte field is exactly representable");
+        let decoded =
+            deserialize_tracking_data(&payload).expect("a boundary-size field must round-trip");
+        assert_eq!(
+            decoded.original_url.as_deref().map(str::len),
+            Some(65_535),
+            "no byte of the boundary-size field may be lost"
+        );
+    }
+
+    /// SM2-F9: the same guard on the v2 unsubscribe payload serializer and
+    /// its public mint path.
+    #[test]
+    fn v2_unsubscribe_payload_rejects_oversized_fields() {
+        // 40 000 two-byte chars = 80 000 bytes (multibyte on purpose).
+        let huge_recipient = "é".repeat(40_000);
+        let err = serialize_unsub_payload_v2("tenant", &huge_recipient, "msg", 1_700_000_000_000)
+            .expect_err("oversized recipient must fail");
+        assert!(
+            err.to_string().contains("recipient"),
+            "error names the offending field: {err}"
+        );
+
+        let codec = make_codec();
+        assert!(
+            codec
+                .generate_unsubscribe_token_with_message("t", &"u".repeat(70_000), "m")
+                .is_err(),
+            "the mint path propagates the oversize error"
+        );
     }
 
     /// #194:legacy HMAC tokens must verify with EITHER the full 32-byte
@@ -1121,133 +1255,135 @@ mod tests {
         );
     }
 
-// ── Gap-closure:expired-token gate, empty-buffer guard, v3 URL round-trip ─────
+    // ── Gap-closure:expired-token gate, empty-buffer guard, v3 URL round-trip ─────
 
-/// A v2 unsubscribe token whose embedded timestamp is OLDER than the
-/// `max_age_days` window must be rejected (line-of-contract: stale signed
-/// URLs have an explicit lifetime), while the SAME shape with a fresh
-/// timestamp verifies.
-#[test]
-fn v2_unsubscribe_token_expired_past_max_age_is_rejected() {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let codec = make_codec();
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    /// A v2 unsubscribe token whose embedded timestamp is OLDER than the
+    /// `max_age_days` window must be rejected (line-of-contract: stale signed
+    /// URLs have an explicit lifetime), while the SAME shape with a fresh
+    /// timestamp verifies.
+    #[test]
+    fn v2_unsubscribe_token_expired_past_max_age_is_rejected() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let codec = make_codec();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
 
-    let seal = |payload: Vec<u8>| -> String {
-        let (iv, tag, ct) = codec.aes128gcm_encrypt(&payload).expect("encrypt");
-        let mut combined = Vec::with_capacity(iv.len() + tag.len() + ct.len());
-        combined.extend_from_slice(&iv);
-        combined.extend_from_slice(&tag);
-        combined.extend_from_slice(&ct);
-        URL_SAFE_NO_PAD.encode(&combined)
-    };
+        let seal = |payload: Vec<u8>| -> String {
+            let (iv, tag, ct) = codec.aes128gcm_encrypt(&payload).expect("encrypt");
+            let mut combined = Vec::with_capacity(iv.len() + tag.len() + ct.len());
+            combined.extend_from_slice(&iv);
+            combined.extend_from_slice(&tag);
+            combined.extend_from_slice(&ct);
+            URL_SAFE_NO_PAD.encode(&combined)
+        };
 
-    // 100 days old, window 90 days → expired.
-    let old = serialize_unsub_payload_v2(
-        "tenant_old",
-        "stale@example.com",
-        "msg_old",
-        now_ms - 100 * 24 * 60 * 60 * 1000,
-    );
-    let old_token = seal(old);
-    assert!(
-        codec.verify_unsubscribe_token(&old_token, Some(90)).is_none(),
-        "an expired v2 token must be rejected"
-    );
-
-    // Fresh timestamp, same shape → verifies with attribution.
-    let fresh = serialize_unsub_payload_v2(
-        "tenant_new",
-        "fresh@example.com",
-        "msg_new",
-        now_ms,
-    );
-    let data = codec
-        .verify_unsubscribe_token(&seal(fresh), Some(90))
-        .expect("fresh v2 token verifies");
-    assert_eq!(data.tenant_id, "tenant_new");
-    assert_eq!(data.message_id.as_deref(), Some("msg_new"));
-}
-
-/// `deserialize_tracking_data` rejects an EMPTY plaintext outright — the
-/// version byte cannot even be read.
-#[test]
-fn deserialize_tracking_data_rejects_empty_buffer() {
-    assert!(deserialize_tracking_data(&[]).is_none());
-}
-
-/// A token whose payload decodes to an EMPTY required field is refused —
-/// `encode` accepts any `TrackingData` (it is a public surface shared with
-/// the worker-processors tracker), so the deserializer must be the one that
-/// upholds the "tenant/message/recipient are non-empty" invariant.
-#[test]
-fn decode_rejects_payloads_with_empty_required_fields() {
-    let codec = make_codec();
-    for empty in [
-        TrackingData {
-            tenant_id: String::new(),
-            message_id: "msg".into(),
-            recipient: "r@example.com".into(),
-            link_id: None,
-            original_url: None,
-        },
-        TrackingData {
-            tenant_id: "tenant".into(),
-            message_id: String::new(),
-            recipient: "r@example.com".into(),
-            link_id: None,
-            original_url: None,
-        },
-        TrackingData {
-            tenant_id: "tenant".into(),
-            message_id: "msg".into(),
-            recipient: String::new(),
-            link_id: None,
-            original_url: None,
-        },
-    ] {
-        let token = codec.encode(&empty).expect("encoding is infallible for well-formed data");
+        // 100 days old, window 90 days → expired.
+        let old = serialize_unsub_payload_v2(
+            "tenant_old",
+            "stale@example.com",
+            "msg_old",
+            now_ms - 100 * 24 * 60 * 60 * 1000,
+        )
+        .unwrap();
+        let old_token = seal(old);
         assert!(
-            codec.decode(&token).is_none(),
-            "a payload with an empty required field must not decode (tenant={:?})",
-            empty.tenant_id
+            codec
+                .verify_unsubscribe_token(&old_token, Some(90))
+                .is_none(),
+            "an expired v2 token must be rejected"
         );
+
+        // Fresh timestamp, same shape → verifies with attribution.
+        let fresh =
+            serialize_unsub_payload_v2("tenant_new", "fresh@example.com", "msg_new", now_ms)
+                .unwrap();
+        let data = codec
+            .verify_unsubscribe_token(&seal(fresh), Some(90))
+            .expect("fresh v2 token verifies");
+        assert_eq!(data.tenant_id, "tenant_new");
+        assert_eq!(data.message_id.as_deref(), Some("msg_new"));
     }
-}
 
-/// v3 tokens (originalUrl present) serialize WITH the URL field and
-/// deserialize back with it intact; the legacy v2 shape (no URL) decodes to
-/// `original_url: None`.
-#[test]
-fn v3_original_url_round_trips_and_v2_decodes_to_none() {
-    let codec = make_codec();
-    let with_url = TrackingData {
-        tenant_id: "tenant_url".into(),
-        message_id: "msg_url".into(),
-        recipient: "clicker@example.com".into(),
-        link_id: Some("lnk_url".into()),
-        original_url: Some("https://example.com/deep/link?q=1".into()),
-    };
-    let token = codec.encode(&with_url).expect("encode v3");
-    let decoded = codec.decode(&token).expect("decode v3");
-    assert_eq!(
-        decoded.original_url.as_deref(),
-        Some("https://example.com/deep/link?q=1"),
-        "the original URL must survive the token round-trip"
-    );
-    assert_eq!(decoded.tenant_id, "tenant_url");
-    assert_eq!(decoded.link_id.as_deref(), Some("lnk_url"));
+    /// `deserialize_tracking_data` rejects an EMPTY plaintext outright — the
+    /// version byte cannot even be read.
+    #[test]
+    fn deserialize_tracking_data_rejects_empty_buffer() {
+        assert!(deserialize_tracking_data(&[]).is_none());
+    }
 
-    // A v2 shape (no URL) still decodes with original_url None.
-    let without_url = TrackingData {
-        original_url: None,
-        ..with_url
-    };
-    let token = codec.encode(&without_url).expect("encode v2");
-    let decoded = codec.decode(&token).expect("decode v2");
-    assert_eq!(decoded.original_url, None);
-}
+    /// A token whose payload decodes to an EMPTY required field is refused —
+    /// `encode` accepts any `TrackingData` (it is a public surface shared with
+    /// the worker-processors tracker), so the deserializer must be the one that
+    /// upholds the "tenant/message/recipient are non-empty" invariant.
+    #[test]
+    fn decode_rejects_payloads_with_empty_required_fields() {
+        let codec = make_codec();
+        for empty in [
+            TrackingData {
+                tenant_id: String::new(),
+                message_id: "msg".into(),
+                recipient: "r@example.com".into(),
+                link_id: None,
+                original_url: None,
+            },
+            TrackingData {
+                tenant_id: "tenant".into(),
+                message_id: String::new(),
+                recipient: "r@example.com".into(),
+                link_id: None,
+                original_url: None,
+            },
+            TrackingData {
+                tenant_id: "tenant".into(),
+                message_id: "msg".into(),
+                recipient: String::new(),
+                link_id: None,
+                original_url: None,
+            },
+        ] {
+            let token = codec
+                .encode(&empty)
+                .expect("encoding is infallible for well-formed data");
+            assert!(
+                codec.decode(&token).is_none(),
+                "a payload with an empty required field must not decode (tenant={:?})",
+                empty.tenant_id
+            );
+        }
+    }
+
+    /// v3 tokens (originalUrl present) serialize WITH the URL field and
+    /// deserialize back with it intact; the legacy v2 shape (no URL) decodes to
+    /// `original_url: None`.
+    #[test]
+    fn v3_original_url_round_trips_and_v2_decodes_to_none() {
+        let codec = make_codec();
+        let with_url = TrackingData {
+            tenant_id: "tenant_url".into(),
+            message_id: "msg_url".into(),
+            recipient: "clicker@example.com".into(),
+            link_id: Some("lnk_url".into()),
+            original_url: Some("https://example.com/deep/link?q=1".into()),
+        };
+        let token = codec.encode(&with_url).expect("encode v3");
+        let decoded = codec.decode(&token).expect("decode v3");
+        assert_eq!(
+            decoded.original_url.as_deref(),
+            Some("https://example.com/deep/link?q=1"),
+            "the original URL must survive the token round-trip"
+        );
+        assert_eq!(decoded.tenant_id, "tenant_url");
+        assert_eq!(decoded.link_id.as_deref(), Some("lnk_url"));
+
+        // A v2 shape (no URL) still decodes with original_url None.
+        let without_url = TrackingData {
+            original_url: None,
+            ..with_url
+        };
+        let token = codec.encode(&without_url).expect("encode v2");
+        let decoded = codec.decode(&token).expect("decode v2");
+        assert_eq!(decoded.original_url, None);
+    }
 }

@@ -1,6 +1,9 @@
 [package]
 name = "kiwicaptcha-wasm"
-version = "0.1.0"
+# Family lockstep version (audit SM15 F10): tracks the canonical Rust core
+# crate `kiwicaptcha` — see ../VERSIONING.md. Do not version this port
+# independently.
+version = "1.7.0"
 edition = "2021"
 description = "KiwiCaptcha WASM solvers (SHA-256 + Argon2id proof-of-work)"
 license = "MIT"

@@ -56,10 +56,25 @@ mod email_pipeline {
             waf_result.total_score
         );
 
-        // Step 2:Threat-intel check
-        let _ti_ip = threat_intel.check_ip("8.8.8.8");
-        let _ti_domain = threat_intel.check_domain("legitimate.com");
-        // Clean IPs/domains should not be blocked (check risk_score if available)
+        // Step 2:Threat-intel check — the verdicts are ASSERTED, not bound
+        // and dropped (audit SM12 F15): a clean IP and domain must classify
+        // exactly Allow by the production reputation scorer.
+        let ti_ip = threat_intel.check_ip("8.8.8.8");
+        assert_eq!(
+            ti_ip.action,
+            threat_intel::engine::ThreatAction::Allow,
+            "clean IP must classify Allow, got {} ({})",
+            ti_ip.action,
+            ti_ip.summary
+        );
+        let ti_domain = threat_intel.check_domain("legitimate.com");
+        assert_eq!(
+            ti_domain.action,
+            threat_intel::engine::ThreatAction::Allow,
+            "clean domain must classify Allow, got {} ({})",
+            ti_domain.action,
+            ti_domain.summary
+        );
 
         // Step 3:Spam filter
         let headers = vec![
@@ -76,8 +91,15 @@ mod email_pipeline {
             "Spam score too high for clean email: {}",
             spam_verdict.score
         );
+        assert_eq!(
+            spam_verdict.classification,
+            spam_filter::engine::SpamClass::Ham,
+            "clean email must classify exactly Ham, got {:?}",
+            spam_verdict.classification
+        );
 
-        // Step 4:DLP scan
+        // Step 4:DLP scan — clean content must be an exact Allow with zero
+        // findings, not merely "a low number".
         let dlp_verdict = dlp.scan(
             "Let's meet tomorrow at 10am. Best regards, John.",
             Some("legitimate.com"),
@@ -87,10 +109,32 @@ mod email_pipeline {
             "DLP score too high for clean email: {}",
             dlp_verdict.risk_score
         );
+        assert_eq!(
+            dlp_verdict.action,
+            dlp_engine::engine::DlpAction::Allow,
+            "clean content must be an exact DLP Allow, got {:?}",
+            dlp_verdict.action
+        );
+        assert!(
+            dlp_verdict.pii_findings.is_empty(),
+            "clean content must produce zero PII findings, got {:?}",
+            dlp_verdict.pii_findings
+        );
 
         // Step 5:Sandbox (no attachment)
         let sandbox_result = sandbox_eng.analyze(b"Plain text attachment", Some("notes.txt"));
         assert!(sandbox_result.is_ok(), "Sandbox should accept plain text");
+        let sandbox_verdict = sandbox_result.expect("verdict");
+        assert!(
+            sandbox_verdict.risk_score < 0.5,
+            "plain text must carry a low sandbox risk, got {}",
+            sandbox_verdict.risk_score
+        );
+        assert!(
+            sandbox_verdict.findings.is_empty(),
+            "plain text must produce zero sandbox findings, got {:?}",
+            sandbox_verdict.findings
+        );
     }
 
     #[test]
@@ -107,10 +151,24 @@ mod email_pipeline {
             body: Some(api_body),
         };
         let result = waf.inspect(&req);
+        // Exact-category assertion (SM12 F15): a single low-value rule from
+        // ANY category must not satisfy this test — the SQLi classifier
+        // itself must fire with a meaningful score.
+        let sqli = result
+            .matches
+            .iter()
+            .find(|m| m.category == waf_engine::AttackCategory::SqlInjection)
+            .expect("WAF must classify the payload as SqlInjection");
         assert!(
-            result.total_score > 0,
-            "WAF should detect SQLi: score = {}",
-            result.total_score
+            sqli.score >= 3,
+            "the SqlInjection rule must contribute a real score, got {}",
+            sqli.score
+        );
+        assert!(
+            result.total_score >= sqli.score,
+            "total_score must include the SqlInjection match: {} < {}",
+            result.total_score,
+            sqli.score
         );
     }
 
@@ -118,18 +176,29 @@ mod email_pipeline {
     fn test_spam_email_detected() {
         let spam = SpamEngine::new();
 
-        let body = "Congratulations! You've won $1,000,000! Click here to claim your prize NOW! This offer expires in 24 hours! Don't delay - act immediately!";
+        // Same shape the spam-filter crate's own suite classifies as Spam:
+        // spammy content + a Reply-To mismatch + failed authentication.
+        let body = "Congratulations! You have won a million dollars! Click here: \
+                    https://bit.ly/scam to wire transfer now! Act now! Limited time! Urgent!!!!!!!";
         let headers = vec![
             ("From".into(), "spam@spammer.com".into()),
-            (
-                "Subject".into(),
-                "URGENT: Act now! Limited time offer!".into(),
-            ),
+            ("Reply-To".into(), "money@different.com".into()),
         ];
-        let verdict = spam.analyze(body, &headers, None);
+        let verdict = spam.analyze(body, &headers, Some("spf=fail; dkim=fail"));
         assert!(
             verdict.score > 3.0,
             "Spam filter should flag obvious spam: score = {}",
+            verdict.score
+        );
+        // Exact classification (SM12 F15): a high score with a Ham label is
+        // a verdict-propagation bug even if the number looks fine.
+        assert!(
+            matches!(
+                verdict.classification,
+                spam_filter::engine::SpamClass::Spam | spam_filter::engine::SpamClass::Reject
+            ),
+            "obvious spam must classify Spam/Reject, got {:?} (score {})",
+            verdict.classification,
             verdict.score
         );
     }
@@ -140,11 +209,21 @@ mod email_pipeline {
 
         let body = "Customer SSN: 123-45-6789, Credit card: 4111-1111-1111-1111";
         let verdict = dlp.scan(body, Some("external.com"));
+        // Exact-category assertions (SM12 F15): both detector types must
+        // fire — an OR-composite let a single finding pass for both.
+        let types: Vec<_> = verdict.pii_findings.iter().map(|f| f.pii_type).collect();
         assert!(
-            verdict.risk_score > 0.0 || !verdict.pii_findings.is_empty(),
-            "DLP should detect PII: risk = {}, findings = {}",
-            verdict.risk_score,
-            verdict.pii_findings.len()
+            types.contains(&dlp_engine::pii::PiiType::Ssn),
+            "DLP must detect the SSN, got finding types {types:?}"
+        );
+        assert!(
+            types.contains(&dlp_engine::pii::PiiType::CreditCard),
+            "DLP must detect the credit card, got finding types {types:?}"
+        );
+        assert!(
+            verdict.risk_score >= 5.0,
+            "two PII hits must push the risk score to a real minimum, got {}",
+            verdict.risk_score
         );
     }
 
@@ -157,8 +236,12 @@ mod email_pipeline {
         assert!(result.is_ok(), "Sandbox should produce a verdict");
         let verdict = result.expect("verdict");
         assert!(
-            verdict.risk_score > 0.0,
-            "Sandbox should flag executable: risk = {}",
+            !verdict.findings.is_empty(),
+            "an executable attachment must produce at least one finding"
+        );
+        assert!(
+            verdict.risk_score >= 1.0,
+            "an executable attachment must carry a substantive risk score, got {}",
             verdict.risk_score
         );
     }
@@ -177,6 +260,14 @@ mod email_pipeline {
             body: Some(body),
         };
         let result = waf.inspect(&req);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.category == waf_engine::AttackCategory::Xss && m.score > 0),
+            "WAF must classify the payload as Xss with a real score, matches: {:?}",
+            result.matches
+        );
         assert!(
             result.total_score > 0,
             "WAF should detect XSS: score = {}",
@@ -340,8 +431,10 @@ mod network_pipeline {
 
         let payload =
             b"GET /search?q=' UNION SELECT * FROM users -- HTTP/1.1\r\nHost:example.com\r\n\r\n";
-        let (_verdict, alerts) =
-            ids.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "tcp", payload);
+        // The sqli signatures are http-scoped (Signature.protocol == "http");
+        // inspecting as "tcp" skips them by design.
+        let (verdict, alerts) =
+            ids.inspect(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 80, "http", payload);
 
         let req = HttpRequest {
             client_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -353,8 +446,38 @@ mod network_pipeline {
         };
         let waf_result = waf.inspect(&req);
 
-        let detected = waf_result.total_score > 0 || !alerts.is_empty();
-        assert!(detected, "SQLi should be detected by IDS or WAF");
+        // SM12 F15: this used to be `waf > 0 || !alerts.is_empty()` — a
+        // single low-value WAF rule could mask a dead IDS (and vice versa).
+        // Each engine is asserted on its OWN classification now.
+        assert!(
+            waf_result
+                .matches
+                .iter()
+                .any(|m| m.category == waf_engine::AttackCategory::SqlInjection),
+            "WAF must classify the query as SqlInjection, matches: {:?}",
+            waf_result.matches
+        );
+        let sqli_alerts: Vec<_> = alerts
+            .iter()
+            .filter(|a| a.category == "sqli")
+            .collect();
+        assert!(
+            !sqli_alerts.is_empty(),
+            "IDS must raise its sqli-signature alert, got alerts: {:?}",
+            alerts
+        );
+        assert!(
+            sqli_alerts
+                .iter()
+                .all(|a| a.action != ids_engine::IdsVerdict::Pass),
+            "a raised sqli alert must recommend a non-Pass action: {:?}",
+            sqli_alerts
+        );
+        assert!(
+            !matches!(verdict, ids_engine::IdsVerdict::Pass),
+            "an attack payload must not yield an overall IDS Pass verdict, got {:?}",
+            verdict
+        );
     }
 
     #[test]
@@ -549,5 +672,316 @@ mod full_stack {
         };
         let dlp = DlpEngine::with_config(cfg);
         let _result = dlp.scan("some content", None);
+    }
+}
+
+// ===========================================================================
+// CHAINED PIPELINE (audit SM12 F15)
+// ===========================================================================
+
+/// The module doc always claimed "verdicts propagate correctly", but nothing
+/// pipelined: every engine was fed independently and the intermediate verdicts
+/// were dropped. This module chains ONE message through the production stack
+/// in delivery order — WAF → threat-intel → spam → DLP → sandbox — aggregates
+/// the per-stage verdicts the way the platform's rejection policy does (ANY
+/// hard-reject vote rejects the message), and asserts each engine's exact
+/// classification. `A > 0 || B` composites are banned by construction: every
+/// stage has its own minimum-score or exact-category assertion, so one
+/// engine's regression cannot be masked by its neighbours.
+mod chained_pipeline {
+    use chrono::Utc;
+    use dlp_engine::engine::{DlpAction, DlpEngine};
+    use sandbox::engine::SandboxEngine;
+    use spam_filter::engine::SpamEngine;
+    use threat_intel::domain_blocklist::DomainBlockEntry;
+    use threat_intel::engine::ThreatAction;
+    use threat_intel::ip_blocklist::{IpBlockEntry, ThreatCategory};
+    use threat_intel::ThreatIntelEngine;
+    use waf_engine::{
+        config::WafConfig,
+        engine::{HttpRequest, WafEngine},
+    };
+
+    /// The combined decision the pipeline produces from the stage verdicts.
+    #[derive(Debug, PartialEq, Eq)]
+    enum PipelineVerdict {
+        Deliver,
+        Reject,
+    }
+
+    struct StageRecord {
+        stage: &'static str,
+        hard_reject: bool,
+        detail: String,
+    }
+
+    /// Aggregate: a message is deliverable only when NO stage voted a hard
+    /// reject. This is the propagation the module doc promised.
+    fn combine(stages: &[StageRecord]) -> PipelineVerdict {
+        if stages.iter().any(|s| s.hard_reject) {
+            PipelineVerdict::Reject
+        } else {
+            PipelineVerdict::Deliver
+        }
+    }
+
+    /// The known-bad sender infrastructure this suite feeds into the threat
+    /// intel blocklists, so the TI stage produces a real Block verdict
+    /// instead of a vacuous default Allow.
+    const BAD_SENDER_IP: &str = "203.0.113.66";
+    const BAD_SENDER_DOMAIN: &str = "chained-pipeline-malware.example";
+    /// The feed name declared in the engine config: unconfigured feeds carry
+    /// trust 3.0 by design and can never produce Block (Enforce) outcomes.
+    const TEST_FEED: &str = "integration-test-feed";
+
+    /// A TI engine whose config declares this suite's feed as a trusted
+    /// (9.5) ENFORCE feed — the same posture production blocklist feeds run
+    /// under — so the fed entries can drive a hard Block.
+    fn block_capable_threat_intel() -> ThreatIntelEngine {
+        let mut config = threat_intel::config::ThreatIntelConfig::default();
+        config.feeds.insert(
+            0,
+            threat_intel::config::FeedSource {
+                name: TEST_FEED.into(),
+                url: "https://feeds.invalid/integration-test.txt".into(),
+                format: threat_intel::config::FeedFormat::PlainText,
+                refresh_interval_secs: 3600,
+                enabled: true,
+                trust_score: 9.5,
+                enforcement_mode: threat_intel::config::FeedEnforcementMode::Enforce,
+            },
+        );
+        ThreatIntelEngine::with_config(config)
+    }
+
+    fn feed_threat_intel(engine: &ThreatIntelEngine) {
+        let now = Utc::now();
+        let ip_entry = IpBlockEntry {
+            cidr: format!("{BAD_SENDER_IP}/32"),
+            source: TEST_FEED.into(),
+            category: ThreatCategory::Malware,
+            confidence: 9.5,
+            added_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        };
+        let domain_entry = DomainBlockEntry {
+            domain: BAD_SENDER_DOMAIN.into(),
+            source: TEST_FEED.into(),
+            confidence: 9.5,
+            category: "malware".into(),
+            added_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        };
+        let applied = engine.apply_feed_refresh(
+            vec![(format!("{BAD_SENDER_IP}/32"), ip_entry)],
+            vec![(BAD_SENDER_DOMAIN.into(), domain_entry)],
+        );
+        assert!(
+            applied,
+            "the test feed refresh must be applied — without it the TI stage is untested"
+        );
+    }
+
+    fn run_pipeline(
+        body: &str,
+        sender_domain: &str,
+        sender_ip: &str,
+        auth_results: Option<&str>,
+        attachment: Option<(&[u8], &str)>,
+    ) -> PipelineVerdict {
+        let waf = WafEngine::new(WafConfig::default());
+        let threat_intel = block_capable_threat_intel();
+        feed_threat_intel(&threat_intel);
+        let spam = SpamEngine::new();
+        let dlp = DlpEngine::new();
+        let sandbox = SandboxEngine::new();
+
+        let mut stages: Vec<StageRecord> = Vec::new();
+
+        // ── Stage 1: WAF on the API submission ─────────────────────────
+        let waf_req = HttpRequest {
+            client_ip: sender_ip.parse().expect("sender ip literal"),
+            method: "POST",
+            path: "/v1/messages",
+            query_string: None,
+            headers: &[("content-type".into(), "application/json".into())],
+            body: Some(body),
+        };
+        let waf_result = waf.inspect(&waf_req);
+        stages.push(StageRecord {
+            stage: "waf",
+            hard_reject: waf_result.total_score >= 10,
+            detail: format!("total_score={}", waf_result.total_score),
+        });
+
+        // ── Stage 2: threat intel on sender IP + envelope domain ───────
+        let ti = threat_intel.check(Some(sender_ip), Some(sender_domain));
+        stages.push(StageRecord {
+            stage: "threat_intel",
+            hard_reject: ti.action == ThreatAction::Block,
+            detail: format!("action={}", ti.action),
+        });
+
+        // ── Stage 3: spam filter on the composed message ───────────────
+        let headers = vec![
+            ("From".into(), format!("sender@{sender_domain}")),
+            ("Subject".into(), "Pipeline verification".into()),
+        ];
+        let spam_verdict = spam.analyze(body, &headers, auth_results);
+        stages.push(StageRecord {
+            stage: "spam",
+            hard_reject: matches!(
+                spam_verdict.classification,
+                spam_filter::engine::SpamClass::Reject
+            ),
+            detail: format!(
+                "class={:?} score={}",
+                spam_verdict.classification, spam_verdict.score
+            ),
+        });
+
+        // ── Stage 4: DLP on the body ───────────────────────────────────
+        let dlp_verdict = dlp.scan(body, Some(sender_domain));
+        stages.push(StageRecord {
+            stage: "dlp",
+            hard_reject: dlp_verdict.action == DlpAction::Block,
+            detail: format!(
+                "action={:?} risk={} findings={}",
+                dlp_verdict.action,
+                dlp_verdict.risk_score,
+                dlp_verdict.pii_findings.len()
+            ),
+        });
+
+        // ── Stage 5: sandbox on the (optional) attachment ──────────────
+        if let Some((content, name)) = attachment {
+            let sandbox_verdict = sandbox
+                .analyze(content, Some(name))
+                .expect("sandbox verdict");
+            stages.push(StageRecord {
+                stage: "sandbox",
+                hard_reject: sandbox_verdict.risk_score >= 1.0,
+                detail: format!(
+                    "risk={} findings={}",
+                    sandbox_verdict.risk_score,
+                    sandbox_verdict.findings.len()
+                ),
+            });
+        }
+
+        for s in &stages {
+            println!("pipeline stage {}: hard_reject={} ({})", s.stage, s.hard_reject, s.detail);
+        }
+        combine(&stages)
+    }
+
+    #[test]
+    fn hostile_message_is_rejected_by_the_chained_pipeline() {
+        // One message carrying four independent signals: SQL injection
+        // (WAF), block-listed sender infrastructure (threat intel), spam
+        // content with failed authentication (spam), and PII (DLP).
+        let body = "Congratulations! You have won a million dollars! Click here: \
+                    https://bit.ly/scam to wire transfer now! Act now! Urgent!!!!!!! \
+                    Also customer SSN: 123-45-6789 and card 4111111111111111. \
+                    ' UNION SELECT * FROM users --";
+        let verdict = run_pipeline(
+            body,
+            BAD_SENDER_DOMAIN,
+            BAD_SENDER_IP,
+            Some("spf=fail; dkim=fail"),
+            None,
+        );
+
+        // The combined verdict must be a REJECT (at least one hard vote).
+        assert_eq!(
+            verdict,
+            PipelineVerdict::Reject,
+            "a message with injection + blocklisted sender + PII must be rejected end-to-end"
+        );
+
+        // Per-engine minimums — every stage must independently classify:
+        let waf = WafEngine::new(WafConfig::default());
+        let waf_result = waf.inspect(&HttpRequest {
+            client_ip: BAD_SENDER_IP.parse().unwrap(),
+            method: "POST",
+            path: "/v1/messages",
+            query_string: None,
+            headers: &[("content-type".into(), "application/json".into())],
+            body: Some(body),
+        });
+        assert!(
+            waf_result
+                .matches
+                .iter()
+                .any(|m| m.category == waf_engine::AttackCategory::SqlInjection),
+            "WAF stage must classify the injection, matches: {:?}",
+            waf_result.matches
+        );
+
+        let ti = block_capable_threat_intel();
+        feed_threat_intel(&ti);
+        let ti_verdict = ti.check(Some(BAD_SENDER_IP), Some(BAD_SENDER_DOMAIN));
+        assert_eq!(
+            ti_verdict.action,
+            ThreatAction::Block,
+            "TI stage must Block the fed feed entries, got {} ({})",
+            ti_verdict.action,
+            ti_verdict.summary
+        );
+
+        let spam = SpamEngine::new();
+        let spam_headers = vec![
+            ("From".into(), format!("sender@{BAD_SENDER_DOMAIN}")),
+            ("Subject".into(), "Pipeline verification".into()),
+        ];
+        let spam_verdict = spam.analyze(body, &spam_headers, Some("spf=fail; dkim=fail"));
+        assert!(
+            matches!(
+                spam_verdict.classification,
+                spam_filter::engine::SpamClass::Spam | spam_filter::engine::SpamClass::Reject
+            ),
+            "spam stage must classify the hostile body Spam/Reject, got {:?} (score {})",
+            spam_verdict.classification,
+            spam_verdict.score
+        );
+
+        let dlp = DlpEngine::new();
+        let dlp_verdict = dlp.scan(body, Some(BAD_SENDER_DOMAIN));
+        let types: Vec<_> = dlp_verdict.pii_findings.iter().map(|f| f.pii_type).collect();
+        assert!(
+            types.contains(&dlp_engine::pii::PiiType::Ssn)
+                && types.contains(&dlp_engine::pii::PiiType::CreditCard),
+            "DLP stage must detect SSN AND credit card, got {types:?}"
+        );
+    }
+
+    #[test]
+    fn clean_message_is_delivered_by_the_chained_pipeline() {
+        let body = "Hi team, the quarterly report is attached to the shared drive. Best, Ana.";
+        let verdict = run_pipeline(body, "legitimate.example", "8.8.8.8", None, None);
+        assert_eq!(
+            verdict,
+            PipelineVerdict::Deliver,
+            "a clean message must pass every stage and be delivered"
+        );
+    }
+
+    #[test]
+    fn malicious_attachment_rejects_an_otherwise_clean_message() {
+        // Propagation check: ONLY the sandbox stage votes — the verdict must
+        // still flip to Reject, proving stage output reaches the decision.
+        let body = "Please find the requested document attached.";
+        let verdict = run_pipeline(
+            body,
+            "legitimate.example",
+            "8.8.8.8",
+            None,
+            Some((b"MZ\x90\x00 fake payload binary".as_slice(), "invoice.exe")),
+        );
+        assert_eq!(
+            verdict,
+            PipelineVerdict::Reject,
+            "an executable attachment must flip the combined verdict to Reject"
+        );
     }
 }

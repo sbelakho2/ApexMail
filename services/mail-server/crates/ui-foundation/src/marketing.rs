@@ -525,6 +525,7 @@ mod tests {
                 "/compare",
                 "/contact",
                 "/contact/sales",
+                "/data-locations",
                 "/de",
                 "/de/cookies",
                 "/docs",

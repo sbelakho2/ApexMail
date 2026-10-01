@@ -54,6 +54,22 @@ impl std::fmt::Display for DlpAction {
 /// i.e. 10 MiB with the default 1 MiB config).
 const MAX_TOTAL_SCAN_CHUNKS: usize = 10;
 
+/// Bytes carried over from the tail of each scan chunk into the next one
+/// (audit finding: chunks split at exact multiples of `max_scan_size` and
+/// joined with "\n" made a PII token straddling a seam match in NEITHER
+/// chunk — a deterministic DLP bypass). 64 bytes covers the longest
+/// detectable token with a wide margin (19-digit card plus separators).
+const CHUNK_CARRY_OVER_BYTES: usize = 64;
+
+/// One scanned slice mapped back onto the original body: `scan_start` is
+/// the slice's offset within the joined scan text, `body_start` the source
+/// offset in the body it was taken from.
+#[derive(Debug, Clone, Copy)]
+struct ChunkSpan {
+    scan_start: usize,
+    body_start: usize,
+}
+
 /// The DLP engine
 pub struct DlpEngine {
     config: DlpConfig,
@@ -107,30 +123,59 @@ impl DlpEngine {
             .saturating_mul(MAX_TOTAL_SCAN_CHUNKS);
         let overflow = body.len() > total_scan_cap;
         let mut chunks_scanned = 1usize;
+        // Scan geometry:one entry per scanned slice, used to map findings
+        // back to body coordinates and de-duplicate the carry-over overlap
+        // copies.
+        let mut chunk_table: Vec<ChunkSpan> = Vec::with_capacity(MAX_TOTAL_SCAN_CHUNKS + 1);
         let scan_text: String = if overflow {
             let half = total_scan_cap / 2;
-            let head_end = body.floor_char_boundary(half);
-            let tail_start = body.ceil_char_boundary(body.len().saturating_sub(half));
+            // The head/tail CUT line is a seam too: extend each side by a
+            // carry-over band so a token straddling the cut is fully
+            // visible inside one slice. The middle remains — and is
+            // explicitly reported as — unscanned.
+            let head_end =
+                body.floor_char_boundary((half + CHUNK_CARRY_OVER_BYTES).min(body.len()));
+            let tail_start =
+                body.ceil_char_boundary(body.len().saturating_sub(half + CHUNK_CARRY_OVER_BYTES));
             chunks_scanned = MAX_TOTAL_SCAN_CHUNKS;
-            format!(
-                "{}\n[DLP:content exceeds {} bytes — scanned first and last {} KiB, middle unscanned]\n{}",
-                &body[..head_end],
+            let note = format!(
+                "\n[DLP:content exceeds {} bytes — scanned first and last {} KiB, middle unscanned]\n",
                 total_scan_cap,
-                half / 1024,
-                &body[tail_start..]
-            )
+                (half + CHUNK_CARRY_OVER_BYTES) / 1024
+            );
+            chunk_table.push(ChunkSpan {
+                scan_start: 0,
+                body_start: 0,
+            });
+            chunk_table.push(ChunkSpan {
+                scan_start: head_end + note.len(),
+                body_start: tail_start,
+            });
+            format!("{}{}{}", &body[..head_end], note, &body[tail_start..])
         } else if truncated {
             let mut parts: Vec<&str> = Vec::with_capacity(MAX_TOTAL_SCAN_CHUNKS + 1);
+            let mut scan_offset = 0usize;
             let mut start = 0usize;
             while start < body.len() {
                 let end =
                     body.ceil_char_boundary((start + self.config.max_scan_size).min(body.len()));
-                parts.push(&body[start..end]);
+                // Carry the previous chunk's tail into this chunk so a
+                // token straddling the seam is fully visible in at least
+                // one slice (audit finding: a token spanning a multiple of
+                // `max_scan_size` matched in NEITHER chunk).
+                let carry = body.floor_char_boundary(start.saturating_sub(CHUNK_CARRY_OVER_BYTES));
+                parts.push(&body[carry..end]);
+                chunk_table.push(ChunkSpan {
+                    scan_start: scan_offset,
+                    body_start: carry,
+                });
+                scan_offset += (end - carry) + 1; // +1 for the "\n" join below
                 start = end;
             }
             chunks_scanned = parts.len();
             // A newline separator keeps PII/policy patterns from matching
-            // across a chunk seam.
+            // across a chunk seam; straddling tokens are covered by the
+            // carry-over window carried INTO the next chunk instead.
             parts.join("\n")
         } else {
             body.to_string()
@@ -140,14 +185,23 @@ impl DlpEngine {
         let mut total_risk = 0.0;
         let mut summary_parts = Vec::with_capacity(16);
 
-        // 1. PII scanning
-        let pii_findings = pii::scan_pii(
-            scan_text,
-            self.config.detect_credit_cards,
-            self.config.detect_ssn,
-            self.config.detect_phone_numbers,
-            self.config.detect_email_addresses,
-        );
+        // 1. PII scanning. The scanner is handed the joined chunk text;
+        // its span results let overlap-window copies of the same token be
+        // de-duplicated (see `dedup_overlap_copies`).
+        let pii_findings = {
+            let (mut findings, spans) = pii::scan_pii_with_spans(
+                scan_text,
+                self.config.detect_credit_cards,
+                self.config.detect_ssn,
+                self.config.detect_phone_numbers,
+                self.config.detect_email_addresses,
+                true,
+            );
+            dedup_overlap_copies(&mut findings, spans, &chunk_table, |f| {
+                (0u8, format!("{:?}|{}", f.pii_type, f.redacted))
+            });
+            findings
+        };
         for finding in &pii_findings {
             total_risk += finding.risk;
             summary_parts.push(format!("{}: {}", finding.pii_type, finding.redacted));
@@ -155,11 +209,23 @@ impl DlpEngine {
 
         // 2. Entropy analysis (secret detection)
         let entropy_result = if self.config.detect_secrets {
-            entropy::scan_entropy(
+            let mut result = entropy::scan_entropy(
                 scan_text,
                 self.config.entropy_threshold,
                 self.config.min_entropy_token_length,
-            )
+            );
+            let spans = result
+                .findings
+                .iter()
+                .map(|f| (f.offset, f.offset + f.length))
+                .collect();
+            dedup_overlap_copies(&mut result.findings, spans, &chunk_table, |f| {
+                (1u8, f.token_preview.clone())
+            });
+            // The aggregate risk must track the SURVIVING findings — the
+            // deduplicated copies must not keep contributing risk.
+            result.risk_score = result.findings.iter().map(|f| f.risk).sum();
+            result
         } else {
             entropy::EntropyResult {
                 findings: vec![],
@@ -177,7 +243,7 @@ impl DlpEngine {
         // 3. Content policy scanning. A build failure is LOUD:it is
         // counted globally and surfaced in the summary — a disabled content
         // channel must never look like "no matches".
-        let policy_matches = match content_policy::scan_content_policy(
+        let mut policy_matches = match content_policy::scan_content_policy(
             scan_text,
             &self.config.confidential_keywords,
         ) {
@@ -190,6 +256,15 @@ impl DlpEngine {
                 Vec::new()
             }
         };
+        {
+            let spans = policy_matches
+                .iter()
+                .map(|pm| (pm.offset, pm.offset + pm.keyword.len()))
+                .collect();
+            dedup_overlap_copies(&mut policy_matches, spans, &chunk_table, |pm| {
+                (2u8, pm.keyword.clone())
+            });
+        }
         for pm in &policy_matches {
             total_risk += pm.risk;
             summary_parts.push(format!("Policy: \"{}\"", pm.keyword));
@@ -302,6 +377,60 @@ impl DlpEngine {
 fn canonical_domain(domain: &str) -> String {
     let trimmed = domain.trim().trim_end_matches('.').to_lowercase();
     idna::domain_to_ascii(&trimmed).unwrap_or(trimmed)
+}
+
+/// De-duplicate findings that a chunk carry-over window scanned twice.
+///
+/// With `CHUNK_CARRY_OVER_BYTES` carried between consecutive chunks, a
+/// token lying ENTIRELY inside the window appears verbatim in two
+/// consecutive chunks (and around the head/tail recovery bands), so both
+/// copies match and the risk would double-count toward `block_threshold`.
+/// A finding is a duplicate iff it carries the same `key` AND its
+/// approximate body-coordinate span overlaps an already-kept finding's
+/// span. Offsets are mapped from scan-text coordinates to body coordinates
+/// via the chunk table; normalization drift (NFKC / zero-width stripping
+/// in the PII scanner) makes them approximate, which at worst KEEPS both
+/// copies of a duplicate — it can never drop a unique finding.
+fn dedup_overlap_copies<T>(
+    findings: &mut Vec<T>,
+    spans: Vec<(usize, usize)>,
+    chunk_table: &[ChunkSpan],
+    key: impl Fn(&T) -> (u8, String),
+) {
+    if chunk_table.len() <= 1 || findings.len() != spans.len() {
+        return;
+    }
+    let mut kept: Vec<(u8, String, usize, usize)> = Vec::with_capacity(findings.len());
+    let mut survivors = Vec::with_capacity(findings.len());
+    for (finding, (start, end)) in findings.drain(..).zip(spans) {
+        let chunk = chunk_for_scan_offset(chunk_table, start);
+        let body_start = chunk.body_start + (start - chunk.scan_start);
+        let body_end = body_start + (end - start);
+        let (k0, k1) = key(&finding);
+        let duplicate = kept
+            .iter()
+            .any(|(k2, ks2, s2, e2)| *k2 == k0 && *ks2 == k1 && body_start < *e2 && body_end > *s2);
+        if duplicate {
+            continue;
+        }
+        kept.push((k0, k1, body_start, body_end));
+        survivors.push(finding);
+    }
+    *findings = survivors;
+}
+
+/// The chunk whose slice in the joined scan text contains `scan_offset`
+/// (the table is in ascending scan order; later entries win).
+fn chunk_for_scan_offset<'t>(chunk_table: &'t [ChunkSpan], scan_offset: usize) -> &'t ChunkSpan {
+    let mut selected = &chunk_table[0];
+    for chunk in chunk_table {
+        if chunk.scan_start <= scan_offset {
+            selected = chunk;
+        } else {
+            break;
+        }
+    }
+    selected
 }
 
 #[cfg(feature = "events")]
@@ -569,6 +698,133 @@ mod tests {
                 .iter()
                 .any(|f| f.pii_type == PiiType::Ssn),
             "PII in the middle of an oversized body must be detected (summary: {})",
+            verdict.summary
+        );
+    }
+
+    // ── Audit:chunk-seam evasion (tokens straddling a scan chunk) ──
+
+    #[test]
+    fn card_straddling_exact_chunk_seam_is_detected() {
+        // Fail-first: chunks were split at exact multiples of max_scan_size
+        // and joined with "\n", so a token spanning the seam matched in
+        // NEITHER chunk — a deterministic, repeatable DLP bypass. Padding
+        // is a NON-word character so the \b anchors inside the card
+        // patterns hold (word-char padding would suppress matching by
+        // itself and prove nothing).
+        let config = DlpConfig {
+            max_scan_size: 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        // The card starts 8 bytes before the seam at byte 1024.
+        let body = format!("{}4111 1111 1111 1111{}", "-".repeat(1016), "-".repeat(64));
+        assert_eq!(
+            &body[1016..1024],
+            "4111 111",
+            "test premise: card straddles the seam"
+        );
+        assert!(body.len() > 1024, "chunked scan required");
+        let verdict = engine.scan_body(&body);
+        let cards = verdict
+            .pii_findings
+            .iter()
+            .filter(|f| f.pii_type == PiiType::CreditCard)
+            .count();
+        assert_eq!(
+            cards, 1,
+            "a card spanning the chunk seam must be detected exactly once: {:?}",
+            verdict.pii_findings
+        );
+        assert!(verdict.risk_score >= 8.0, "risk: {}", verdict.risk_score);
+    }
+
+    #[test]
+    fn ssn_straddling_exact_chunk_seam_is_detected() {
+        let config = DlpConfig {
+            max_scan_size: 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        // The SSN (11 bytes) starts 5 bytes before the seam at byte 1024.
+        let body = format!("{}123-45-6789{}", "-".repeat(1019), "-".repeat(64));
+        assert_eq!(
+            &body[1019..1024],
+            "123-4",
+            "test premise: SSN straddles seam"
+        );
+        let verdict = engine.scan_body(&body);
+        assert!(
+            verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::Ssn),
+            "an SSN spanning the chunk seam must be detected: {:?}",
+            verdict.pii_findings
+        );
+    }
+
+    #[test]
+    fn seam_carryover_does_not_double_count_tokens_inside_overlap() {
+        // A token lying ENTIRELY inside the carry-over window is scanned
+        // twice (original chunk + next chunk's carried copy) — the overlap
+        // dedup must report it exactly once so risk is not inflated toward
+        // block_threshold.
+        let config = DlpConfig {
+            max_scan_size: 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        // Card at 984..1003, entirely within chunk 1 and inside the 64-byte
+        // window before the seam at 1024.
+        let body = format!("{}4111 1111 1111 1111{}", "-".repeat(984), "-".repeat(64));
+        assert!(body.len() > 1024, "chunked scan required");
+        let verdict = engine.scan_body(&body);
+        let cards = verdict
+            .pii_findings
+            .iter()
+            .filter(|f| f.pii_type == PiiType::CreditCard)
+            .count();
+        assert_eq!(
+            cards, 1,
+            "carry-over copies must not double-report a token: {:?}",
+            verdict.pii_findings
+        );
+    }
+
+    #[test]
+    fn hard_cap_head_tail_cut_is_recovered_by_carry_bands() {
+        // Fail-first: the head+tail hard-cap fallback cut the head at
+        // `cap / 2` and the tail at `len - cap / 2`; a token straddling the
+        // cut matched in NEITHER slice. Both sides now carry a 64-byte
+        // recovery band across the cut.
+        let config = DlpConfig {
+            max_scan_size: 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        let cap = 1024 * MAX_TOTAL_SCAN_CHUNKS; // 10240
+        let half = cap / 2; // 5120
+                            // Card straddling the head cut at byte 5120.
+        let body = format!(
+            "{}4111 1111 1111 1111{}",
+            "-".repeat(half - 8),
+            "-".repeat(cap)
+        );
+        assert_eq!(&body[half - 8..half], "4111 111", "test premise");
+        assert!(body.len() > cap, "hard-cap fallback required");
+        let verdict = engine.scan_body(&body);
+        assert!(
+            verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::CreditCard),
+            "a card straddling the hard-cap cut must be recovered: {:?}",
+            verdict.pii_findings
+        );
+        assert!(
+            verdict.summary.contains("middle unscanned"),
+            "the unscanned middle must still be honestly reported: {}",
             verdict.summary
         );
     }

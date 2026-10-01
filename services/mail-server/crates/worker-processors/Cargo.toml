@@ -38,6 +38,11 @@ reqwest.workspace = true
 # Health check server
 axum.workspace = true
 
+# SM10 F4: the shared STONITH fence helper (ha::fence) the claim loops gate
+# on. Path dependency: `ha` is not a workspace dependency and the workspace
+# root manifest is out of bounds for this change.
+ha = { path = "../ha" }
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

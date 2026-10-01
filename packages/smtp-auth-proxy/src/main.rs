@@ -22,7 +22,7 @@ The real SMTP AUTH proxy implementation lives in the mail-server workspace:
 Build and run it from the mail-server workspace root instead:
 
     cd services/mail-server
-    cargo run -p mta --bin smtp-auth-proxy   # (see mail-server's Cargo.toml for the exact bin name)
+    cargo run -p mta --bin mta-server
 
 See packages/smtp-auth-proxy/README.md for details.
 ";
@@ -38,5 +38,8 @@ mod tests {
     fn notice_points_at_real_crate() {
         // Guards against the pointer to the real implementation rotting away.
         assert!(crate::NOTICE.contains("services/mail-server/crates/mta"));
+        // The real bin name (audit SM15 F8): `mta-server`, per
+        // services/mail-server/crates/mta/Cargo.toml.
+        assert!(crate::NOTICE.contains("--bin mta-server"));
     }
 }

@@ -47,17 +47,6 @@ fn reap(child: &mut Child, deadline: Duration) -> std::process::ExitStatus {
     }
 }
 
-fn output_of(child: &mut Child) -> String {
-    let mut text = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut text);
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut text);
-    }
-    text
-}
-
 /// Probe helper (kept from the readiness contract of a listening daemon):
 /// connects and immediately drops the socket.
 fn can_connect(addr: SocketAddr) -> bool {
@@ -137,7 +126,11 @@ fn daemon_sigterm_exits_cleanly() {
     let mut rest = String::new();
     let _ = stdout.read_to_string(&mut rest);
     let exit = reap(&mut child, STOP_DEADLINE);
-    assert_eq!(exit.code(), Some(0), "SIGTERM must drain cleanly, got {exit}");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGTERM must drain cleanly, got {exit}"
+    );
     let output = format!("{startup_log}{rest}");
     assert!(
         output.contains("received SIGTERM") && output.contains("Shutting down analytics worker"),
@@ -151,7 +144,11 @@ fn daemon_sigterm_exits_cleanly() {
 fn daemon_fails_fast_on_an_unreachable_database() {
     let mut child = spawn_worker("postgres://apexmail:bad@127.0.0.1:1/none", &[]);
     let exit = reap(&mut child, STARTUP_DEADLINE);
-    assert_ne!(exit.code(), Some(0), "expected an honest failure, got {exit}");
+    assert_ne!(
+        exit.code(),
+        Some(0),
+        "expected an honest failure, got {exit}"
+    );
 }
 
 /// The `can_connect` helper stays exercised: the local Redis answers.

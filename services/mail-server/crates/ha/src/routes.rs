@@ -48,14 +48,20 @@ pub struct AppState {
     pub chaos: ChaosEngineeringService,
 }
 
-// ── Auth middleware helper ──────────────────────────────────
+// ── Auth middleware helpers ──────────────────────────────────
 
-fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
-    let key = headers
+/// Extract the presented API key (either header is accepted as the carrier).
+fn presented_api_key(headers: &HeaderMap) -> &str {
+    headers
         .get("x-api-key")
         .or_else(|| headers.get("x-internal-api-key"))
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+}
+
+/// Standard gate: the internal service key OR the admin key.
+fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
+    let key = presented_api_key(headers);
     if timing_safe_compare(key, &config.internal_api_key)
         || timing_safe_compare(key, &config.admin_api_key)
     {
@@ -65,12 +71,55 @@ fn check_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode>
     }
 }
 
+/// SM10 F11: destructive gates accept ONLY the admin key. The internal key
+/// is held by every internal service, so authorizing failover/promotion/
+/// restore/chaos with it would let the least-privileged workload trigger a
+/// cluster topology change.
+fn check_admin_api_key(headers: &HeaderMap, config: &Config) -> Result<(), StatusCode> {
+    let key = presented_api_key(headers);
+    if timing_safe_compare(key, &config.admin_api_key) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// Middleware: standard auth (internal OR admin key) for the internal route
+/// group.
+async fn internal_auth_guard(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    match check_api_key(request.headers(), &state.config) {
+        Ok(()) => next.run(request).await,
+        Err(status) => status.into_response(),
+    }
+}
+
+/// Middleware: admin-only auth for the destructive route group (SM10 F11).
+async fn admin_auth_guard(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    match check_admin_api_key(request.headers(), &state.config) {
+        Ok(()) => next.run(request).await,
+        Err(status) => status.into_response(),
+    }
+}
+
 // ── Fencing write-guard (B.1 enforcement) ──────────────────
 
 /// B.1 enforcement: this node must refuse to serve mutating requests while
 /// its Redis fence key (`ha:fenced:{self}`) exists. Read-only requests and
 /// the split-brain / unfence recovery endpoints are exempt so a fenced node
 /// can still be operated on (otherwise recovery would deadlock).
+///
+/// Layer position (SM10 F12): this guard is applied INSIDE the auth layers
+/// (see `build_router`) — it only ever observes AUTHENTICATED requests, so
+/// the fenced-node 503 body never leaks to unauthenticated callers, who get
+/// 401 from auth first.
 async fn fence_guard(
     State(state): State<Arc<AppState>>,
     request: axum::extract::Request,
@@ -102,28 +151,69 @@ async fn fence_guard(
 
 // ── Build Router ───────────────────────────────────────────
 
+/// Build the HA service router.
+///
+/// Auth is enforced PER ROUTE GROUP by middleware (not inside handlers), so
+/// the fence guard can sit INSIDE the auth layer (SM10 F12): the last-added
+/// layer is the outermost, meaning auth runs first — an unauthenticated
+/// caller gets a 401, never the fenced-node 503 body, which would leak the
+/// node's fence state to anyone who can reach the port.
+///
+/// Groups (SM10 F11):
+/// - **admin** — destructive cluster-topology operations
+///   (failover initiation, failback, split-brain resolution, manual
+///   promotion, backup restore, chaos-experiment start, region fence/
+///   unfence). Accept ONLY the admin key; the internal service key is held
+///   by every internal workload and must not authorize topology changes.
+/// - **internal** — everything else; the internal service key OR the admin
+///   key. Mutating requests in this group still pass the fence guard.
+/// - `/health` — unauthenticated liveness probe.
 pub fn build_router(state: Arc<AppState>) -> Router<()> {
-    Router::new()
-        // Health
-        .route("/health", get(health_check))
-        .route("/api/v1/health", get(health_detailed))
-        .route("/api/v1/health/cluster", get(cluster_status))
+    let admin_routes = Router::new()
         // Failover
-        .route("/api/v1/failover/status", get(failover_status))
         .route("/api/v1/failover/initiate", post(failover_initiate))
+        // SM10 F11 (adversarial pass): failback and split-brain resolution
+        // rewrite primary claims and fence nodes, and the region fence/
+        // unfence routes place and lift the STONITH keys themselves — the
+        // same class of cluster-topology change as initiate/promote, so
+        // they take the admin group too (the universal internal key must
+        // not authorize topology changes).
         .route("/api/v1/failover/failback", post(failover_failback))
-        .route("/api/v1/failover/history", get(failover_history))
-        .route("/api/v1/failover/split-brain", get(split_brain_check))
         .route(
             "/api/v1/failover/split-brain/resolve",
             post(split_brain_resolve),
         )
         // Backup
+        .route("/api/v1/backup/restore", post(backup_restore))
+        // Replication
+        .route("/api/v1/replication/promote", post(replication_promote))
+        // Chaos Engineering
+        .route("/api/v1/chaos/experiments", post(chaos_start))
+        // Region fencing (STONITH key placement/lift)
+        .route("/api/v1/regions/:name/fence", post(regions_fence))
+        .route("/api/v1/regions/:name/unfence", post(regions_unfence))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            fence_guard,
+        ))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            admin_auth_guard,
+        ));
+
+    let internal_routes = Router::new()
+        // Health
+        .route("/api/v1/health", get(health_detailed))
+        .route("/api/v1/health/cluster", get(cluster_status))
+        // Failover
+        .route("/api/v1/failover/status", get(failover_status))
+        .route("/api/v1/failover/history", get(failover_history))
+        .route("/api/v1/failover/split-brain", get(split_brain_check))
+        // Backup
         .route("/api/v1/backup", post(backup_create))
         .route("/api/v1/backup/list", get(backup_list))
         .route("/api/v1/backup/:id", get(backup_get))
         .route("/api/v1/backup/:id", delete(backup_delete))
-        .route("/api/v1/backup/restore", post(backup_restore))
         .route("/api/v1/backup/pitr", post(backup_pitr))
         .route("/api/v1/backup/schedule", get(backup_schedule))
         .route("/api/v1/backup/retention", post(backup_retention_cleanup))
@@ -136,7 +226,6 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
             "/api/v1/replication/slots/:name",
             delete(replication_delete_slot),
         )
-        .route("/api/v1/replication/promote", post(replication_promote))
         .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
         .route(
             "/api/v1/replication/lag/history",
@@ -149,8 +238,6 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/regions/:name", delete(regions_remove))
         .route("/api/v1/regions/:name/health", put(regions_update_health))
         .route("/api/v1/regions/:name/weight", put(regions_set_weight))
-        .route("/api/v1/regions/:name/fence", post(regions_fence))
-        .route("/api/v1/regions/:name/unfence", post(regions_unfence))
         .route("/api/v1/regions/route", get(regions_route))
         .route("/api/v1/regions/traffic", get(regions_traffic))
         .route("/api/v1/regions/geo-rules", get(geo_rules_list))
@@ -164,16 +251,24 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/circuit-breakers/:name", delete(circuits_remove))
         // Chaos Engineering
         .route("/api/v1/chaos/experiments", get(chaos_list))
-        .route("/api/v1/chaos/experiments", post(chaos_start))
         .route("/api/v1/chaos/experiments/:id", get(chaos_get))
         .route("/api/v1/chaos/experiments/:id", delete(chaos_delete))
         .route("/api/v1/chaos/experiments/:id/abort", post(chaos_abort))
-        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             fence_guard,
         ))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            internal_auth_guard,
+        ));
+
+    Router::new()
+        .route("/health", get(health_check))
+        .merge(admin_routes)
+        .merge(internal_routes)
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
+        .layer(TimeoutLayer::new(Duration::from_secs(30)))
         .with_state(state)
 }
 
@@ -185,18 +280,14 @@ async fn health_check() -> impl IntoResponse {
 
 async fn health_detailed(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let health = state.health.check_all().await;
     Ok(Json(health))
 }
 
 async fn cluster_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .health
         .get_cluster_status()
@@ -209,9 +300,7 @@ async fn cluster_status(
 
 async fn failover_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let info = state.failover.get_config_info().await;
     Ok(Json(info))
 }
@@ -224,10 +313,8 @@ struct FailoverRequest {
 
 async fn failover_initiate(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<FailoverRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .failover
         .initiate_failover(crate::types::FailoverType::Manual, body.reason)
@@ -246,10 +333,8 @@ struct FailbackQuery {
 
 async fn failover_failback(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<FailbackQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .failover
         .initiate_failback_opt(q.force.unwrap_or(false))
@@ -282,10 +367,8 @@ struct PaginationQuery {
 
 async fn failover_history(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<HistoryQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .failover
         .get_history(q.limit)
@@ -296,9 +379,7 @@ async fn failover_history(
 
 async fn split_brain_check(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .failover
         .detect_split_brain()
@@ -315,10 +396,8 @@ struct ResolveSplitBrainRequest {
 
 async fn split_brain_resolve(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<ResolveSplitBrainRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .failover
         .resolve_split_brain(&body.winner_node)
@@ -338,10 +417,8 @@ struct BackupCreateRequest {
 
 async fn backup_create(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<BackupCreateRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let bt = body
         .backup_type
         .as_deref()
@@ -366,10 +443,8 @@ struct BackupListQuery {
 
 async fn backup_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<BackupListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .list_backups(q.backup_type.as_deref(), q.status.as_deref(), q.limit)
@@ -380,10 +455,8 @@ async fn backup_list(
 
 async fn backup_get(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .get_backup(id)
@@ -395,10 +468,8 @@ async fn backup_get(
 
 async fn backup_delete(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .delete_backup(id)
@@ -409,10 +480,8 @@ async fn backup_delete(
 
 async fn backup_restore(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<RestoreOptions>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .restore(body)
@@ -429,10 +498,8 @@ struct PitrRequest {
 
 async fn backup_pitr(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<PitrRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .pitr(body.target_time)
@@ -443,17 +510,13 @@ async fn backup_pitr(
 
 async fn backup_schedule(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     Ok(Json(state.backup.get_schedule()))
 }
 
 async fn backup_retention_cleanup(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .backup
         .enforce_retention()
@@ -466,9 +529,7 @@ async fn backup_retention_cleanup(
 
 async fn replication_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .get_stats()
@@ -479,9 +540,7 @@ async fn replication_status(
 
 async fn replication_replicas(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .get_replicas()
@@ -492,9 +551,7 @@ async fn replication_replicas(
 
 async fn replication_slots(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .get_slots()
@@ -512,10 +569,8 @@ struct CreateSlotRequest {
 
 async fn replication_create_slot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<CreateSlotRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let st = body.slot_type.as_deref().unwrap_or("physical");
     state
         .replication
@@ -532,10 +587,8 @@ async fn replication_create_slot(
 
 async fn replication_delete_slot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .drop_slot(&name)
@@ -546,9 +599,7 @@ async fn replication_delete_slot(
 
 async fn replication_promote(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .promote_standby()
@@ -565,10 +616,8 @@ struct SyncModeRequest {
 
 async fn replication_sync_mode(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<SyncModeRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .set_sync_mode(body.synchronous)
@@ -589,10 +638,8 @@ fn default_minutes() -> i64 {
 
 async fn replication_lag_history(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<LagHistoryQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .replication
         .get_lag_history(q.minutes)
@@ -605,10 +652,8 @@ async fn replication_lag_history(
 
 async fn regions_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
     state
@@ -630,10 +675,8 @@ struct RegisterRegionRequest {
 
 async fn regions_register(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<RegisterRegionRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let role = RegionRole::parse(&body.role);
     state
         .multi_region
@@ -650,10 +693,8 @@ async fn regions_register(
 
 async fn regions_get(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .get_region(&name)
@@ -665,10 +706,8 @@ async fn regions_get(
 
 async fn regions_remove(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .remove_region(&name)
@@ -687,11 +726,9 @@ struct UpdateHealthRequest {
 
 async fn regions_update_health(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Json(body): Json<UpdateHealthRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .update_health(
@@ -713,11 +750,9 @@ struct SetWeightRequest {
 
 async fn regions_set_weight(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Json(body): Json<SetWeightRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .set_weight(&name, body.weight)
@@ -734,11 +769,9 @@ struct FenceRequest {
 
 async fn regions_fence(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
     Json(body): Json<FenceRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let reason = body.reason.as_deref().unwrap_or("Manual fence");
     state
         .multi_region
@@ -750,10 +783,8 @@ async fn regions_fence(
 
 async fn regions_unfence(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .unfence_region(&name)
@@ -770,10 +801,8 @@ struct RouteQuery {
 
 async fn regions_route(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<RouteQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .route_request(q.source_region.as_deref())
@@ -784,9 +813,7 @@ async fn regions_route(
 
 async fn regions_traffic(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .get_traffic_distribution()
@@ -797,10 +824,8 @@ async fn regions_traffic(
 
 async fn geo_rules_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<PaginationQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let limit = q.limit.clamp(1, 200);
     let offset = q.offset.max(0);
     state
@@ -822,10 +847,8 @@ struct AddGeoRuleRequest {
 
 async fn geo_rules_add(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<AddGeoRuleRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .add_geo_rule(
@@ -841,10 +864,8 @@ async fn geo_rules_add(
 
 async fn geo_rules_delete(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .multi_region
         .delete_geo_rule(id)
@@ -857,19 +878,15 @@ async fn geo_rules_delete(
 
 async fn circuits_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     let stats = state.circuit_breaker.get_all_stats().await;
     Ok(Json(stats))
 }
 
 async fn circuits_get(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .circuit_breaker
         .get_stats(&name)
@@ -880,10 +897,8 @@ async fn circuits_get(
 
 async fn circuits_reset(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .circuit_breaker
         .reset(&name)
@@ -894,10 +909,8 @@ async fn circuits_reset(
 
 async fn circuits_configure(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<CircuitConfig>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .circuit_breaker
         .configure(body)
@@ -913,10 +926,8 @@ async fn circuits_configure(
 
 async fn circuits_remove(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .circuit_breaker
         .remove(&name)
@@ -937,10 +948,8 @@ struct ChaosListQuery {
 
 async fn chaos_list(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(q): Query<ChaosListQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .chaos
         .list_experiments(q.status.as_deref(), q.limit)
@@ -959,10 +968,8 @@ struct ChaosStartRequest {
 
 async fn chaos_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(body): Json<ChaosStartRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .chaos
         .start_experiment(&body.name, body.config)
@@ -973,10 +980,8 @@ async fn chaos_start(
 
 async fn chaos_get(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .chaos
         .get_experiment(id)
@@ -988,10 +993,8 @@ async fn chaos_get(
 
 async fn chaos_delete(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .chaos
         .delete_experiment(id)
@@ -1002,10 +1005,8 @@ async fn chaos_delete(
 
 async fn chaos_abort(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    check_api_key(&headers, &state.config)?;
     state
         .chaos
         .abort_experiment(id)
@@ -1242,15 +1243,20 @@ mod tests {
             config.redis.host = "127.0.0.1".into();
             config.redis.port = port;
             config.multi_region.node_id = "fenced-node".into();
+            // SM10 F11: failover/initiate is ADMIN-only — the fence matrix
+            // below must present the admin key to reach the guard/handler.
+            // (No replicas configured so an accepted initiate fails FAST in
+            // the handler instead of probing/promoting anything real.)
+            config.database.replica_hosts = vec![];
             let state = test_state_with_config(Arc::new(config));
             let app: Router<()> = build_router(state.clone());
 
-            // Not fenced: the guard passes (request proceeds; DB errors → 500,
-            // which proves the guard itself did not block).
+            // Not fenced: the guard passes (request proceeds; the handler
+            // errors → 500, which proves the guard itself did not block).
             let req = Request::builder()
                 .method("POST")
                 .uri("/api/v1/failover/initiate")
-                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .header("x-api-key", TEST_ADMIN_API_KEY)
                 .body(Body::from("{}"))
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
@@ -1273,7 +1279,7 @@ mod tests {
             let req = Request::builder()
                 .method("POST")
                 .uri("/api/v1/failover/initiate")
-                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .header("x-api-key", TEST_ADMIN_API_KEY)
                 .body(Body::from("{}"))
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
@@ -1294,10 +1300,12 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
 
             // Split-brain recovery endpoints are exempt from the guard.
+            // SM10 F11 (adversarial pass): resolution is ADMIN-only, so the
+            // recovery call presents the admin key.
             let req = Request::builder()
                 .method("POST")
                 .uri("/api/v1/failover/split-brain/resolve")
-                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .header("x-api-key", TEST_ADMIN_API_KEY)
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"winner_node":"fenced-node"}"#))
                 .unwrap();
@@ -1307,5 +1315,195 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    // ── SM10 F11: destructive routes require the ADMIN key ─────────────
+
+    /// Pure gate matrix: the standard gate accepts internal OR admin, the
+    /// destructive gate accepts ONLY the admin key (timing-safe compares on
+    /// both; the internal key must NOT satisfy the destructive gate).
+    #[test]
+    fn test_admin_gate_matrix() {
+        let mut cfg = Config::from_env().expect("HA config must load in development");
+        cfg.internal_api_key = TEST_INTERNAL_API_KEY.into();
+        cfg.admin_api_key = TEST_ADMIN_API_KEY.into();
+
+        let mut internal_only = HeaderMap::new();
+        internal_only.insert("x-api-key", TEST_INTERNAL_API_KEY.parse().unwrap());
+        let mut admin = HeaderMap::new();
+        admin.insert("x-api-key", TEST_ADMIN_API_KEY.parse().unwrap());
+        let mut garbage = HeaderMap::new();
+        garbage.insert("x-api-key", "not-a-key".parse().unwrap());
+        let empty = HeaderMap::new();
+
+        // Standard gate: internal or admin.
+        assert!(check_api_key(&internal_only, &cfg).is_ok());
+        assert!(check_api_key(&admin, &cfg).is_ok());
+        assert!(check_api_key(&garbage, &cfg).is_err());
+        assert!(check_api_key(&empty, &cfg).is_err());
+
+        // Destructive gate: ADMIN ONLY — the universal internal key must be
+        // rejected (SM10 F11).
+        assert!(
+            check_admin_api_key(&internal_only, &cfg).is_err(),
+            "internal key must NOT authorize destructive operations"
+        );
+        assert!(check_admin_api_key(&admin, &cfg).is_ok());
+        assert!(check_admin_api_key(&garbage, &cfg).is_err());
+        assert!(check_admin_api_key(&empty, &cfg).is_err());
+    }
+
+    /// Router-level gate matrix (SM10 F11): every destructive route family
+    /// rejects the internal key with 401, while the admin key passes the
+    /// gate (the request proceeds past auth — with an UNREADABLE fence
+    /// authority it deterministically stops at the fail-closed fence check
+    /// with 503, which proves auth opened the gate).
+    #[test]
+    fn test_destructive_routes_reject_internal_key() {
+        test_runtime().block_on(async {
+            let mut config = Config::from_env().expect("HA config must load in development");
+            config.internal_api_key = TEST_INTERNAL_API_KEY.into();
+            config.admin_api_key = TEST_ADMIN_API_KEY.into();
+            // Unreadable fence authority (nothing listens): fence checks
+            // fail CLOSED with 503 — a deterministic marker that a request
+            // got PAST auth.
+            config.redis.host = "127.0.0.1".into();
+            config.redis.port = 1;
+            config.database.replica_hosts = vec![];
+            let app: Router<()> = build_router(test_state_with_config(Arc::new(config)));
+
+            let destructive: [(&str, &str); 6] = [
+                ("POST", "/api/v1/failover/initiate"),
+                ("POST", "/api/v1/replication/promote"),
+                ("POST", "/api/v1/backup/restore"),
+                ("POST", "/api/v1/chaos/experiments"),
+                // SM10 F11 (adversarial pass): the topology routes below
+                // rewrite claims or place STONITH fence keys — admin-only
+                // like initiate/promote.
+                ("POST", "/api/v1/failover/failback"),
+                ("POST", "/api/v1/regions/some-node/fence"),
+            ];
+
+            for (method, uri) in destructive {
+                // The universal internal key must NOT authorize destructive
+                // operations.
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-api-key", TEST_INTERNAL_API_KEY)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{method} {uri} must reject the internal key"
+                );
+
+                // The admin key passes the gate; the request then stops at
+                // the fail-closed fence check (503) — never a 401.
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("x-api-key", TEST_ADMIN_API_KEY)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{method} {uri} must let the admin key past auth"
+                );
+            }
+
+            // Unfence and split-brain resolution are admin-only too, but
+            // they are RECOVERY endpoints exempt from the fence guard — the
+            // admin request proceeds to the handler (500 on this test's
+            // unwritable fence authority/DB), which still proves auth
+            // opened the gate; the internal key gets 401 for both.
+            for uri in [
+                "/api/v1/regions/some-node/unfence",
+                "/api/v1/failover/split-brain/resolve",
+            ] {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("x-api-key", TEST_INTERNAL_API_KEY)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} must reject the internal key"
+                );
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("x-api-key", TEST_ADMIN_API_KEY)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} must let the admin key past auth"
+                );
+            }
+        });
+    }
+
+    // ── SM10 F12: the fence guard runs INSIDE auth ─────────────────────
+
+    /// An UNAUTHENTICATED mutating request must get 401 (auth is the
+    /// outermost layer) — never the fenced-node 503 body, which would leak
+    /// fence state to unauthenticated callers. With an unreadable fence
+    /// authority this is deterministic: if the guard ran first, the request
+    /// would fail closed with 503 instead.
+    #[test]
+    fn test_unauthenticated_gets_401_not_fence_503() {
+        test_runtime().block_on(async {
+            let mut config = Config::from_env().expect("HA config must load in development");
+            config.internal_api_key = TEST_INTERNAL_API_KEY.into();
+            config.admin_api_key = TEST_ADMIN_API_KEY.into();
+            // Fence authority UNREADABLE: the guard would 503 every mutating
+            // request it sees.
+            config.redis.host = "127.0.0.1".into();
+            config.redis.port = 1;
+            let app: Router<()> = build_router(test_state_with_config(Arc::new(config)));
+
+            // Unauthenticated + mutating: auth must answer 401 BEFORE the
+            // fence guard is consulted.
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/backup/retention")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated mutating request must get 401, not the fence 503"
+            );
+
+            // Same request authenticated: the guard now runs (inside auth)
+            // and fails closed with 503 — proving the order is auth → fence.
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/backup/retention")
+                .header("x-api-key", TEST_INTERNAL_API_KEY)
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authenticated mutating request must reach the (fail-closed) fence guard"
+            );
+        });
     }
 }

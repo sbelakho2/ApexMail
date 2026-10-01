@@ -73,6 +73,21 @@ pub struct HttpRequest<'a> {
 impl WafEngine {
     /// Create a new WAF engine
     pub fn new(config: WafConfig) -> Self {
+        // Audit SM5 F14: paranoia_level 0 (or >4) silently DISARMS every
+        // rule — the retain filter at the end of `inspect` drops all
+        // matches while the engine reports healthy. Fail closed: clamp an
+        // invalid level into the legal range (0 becomes 1, the MOST
+        // restrictive filtering level) and reject the config through
+        // `WafConfig::validate` at construction sites that can propagate
+        // errors.
+        let mut config = config;
+        if let Err(reason) = config.validate() {
+            warn!(
+                reason = %reason,
+                "WAF: invalid WafConfig rejected — paranoia_level clamped to 1 (fail-closed)"
+            );
+            config.paranoia_level = config.paranoia_level.clamp(1, 4);
+        }
         // Parse the allowlist at construction (audit F10): exact string
         // comparison let `::ffff:10.0.0.1` (what a dual-stack listener
         // reports) bypass the allowlist entry `10.0.0.1` and vice versa.
@@ -1212,6 +1227,103 @@ mod tests {
         assert!(
             info2.matches.iter().any(|m| m.rule_id == 942400),
             "PL2 rule 942400 must fire at the default paranoia level 2"
+        );
+    }
+
+    // ── Audit SM5 F14: paranoia_level 0 must not disarm the engine ──
+
+    #[test]
+    fn test_paranoia_level_zero_is_rejected_not_disarming() {
+        // WafConfig::validate must reject out-of-range levels…
+        let mut cfg = WafConfig::default();
+        cfg.paranoia_level = 0;
+        assert!(cfg.validate().is_err(), "level 0 must be rejected");
+        cfg.paranoia_level = 5;
+        assert!(cfg.validate().is_err(), "level 5 must be rejected");
+
+        // …and an engine built with level 0 must fail CLOSED (clamp to 1,
+        // all rules active), not silently drop every match.
+        let engine = WafEngine::new(WafConfig {
+            paranoia_level: 0,
+            ..WafConfig::default()
+        });
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/search",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some("' OR 1=1 --"),
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            !info.matches.is_empty(),
+            "paranoia_level 0 must not silently disarm every rule"
+        );
+        assert!(
+            matches!(info.decision, WafDecision::Block(_)),
+            "classic SQLi must still block at the clamped level, score={}",
+            info.total_score
+        );
+    }
+
+    // ── Audit SM5 F1: analyzer payloads the old keyword gate missed ──
+
+    #[test]
+    fn test_xss_gate_bypass_vectors_now_blocked() {
+        // Payloads with NO token from the old keyword gate list: `ontoggle`
+        // (analyzer-recognized handler absent from the gate list) and
+        // `<details`/`<video` (analyzer tags absent from the gate list).
+        for payload in [
+            "<x ontoggle=fetch('//evil')>",
+            "<details open ontoggle=alert(1)>",
+            "<video><source onerror=alert(1)>",
+        ] {
+            let engine = make_engine();
+            let req = HttpRequest {
+                client_ip: "10.0.0.1".parse().expect("valid IP"),
+                method: "POST",
+                path: "/api/comments",
+                query_string: None,
+                headers: &[
+                    ("Host".into(), "example.com".into()),
+                    ("Content-Type".into(), "text/plain".into()),
+                ],
+                body: Some(payload),
+            };
+            let info = engine.inspect(&req);
+            assert!(
+                matches!(info.decision, WafDecision::Block(_)),
+                "{payload:?} must be blocked now that the gate is structural, score={} matches={:?}",
+                info.total_score,
+                info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn test_stack_truncate_bypass_vector_now_blocked() {
+        let engine = make_engine();
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "GET",
+            path: "/api/users",
+            query_string: Some("id=1%3BTRUNCATE%20TABLE%20users"),
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            matches!(info.decision, WafDecision::Block(_)),
+            "stacked TRUNCATE must be blocked, score={} matches={:?}",
+            info.total_score,
+            info.matches
+                .iter()
+                .map(|m| (m.rule_id, m.score))
+                .collect::<Vec<_>>()
         );
     }
 

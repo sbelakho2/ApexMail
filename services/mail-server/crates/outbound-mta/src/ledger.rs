@@ -539,11 +539,14 @@ impl RelayLedger for PgLedger {
         next_attempt_at: DateTime<Utc>,
         error: &str,
     ) -> Result<(), LedgerError> {
-        sqlx::query(
+        // Fenced on the attempt this worker claimed: a daemon sweep that
+        // re-claimed the expired lease bumps `attempt`, so this stale write
+        // must not reset the successor's row (audit finding 2).
+        let result = sqlx::query(
             "UPDATE outbound_relay_ledger \
              SET state = 'pending', attempt = $2, next_attempt_at = $3, last_error = $4, \
                  lease_until = NULL, updated_at = NOW() \
-             WHERE send_unit = $1 AND state = 'delivering'",
+             WHERE send_unit = $1 AND state = 'delivering' AND attempt = $2",
         )
         .bind(send_unit)
         .bind(i32::try_from(attempt).unwrap_or(i32::MAX))
@@ -551,6 +554,15 @@ impl RelayLedger for PgLedger {
         .bind(error)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                event = "relay_lease_lost",
+                send_unit = %send_unit,
+                attempt,
+                "record_retry matched no row: the delivery lease was lost (expired and \
+                 re-claimed); the retry schedule is NOT applied"
+            );
+        }
         Ok(())
     }
 
@@ -568,12 +580,15 @@ impl RelayLedger for PgLedger {
         // together, so a crash can neither duplicate the accepted copies nor
         // drop the deferred recipients.
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        // Fenced on the claimed attempt: if a daemon sweep re-claimed the
+        // expired lease, this stale acceptance must NOT land — the new owner
+        // is delivering (or has delivered) its own copy (audit finding 2).
+        let result = sqlx::query(
             "UPDATE outbound_relay_ledger \
              SET state = 'accepted', acceptance_record = $2, actual_source_ip = $3::text::inet, \
                  remote_mx = $4, tls_used = $5, accepted_at = $6, lease_until = NULL, \
                  last_error = NULL, updated_at = NOW() \
-             WHERE send_unit = $1 AND state = 'delivering'",
+             WHERE send_unit = $1 AND state = 'delivering' AND attempt = $7",
         )
         .bind(send_unit)
         .bind(&acceptance)
@@ -581,8 +596,22 @@ impl RelayLedger for PgLedger {
         .bind(&record.remote_mx)
         .bind(record.tls_used)
         .bind(record.accepted_at)
+        .bind(i32::try_from(record.attempt).unwrap_or(i32::MAX))
         .execute(&mut *tx)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                event = "relay_lease_lost",
+                send_unit = %send_unit,
+                attempt = record.attempt,
+                "record_accepted matched no row: the delivery lease was lost (expired and \
+                 re-claimed); the acceptance and its follow-up unit are NOT applied — the \
+                 re-claiming owner owns the verdict now"
+            );
+            // Roll the (empty) transaction back: the deferred follow-up unit
+            // must never be inserted by a worker that lost the lease.
+            return Ok(());
+        }
         if let Some(plan) = &record.deferred_retry {
             let recipients = serde_json::Value::Array(
                 plan.recipients
@@ -624,17 +653,28 @@ impl RelayLedger for PgLedger {
         attempt: u32,
         error: &str,
     ) -> Result<(), LedgerError> {
-        sqlx::query(
+        // Fenced on the claimed attempt (audit finding 2): a stale worker
+        // must not fail a row whose lease a successor already re-claimed.
+        let result = sqlx::query(
             "UPDATE outbound_relay_ledger \
              SET state = 'failed', attempt = $2, last_error = $3, lease_until = NULL, \
                  updated_at = NOW() \
-             WHERE send_unit = $1 AND state = 'delivering'",
+             WHERE send_unit = $1 AND state = 'delivering' AND attempt = $2",
         )
         .bind(send_unit)
         .bind(i32::try_from(attempt).unwrap_or(i32::MAX))
         .bind(error)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            tracing::warn!(
+                event = "relay_lease_lost",
+                send_unit = %send_unit,
+                attempt,
+                "record_permanent matched no row: the delivery lease was lost (expired and \
+                 re-claimed); the permanent failure is NOT applied"
+            );
+        }
         Ok(())
     }
 
@@ -842,7 +882,9 @@ pub mod test_support {
         ) -> Result<(), LedgerError> {
             self.with_entries(|entries| {
                 if let Some(entry) = entries.get_mut(send_unit) {
-                    if entry.state == "delivering" {
+                    // Same attempt fence as PgLedger: a stale worker that
+                    // lost its lease must not reset the successor's row.
+                    if entry.state == "delivering" && entry.attempt == attempt {
                         entry.state = "pending".to_string();
                         entry.attempt = attempt;
                         entry.next_attempt_at = next_attempt_at;
@@ -865,7 +907,10 @@ pub mod test_support {
                 // borrow, inserted once it ends).
                 let mut follow_up: Option<QueuedSubmission> = None;
                 if let Some(entry) = entries.get_mut(send_unit) {
-                    if entry.state == "delivering" {
+                    // Same attempt fence as PgLedger: a stale worker that
+                    // lost its lease must not pin the acceptance (and must
+                    // not insert the follow-up unit).
+                    if entry.state == "delivering" && entry.attempt == record.attempt {
                         entry.state = "accepted".to_string();
                         entry.attempt = record.attempt;
                         entry.actual_source_ip = record.actual_source_ip;
@@ -918,7 +963,8 @@ pub mod test_support {
         ) -> Result<(), LedgerError> {
             self.with_entries(|entries| {
                 if let Some(entry) = entries.get_mut(send_unit) {
-                    if entry.state == "delivering" {
+                    // Same attempt fence as PgLedger (audit finding 2).
+                    if entry.state == "delivering" && entry.attempt == attempt {
                         entry.state = "failed".to_string();
                         entry.attempt = attempt;
                         entry.last_error = Some(error.to_string());
@@ -1025,11 +1071,11 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::ledger::test_support::MemoryLedger;
-    use crate::relay::{
-        AcceptanceRecord, RecipientOutcome, RecipientResult, Relay, RelayConfig, RelayError,
-        SubmitRequest,
-    };
     use crate::mx::test_support::StaticMxResolver;
+    use crate::relay::{
+        deferred_retry_unit, AcceptanceRecord, DeferredRetryPlan, RecipientOutcome,
+        RecipientResult, Relay, RelayConfig, RelayError, SubmitRequest,
+    };
     use crate::test_smtp::{FakeSmtpConfig, FakeSmtpServer, ReplySpec};
     use std::sync::Arc;
 
@@ -1805,6 +1851,118 @@ mod tests {
         assert_eq!(stats.delivering, 0);
     }
 
+    /// Audit finding 2 regression: a single attempt can legitimately outlive
+    /// its lease (two slow addresses already exceed the 15-minute default),
+    /// so a daemon sweep re-claims the row and a second delivery runs
+    /// concurrently. Every retry/terminal write is fenced on the claimed
+    /// attempt: the stale worker's verdicts must never land on — or reset —
+    /// the successor's in-flight row, and the stale acceptance must not
+    /// insert the deferred follow-up unit.
+    #[tokio::test]
+    async fn stale_attempt_writes_cannot_corrupt_a_reclaimed_row() {
+        let ledger = MemoryLedger::new();
+        let now = Utc::now();
+        let submission = NewSubmission {
+            send_unit: "mem-fence-1".to_string(),
+            tenant_id: None,
+            queue_id: None,
+            request_fingerprint: None,
+            envelope_from: None,
+            recipients: vec!["u@example.com".to_string()],
+            message: b"x".to_vec(),
+            requested_source_ip: None,
+            max_attempts: 3,
+        };
+        let claimed = ledger
+            .claim_submission(submission, now, Duration::from_secs(60))
+            .await
+            .expect("claim");
+        let ClaimOutcome::Claimed(row) = claimed else {
+            panic!("the first claim must own the delivery");
+        };
+        assert_eq!(row.attempt, 1);
+
+        // The attempt outlives its lease: the sweep re-claims the expired
+        // lease for a second, concurrent delivery (attempt bumps to 2).
+        let reclaimed = ledger
+            .claim_due(
+                now + chrono::Duration::seconds(61),
+                Duration::from_secs(60),
+                10,
+            )
+            .await
+            .expect("the sweep re-claims the expired lease");
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].attempt, 2);
+
+        // The STALE worker (attempt 1) reports back after the sweep. Each
+        // call succeeds, but every write must be fenced off.
+        ledger
+            .record_retry(
+                "mem-fence-1",
+                1,
+                now + chrono::Duration::minutes(5),
+                "stale retry",
+            )
+            .await
+            .expect("retry call");
+        let stale_record = AcceptanceRecord {
+            send_unit: "mem-fence-1".to_string(),
+            state: "accepted".to_string(),
+            accepted_at: now,
+            attempt: 1,
+            remote_mx: Some("stale-mx.example".to_string()),
+            tls_used: false,
+            requested_source_ip: None,
+            actual_source_ip: None,
+            recipients: Vec::new(),
+            dsn_send_units: Vec::new(),
+            deferred_retry: Some(DeferredRetryPlan {
+                send_unit: deferred_retry_unit("mem-fence-1", 1),
+                recipients: vec!["u@example.com".to_string()],
+                attempt: 1,
+                next_attempt_at: now + chrono::Duration::minutes(1),
+                reason: "stale follow-up".to_string(),
+            }),
+        };
+        ledger
+            .record_accepted("mem-fence-1", &stale_record)
+            .await
+            .expect("accept call");
+        ledger
+            .record_permanent("mem-fence-1", 1, "stale permanent")
+            .await
+            .expect("permanent call");
+
+        let row = ledger.get("mem-fence-1").await.expect("get").expect("row");
+        assert_eq!(row.state, "delivering", "no stale verdict may land");
+        assert_eq!(row.attempt, 2, "the successor's attempt is intact");
+        assert!(row.acceptance.is_none(), "no stale acceptance");
+        assert_eq!(row.remote_mx, None);
+        assert!(
+            ledger
+                .get(&deferred_retry_unit("mem-fence-1", 1))
+                .await
+                .expect("get")
+                .is_none(),
+            "a worker that lost its lease must not insert the follow-up unit"
+        );
+
+        // The SUCCESSOR (attempt 2) completes: its writes go through.
+        let live_record = AcceptanceRecord {
+            attempt: 2,
+            remote_mx: Some("live-mx.example".to_string()),
+            ..stale_record
+        };
+        ledger
+            .record_accepted("mem-fence-1", &live_record)
+            .await
+            .expect("the current owner's acceptance applies");
+        let row = ledger.get("mem-fence-1").await.expect("get").expect("row");
+        assert_eq!(row.state, "accepted");
+        assert_eq!(row.remote_mx.as_deref(), Some("live-mx.example"));
+    }
+
     // ── crash consistency: death at any seam of the relay pipeline ────────
     //
     // These tests run the REAL PgLedger against the REAL canonical schema
@@ -1834,9 +1992,8 @@ mod tests {
     ) -> (Relay, Arc<PgLedger>, FakeSmtpServer) {
         let server = FakeSmtpServer::start(server_config).await;
         let ledger = Arc::new(PgLedger::new(pool));
-        let resolver = Arc::new(
-            StaticMxResolver::new().with_target("example.com", vec![server.addr()]),
-        );
+        let resolver =
+            Arc::new(StaticMxResolver::new().with_target("example.com", vec![server.addr()]));
         let relay = Relay::new(ledger.clone(), resolver, RelayConfig::default());
         (relay, ledger, server)
     }
@@ -1972,13 +2129,13 @@ mod tests {
         let (relay, ledger, server) = crash_harness(pool.clone(), server_config).await;
         let request = crash_request(
             unit.clone(),
-            vec![
-                "a@example.com".to_string(),
-                "b@example.com".to_string(),
-            ],
+            vec!["a@example.com".to_string(), "b@example.com".to_string()],
         );
 
-        let record = relay.submit(request.clone()).await.expect("partial acceptance");
+        let record = relay
+            .submit(request.clone())
+            .await
+            .expect("partial acceptance");
         assert_eq!(
             record
                 .recipients

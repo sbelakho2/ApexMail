@@ -2710,8 +2710,7 @@ mod adversarial_tests {
             config.internal_service_token = Some("universal-legacy".into());
             config.pdf_renderer_auth_token = None;
             let state =
-                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config)
-                    .await;
+                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config).await;
             let legacy = Harness {
                 app: build_app(state),
                 pool: h.pool.clone(),
@@ -2735,8 +2734,7 @@ mod adversarial_tests {
             config.internal_service_token = Some("universal-legacy".into());
             config.pdf_renderer_auth_token = Some("dedicated-pdf-secret".into());
             let state =
-                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config)
-                    .await;
+                crate::app::test_support::test_state_over_with_config(h.pool.clone(), config).await;
             let migrated = Harness {
                 app: build_app(state),
                 pool: h.pool.clone(),

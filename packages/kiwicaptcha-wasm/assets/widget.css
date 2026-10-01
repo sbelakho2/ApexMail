@@ -49,6 +49,10 @@
     --kiwi-badge-success-text: #00603e;
     --kiwi-badge-error-text: #b91c1c;
     --kiwi-border: #e0e0e0;
+    /* WCAG 1.4.11 non-text contrast: meaningful control boundaries
+       need >=3:1 against the card background (#fafafa); --kiwi-border is the
+       decorative divider tone (1.26:1) and must not be used for controls. */
+    --kiwi-border-strong: #8a8a8a;
     --kiwi-track: #e4e4e4;
     --kiwi-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
@@ -274,7 +278,7 @@
     align-items: center;
     justify-content: center;
     padding: 6px 12px;
-    border: 1px solid var(--kiwi-border);
+    border: 1px solid var(--kiwi-border-strong);
     border-radius: 6px;
     background: var(--kiwi-bg);
     color: var(--kiwi-text);

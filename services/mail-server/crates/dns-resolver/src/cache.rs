@@ -46,6 +46,79 @@ impl Expiry<String, CachedEntry> for PositiveRecordExpiry {
     }
 }
 
+/// E-2 + audit finding 4: bounded best-effort index of live DKIM cache keys
+/// (`dkim:{selector}._domainkey.{domain}`). moka does not expose key
+/// iteration, so keys are tracked here to make
+/// [`DnsCache::invalidate_by_domain_suffix`] a REAL invalidation instead of
+/// a selector-less no-op.
+///
+/// The index MUST stay bounded: selector/domain come from the
+/// attacker-controlled `DKIM-Signature` headers of inbound mail, so an
+/// unbounded `HashSet` grows without limit while the caches themselves stay
+/// capped (TTL/capacity eviction never touched the set). The cap follows the
+/// positive cache capacity — every live DKIM entry can always be tracked —
+/// and eviction is FIFO: a flood of unique attacker keys drops the OLDEST
+/// tracked keys first, so recently seen legitimate keys keep their suffix
+/// invalidation. Losing a tracked key degrades gracefully to pre-E-2
+/// behavior (the entry simply lives out its TTL).
+#[derive(Debug, Default)]
+struct DkimKeyIndex {
+    keys: std::collections::HashSet<String>,
+    /// FIFO eviction order (mirrors `keys`; entries are removed from both).
+    order: std::collections::VecDeque<String>,
+    /// Maximum tracked keys; sized from `DnsConfig::positive_cache_size`.
+    cap: usize,
+}
+
+impl DkimKeyIndex {
+    fn new(cap: usize) -> Self {
+        Self {
+            keys: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn track(&mut self, key: &str) {
+        if self.keys.contains(key) {
+            return;
+        }
+        while self.order.len() >= self.cap {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.keys.remove(&evicted);
+        }
+        self.keys.insert(key.to_string());
+        self.order.push_back(key.to_string());
+    }
+
+    fn untrack(&mut self, key: &str) {
+        if self.keys.remove(key) {
+            self.order.retain(|tracked| tracked != key);
+        }
+    }
+
+    /// Retain only the keys for which `keep` returns true; every dropped key
+    /// is handed to `on_dropped` (which invalidates it from the caches).
+    fn retain(&mut self, keep: impl Fn(&str) -> bool, mut on_dropped: impl FnMut(&str)) {
+        self.keys.retain(|key| {
+            if keep(key) {
+                true
+            } else {
+                on_dropped(key);
+                false
+            }
+        });
+        self.order.retain(|key| self.keys.contains(key));
+    }
+
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.order.clear();
+    }
+}
+
 /// Thread-safe DNS cache with TTL-based eviction.
 ///
 /// Concurrency: both internal caches are moka (thread-safe, sharded) and
@@ -59,11 +132,8 @@ impl Expiry<String, CachedEntry> for PositiveRecordExpiry {
 pub struct DnsCache {
     cache: Cache<String, CachedEntry>,
     negative_cache: Cache<String, ()>,
-    /// E-2:live index of DKIM keys (`dkim:{selector}._domainkey.{domain}`).
-    /// moka does not expose key iteration, so keys are tracked here to make
-    /// `invalidate_by_domain_suffix` a REAL invalidation instead of the old
-    /// selector-less no-op (stale DKIM public keys survived domain rotation).
-    dkim_keys: RwLock<std::collections::HashSet<String>>,
+    /// Bounded live index of DKIM keys (see [`DkimKeyIndex`]).
+    dkim_keys: RwLock<DkimKeyIndex>,
     default_positive_ttl: Duration,
     max_positive_ttl: Duration,
 }
@@ -93,7 +163,11 @@ impl DnsCache {
         Self {
             cache,
             negative_cache,
-            dkim_keys: RwLock::new(std::collections::HashSet::new()),
+            // Audit finding 4: the index is capped at the positive cache's
+            // capacity so it can never outgrow the bounded caches it tracks.
+            dkim_keys: RwLock::new(DkimKeyIndex::new(
+                usize::try_from(config.positive_cache_size).unwrap_or(usize::MAX),
+            )),
             default_positive_ttl,
             max_positive_ttl,
         }
@@ -175,17 +249,15 @@ impl DnsCache {
         let suffix = format!(".{domain}");
         let mut dkim = self.dkim_keys.write();
         let mut invalidated = 0usize;
-        dkim.retain(|key| {
-            if key.contains("._domainkey.") && key.ends_with(&suffix) {
+        dkim.retain(
+            |key| !(key.contains("._domainkey.") && key.ends_with(&suffix)),
+            |key| {
                 self.cache.invalidate(key);
                 self.negative_cache.invalidate(key);
                 invalidated += 1;
                 debug!(key, domain, "Invalidated DKIM cache entry by domain suffix");
-                false
-            } else {
-                true
-            }
-        });
+            },
+        );
         // Defensive: the old (broken) selector-less form, if anything ever
         // wrote it directly.
         self.negative_cache
@@ -195,17 +267,20 @@ impl DnsCache {
         }
     }
 
-    /// Track a DKIM-shaped key for suffix invalidation (E-2).
+    /// Track a DKIM-shaped key for suffix invalidation (E-2). The index is
+    /// bounded (audit finding 4): under a flood of unique
+    /// attacker-controlled selector/domain pairs the oldest tracked keys are
+    /// evicted FIFO instead of growing without limit.
     fn track_dkim_key(&self, key: &str) {
         if key.starts_with("dkim:") {
-            self.dkim_keys.write().insert(key.to_string());
+            self.dkim_keys.write().track(key);
         }
     }
 
     /// Stop tracking a key that was explicitly invalidated.
     fn untrack_dkim_key(&self, key: &str) {
         if key.starts_with("dkim:") {
-            self.dkim_keys.write().remove(key);
+            self.dkim_keys.write().untrack(key);
         }
     }
 
@@ -217,6 +292,12 @@ impl DnsCache {
     /// Whether the positive cache is empty.
     pub fn is_empty(&self) -> bool {
         self.cache.entry_count() == 0
+    }
+
+    /// Number of tracked DKIM keys (test-only visibility for the bound).
+    #[cfg(test)]
+    fn dkim_index_len(&self) -> usize {
+        self.dkim_keys.read().keys.len()
     }
 
     /// Clear all caches.
@@ -510,6 +591,82 @@ mod tests {
             cache.get("mx:example.com"),
             Some(CachedResult::Records(_))
         ));
+    }
+
+    // ── audit finding 4: the DKIM key index is bounded ──────────────────────
+
+    /// Audit finding 4 regression: selector/domain come from the
+    /// attacker-controlled `DKIM-Signature: s=/d=` headers of inbound mail.
+    /// The tracked-key index used to be an unbounded HashSet that TTL/capacity
+    /// eviction never touched, so a flood of unique keys grew memory without
+    /// limit while the caches themselves stayed capped. The index is now
+    /// capped (with the positive cache capacity) and evicts FIFO.
+    #[test]
+    fn dkim_key_index_is_bounded_under_a_flood_of_unique_keys() {
+        let cache = DnsCache::new(&DnsConfig {
+            positive_cache_size: 8,
+            cache_ttl_secs: 3600, // nothing expires during the test
+            ..DnsConfig::default()
+        });
+        for i in 0..500u32 {
+            cache.insert_negative(format!("dkim:s{i}._domainkey.attacker-{i}.example"));
+        }
+        let index_len = cache.dkim_index_len();
+        assert!(
+            index_len <= 8,
+            "the dkim index must stay capped at the positive cache capacity, got {index_len}"
+        );
+
+        // FIFO eviction: a key tracked after the flood is still tracked, so
+        // its suffix invalidation still works (losing RECENT keys to the
+        // flood would resurface the stale-DKIM-key bug E-2 fixed).
+        cache.insert(
+            "dkim:legit._domainkey.legit.example",
+            vec!["v=DKIM1; k=rsa; p=OK".into()],
+        );
+        cache.invalidate_by_domain_suffix("legit.example");
+        assert!(
+            cache.get("dkim:legit._domainkey.legit.example").is_none(),
+            "a recently tracked key must still be suffix-invalidatable after a flood"
+        );
+        // Only the suffix match is purged; the surviving flood keys stay
+        // tracked (and the index stays capped).
+        assert_eq!(
+            cache.dkim_index_len(),
+            7,
+            "the suffix pass purges exactly its matches, nothing else"
+        );
+    }
+
+    /// Re-tracking an existing key must not grow the FIFO order, and explicit
+    /// invalidation must remove the key from both the set and the order.
+    #[test]
+    fn dkim_index_tracking_survives_retracks_and_untracks() {
+        let cache = DnsCache::new(&DnsConfig {
+            positive_cache_size: 4,
+            ..DnsConfig::default()
+        });
+        for _ in 0..10 {
+            cache.insert(
+                "dkim:sel._domainkey.example.com",
+                vec!["v=DKIM1; p=A".into()],
+            );
+        }
+        assert!(
+            cache.dkim_index_len() <= 4,
+            "re-tracking one key must not evict anything or grow the index"
+        );
+        cache.invalidate("dkim:sel._domainkey.example.com");
+        assert_eq!(cache.dkim_index_len(), 0, "untrack must drop the key");
+
+        // The freed capacity is reusable and suffix invalidation still works
+        // for freshly tracked keys.
+        cache.insert(
+            "dkim:sel2._domainkey.example.com",
+            vec!["v=DKIM1; p=B".into()],
+        );
+        cache.invalidate_by_domain_suffix("example.com");
+        assert!(cache.get("dkim:sel2._domainkey.example.com").is_none());
     }
 
     // ── Adversarial: re-insert TTL refresh, cross-invalidation ──────────

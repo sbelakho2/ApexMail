@@ -18,7 +18,10 @@ analytics = { path = "../analytics" }
 compliance = { path = "../compliance" }
 enterprise = { path = "../enterprise" }
 pattern-matcher = { path = "../pattern-matcher" }
-apexmail-rate-limiter = { path = "../rate-limiter" }
+# The `redis` feature is required so these tests can drive the REAL
+# `RedisLimiter` (token-bucket Lua + tenant-scoped in-memory fallback),
+# not only the always-available in-memory primitives (audit F16a).
+apexmail-rate-limiter = { path = "../rate-limiter", features = ["redis"] }
 template-renderer = { path = "../template-renderer" }
 ui-foundation = { path = "../ui-foundation" }
 # Gate G / service page contracts render the tracking-service unsubscribe and

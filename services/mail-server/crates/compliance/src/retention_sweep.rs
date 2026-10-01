@@ -288,14 +288,14 @@ impl RetentionSweeper {
         }
 
         // gdpr_exports — same window as GdprAutomation::enforce_retention
-        // (created_at + export_expiration_days, NOT expires_at). F5: rows of
-        // held tenants are excluded; NULL-tenant rows are kept whenever any
-        // hold is active (they cannot be attributed).
+        // (created_at + export_expiration_days, NOT expires_at). F5/F4: rows
+        // of held tenants are excluded via the central hold authority;
+        // NULL-tenant rows are kept whenever any hold is active (they cannot
+        // be attributed).
         let exports_deleted = self
             .purge_with_hold_filter(
                 "DELETE FROM gdpr_exports WHERE created_at < $1",
                 now - chrono::Duration::days(self.export_expiration_days),
-                &tenants,
             )
             .await;
 
@@ -305,7 +305,6 @@ impl RetentionSweeper {
             .purge_with_hold_filter(
                 "DELETE FROM dsr_verification_outbox WHERE created_at < $1",
                 now - chrono::Duration::days(self.request_expiration_days),
-                &tenants,
             )
             .await;
 
@@ -719,32 +718,43 @@ impl RetentionSweeper {
         Ok(deleted)
     }
 
-    /// F5: a retention purge (gdpr_exports / DSR outbox) that excludes held
-    /// tenants. Rows with a NULL tenant id are KEPT whenever any hold is
-    /// active — they cannot be attributed to a tenant, so they might belong
-    /// to a held one (fall back to keep). Returns (deleted, ok).
+    /// F5/F4: a retention purge (gdpr_exports / DSR outbox) that excludes
+    /// held tenants through the ONE central legal-hold authority
+    /// ([`crate::legal_hold::active_holds`]). Rows with a NULL tenant id are
+    /// KEPT whenever any hold is active — they cannot be attributed to a
+    /// tenant, so they might belong to a held one (fall back to keep).
+    /// Returns (deleted, ok).
     async fn purge_with_hold_filter(
         &self,
         base_delete: &str,
         cutoff: DateTime<Utc>,
-        tenants: &Option<Vec<TenantRetention>>,
     ) -> (u64, bool) {
-        let held: Vec<String> = tenants
-            .as_ref()
-            .map(|ts| ts.iter().filter(|t| t.held).map(|t| t.id.clone()).collect())
-            .unwrap_or_default();
-        let result = if held.is_empty() {
-            sqlx::query(base_delete)
-                .bind(cutoff)
-                .execute(&self.db)
-                .await
-        } else {
-            let sql = format!("{base_delete} AND (tenant_id IS NOT NULL AND tenant_id <> ALL($2))");
-            sqlx::query(&sql)
-                .bind(cutoff)
-                .bind(&held)
-                .execute(&self.db)
-                .await
+        let held = match crate::legal_hold::active_holds(&self.db).await {
+            Ok(held) => held,
+            Err(e) => {
+                // Fail closed: an unknown hold state must never purge.
+                warn!(error = %e, "retention sweep: legal hold lookup failed — purge skipped");
+                return (0, false);
+            }
+        };
+        // A non-empty hold list is matched by reference — no unwrapping: an
+        // empty or absent list simply runs the unfiltered DELETE.
+        let result = match held.as_ref().filter(|ids| !ids.is_empty()) {
+            None => {
+                sqlx::query(base_delete)
+                    .bind(cutoff)
+                    .execute(&self.db)
+                    .await
+            }
+            Some(held_ids) => {
+                let sql =
+                    format!("{base_delete} AND (tenant_id IS NOT NULL AND tenant_id <> ALL($2))");
+                sqlx::query(&sql)
+                    .bind(cutoff)
+                    .bind(held_ids)
+                    .execute(&self.db)
+                    .await
+            }
         };
         match result {
             Ok(r) => (r.rows_affected(), true),
@@ -1020,5 +1030,83 @@ mod tests {
             category_ids: &["RET-007"],
         };
         assert_eq!(target.retention_days(&empty), None);
+    }
+
+    /// Audit F4: the sweep's `gdpr_exports` purge excludes held tenants via
+    /// the central hold authority — a held tenant's expired export SURVIVES
+    /// the sweep while an unheld tenant's is purged by the same run.
+    #[tokio::test]
+    async fn held_tenant_exports_survive_the_sweep_purge() {
+        let Some(pool) = crate::test_support::canonical_pool("sweep_hold", "sweep_hold").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let sweeper = RetentionSweeper::new(pool.clone(), 7, 30, 365);
+        let audit_config = crate::config::AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: false,
+            signing_key: "unit-test-sweep-signing-key".into(),
+        };
+        let logger = crate::audit_logger::AuditLogger::new(pool.clone(), audit_config);
+
+        // Canonical tables type tenants.id as VARCHAR(26).
+        let held_tenant = crate::test_support::unique_tenant();
+        let free_tenant = crate::test_support::unique_tenant();
+        for (tenant, held) in [(&held_tenant, true), (&free_tenant, false)] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, legal_hold)
+                 VALUES ($1, 'n', $1, 'free', $2)",
+            )
+            .bind(tenant)
+            .bind(held)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        let held_export = uuid::Uuid::new_v4().to_string();
+        let free_export = uuid::Uuid::new_v4().to_string();
+        for (id, tenant, email) in [
+            (&held_export, &held_tenant, "held@sweep.test"),
+            (&free_export, &free_tenant, "free@sweep.test"),
+        ] {
+            sqlx::query(
+                "INSERT INTO gdpr_exports (id, request_id, tenant_id, email, data, export_url, expires_at, created_at)
+                 VALUES ($1, 'req-sweep', $2, $3, '{}'::jsonb, 'https://gdpr.test.local/x',
+                         NOW() - INTERVAL '1 day', NOW() - INTERVAL '30 days')",
+            )
+            .bind(id)
+            .bind(tenant)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("seed export");
+        }
+
+        sweeper
+            .run_sweep(&logger)
+            .await
+            .expect("the sweep completes");
+
+        let held_survives: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM gdpr_exports WHERE id = $1)")
+                .bind(&held_export)
+                .fetch_one(&pool)
+                .await
+                .expect("probe held export");
+        let free_purged: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM gdpr_exports WHERE id = $1)")
+                .bind(&free_export)
+                .fetch_one(&pool)
+                .await
+                .expect("probe free export");
+        assert!(
+            held_survives,
+            "a held tenant's expired export must survive the sweep"
+        );
+        assert!(
+            !free_purged,
+            "an unheld tenant's expired export must be purged by the same sweep"
+        );
     }
 }

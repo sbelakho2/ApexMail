@@ -23,7 +23,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
   <input type="hidden" name="page_language" value="es" />
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Empresa <span class="text-red-500">*</span></label>
-    <input type="text" id="company" name="company" required
+    <input type="text" id="company" name="company" required maxlength="200"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="Nombre de su organización" />
   </div>
@@ -53,7 +53,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
 
     <div>
       <label for="peak-hourly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Volumen horario punta</label>
-      <input type="text" id="peak-hourly-volume" name="peak_hourly_volume"
+      <input type="text" id="peak-hourly-volume" name="peak_hourly_volume" maxlength="200"
         class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
         placeholder="p. ej., 50.000 por hora" />
     </div>
@@ -111,8 +111,6 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
         <span>Caso de uso HIPAA (no disponible actualmente; consultar alternativas)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-      </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />
         <span>CCPA / leyes de privacidad estatales de EE. UU.</span>
       </label>
@@ -159,7 +157,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
 
   <div>
     <label for="additional-context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Contexto adicional</label>
-    <textarea id="additional-context" name="additional_context" rows="4"
+    <textarea id="additional-context" name="additional_context" rows="4" maxlength="2000"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Requisitos específicos de integración, planes de migración, necesidades de arquitectura de seguridad o cualquier otro contexto que nos ayude a preparar la recomendación adecuada."></textarea>
   </div>

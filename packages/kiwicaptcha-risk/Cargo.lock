@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "kiwicaptcha-risk"
-version = "0.1.0"
+version = "1.7.0"
 dependencies = [
  "hex",
  "hkdf",

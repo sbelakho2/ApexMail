@@ -101,6 +101,10 @@ async function simulateAutofill(page, selector, value) {
 async function serveFormPage(page, endpoint) {
   const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
   const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+  // The lazy risk module (widget-risk.js) is embedded on every production
+  // inline page (the bundle's form_div_layout.html.twig embeds it after
+  // the driver); the fixture page mirrors that exact inline-tier shape.
+  const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
   <div class="kiwi-container" id="kiwicaptcha-root"
@@ -112,7 +116,7 @@ ${WIDGET_MARKUP}
   <label>Username <input type="text" name="username" autocomplete="username" /></label>
   <label>Password <input type="password" name="password" autocomplete="current-password" /></label>
 </form>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
   await page.route('**/autofill-form', (route) =>
     route.fulfill({ contentType: 'text/html', body: html })
   );

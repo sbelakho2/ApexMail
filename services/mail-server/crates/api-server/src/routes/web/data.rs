@@ -646,9 +646,7 @@ async fn web_route_data(
     // Batch-2 list-edit fix: /lists/{id}/edit is data-backed like the
     // campaign editor, so the form can carry the real id + name.
     let list_edit = if path.starts_with("/lists/") && path.ends_with("/edit") {
-        let id = path
-            .trim_start_matches("/lists/")
-            .trim_end_matches("/edit");
+        let id = path.trim_start_matches("/lists/").trim_end_matches("/edit");
         load_list_edit(state, &tenant, id).await
     } else {
         None
@@ -695,9 +693,7 @@ async fn load_list_edit(
         id,
         name,
         description: description.unwrap_or_default(),
-        created_at: created_at
-            .map(|ts| ts.to_rfc3339())
-            .unwrap_or_default(),
+        created_at: created_at.map(|ts| ts.to_rfc3339()).unwrap_or_default(),
     })
 }
 
@@ -2251,7 +2247,12 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
 /// rendered, the compliance surface owns the mutations. Same honesty
 /// contract as every list: a failed query is "unavailable", never an empty
 /// list.
-async fn web_suppressions(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
+async fn web_suppressions(
+    state: &AppState,
+    tenant: &str,
+    q: &ListQuery,
+    cid: &str,
+) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     if !q.search.is_empty() {
@@ -2317,8 +2318,7 @@ async fn web_suppressions(state: &AppState, tenant: &str, q: &ListQuery, cid: &s
     // Read-only: no bulk action, no delete intent, no primary write action.
     data.empty_title = "No suppressions".into();
     data.empty_description =
-        "Nothing is withheld yet — bounces, complaints, and unsubscribes land here."
-            .into();
+        "Nothing is withheld yet — bounces, complaints, and unsubscribes land here.".into();
     if rows_unavailable {
         mark_rows_unavailable(&mut data, "Suppressions", cid);
     }
@@ -4219,7 +4219,11 @@ impl CampaignSendStats {
 /// caller's tenant AND the campaign id (events.campaign_id is TEXT; the
 /// campaign's UUID travels as its canonical text form). Any query failure
 /// degrades to the honest `unavailable` stats, never a zero.
-pub(crate) async fn load_campaign_send_stats(db: &sqlx::PgPool, tenant: &str, id: &str) -> CampaignSendStats {
+pub(crate) async fn load_campaign_send_stats(
+    db: &sqlx::PgPool,
+    tenant: &str,
+    id: &str,
+) -> CampaignSendStats {
     let counts: Result<(i64, i64, i64, i64), sqlx::Error> = sqlx::query_as(
         "SELECT COUNT(*) FILTER (WHERE event_type = 'sent')::bigint,
                 COUNT(*) FILTER (WHERE event_type = 'delivered')::bigint,
@@ -4412,13 +4416,12 @@ pub(crate) async fn load_list_detail(
     tenant: &str,
     id: &str,
 ) -> Result<Option<ui_foundation::view_data::ListDetailData>, sqlx::Error> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT id::text, name FROM lists WHERE id = $1::uuid AND tenant_id = $2",
-    )
-    .bind(id)
-    .bind(tenant)
-    .fetch_optional(db)
-    .await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT id::text, name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await?;
     let Some((id, name)) = row else {
         return Ok(None);
     };
@@ -4499,11 +4502,13 @@ pub(crate) async fn load_campaign_detail(
         .and_then(super::parse_recipients_job)
         .unzip();
     let list_name: Option<String> = match &list_id {
-        Some(list_id) => sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(list_id)
-            .bind(tenant)
-            .fetch_optional(db)
-            .await?,
+        Some(list_id) => {
+            sqlx::query_scalar("SELECT name FROM lists WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(list_id)
+                .bind(tenant)
+                .fetch_optional(db)
+                .await?
+        }
         None => None,
     };
     let recipient_count = match &list_id {
@@ -6869,16 +6874,14 @@ mod coverage_loader_tests {
         // list or zero count (outage-honesty audit #16).
         assert!(tenant_lists_for_select(&app.db, "t").await.is_err());
         assert!(tenant_plan_names(&app.db).await.is_err());
-        assert!(
-            count_list_recipients_filtered(
-                &app.db,
-                "t",
-                "00000000-0000-0000-0000-000000000000",
-                "all"
-            )
-            .await
-            .is_err()
-        );
+        assert!(count_list_recipients_filtered(
+            &app.db,
+            "t",
+            "00000000-0000-0000-0000-000000000000",
+            "all"
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
@@ -7105,11 +7108,9 @@ mod coverage_loader_tests {
                 .expect("cross-tenant campaign query succeeds")
                 .is_none()
         );
-        assert!(
-            load_campaign_detail(&app.db, &tenant_a, "not-a-uuid")
-                .await
-                .is_err()
-        );
+        assert!(load_campaign_detail(&app.db, &tenant_a, "not-a-uuid")
+            .await
+            .is_err());
 
         // Select helpers return only this tenant's rows.
         let lists = tenant_lists_for_select(&app.db, &tenant_a)
@@ -7118,13 +7119,11 @@ mod coverage_loader_tests {
         assert_eq!(lists.len(), 1);
         assert!(lists[0].1.contains(&tag_a));
         assert!(!lists[0].2, "nothing selected by default");
-        assert!(
-            tenant_plan_names(&app.db)
-                .await
-                .expect("plans catalog query succeeds")
-                .iter()
-                .any(|name| !name.is_empty())
-        );
+        assert!(tenant_plan_names(&app.db)
+            .await
+            .expect("plans catalog query succeeds")
+            .iter()
+            .any(|name| !name.is_empty()));
         // Audit #16: counts are `Ok(i64)` now — a cross-tenant list is a
         // genuine (empty) count, not an error.
         assert_eq!(

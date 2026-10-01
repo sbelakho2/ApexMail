@@ -113,19 +113,21 @@ t = transport
 webhooks = ApexMail::WebhooksAPI.new(t)
 webhooks.create(
   url: "https://example.com/hook",
-  events: ["message.delivered", "email.bounced", "*"],
+  events: ["message.delivered", "message.bounced", "*"],
   secret: "whsec_legacy", # must NOT be sent
 )
 expect("webhook create sends exactly {url, events}",
-       t.calls[0][:body] == { url: "https://example.com/hook", events: ["message.delivered", "email.bounced", "*"] })
+       t.calls[0][:body] == { url: "https://example.com/hook", events: ["message.delivered", "message.bounced", "*"] })
 
-rejected = false
+# SM15 F1: unknown event names are advisory (warn, not raise) — the
+# server stays the authority so new server events never brick the SDK.
+raised = false
 begin
   webhooks.create(url: "https://example.com/hook", events: ["delivered"])
 rescue ArgumentError
-  rejected = true
+  raised = true
 end
-expect("webhook create rejects unknown event names", rejected)
+expect("webhook create warns but does not raise on unknown event names", !raised)
 
 t = transport
 webhooks = ApexMail::WebhooksAPI.new(t)
@@ -135,11 +137,12 @@ expect("webhook update maps active=false to status=paused",
 
 expect("KNOWN_WEBHOOK_EVENTS matches the server list",
        ApexMail::KNOWN_WEBHOOK_EVENTS == %w[
-         email.delivered email.bounced email.complained
-         message.sent message.delivered message.bounced
-         message.complained message.opened message.clicked
+         message.accepted message.queued message.attempted
+         message.deferred message.delivered message.bounced
+         message.complained message.suppressed message.opened
+         message.clicked message.cancelled
          recipient.unsubscribed placement_test.completed
-         bounce complaint inbound *
+         inbound *
        ])
 
 # ── F4: template wire shape vs templates.rs ────────────────────────────────

@@ -536,17 +536,33 @@ impl SpamEngine {
         auth_results: Option<&str>,
         tenant_id: &str,
     ) -> SpamVerdict {
+        // Global-model probability with the SAME cold-start guard `analyze`
+        // enforces: below `min_training_samples` the model is neutral 0.5.
+        // Without this guard a 2-sample model's raw probability flowed
+        // straight into the 60/40 blend and moved tenant verdicts — exactly
+        // the failure the cold-start guard exists to prevent.
         let global_prob = if self.config.enable_bayesian {
-            self.bayesian.classify(body)
+            let raw_prob = self.bayesian.classify(body);
+            if self.bayesian.total_samples() < self.config.min_training_samples {
+                0.5 // Neutral — don't let an under-trained model influence scoring
+            } else {
+                raw_prob
+            }
         } else {
             0.5
         };
 
-        // Get or create per-tenant classifier for namespace isolation
+        // Get or create per-tenant classifier for namespace isolation.
+        // The tenant model gets the identical guard: a tenant classifier
+        // with a handful of samples must not steer the blend either.
         let tenant_prob = {
             let classifiers = self.tenant_classifiers.read();
             if let Some(tc) = classifiers.get(tenant_id) {
-                tc.classify(body)
+                if tc.total_samples() < self.config.min_training_samples {
+                    0.5 // Neutral — under-trained tenant model
+                } else {
+                    tc.classify(body)
+                }
             } else {
                 // No tenant-specific model yet — fall back to global
                 global_prob
@@ -972,6 +988,54 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.id == "CUSTOM_PHRASE"));
+    }
+
+    // ── Audit:analyze_for_tenant applies the Bayesian cold-start guard ──
+
+    #[test]
+    fn analyze_for_tenant_applies_bayesian_cold_start_guard() {
+        // Fail-first: `analyze_for_tenant` classified with the raw model
+        // probability and skipped the `min_training_samples` neutral guard
+        // that `analyze` enforces. Through the 60/40 blend a 2-sample model
+        // directly moved tenant verdicts — exactly the cold-start failure
+        // the guard exists to prevent.
+        let config = crate::config::SpamConfig {
+            min_training_samples: 200,
+            ..Default::default()
+        };
+        let engine = SpamEngine::with_config(config);
+        let spam_body = "buy cheap viagra pills now buy cheap viagra pills now";
+
+        let baseline = engine.analyze_for_tenant(spam_body, &[], None, "tenant-x");
+
+        // Train exactly 2 spam samples — far below min_training_samples.
+        engine.bayesian().learn_spam(spam_body);
+        engine.bayesian().learn_spam(spam_body);
+        assert_eq!(engine.bayesian().total_samples(), 2);
+        // Also a 2-sample TENANT model: the guard must apply to both sides
+        // of the blend.
+        engine
+            .train_tenant_spam("tenant-x", spam_body)
+            .expect("validated tenant sample trains");
+        engine
+            .train_tenant_spam("tenant-x", spam_body)
+            .expect("validated tenant sample trains");
+
+        let after = engine.analyze_for_tenant(spam_body, &[], None, "tenant-x");
+        assert_eq!(
+            after.bayesian_probability, 0.5,
+            "under-trained global+tenant models must yield the neutral 0.5"
+        );
+        assert_eq!(
+            after.score, baseline.score,
+            "a 2-sample model must not move the tenant verdict"
+        );
+        assert_eq!(after.classification, baseline.classification);
+
+        // Parity with `analyze`:the shared guard produces the same neutral
+        // probability on the global entry point.
+        let plain = engine.analyze(spam_body, &[], None);
+        assert_eq!(plain.bayesian_probability, 0.5);
     }
 
     #[test]

@@ -2,14 +2,21 @@
 
 This directory contains official ApexMail SDK packages for various languages:
 
-| Language | Package | Status | Maintainer |
-|----------|---------|--------|------------|
-| Go | `packages/sdk-go/` | ✅ Active | ApexMail Team |
-| Ruby | `packages/sdk-ruby/` | ✅ Active | ApexMail Team |
-| Java | `packages/sdk-java/` | ✅ Available | ApexMail Team |
-| Python | `packages/sdk-python/` | ✅ Available | ApexMail Team |
-| PHP | `packages/sdk-php/` | ✅ Available | ApexMail Team |
-| Rust | (planned) | 🔄 Planned | ApexMail Team |
+| Language | Package | Version | Status | Maintainer |
+|----------|---------|---------|--------|------------|
+| Go | `packages/sdk-go/` | 1.0.1 | ✅ Active | ApexMail Team |
+| Ruby | `packages/sdk-ruby/` | 1.0.1 | ✅ Active | ApexMail Team |
+| Java | `packages/sdk-java/` | 1.0.1 | ✅ Available | ApexMail Team |
+| Python | `packages/sdk-python/` | 1.0.1 | ✅ Available | ApexMail Team |
+| PHP | `packages/sdk-php/` | 1.0.1 | ✅ Available | ApexMail Team |
+| Rust | (planned) | — | 🔄 Planned | ApexMail Team |
+
+All five SDKs are released in lockstep at the same version. Each SDK's
+version constant (Go `sdkVersion`, Python `__version__`/`pyproject.toml`,
+Ruby `SDK_VERSION`/gemspec, Java `ApexMailClient.SDK_VERSION`, PHP
+`Client::SDK_VERSION`) must equal the head entry of its `CHANGELOG.md`.
+`python3 packages/check_versions.py` enforces this mechanically (exit 1 on
+drift) and is the CI gate for the invariant (audit SM15 F4).
 
 ## Rust SDK
 
@@ -31,14 +38,14 @@ All SDKs should parse the standard ApexMail API error envelope:
 
 ## Cursor Pagination
 
-All SDKs now support cursor-based pagination for list endpoints (messages, templates, events, suppressions).
-The `Pagination` struct in each SDK includes `cursor` (string, for the next page token) and `has_more` (boolean)
-fields. See each SDK's CHANGELOG for details:
+All SDKs support cursor-based pagination for list endpoints (messages, templates, events, suppressions).
+Every list method accepts a `cursor` parameter that is forwarded as the `cursor` query parameter.
+See each SDK's CHANGELOG for details:
 
-- **Go SDK:** `ListEmailsOptions.Cursor`, `ListTemplatesOptions.Cursor`, `ListSuppressionsOptions.Cursor`, `ListEventsOptions.Cursor`
-- **Java SDK:** Cursor parameter in all list methods via `Map` options
-- **PHP SDK:** `$options['cursor']` in all list methods
-- **Python SDK:** `cursor=` keyword argument in all list methods
+- **Go SDK:** `Cursor` field on `ListEmailsOptions`, `ListTemplatesOptions`, `ListSuppressionsOptions`, `ListEventsOptions`; `Pagination` exposes `Cursor` and `HasMore`
+- **Java SDK:** `cursor` key in the options `Map` of every list method
+- **PHP SDK:** `$options['cursor']` in all list methods; envelope metadata (`has_more`, `next_cursor`) is captured on the client
+- **Python SDK:** `cursor=` keyword argument in all list methods; list models expose `cursor`/`has_more`
 - **Ruby SDK:** `cursor:` keyword argument in all list methods
 
 SDK clients should return typed error objects with `Code` and `Message` fields.

@@ -27,14 +27,60 @@ mod devex {
     use super::*;
     use devex_service::config::DevExConfig;
     use devex_service::routes::{build_router, AppState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn app() -> axum::Router {
-        // Batch fix: the per-workload credential migration replaced the raw
-        // service_token field with ServiceAuth — set the dedicated env before
-        // state construction (nextest isolates each test in its own process).
-        std::env::set_var("DEVEX_AUTH_TOKEN", "test-key");
-        let state = AppState::from_config(DevExConfig::default()).expect("devex state");
+        // SM12 F17: the credential is INJECTED into the state instead of
+        // mutating the process-global environment (the old set_var raced
+        // sibling threads under plain `cargo test`, where every test runs
+        // in one process). Same injection pattern the devex in-crate and
+        // AI-module tests use.
+        let mut state = AppState::from_config(DevExConfig::default()).expect("devex state");
+        state.service_auth = devex_service::auth::ServiceAuth::resolve(
+            Some("test-key"),
+            None,
+            false,
+        )
+        .expect("dedicated test credential resolves");
         build_router(state)
+    }
+
+    /// A local webhook sink: axum bound to an ephemeral loopback port that
+    /// counts every received request (SM12 F5 — replaces httpbin.org).
+    async fn spawn_webhook_sink() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let sink = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move || async move {
+                hits_for_handler.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::OK
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback sink");
+        let addr = listener.local_addr().expect("sink local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, sink)
+                .await
+                .expect("webhook sink server");
+        });
+        (format!("http://{addr}/hook"), hits)
+    }
+
+    async fn post_webhook_test(url: &str, event_type: &str) -> axum::http::Response<Body> {
+        let body = serde_json::json!({ "url": url, "event_type": event_type });
+        app()
+            .oneshot(
+                Request::post("/webhooks/test")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -64,27 +110,98 @@ mod devex {
         assert_eq!(json["sdks"].as_array().unwrap().len(), 5);
     }
 
+    /// SM12 F5: the route must deliver a PRECISE verdict against a local
+    /// axum sink, not accept any 200-or-500 outcome against httpbin.org.
+    /// A loopback target is refused by the production SSRF guard — and the
+    /// sink must have received NOTHING (the guard blocks before any
+    /// connection). If the guard is unwired, the sink receives the POST,
+    /// the route answers 200, and both assertions fail.
     #[tokio::test]
-    async fn webhook_test_endpoint_accepts_post() {
-        let body = serde_json::json!({
-            "url": "https://httpbin.org/post",
-            "event_type": "message.delivered"
-        });
-        let resp = app()
-            .oneshot(
-                Request::post("/webhooks/test")
-                    .header("x-api-key", "test-key")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        // The handler tries to actually POST to the URL, and will fail in tests
-        // (no network). We just verify the route exists and returns a response.
-        // Either 200 (if network is available) or 500 (network error) is fine.
+    async fn webhook_test_route_blocks_private_target_before_any_delivery() {
+        let (sink_url, sink_hits) = spawn_webhook_sink().await;
+        let resp = post_webhook_test(&sink_url, "message.delivered").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a loopback webhook target must be refused, not delivered"
+        );
+        let json = body_json(resp).await;
+        let error = json["error"].as_str().unwrap_or_default();
         assert!(
-            resp.status() == StatusCode::OK || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+            error.contains("private/internal"),
+            "the refusal must name the SSRF guard, got: {error}"
+        );
+        assert_eq!(
+            sink_hits.load(Ordering::SeqCst),
+            0,
+            "the SSRF guard must stop the outbound POST before any request reaches the sink"
+        );
+    }
+
+    /// The DNS-resolution failure arm delivers its own precise verdict.
+    /// `.invalid` is guaranteed non-resolvable (RFC 2606): with a resolver
+    /// it is NXDOMAIN, without one the lookup errors — both surface as the
+    /// same "could not be resolved" refusal, so this is network-independent.
+    #[tokio::test]
+    async fn webhook_test_route_reports_unresolvable_hosts_precisely() {
+        let host = format!("cold-{}.invalid", uuid::Uuid::new_v4().simple());
+        let resp = post_webhook_test(&format!("https://{host}/hook"), "message.delivered").await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("could not be resolved"),
+            "an unresolvable host must produce the DNS-refusal verdict, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_test_route_refuses_non_http_schemes() {
+        let resp = post_webhook_test("ftp://example.com/hook", "message.delivered").await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        let error = json["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("Only http/https"),
+            "non-http schemes must be refused by the URL validator, got: {error}"
+        );
+    }
+
+    /// The signature the tester stamps onto delivered webhooks is real
+    /// HMAC (t=,v1= scheme): it verifies for the configured secret, fails
+    /// for a tampered body, and fails for a different secret.
+    #[tokio::test]
+    async fn webhook_tester_signature_round_trips() {
+        use devex_service::webhook_tester::WebhookTester;
+
+        let tester = WebhookTester::new(vec!["whsec_integration_test_secret".into()])
+            .expect("signing secret configured");
+        let payload = WebhookTester::build_test_payload("message.delivered");
+        let body = serde_json::to_vec(&payload).unwrap();
+
+        let signature = tester.sign_payload(&body);
+        assert!(
+            signature.starts_with("t=") && signature.contains(",v1="),
+            "the signature header must use the t=,v1= scheme, got: {signature}"
+        );
+        assert!(
+            tester.verify_signature(&body, &signature),
+            "the signed payload must verify against the configured secret"
+        );
+
+        let mut tampered = body.clone();
+        tampered[0] ^= 0xff;
+        assert!(
+            !tester.verify_signature(&tampered, &signature),
+            "a tampered body must fail signature verification"
+        );
+
+        let other = WebhookTester::new(vec!["whsec_other_secret".into()]).expect("secret");
+        assert!(
+            !other.verify_signature(&body, &signature),
+            "a different secret must not verify the signature"
         );
     }
 
@@ -276,83 +393,50 @@ mod sales {
 
     /// Provisioning runs exactly once per test PROCESS; each test then gets a
     /// FRESH pool (a sqlx pool is bound to the runtime that created it —
-    /// sharing one across `#[tokio::test]` runtimes deadlocks).
+    /// sharing one across `#[tokio::test]` runtimes deadlocks). SM12c: the
+    /// hand-copied `test_database_url`/`database_url_for`/INIT block is
+    /// replaced by the shared `migrator::test_support` helpers.
     static INIT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-
-    fn test_database_url() -> Option<String> {
-        std::env::var("TEST_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    }
-
-    /// Rewrite the database segment of a `postgresql://…/<db>` URL,
-    /// preserving any query string.
-    fn database_url_for(base_url: &str, db_name: &str) -> String {
-        match base_url.rsplit_once('/') {
-            Some((server, rest)) => {
-                let query = rest
-                    .split_once('?')
-                    .map(|(_, query)| format!("?{query}"))
-                    .unwrap_or_default();
-                format!("{server}/{db_name}{query}")
-            }
-            None => base_url.to_string(),
-        }
-    }
-
-    async fn connect(url: &str) -> sqlx::PgPool {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            PgPoolOptions::new().max_connections(10).connect(url),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("timed out connecting to canonical test database {url}"))
-        .unwrap_or_else(|error| {
-            panic!("could not connect to canonical test database {url}: {error}")
-        })
-    }
 
     async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
         let ready = INIT
             .get_or_init(|| async {
-                migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
-                let Some(base_url) = test_database_url() else {
-                    eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
-                    return false;
-                };
-                let db = match migrator::test_support::shared_canonical_db(
-                    base_url.as_str(),
-                    SALES_ROUTES_DB,
-                )
-                .await
+                match migrator::test_support::provision_shared_canonical_db(SALES_ROUTES_DB)
+                    .await
                 {
-                    Ok(db) => db,
-                    // F01: the URL is configured, so provisioning failure is
-                    // infrastructure breakage — panic, never soft-skip.
-                    Err(error) => panic!("{}", error.panic_message()),
-                };
-                let Some(db) = db else {
-                    eprintln!("skipping {test_name}: unconfigured");
-                    return false;
-                };
-                // Post-migration assertion: the canonical chain must have
-                // produced the sales schema this suite exercises.
-                initialize_schema(&db).await.unwrap_or_else(|error| {
-                    panic!(
-                        "canonical test database `{SALES_ROUTES_DB}` does not carry the \
-                         sales schema this build expects: {error}"
-                    )
-                });
-                db.close().await;
-                true
+                    Some(db) => {
+                        // Post-migration assertion: the canonical chain must
+                        // have produced the sales schema this suite exercises.
+                        initialize_schema(&db).await.unwrap_or_else(|error| {
+                            panic!(
+                                "canonical test database `{SALES_ROUTES_DB}` does not carry the \
+                                 sales schema this build expects: {error}"
+                            )
+                        });
+                        db.close().await;
+                        true
+                    }
+                    // None = TEST_DATABASE_URL unset/blank (soft-skip gate
+                    // already applied inside the helper).
+                    None => {
+                        eprintln!(
+                            "skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test"
+                        );
+                        false
+                    }
+                }
             })
             .await;
         if !ready {
             return None;
         }
 
-        let base_url = test_database_url()?;
-        let db = connect(&database_url_for(&base_url, SALES_ROUTES_DB)).await;
+        let base_url = migrator::test_support::test_database_url()?;
+        let db = migrator::test_support::connect_pool(&migrator::test_support::database_url_for(
+            &base_url,
+            SALES_ROUTES_DB,
+        ))
+        .await;
 
         let crm = CrmBackend::postgres(db.clone());
         crm.initialize()
@@ -395,7 +479,10 @@ mod sales {
     }
 
     #[tokio::test]
-    async fn health_returns_200() {
+    async fn health_reports_degraded_without_db() {
+        // SM12c rename: this asserts the DELIBERATE degraded answer the
+        // service gives without a database (503 + "degraded") — the old
+        // `health_returns_200` name lied about what it pins.
         let resp = app()
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
@@ -415,6 +502,7 @@ mod sales {
         // UNIQUE(tenant_id, lower(contact_email)) — a fixed address 409s on
         // every suite re-run against the same database.
         let email = format!("alice-{}@acme.com", uuid::Uuid::new_v4().simple());
+        let submitted_email = email.clone();
         let body = serde_json::json!({
             "email": email,
             "name": "Alice Smith",
@@ -433,11 +521,12 @@ mod sales {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["email"], json["email"].clone());
-        assert!(
-            json["email"].as_str().unwrap_or("").starts_with("alice-"),
-            "created lead echoes the submitted email: {}",
-            json["email"]
+        // SM12 F6: assert against the SUBMITTED email — the previous line
+        // compared `json["email"]` to itself (always true).
+        assert_eq!(
+            json["email"].as_str().unwrap_or(""),
+            submitted_email,
+            "created lead echoes the submitted email, got: {json}"
         );
     }
 
@@ -489,22 +578,25 @@ mod sales {
 
 mod ai {
     use super::*;
-    use ai_service::routes::{build_router, default_app_state};
+    use ai_service::config::AiConfig;
+    use ai_service::routes::{build_router, AppState};
 
     async fn app() -> axum::Router {
-        // Batch fix: production-detection treats unset APP_ENV as production,
-        // and the boot refuses without the dedicated credential — set it via
-        // env BEFORE from_config runs (nextest isolates each test in its own
-        // process, so the mutation cannot race siblings).
-        std::env::set_var("AI_ADMIN_TOKEN", "test-ai-admin-key");
-        let mut state = default_app_state().await.expect("default app state");
-        let exclusive = Arc::get_mut(&mut state).expect("exclusive app state");
-        exclusive.service_token = "test-key".into();
-        // Batch fix: AI-control routes require the dedicated credential (the
-        // universal internal token must not authorize them), and production
-        // boots refuse without it — the harness sets a test token.
-        exclusive.ai_admin_token = "test-ai-admin-key".into();
-        build_router(state)
+        // SM12 F17: config INJECTION instead of `std::env::set_var`. The
+        // previous harness assumed nextest's one-process-per-test isolation;
+        // under plain `cargo test` the concurrent set_var/read is a data
+        // race. Both credentials now arrive through AiConfig/from_config —
+        // the same pattern the AI module's in-crate tests use.
+        let state = AppState::from_config(
+            AiConfig {
+                ai_admin_token: "test-ai-admin-key".into(),
+                ..AiConfig::default()
+            },
+            "test-key".into(),
+        )
+        .await
+        .expect("ai state from injected config");
+        build_router(std::sync::Arc::new(state))
     }
 
     #[tokio::test]
@@ -578,68 +670,24 @@ mod ai {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Billing service — routes require DB/Redis state; test plan seed logic only
-// (5 tests)
+// Billing service — plan-seed smoke only (SM12c: the CANONICAL default-plan
+// assertions live in functional-tests functional_billing.rs; the deep
+// per-feature/per-tier duplicates this module used to carry were removed so
+// there is one source of truth. The HTTP-level billing behaviour (invoice
+// creation, subscription override, wallet credit with idempotency keys) is
+// covered DB-backed in concurrency_tests.rs — audit SM12 F16b.)
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod billing {
     use billing_service::plans::default_plans;
 
     #[test]
-    fn default_plans_contains_expected_tiers() {
+    fn default_plans_seed_the_documented_tiers() {
         let plans = default_plans();
         let names: Vec<&str> = plans.iter().map(|p| p.name).collect();
         assert!(names.contains(&"free"));
         assert!(names.contains(&"starter"));
         assert!(names.contains(&"pro"));
         assert!(names.contains(&"enterprise"));
-    }
-
-    #[test]
-    fn free_plan_has_zero_price() {
-        let plans = default_plans();
-        let free = plans.iter().find(|p| p.name == "free").unwrap();
-        assert_eq!(free.price_monthly, 0);
-        assert_eq!(free.price_yearly, 0);
-    }
-
-    #[test]
-    fn enterprise_plan_has_all_features() {
-        let plans = default_plans();
-        let ent = plans.iter().find(|p| p.name == "enterprise").unwrap();
-        assert!(ent.features.sso_enabled);
-        assert!(ent.features.dedicated_ip);
-        // audit_logs is NotYetImplemented (no customer audit access surface)
-        // and is no longer seeded on any plan — see
-        // billing-entitlements::PLAN_FEATURE_CLASSIFICATION.
-        assert!(!ent.features.audit_logs);
-        assert!(ent.features.send_time_optimization);
-        assert!(ent.features.advanced_analytics);
-    }
-
-    #[test]
-    fn plans_sorted_by_sort_order() {
-        let plans = default_plans();
-        for w in plans.windows(2) {
-            assert!(w[0].sort_order <= w[1].sort_order);
-        }
-    }
-
-    #[test]
-    fn all_plans_have_positive_limits() {
-        let plans = default_plans();
-        for p in &plans {
-            // -1 means unlimited, otherwise must be positive
-            assert!(
-                p.email_limit > 0 || p.email_limit == -1,
-                "{} email_limit",
-                p.name
-            );
-            assert!(
-                p.api_call_limit > 0 || p.api_call_limit == -1,
-                "{} api_call_limit",
-                p.name
-            );
-        }
     }
 }

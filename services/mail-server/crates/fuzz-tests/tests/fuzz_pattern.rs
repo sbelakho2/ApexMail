@@ -8,7 +8,7 @@ use rand::Rng;
 #[test]
 fn fuzz_pattern_match_no_panic() {
     // Random patterns and random texts must never crash the Aho-Corasick matcher.
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
 
     // Build a matcher with random patterns
     let num_patterns = rng.random_range(1..50);
@@ -71,7 +71,7 @@ fn fuzz_severity_always_valid() {
         Severity::Critical,
     ];
 
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..5_000 {
         let text = random_ascii(rng.random_range(0..200));
         let matches = ruleset.evaluate(&text);
@@ -90,7 +90,7 @@ fn fuzz_severity_always_valid() {
 fn fuzz_empty_rules_returns_empty() {
     // Matching with zero rules must always return an empty result.
     let ruleset = RuleSet::new(vec![]);
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..1_000 {
         let text = random_ascii(rng.random_range(0..500));
         let matches = ruleset.evaluate(&text);

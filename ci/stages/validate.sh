@@ -63,8 +63,19 @@ validate_env_file() {
 # value (plus every PROD_*_FILE pointing at a temp file) and asks compose to
 # render the merged config. Catches YAML/interpolation drift without secrets.
 validate_compose() {
-    command -v docker >/dev/null 2>&1 \
-        || { ci_warn "docker CLI missing — compose config check skipped"; return "$CI_EXIT_OK"; }
+    # Audit SM14 F5: docker-absence used to be a silent warn-and-skip here,
+    # contradicting the file's own fail-closed policy (CI_MISSING_TOOLS=fail
+    # on the deploy host AND in the hermetic CI image — which carries the
+    # docker CLI + compose plugin precisely so this CLIENT-SIDE render can
+    # run without a daemon). The gate can no longer silently vanish.
+    if ! command -v docker >/dev/null 2>&1; then
+        if [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
+            ci_err "docker CLI missing and CI_MISSING_TOOLS=fail — the compose contract gate cannot silently vanish (audit SM14 F5, fail closed)"
+            return "$CI_EXIT_FAIL"
+        fi
+        ci_warn "docker CLI missing — compose config check skipped"
+        return "$CI_EXIT_OK"
+    fi
     _dummy_dir=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-dummyenv.XXXXXX")
     _dummy_env=$_dummy_dir/env
     _guards=$(grep -ohE '\$\{[A-Z0-9_]+:\?' \
@@ -143,6 +154,31 @@ validate_pipeline_config() {
         # wiring cannot silently disappear (see ci/README.md §12).
         grep -q 'tools/post_github_status.sh' "$_wp" \
             || { ci_err ".woodpecker.yml lost the notify-github step (tools/post_github_status.sh) — the branch-protection commit status would never be posted"; _vp_err=1; }
+
+        # Audit SM14 F9: the executor image must be referenced BY DIGEST
+        # (`...@sha256:<64 hex>`). The mutable `:1` tag was re-pushed on
+        # every tool bump, silently replacing every scanner/tool version CI
+        # runs — with GITHUB_TOKEN mounted. The REAL digest is an operator
+        # action (build + push + `docker buildx imagetools inspect`, see the
+        # ci/ci-image/Dockerfile header); THIS check enforces the contract
+        # mechanically: any IMAGE REFERENCE line (an `image:` key or the
+        # &ci_image anchor definition) naming apexmail-ci without a digest
+        # pin fails the run. Other lines merely MENTIONING the image name
+        # (e.g. the toolchain step's `apexmail-ci-toolchain --assert`
+        # command) are not references and must not trip the check.
+        _ci_img_bad=$(grep -E '^[[:space:]]*(image:|- &ci_image)' "$_wp" \
+            | grep 'apexmail-ci' | grep -vE '@sha256:[0-9a-f]{64}' || true)
+        if [ -n "$_ci_img_bad" ]; then
+            ci_err ".woodpecker.yml references the executor image WITHOUT a @sha256:<digest> pin (audit SM14 F9) — build/push the image and pin the digest (ci/ci-image/Dockerfile header):"
+            printf '%s\n' "$_ci_img_bad" | sed 's/^/    /' >&2
+            _vp_err=1
+        elif ! grep -E '^[[:space:]]*- &ci_image' "$_wp" | grep -qE '@sha256:[0-9a-f]{64}'; then
+            ci_err ".woodpecker.yml lost the &ci_image digest anchor — every step must dereference ONE digest-pinned executor image (audit SM14 F9)"
+            _vp_err=1
+        fi
+        if grep -q 'apexmail-ci@sha256:0\{64\}' "$_wp"; then
+            ci_warn "executor image pin is the all-zero PLACEHOLDER digest — build/push the image and record the real digest in the &ci_image anchor (operator action; ci/ci-image/Dockerfile header)"
+        fi
     fi
     [ -f "$CI_ROOT/woodpecker/stage.sh" ] \
         || { ci_err "missing ci/woodpecker/stage.sh (the executor's stage wrapper)"; _vp_err=1; }

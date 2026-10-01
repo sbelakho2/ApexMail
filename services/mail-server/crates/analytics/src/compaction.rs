@@ -179,8 +179,7 @@ impl CompactionWorker {
                 // history. (The old load_manifested_ids() recursively scanned
                 // every year/month manifest per tenant on every run.)
                 let row_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-                let manifested =
-                    load_committed_event_ids(&self.pool, tenant_id, &row_ids).await;
+                let manifested = load_committed_event_ids(&self.pool, tenant_id, &row_ids).await;
 
                 // F13:split the batch — ids already committed (a previous run
                 // wrote the cold copy and committed the ledger row but died
@@ -298,9 +297,9 @@ impl CompactionWorker {
             buf.push(b'\n');
         }
 
-        let first = rows.first().ok_or_else(|| {
-            anyhow::anyhow!("write_cold_objects called with an empty batch")
-        })?;
+        let first = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("write_cold_objects called with an empty batch"))?;
         let dir = jsonl_dir(&self.storage_path, first);
         let (file, manifest_file) = cold_batch_file_names(batch_id);
         let object_key = object_key_relative(&self.storage_path, &dir, &file);
@@ -323,7 +322,11 @@ impl CompactionWorker {
             )
         })
         .await??;
-        debug!("Wrote cold storage batch {} ({} bytes)", batch_id, buf.len());
+        debug!(
+            "Wrote cold storage batch {} ({} bytes)",
+            batch_id,
+            buf.len()
+        );
 
         let len = buf.len() as u64;
         Ok((len, buf, object_key, manifest_key))
@@ -463,9 +466,7 @@ fn split_pending<'a>(
     rows: &'a [EventRow],
     committed: &std::collections::HashSet<String>,
 ) -> Vec<&'a EventRow> {
-    rows.iter()
-        .filter(|r| !committed.contains(&r.id))
-        .collect()
+    rows.iter().filter(|r| !committed.contains(&r.id)).collect()
 }
 
 /// Write the JSONL object + manifest durably into `dir` (blocking core).
@@ -501,7 +502,11 @@ fn write_cold_objects_sync(
 
 /// Atomically materialize one object inside `dir` (see
 /// [`write_cold_objects_sync`] for the durability argument).
-fn write_object_atomically_sync(dir: &std::path::Path, file: &str, bytes: &[u8]) -> anyhow::Result<()> {
+fn write_object_atomically_sync(
+    dir: &std::path::Path,
+    file: &str,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
     let final_path = dir.join(file);
     let temp_path = dir.join(format!(".{file}.tmp"));
     let write = || -> anyhow::Result<()> {
@@ -634,7 +639,10 @@ pub async fn load_committed_event_ids(
 /// Recovery/verification entry point:read the COMMITTED rows for a tenant —
 /// never "whatever files exist" (finding C). Ordered newest-first by
 /// committed_at via `idx_compaction_batches_tenant_committed`.
-pub async fn load_committed_batches(pool: &PgPool, tenant_id: &str) -> anyhow::Result<Vec<CommittedBatch>> {
+pub async fn load_committed_batches(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> anyhow::Result<Vec<CommittedBatch>> {
     Ok(sqlx::query_as::<_, CommittedBatch>(
         "SELECT batch_id, tenant_id, year, month, object_key, manifest_key, event_count, \
          checksum, committed_at \
@@ -820,7 +828,10 @@ mod tests {
 
         assert_ne!(a_obj, b_obj, "same-millisecond batches must not collide");
         assert_ne!(a_manifest, b_manifest);
-        assert!(a_obj.starts_with("events_") && a_obj.ends_with(".jsonl"), "{a_obj}");
+        assert!(
+            a_obj.starts_with("events_") && a_obj.ends_with(".jsonl"),
+            "{a_obj}"
+        );
         assert!(a_manifest.ends_with(".manifest.json"), "{a_manifest}");
         // The uuid identity is embedded in both names (matches migration 231).
         assert!(a_obj.contains(&a.to_string()), "{a_obj}");
@@ -867,7 +878,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
 
         // No-clobber:rewriting an existing identity is a loud error, and the
         // original bytes are untouched.
@@ -890,7 +904,10 @@ mod tests {
     fn split_pending_skips_committed_ids_keeps_deleting_them() {
         let committed_id = uuid::Uuid::new_v4().to_string();
         let fresh_id = uuid::Uuid::new_v4().to_string();
-        let rows = vec![example_row(committed_id.clone(), None), example_row(fresh_id.clone(), None)];
+        let rows = vec![
+            example_row(committed_id.clone(), None),
+            example_row(fresh_id.clone(), None),
+        ];
         let committed: std::collections::HashSet<String> = [committed_id].into();
 
         let pending = split_pending(&rows, &committed);
@@ -1042,7 +1059,8 @@ mod gap_tests {
     /// removed by the retention pass.
     #[tokio::test]
     async fn run_prunes_cold_storage_even_when_migration_is_empty() {
-        let (Some(redis), Some(pool)) = (private_redis(13), canonical_pool("compaction_empty").await)
+        let (Some(redis), Some(pool)) =
+            (private_redis(13), canonical_pool("compaction_empty").await)
         else {
             // coverage: justified — soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
@@ -1060,7 +1078,10 @@ mod gap_tests {
         assert!(status.completed);
         assert_eq!(status.rows_migrated, 0);
         assert_eq!(status.rows_deleted, 0);
-        assert!(!aged.exists(), "the aged-out month directory must be pruned");
+        assert!(
+            !aged.exists(),
+            "the aged-out month directory must be pruned"
+        );
         assert!(
             !aged.join("events_old.jsonl").exists(),
             "the aged-out object is gone with its directory"
@@ -1073,8 +1094,10 @@ mod gap_tests {
     /// from `events` — after which the retention pass still runs.
     #[tokio::test]
     async fn run_migrates_commits_and_deletes_old_events() {
-        let (Some(redis), Some(pool)) = (private_redis(14), canonical_pool("compaction_migrate").await)
-        else {
+        let (Some(redis), Some(pool)) = (
+            private_redis(14),
+            canonical_pool("compaction_migrate").await,
+        ) else {
             // coverage: justified — soft-skip guard: reachable only when the
             // TEST_* env vars are unset (a run in which the whole DB/Redis
             // suite skips); a coverage run has them configured.
@@ -1099,7 +1122,12 @@ mod gap_tests {
             .expect("seed old event");
         }
 
-        let worker = CompactionWorker::new(pool.clone(), redis.clone(), config(90, 730, 100), root.clone());
+        let worker = CompactionWorker::new(
+            pool.clone(),
+            redis.clone(),
+            config(90, 730, 100),
+            root.clone(),
+        );
         let status = worker.run().await.expect("migration run");
         assert!(status.completed);
         assert_eq!(status.rows_migrated, 2, "both old events migrated");
@@ -1107,12 +1135,13 @@ mod gap_tests {
         assert!(status.bytes_written > 0);
 
         // The commit point:ledger batch + covered-id rows exist.
-        let batches: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM analytics_compaction_batches WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let batches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM analytics_compaction_batches WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(batches >= 1, "the batch is committed to the ledger");
         let covered: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM analytics_compaction_batch_event_ids WHERE tenant_id = $1",
@@ -1143,7 +1172,10 @@ mod gap_tests {
         assert_eq!(jsonl.len(), 1, "one JSONL object per batch");
         let bytes = std::fs::read(&jsonl[0]).expect("cold object");
         let text = String::from_utf8(bytes).expect("utf8 jsonl");
-        assert!(text.contains("203.0.113.0"), "IP masked in cold copy: {text}");
+        assert!(
+            text.contains("203.0.113.0"),
+            "IP masked in cold copy: {text}"
+        );
         assert!(!text.contains("203.0.113.9"), "full IP never in cold copy");
 
         // A SECOND run is idempotent: nothing left to migrate.
@@ -1176,7 +1208,8 @@ mod gap_tests {
             .runtime(deadpool_redis::Runtime::Tokio1)
             .build()
             .expect("pool");
-        let worker = CompactionWorker::new(pool, redis, config(90, 730, 100), storage_root("empty"));
+        let worker =
+            CompactionWorker::new(pool, redis, config(90, 730, 100), storage_root("empty"));
         let err = worker
             .write_cold_objects(&[], Uuid::new_v4())
             .await
@@ -1202,7 +1235,12 @@ mod gap_tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://offline@127.0.0.1:1/offline")
             .expect("lazy pool");
-        let worker = CompactionWorker::new(pool, redis.clone(), config(90, 730, 100), storage_root("nolock"));
+        let worker = CompactionWorker::new(
+            pool,
+            redis.clone(),
+            config(90, 730, 100),
+            storage_root("nolock"),
+        );
         let lock_key = format!("compaction:lock:{}", Utc::now().format("%Y-%m-%d"));
         // Someone else owns the lock.
         {
@@ -1216,11 +1254,22 @@ mod gap_tests {
         worker.release_lock(&lock_key).await.expect("no-op release");
         let still: Option<String> = {
             let mut conn = redis.get().await.unwrap();
-            redis::cmd("GET").arg(&lock_key).query_async(&mut *conn).await.unwrap()
+            redis::cmd("GET")
+                .arg(&lock_key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap()
         };
-        assert_eq!(still.as_deref(), Some("owner-elsewhere"), "foreign lock untouched");
+        assert_eq!(
+            still.as_deref(),
+            Some("owner-elsewhere"),
+            "foreign lock untouched"
+        );
         let mut conn = redis.get().await.unwrap();
-        let _: Result<(), _> = redis::cmd("DEL").arg(&lock_key).query_async(&mut *conn).await;
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(&lock_key)
+            .query_async(&mut *conn)
+            .await;
     }
 
     /// Empty candidate lists short-circuit to an empty coverage set without

@@ -29,13 +29,21 @@ description = "Global allowlist for ApexMail"
 # Directory-boundary-anchored paths for deliberately fake credentials.
 # `(^|/)tests/fixtures/` matches <anything>/tests/fixtures/<file> at any
 # depth but never a file merely named "*test*" or "*fixture*".
+#
+# Audit SM14 F8 (2026-09-30): the two WHOLE-TREE exemptions below are GONE —
+#   * "(^|/)migrations/" — production-executed SQL. The full-history scan
+#     (841 commits) shows ZERO findings under migrations/, so the directory
+#     entry covered nothing reviewed: it only guaranteed that a future real
+#     DSN pasted into a migration would be invisible. A migration that
+#     genuinely needs an example connection string gets a per-file entry.
+#   * "(^|/)apps/ai/(training|src)/" — ordinary product source + training
+#     scripts. Narrowed to the exact reviewed files (see the 2026-09-30
+#     block below); every OTHER file in those trees is scanned again.
 paths = [
     # Rust test fixture directories (e.g. crates/mta/tests/fixtures TLS material)
     "(^|/)tests/fixtures/",
     # Benchmark corpora
     "(^|/)benches/",
-    # SQL migrations may contain documented example connection strings
-    "(^|/)migrations/",
     # Generated code
     "(^|/)generated(/|$)",
     #
@@ -66,9 +74,67 @@ paths = [
     "(^|/)docs/deployment/(configuration|PRODUCTION_SETUP|automated-setup-guide)[.]md$",
     # TS test suites (billing app, ai app) + historical ai training scripts.
     "(^|/)__tests__/",
-    "(^|/)apps/ai/(training|src)/",
     # Root legacy landing page (generated snapshot markup).
     "^index[.]html$",
+    #
+    # 2026-09-30 narrowing (audit SM14 F8): replaces the whole-tree
+    # "(^|/)apps/ai/(training|src)/" exemption. EVERY remaining finding under
+    # apps/ai was re-reviewed line-by-line; these seven files carry the only
+    # hits and all are deterministic fakes, docs placeholders, or rule
+    # false-positives — none is a credential. Every OTHER file in apps/ai/
+    # (src included) is now scanned with ALL rules again.
+    #   customer-support.test.ts:670 — sequential-hex fixture "a1b2c3d4…"
+    #     inside a unit test's canned API response.
+    #   lead-scoring-pipeline.ts:178 — linkedin-client-id rule FALSE POSITIVE:
+    #     the match is the feature-name literal 'linkedinPresence' in a
+    #     feature list, not a client id.
+    #   build_agent.py:499 — placeholder "whsec_abc123xyz" in generated
+    #     training-data JSON.
+    #   build_r17e.py / build_r26.py — dataset fixture keys "am_live_abc123"/
+    #     "am_live_xyz789" (shorter siblings of the am_live_* value allowlist
+    #     below; path-scoped so other files stay covered).
+    #   generate_dataset.py / generate_dataset_v2.py — documented curl
+    #     example with the "Bearer am_live_your_key" placeholder.
+    '(^|/)apps/ai/src/assistant/customer-support[.]test[.]ts$',
+    '(^|/)apps/ai/src/training/lead-scoring-pipeline[.]ts$',
+    '(^|/)apps/ai/training/build_agent[.]py$',
+    '(^|/)apps/ai/training/build_r17e[.]py$',
+    '(^|/)apps/ai/training/build_r26[.]py$',
+    '(^|/)apps/ai/training/generate_dataset(_v2)?[.]py$',
+    #
+    # 2026-09-30 heuristic-noise triage (audit SM14 F8 validation: the
+    # required gitleaks gate was failing at HEAD on 21 findings, every one
+    # reviewed line-by-line — deterministic in-source test constants, test
+    # TLS material, and one committed pinning-checker FIXTURE; none is a
+    # credential). Allowlisted by exact reviewed FILE PATH per the
+    # 2026-09-05 convention, so the same constant in any other file fires:
+    #   api-server/src/audit_log.rs — #[cfg(test)] sets
+    #     AUDIT_SIGNING_KEY="w6a-signing-key-0123456789" (deterministic test
+    #     key for hash-chain assertions).
+    #   api-server/tests/bin_server_lifecycle.rs — generated test TLS
+    #     private key + DB_PASSWORD "bebc8cef…" binary-server lifecycle
+    #     fixture (same constant in observability-service's lifecycle test).
+    #   enterprise/tests/sso_integration.rs — SSO_ENCRYPTION_KEY
+    #     "sso-integration-test-key-0123456789".
+    #   imap-server connection_tests.rs / adversarial_tests.rs — generated
+    #     test PEM keys (BEGIN PRIVATE KEY blocks).
+    #   mta/src/servers/inbound.rs — #[cfg(test)] PEM keys (PKCS8 + RSA)
+    #     for STARTTLS session tests.
+    #   worker-processors/src/email/transport.rs — #[cfg(test)]
+    #     VERP_HMAC_SECRET="0123456789abcdef…" stub-SMTP fixtures (the
+    #     substring value allowlist was removed 2026-09-05; path entry
+    #     restores this file only).
+    #   tools/fixtures/compose_pinning/pass-sha-tag-pin.json — the
+    #     image-pinning checker's committed PASS fixture: its whole purpose
+    #     is a fake digest-shaped image reference.
+    '(^|/)crates/api-server/src/audit_log[.]rs$',
+    '(^|/)crates/api-server/tests/bin_server_lifecycle[.]rs$',
+    '(^|/)crates/enterprise/tests/sso_integration[.]rs$',
+    '(^|/)crates/imap-server/src/(connection_tests|adversarial_tests)[.]rs$',
+    '(^|/)crates/mta/src/servers/inbound[.]rs$',
+    '(^|/)crates/observability-service/tests/service_lifecycle[.]rs$',
+    '(^|/)crates/worker-processors/src/email/transport[.]rs$',
+    '(^|/)tools/fixtures/compose_pinning/pass-sha-tag-pin[.]json$',
     #
     # 2026-09-05 narrowing (audit §2: the old VALUE regexes "CHANGEME",
     # "changethis" and "0123456789abcdef" suppressed ANY secret containing

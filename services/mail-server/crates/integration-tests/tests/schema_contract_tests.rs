@@ -25,7 +25,9 @@ use api_server::{
 use axum::Router;
 use deadpool_redis::Config as RedisConfig;
 use sqlx::PgPool;
+use std::sync::Mutex;
 use std::time::Duration;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 /// Apply the canonical production migrations against the test database via
@@ -44,69 +46,23 @@ async fn apply_canonical_migrations(pool: &PgPool) {
         .expect("failed to apply canonical migrations");
 }
 
-/// Schema-contract tests each get a PRIVATE database (`<base>_schema_<test>`)
-/// carrying the canonical production chain: `cargo test` runs tests in
-/// parallel threads of one process and `cargo nextest` runs every test in
-/// its own process — a per-test name gives both a freshly migrated,
-/// uncontended database (no cross-test seeding interference, and no
-/// DROP-during-use races). The per-test isolation also keeps runtime code
-/// in OTHER test binaries (e.g. `integration_routes` calling
-/// `crm_pg::initialize`, which creates `sales_leads` at runtime) from
-/// polluting this suite's catalog and `_sqlx_migrations` lineage ledger.
+/// Schema-contract tests each get a PRIVATE canonical database carrying the
+/// full production chain: `cargo test` runs tests in parallel threads of one
+/// process and `cargo nextest` runs every test in its own process — a
+/// per-test name gives both a freshly migrated, uncontended database (no
+/// cross-test seeding interference, and no DROP-during-use races).
+///
+/// SM12c harness dedup: this is now the shared `migrator::test_support`
+/// helper (per-call template clone; `None` only when TEST_DATABASE_URL is
+/// unset — soft-skip — and a configured provisioning failure PANICS with the
+/// F01 message), replacing the copy-pasted block this suite used to carry.
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
-    migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
-    let database_url = match std::env::var("TEST_DATABASE_URL") {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => {
-            eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
-            return None;
-        }
-    };
-
-    // Derive an isolated database URL by appending `_schema_<test>` to the
-    // dbname. Postgres truncates identifiers beyond 63 bytes, which would
-    // silently CREATE a differently-named database — bound the suffix so the
-    // full name always fits.
-    let (server_part, db_part) = match database_url.rsplit_once('/') {
-        Some((s, d)) => (s, d),
-        None => {
-            eprintln!("skipping {test_name}: TEST_DATABASE_URL has no database segment");
-            return None;
-        }
-    };
-    let db_only = db_part.split('?').next().unwrap_or(db_part);
-    const PREFIX: &str = "_schema_";
-    let max_suffix = 63_usize.saturating_sub(db_only.len() + PREFIX.len());
-    let sanitized: String = test_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let suffix = &sanitized[..sanitized.len().min(max_suffix)];
-    let isolated_db = format!("{db_only}{PREFIX}{suffix}");
-
-    // Template-clone provisioning (migrator::test_support): applying the
-    // ~170-file chain per test was fine locally but at CI nextest
-    // parallelism the concurrent DDL exhausted the cluster's shared lock
-    // memory ("out of shared memory", migration 64). The chain is applied
-    // once into the cluster's template; each test clones it. A provisioning
-    // FAILURE panics rather than soft-skipping: this is a required gate
-    // (the F52 rule — missing infrastructure must not read as green, and
-    // the F01 Result contract makes configured failures explicit errors).
-    match migrator::test_support::fresh_canonical_db(
-        &format!("{server_part}/{db_only}"),
-        &isolated_db,
-    )
-    .await
-    {
-        Ok(pool) => pool,
-        Err(error) => panic!("{}", error.panic_message()),
-    }
+    // The suffix embeds the test name (restoring this suite's original
+    // `<base>_schema_<test>` private-per-test naming): `optional_pg_pool`
+    // derives the database name from the suffix alone, so a constant suffix
+    // would funnel every parallel test into ONE database whose per-call
+    // re-provisioning severs its siblings' connections mid-test.
+    migrator::test_support::optional_pg_pool(test_name, &format!("schema_{test_name}")).await
 }
 
 fn bounded_id(prefix: &str) -> String {
@@ -114,7 +70,6 @@ fn bounded_id(prefix: &str) -> String {
     apexmail_lib::id::generate_id(prefix, suffix_len)
 }
 
-#[allow(dead_code)]
 fn test_config() -> Config {
     Config {
         ai_service_base_url: String::new(),
@@ -226,13 +181,13 @@ fn test_config() -> Config {
 /// Create a test router wrapping the real registration endpoints.
 ///
 /// # Thread-safety note
-/// This helper calls `std::env::set_var` which is **not** thread-safe.
-/// Every test that calls `registration_test_app` MUST be annotated with
-/// `#[serial]` to prevent concurrent env-var manipulation races.
+/// This helper calls `std::env::set_var` (DKIM/AWS test credentials) which
+/// is **not** thread-safe. Every test that calls `registration_test_app`
+/// MUST be annotated with `#[serial]` to prevent env-manipulation races.
+///
 /// Mint the HMAC-signed X-CSRF-Token the auth-form-protected endpoints
 /// require (same construction as csrf.rs's tests' mint_csrf_token):
 /// base64(nonce).base64(HMAC-SHA256(secret, nonce)).
-#[allow(dead_code)] // retained with registration_test_app for future HTTP-ceremony coverage
 fn mint_csrf_header_value(secret: &str) -> String {
     use base64::Engine;
     let nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -286,60 +241,75 @@ async fn seed_system_sender_domain(pool: &sqlx::PgPool) {
     .expect("system sender seed");
 }
 
-#[allow(dead_code)] // retained for future HTTP-ceremony coverage
-async fn registration_test_app(pool: PgPool) -> Router {
-    // Surface server-side error! logs (INTERNAL_ERROR carries a requestId
-    // but the message is only logged server-side).
+/// AWS SDK env (AppState builds an SES client): installed exactly ONCE
+/// under this lock — concurrent `set_var` is a data race (SM12 F17 rule).
+static AWS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn ensure_aws_test_env() {
+    let _guard = AWS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+        }
+        if std::env::var("AWS_SECRET_ACCESS_KEY").is_err() {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        }
+    });
+}
+
+/// The REAL `build_app` router over a dedicated canonical register database
+/// (provisioned through the production migrator — audit F01) whose system
+/// sender is dkim-ready. Returns `(app, pool)`; `None` only when
+/// TEST_DATABASE_URL is unset (the caller applies the soft-skip gate).
+///
+/// SM12 F18: this harness was 250 lines of `#[allow(dead_code)]` — it is
+/// now the fixture of `register_http_ceremony_...` below, which drives the
+/// full register HTTP ceremony through the production router.
+async fn registration_test_app() -> Option<(Router, PgPool)> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
         )
         .try_init();
-    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+    ensure_aws_test_env();
 
-    let raw_database_url =
-        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
-    // Mirror `optional_pg_pool`'s isolation: append `_schema` to the dbname so
-    // the app's pool targets the same dedicated database the schema-contract
-    // tests use.
-    let database_url = match raw_database_url.rsplit_once('/') {
-        Some((server_part, db_part)) => {
-            let db_only = db_part.split('?').next().unwrap_or(db_part);
-            format!("{server_part}/{db_only}_schema")
-        }
-        None => raw_database_url,
-    };
-    // The register flow is production code bound to the CANONICAL migration
-    // chain; provision it through the REAL production migrator (audit F01)
-    // on a dedicated database and seed the dkim-ready system sender.
-    let (server_part, db_only) = database_url.rsplit_once('/').unwrap();
-    let canonical_db = format!("{db_only}_register");
-    // Provision through the REAL production migrator (audit F01) on a
-    // dedicated database and seed the dkim-ready system sender. The F01
-    // Result contract: a configured provisioning failure PANICS (never a
-    // silent skip); Ok(None) cannot occur here because the URL is present.
-    match migrator::test_support::fresh_canonical_db(&database_url, &canonical_db).await {
-        Ok(Some(canon_pool)) => {
-            seed_system_sender_domain(&canon_pool).await;
-            canon_pool.close().await;
-        }
-        Ok(None) => {}
+    let base_url = migrator::test_support::test_database_url()?;
+    let db_only = base_url
+        .rsplit_once('/')
+        .map(|(_, d)| d.split('?').next().unwrap_or(d))
+        .unwrap_or("apexmail")
+        .to_string();
+    // Unique per call: a fixed name would race its own DROP against
+    // sibling nextest processes (see concurrent_registration_... below).
+    let register_db = format!(
+        "{db_only}_reg_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    );
+    let pool = match migrator::test_support::fresh_canonical_db(&base_url, &register_db).await {
+        Ok(Some(pool)) => pool,
+        Ok(None) => panic!(
+            "TEST_DATABASE_URL is configured but the canonical register database \
+             {register_db} could not be provisioned"
+        ),
         Err(error) => panic!("{}", error.panic_message()),
-    }
-    let database_url = format!("{server_part}/{canonical_db}");
+    };
+    // The register flow queues its verification email through the SYSTEM
+    // sender — seeded in the SAME database the app's pools target.
+    seed_system_sender_domain(&pool).await;
 
+    let database_url = migrator::test_support::database_url_for(&base_url, &register_db);
     let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 2, 0)
         .await
         .expect("failed to create test pool pair");
 
-    // TEST_REDIS_URL (workspace convention) so the transactional
-    // verification-email queue write reaches the real test Redis instead of
-    // a hardcoded port that may not be running.
+    // TEST_REDIS_URL (workspace convention) when available; the signup path
+    // deliberately soft-skips Redis internally, so a dead port keeps this
+    // hermetic when the variable is unset.
     let redis_url =
-        std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".to_string());
     let redis = RedisConfig::from_url(&redis_url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("failed to create lazy redis pool");
@@ -355,19 +325,120 @@ async fn registration_test_app(pool: PgPool) -> Router {
         "us-east-1".into(),
     );
 
-    build_app(
-        AppStateInner::new(
-            pool,
-            pools,
-            redis,
-            test_config(),
-            reqwest::Client::new(),
-            ses_provider,
-            None,
+    Some((
+        build_app(
+            AppStateInner::new(
+                pool.clone(),
+                pools,
+                redis,
+                test_config(),
+                reqwest::Client::new(),
+                ses_provider,
+                None,
+            )
+            .await
+            .expect("failed to create test app state"),
+        ),
+        pool,
+    ))
+}
+
+/// SM12 F18 — the register HTTP ceremony through the REAL router: a CSRF'd
+/// `POST /v1/auth/register` must persist a UUID users row + pending tenant,
+/// and queue the verification email through the dkim-ready system sender.
+/// This is the port of the api-server suite's reference ceremony onto this
+/// crate's (previously dead) registration harness.
+#[tokio::test]
+#[serial]
+async fn register_http_ceremony_persists_tenant_user_and_queue() {
+    let Some((app, pool)) = registration_test_app().await else {
+        eprintln!("skipping register_http_ceremony: set TEST_DATABASE_URL to run DB-backed test");
+        return;
+    };
+    // The DKIM env var is process-global and the awaited register path
+    // reads it: seed_system_sender_domain set it inside the harness; the
+    // #[serial] annotation keeps sibling tests off the variable meanwhile.
+    let csrf = mint_csrf_header_value(&test_config().csrf_secret);
+    let email = format!("register-{}@example.com", Uuid::new_v4());
+    let body = serde_json::json!({
+        "company_name": "Register Ceremony Co",
+        "email": email,
+        "name": "Ceremony Tester",
+        "password": "Sup3r#SecurePass",
+        "plan": "free",
+    });
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v1/auth/register")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", csrf)
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
         )
         .await
-        .expect("failed to create test app state"),
+        .expect("register request must dispatch");
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap_or_default();
+    let body_text = String::from_utf8_lossy(&body_bytes);
+    assert_eq!(
+        status,
+        axum::http::StatusCode::ACCEPTED,
+        "the register ceremony must be accepted, got {status}; body: {body_text}"
+    );
+
+    // The users row exists, carries a UUID id + owner role, and the password
+    // hash is a verifiable PHC string (never a plaintext/cleared value).
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id::text, password_hash, role FROM users WHERE email = $1",
     )
+    .bind(&email)
+    .fetch_optional(&pool)
+    .await
+    .expect("users lookup must not error");
+    let Some((user_id, password_hash, role)) = row else {
+        panic!("the register ceremony must persist a users row for {email}");
+    };
+    assert!(
+        Uuid::parse_str(&user_id).is_ok(),
+        "users.id must be a valid UUID, got {user_id}"
+    );
+    assert_eq!(role, "owner", "a signup user is the tenant owner");
+    assert!(
+        password_hash.starts_with("$2") || password_hash.starts_with("$argon2"),
+        "password hash must be a verifiable hash, got {password_hash:?}"
+    );
+
+    // The tenant row exists, pending verification, and OWNS the user.
+    let (tenant_status,): (String,) = sqlx::query_as(
+        "SELECT t.status FROM tenants t JOIN users u ON u.tenant_id = t.id WHERE u.email = $1",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("the registered user must belong to a persisted tenant");
+    assert_eq!(tenant_status, "pending", "signup persists a pending tenant");
+
+    // The verification email was queued through the system sender.
+    // `query_scalar` yields the scalar itself — destructuring it into a
+    // 1-tuple makes sqlx decode the INT8 column as a composite RECORD.
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM email_queue WHERE to_addresses = ARRAY[$1]::text[]",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("email_queue lookup must not error");
+    assert!(
+        queued >= 1,
+        "the register ceremony must queue the verification email for {email}"
+    );
+
+    pool.close().await;
 }
 
 /// Helper:create a test tenant and return its ID.

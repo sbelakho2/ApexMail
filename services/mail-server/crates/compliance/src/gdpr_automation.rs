@@ -413,6 +413,53 @@ impl GdprAutomation {
             .await?
             .ok_or("Request not found")?;
 
+        // F4 (legal hold): an erasure on a HELD tenant must not run — the
+        // hold freezes the subject's records as evidence, exactly like the
+        // retention sweep's absolute skip. The request defers to human
+        // review (the same `pending_manual_review` parking spot the
+        // rectification path uses) instead of deleting. Fail-closed: a hold
+        // lookup error also defers rather than risking an erasure.
+        if request.request_type == DataSubjectRequestType::Erasure {
+            match crate::legal_hold::tenant_is_held(&self.db, &request.tenant_id).await {
+                Ok(Some(true)) | Err(_) => {
+                    warn!(
+                        request_id = %request.id,
+                        tenant_id = %request.tenant_id,
+                        "GDPR erasure deferred: tenant is under legal hold (or hold state unreadable)"
+                    );
+                    let result = DataSubjectRequestResult {
+                        data: Some(serde_json::json!({
+                            "deferred": "legal_hold",
+                            "reason": "The tenant's records are under an active legal hold; \
+                                       erasure requires manual review and cannot run automatically.",
+                        })),
+                        export_url: None,
+                        export_expires_at: None,
+                        deleted_records: None,
+                        deletion_confirmation: None,
+                        modified_records: None,
+                        rejection_reason: None,
+                        partial: None,
+                        review_required: true,
+                        retained_disclosure: None,
+                    };
+                    let result_json = serde_json::to_value(&result).ok();
+                    sqlx::query(
+                        "UPDATE data_subject_requests
+                         SET status = 'pending_manual_review', completed_at = NULL, result = $2
+                         WHERE id = $1",
+                    )
+                    .bind(request_id)
+                    .bind(&result_json)
+                    .execute(&self.db)
+                    .await
+                    .map_err(|e| format!("DB error deferring held erasure: {e}"))?;
+                    return Ok(result);
+                }
+                Ok(Some(false)) | Ok(None) => { /* not held — proceed */ }
+            }
+        }
+
         let result = match request.request_type {
             DataSubjectRequestType::Access => self.process_access_request(&request).await,
             DataSubjectRequestType::Erasure => self.process_erasure_request(&request).await,
@@ -2029,6 +2076,16 @@ impl GdprAutomation {
     /// NOT `data_retention_days`; revoked-consent cleanup also covers rows
     /// with NULL granted_at (never-granted records) older than the cutoff,
     /// keyed on their revocation time.
+    ///
+    /// F4 (legal hold): this job used to purge WITHOUT the hold exclusion
+    /// the retention sweep enforces on the same `gdpr_exports` table — a
+    /// held tenant's SAR exports (evidence of what was disclosed) and
+    /// consent history could be destroyed by this cron. Both deletions now
+    /// go through the ONE central hold authority
+    /// ([`crate::legal_hold::active_holds`]): rows of held tenants (and
+    /// NULL-tenant rows while any hold is active) survive, and a failed hold
+    /// lookup fails the job closed — nothing is deleted on an unknown hold
+    /// state.
     pub async fn enforce_retention(&self) -> Result<(u64, u64), String> {
         let (consent_cutoff, export_cutoff) = retention_cutoffs(
             Utc::now(),
@@ -2036,19 +2093,34 @@ impl GdprAutomation {
             self.config.export_expiration_days,
         );
 
-        let consents = sqlx::query(
+        let held = crate::legal_hold::active_holds(&self.db).await?;
+        let hold_filter = crate::legal_hold::exclusion_sql(&held, "tenant_id");
+        // An owned empty fallback keeps the bind borrow alive past the
+        // statement; `binds_held` guarantees it is only bound when non-empty.
+        let empty: Vec<String> = Vec::new();
+        let held_ids: &Vec<String> = held.as_ref().unwrap_or(&empty);
+
+        let consents_sql = format!(
             "DELETE FROM consent_records
              WHERE granted = false
-               AND COALESCE(granted_at, revoked_at) < $1",
-        )
-        .bind(consent_cutoff)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB: {e}"))?
-        .rows_affected();
+               AND COALESCE(granted_at, revoked_at) < $1{hold_filter}"
+        );
+        let mut consents_query = sqlx::query(&consents_sql).bind(consent_cutoff);
+        if crate::legal_hold::binds_held(&held) {
+            consents_query = consents_query.bind(held_ids);
+        }
+        let consents = consents_query
+            .execute(&self.db)
+            .await
+            .map_err(|e| format!("DB: {e}"))?
+            .rows_affected();
 
-        let exports = sqlx::query("DELETE FROM gdpr_exports WHERE created_at < $1")
-            .bind(export_cutoff)
+        let exports_sql = format!("DELETE FROM gdpr_exports WHERE created_at < $1{hold_filter}");
+        let mut exports_query = sqlx::query(&exports_sql).bind(export_cutoff);
+        if crate::legal_hold::binds_held(&held) {
+            exports_query = exports_query.bind(held_ids);
+        }
+        let exports = exports_query
             .execute(&self.db)
             .await
             .map_err(|e| format!("DB: {e}"))?
@@ -4313,6 +4385,162 @@ mod hostile_db_tests {
         .fetch_one(pool)
         .await
         .expect("request row")
+    }
+
+    // ── Audit F4: legal hold guards BOTH deletion jobs ──────────────────────
+
+    /// Seed one tenants row with an explicit `legal_hold` value.
+    async fn seed_tenant_with_hold(pool: &PgPool, tenant: &str, held: bool) {
+        sqlx::query("INSERT INTO tenants (id, name, slug, plan, legal_hold) VALUES ($1, 'n', $1, 'free', $2)")
+            .bind(tenant)
+            .bind(held)
+            .execute(pool)
+            .await
+            .expect("seed tenant with hold");
+    }
+
+    async fn seed_expired_export(pool: &PgPool, id: &str, tenant: &str, email: &str) {
+        sqlx::query(
+            "INSERT INTO gdpr_exports (id, request_id, tenant_id, email, data, export_url, expires_at, created_at)
+             VALUES ($1, 'req-seed', $2, $3, '{}'::jsonb, 'https://gdpr.test.local/x',
+                     NOW() - INTERVAL '1 day', NOW() - INTERVAL '30 days')",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed expired export");
+    }
+
+    async fn seed_old_withdrawn_consent(pool: &PgPool, id: &str, tenant: &str, email: &str) {
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted,
+                granted_at, revoked_at, source, ip_address, metadata)
+             VALUES ($1, $2, $3, $4, 'marketing', false, NOW() - INTERVAL '800 days',
+                     NOW() - INTERVAL '790 days', 'api', '203.0.113.1', '{}'::jsonb)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(Uuid::new_v4().to_string())
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed withdrawn consent");
+    }
+
+    async fn export_exists(pool: &PgPool, id: &str) -> bool {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM gdpr_exports WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("export probe")
+    }
+
+    async fn consent_exists(pool: &PgPool, id: &str) -> bool {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM consent_records WHERE id = $1)")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("consent probe")
+    }
+
+    /// The audit-F4 shape: a HELD tenant's `gdpr_exports` (evidence of what
+    /// was disclosed) and withdrawn `consent_records` (consent history) MUST
+    /// survive `enforce_retention`, while an unheld tenant's equally-expired
+    /// rows are purged by the same run.
+    #[tokio::test]
+    async fn held_tenant_exports_and_consents_survive_enforce_retention() {
+        let Some(pool) = hostile_db("hold_retention").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let held_tenant = test_support::unique_tenant();
+        let free_tenant = test_support::unique_tenant();
+        seed_tenant_with_hold(&pool, &held_tenant, true).await;
+        seed_tenant_with_hold(&pool, &free_tenant, false).await;
+
+        let held_export = format!("exp-held-{}", Uuid::new_v4());
+        let free_export = format!("exp-free-{}", Uuid::new_v4());
+        let held_consent = format!("con-held-{}", Uuid::new_v4());
+        let free_consent = format!("con-free-{}", Uuid::new_v4());
+        seed_expired_export(&pool, &held_export, &held_tenant, "held@example.test").await;
+        seed_expired_export(&pool, &free_export, &free_tenant, "free@example.test").await;
+        seed_old_withdrawn_consent(&pool, &held_consent, &held_tenant, "held@example.test").await;
+        seed_old_withdrawn_consent(&pool, &free_consent, &free_tenant, "free@example.test").await;
+
+        let (consents, exports) = gdpr.enforce_retention().await.expect("enforce runs");
+        assert!(
+            exports >= 1 && consents >= 1,
+            "the run must still purge the UNHELD rows (consents={consents}, exports={exports})"
+        );
+
+        assert!(
+            export_exists(&pool, &held_export).await,
+            "a held tenant's expired export must SURVIVE the GDPR retention job"
+        );
+        assert!(
+            consent_exists(&pool, &held_consent).await,
+            "a held tenant's withdrawn consent must SURVIVE the GDPR retention job"
+        );
+        assert!(
+            !export_exists(&pool, &free_export).await,
+            "an unheld tenant's expired export must still be purged"
+        );
+        assert!(
+            !consent_exists(&pool, &free_consent).await,
+            "an unheld tenant's withdrawn consent must still be purged"
+        );
+    }
+
+    /// The DSR erasure path defers for a held tenant: the request parks in
+    /// `pending_manual_review` with zero deletions — never `completed`.
+    #[tokio::test]
+    async fn held_tenant_erasure_defers_to_manual_review() {
+        let Some(pool) = hostile_db("hold_erasure").await else {
+            return;
+        };
+        let gdpr = automation_with(pool.clone(), config());
+        let held_tenant = test_support::unique_tenant();
+        seed_tenant_with_hold(&pool, &held_tenant, true).await;
+
+        let request_id = format!("dsr-held-{}", Uuid::new_v4());
+        seed_request(
+            &pool,
+            &request_id,
+            &held_tenant,
+            "subject@held.example.test",
+            "erasure",
+        )
+        .await;
+
+        let result = gdpr
+            .process_request(&request_id)
+            .await
+            .expect("the deferral is a successful outcome, not an error");
+        assert!(
+            result.review_required,
+            "a held erasure must surface review_required"
+        );
+        assert_eq!(
+            result.deleted_records, None,
+            "a held erasure must not delete anything"
+        );
+        let (status, stored, _completed) = request_row(&pool, &request_id).await;
+        assert_eq!(status, "pending_manual_review", "parked for review");
+        // The persisted `result` column carries the serialized envelope
+        // (`{"data": {..the DataSubjectRequestResult..}}`), so the deferral
+        // marker sits under `data`.
+        assert!(
+            stored
+                .as_ref()
+                .and_then(|v| v.get("data"))
+                .and_then(|d| d.get("deferred"))
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| d == "legal_hold"),
+            "the deferral reason is recorded: {stored:?}"
+        );
     }
 
     // ── Extension clock (Art. 12(3)) ────────────────────────────────────────

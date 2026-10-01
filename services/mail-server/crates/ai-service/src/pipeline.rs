@@ -5,6 +5,11 @@
 //!      2a. Generator (Qwen 2.5-7B): natural language response, streamed token-by-token
 //!      2b. Tool execution: detects tool_call blocks, executes Rust-calculated results, feeds back to LLM
 //!   3. Verifier (Rust): deterministic checks on pricing, safety, DNS, quality
+//!
+//! SM9 #7: this module is UNWIRED LIBRARY CODE — `AiPipeline` is referenced
+//! only by its own tests; no binary routes traffic through it (the live
+//! generative path is `chat.rs`). The defenses below are maintained so the
+//! module is safe to wire, not because anything currently exercises them.
 
 use crate::defense::{self, sanitize_input, sanitize_llm_output, ThreatLevel};
 use crate::domain_dns::DomainDnsStore;
@@ -414,16 +419,55 @@ impl AiPipeline {
             let response = if let Some(ref tx) = stream_tx {
                 let tx_c = tx.clone();
                 let mut c = String::new();
-                match self
+                // SM9 #7b: streamed tokens pass through the same allowlist
+                // as the reassembled final answer BEFORE `try_send` — a
+                // stream consumer must never see raw model output, and a
+                // dangerous tag split across tokens is held back by the
+                // streaming sanitizer until it is provably inert.
+                let mut sink = crate::content::StreamingSanitizer::new();
+                let streamed = self
                     .client
                     .generate_streaming(&gen_system, &gen_user, "", |t| {
                         c.push_str(t);
-                        let _ = tx_c.try_send(serde_json::json!({"token":t}));
+                        let safe = sink.push(t);
+                        if !safe.is_empty() {
+                            let _ = tx_c.try_send(serde_json::json!({"token":safe}));
+                        }
                     })
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => c,
+                    .await;
+                match streamed {
+                    Ok(r) => {
+                        // Flush the held-back tail so the emitted stream
+                        // covers the whole answer.
+                        let rest = sink.finish();
+                        if !rest.is_empty() {
+                            let _ = tx_c.try_send(serde_json::json!({"token":rest}));
+                        }
+                        r
+                    }
+                    Err(e) => {
+                        // SM9 #7a: a streaming generation error goes through
+                        // the SAME retry ladder as the non-streaming path
+                        // below. The partial text accumulated so far must
+                        // never proceed as the response: a truncated answer
+                        // could otherwise pass — or bypass — verification
+                        // and ship as success.
+                        tracing::error!(error=%e, "Generator (streaming) failed");
+                        if retries < MAX_RETRIES {
+                            retries += 1;
+                            continue;
+                        }
+                        return PipelineResult {
+                            plan,
+                            response: "Please try again or contact support@apexmail.ee".into(),
+                            streamed: false,
+                            retries,
+                            plan_latency_ms: plan_latency,
+                            gen_latency_ms: 0,
+                            passed_policy_verification: false,
+                            fallback_used: true,
+                        };
+                    }
                 }
             } else {
                 match self
@@ -525,9 +569,9 @@ impl AiPipeline {
                 // (Fix #17: only a FAILED lookup is Unavailable).
                 retrieval_unavailable: false,
             };
-            let verdict = self
-                .verifier
-                .verify_grounded(&final_response, &tool_computed_totals, &grounding);
+            let verdict =
+                self.verifier
+                    .verify_grounded(&final_response, &tool_computed_totals, &grounding);
             if verdict.passed {
                 // Sanitize final output for HTML/JS injection before returning
                 let sanitized = sanitize_llm_output(&final_response);
@@ -749,7 +793,10 @@ mod tests {
 
         let result = run_pipeline(&pipeline, "What does the Pro plan cost?", None).await;
 
-        assert!(result.passed_policy_verification, "clean answer must verify");
+        assert!(
+            result.passed_policy_verification,
+            "clean answer must verify"
+        );
         assert!(!result.fallback_used);
         assert_eq!(result.retries, 0);
         assert!(!result.streamed);
@@ -786,7 +833,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let result = run_pipeline(&pipeline, "What will I pay for 160k emails?", Some(tx)).await;
 
-        assert!(result.passed_policy_verification, "tool echo must be allowlisted");
+        assert!(
+            result.passed_policy_verification,
+            "tool echo must be allowlisted"
+        );
         assert!(result.streamed);
         assert!(!result.fallback_used);
         assert_eq!(
@@ -826,6 +876,77 @@ mod tests {
             mock.request_count(),
             2,
             "tool loop regenerates exactly once"
+        );
+    }
+
+    /// SM9 #7a: a streaming generation ERROR follows the same retry ladder
+    /// as the non-streaming path — the partial accumulated text never
+    /// proceeds as the response; after the ladder is exhausted the caller
+    /// gets the honest fallback, not a truncated pseudo-answer.
+    #[tokio::test]
+    async fn streaming_generation_error_retries_then_falls_back() {
+        let _serial = ENV_SERIAL.lock().await;
+        let _planner = EnvGuard::with(&[("AI_PIPELINE_PLANNER", None)]);
+        let mock = spawn_scripted_llm(vec![LlmScript::Raw(500, "{\"error\":\"down\"}")]).await;
+        let pipeline = pipeline_at(mock.endpoint()).await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let result = run_pipeline(&pipeline, "What does the Pro plan cost?", Some(tx)).await;
+
+        assert!(
+            !result.passed_policy_verification && result.fallback_used,
+            "a failed generation must land in the fallback ladder: {result:?}"
+        );
+        assert_eq!(
+            result.response, "Please try again or contact support@apexmail.ee",
+            "the fallback text, never a partial model answer"
+        );
+        assert_eq!(result.streamed, false, "nothing streamed was a success");
+        assert_eq!(result.retries, MAX_RETRIES, "the full ladder was used");
+        assert_eq!(
+            mock.request_count(),
+            (MAX_RETRIES + 1) as usize,
+            "initial attempt + MAX_RETRIES retries"
+        );
+        // The stream channel closed with no token payload presented as the
+        // answer (a provider error yields no tokens at all).
+        while let Some(msg) = rx.recv().await {
+            assert!(
+                msg.get("token").is_none(),
+                "no model token may be forwarded from a failed stream: {msg}"
+            );
+        }
+    }
+
+    /// SM9 #7b: streamed tokens are sanitized with the same allowlist as the
+    /// final answer BEFORE `try_send` — a stream consumer never sees raw
+    /// model markup, even when the answer itself goes on to fail verification
+    /// and escalate.
+    #[tokio::test]
+    async fn streamed_tokens_are_sanitized_before_the_channel_sees_them() {
+        let _serial = ENV_SERIAL.lock().await;
+        let _planner = EnvGuard::with(&[("AI_PIPELINE_PLANNER", None)]);
+        let xss = "The Pro plan costs \u{20ac}65. <script>alert('xss')</script><img src=x onerror=alert(2)> Done.";
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(xss)]).await;
+        let pipeline = pipeline_at(mock.endpoint()).await;
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let _ = run_pipeline(&pipeline, "What does the Pro plan cost?", Some(tx)).await;
+
+        let mut streamed = String::new();
+        while let Some(msg) = rx.recv().await {
+            if let Some(token) = msg.get("token").and_then(serde_json::Value::as_str) {
+                streamed.push_str(token);
+            }
+        }
+        let lower = streamed.to_ascii_lowercase();
+        assert!(
+            !lower.contains("<scr") && !lower.contains("onerror") && !lower.contains("alert("),
+            "no raw markup may reach the stream consumer: {streamed:?}"
+        );
+        assert!(
+            streamed.contains("\u{20ac}65"),
+            "benign prose still streams: {streamed:?}"
         );
     }
 
@@ -1153,13 +1274,17 @@ mod tests {
     }
 
     /// Output that PASSES verification but carries a sanitizer-triggering
-    /// pattern the verifier does not flag (e.g. an unlisted event handler)
+    /// pattern the verifier's raw-markup rejection does not enumerate (an
+    /// event handler outside its list — the verifier cannot enumerate every
+    /// `on*` handler without false-positiving prose like `onboarding=true`)
     /// is sanitized before delivery — and the response is the sanitized one.
+    /// Payloads the verifier DOES recognize are refused outright (see the
+    /// chat tests).
     #[tokio::test]
     async fn verified_output_is_still_sanitized_before_delivery() {
         let _serial = ENV_SERIAL.lock().await;
         let _planner = EnvGuard::with(&[("AI_PIPELINE_PLANNER", None)]);
-        let sneaky = "To add hover tracking, put onmouseover=\'count()\' on your link and test it carefully before sending.";
+        let sneaky = "To add hover tracking, put onbeforetoggle=\'count()\' on your element and test it carefully before sending.";
         let mock = spawn_scripted_llm(vec![LlmScript::Content(sneaky)]).await;
         let pipeline = pipeline_at(mock.endpoint()).await;
 
@@ -1170,7 +1295,7 @@ mod tests {
             "the verifier passes this answer"
         );
         assert!(
-            !result.response.contains("onmouseover"),
+            !result.response.contains("onbeforetoggle"),
             "the sanitizer must strip the handler before delivery: {:?}",
             result.response
         );

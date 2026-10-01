@@ -529,10 +529,7 @@ pub(crate) mod test_support {
                         .query_async::<Vec<String>>(&mut *conn)
                         .await
                     {
-                        return entries
-                            .into_iter()
-                            .filter(|e| e.contains(needle))
-                            .collect();
+                        return entries.into_iter().filter(|e| e.contains(needle)).collect();
                     }
                 }
                 Err(_) => {}
@@ -577,7 +574,7 @@ pub(crate) mod test_support {
                     .filter_map(|s| s.parse().ok())
                     .collect(),
                 max_redirect_url_len: 2048,
-            token_max_age_days: None,
+                token_max_age_days: None,
             },
             rate_limit: RateLimitConfig {
                 enabled: false,

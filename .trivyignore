@@ -81,6 +81,13 @@ GHSA-82j2-j2ch-gfr8   # rustls-webpki CRL panic — reviewed, see deny.toml lock
 # ApexMail stack). Fixes exist (2.18.8) but SDK version bumps are a product
 # decision, tracked as follow-up: bump jackson-* to 2.18.8 in the next
 # sdk-java release and DELETE these three lines.
-GHSA-r7wm-3cxj-wff9   # jackson-core maxNumberLength bypass (sdk-java example)
-CVE-2026-54512        # jackson-databind arbitrary code execution (sdk-java example)
-CVE-2026-54513        # jackson-databind security bypass (sdk-java example)
+# Audit SM14 F7: these entries previously applied GLOBALLY and FOREVER —
+# .trivyignore has no package/image scoping, so an arbitrary-code-execution
+# class finding would have stayed invisible to every trivy lane even after a
+# Java service entered the stack. Each entry now carries an `exp:` date
+# (trivy >= 0.32, CI image ships 0.74.0): on expiry the finding re-arms and
+# the scan FAILS until the SDK is bumped or the entry is consciously
+# renewed with a fresh justification.
+GHSA-r7wm-3cxj-wff9 exp:2026-12-31   # jackson-core maxNumberLength bypass (sdk-java example)
+CVE-2026-54512 exp:2026-12-31        # jackson-databind arbitrary code execution (sdk-java example)
+CVE-2026-54513 exp:2026-12-31        # jackson-databind security bypass (sdk-java example)

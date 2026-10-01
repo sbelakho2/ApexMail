@@ -56,7 +56,7 @@ from .models import (
 )
 from .webhooks import verify_signature
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = [
     # Client
     "ApexMail",

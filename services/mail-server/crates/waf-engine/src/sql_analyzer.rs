@@ -13,7 +13,7 @@ use crate::{AttackCategory, MatchLocation, RuleMatch};
 
 /// SQL token types
 #[derive(Debug, Clone, PartialEq)]
-enum SqlToken {
+pub(crate) enum SqlToken {
     Keyword(SqlKeyword),
     Operator(SqlOp),
     StringLiteral(String),
@@ -29,7 +29,7 @@ enum SqlToken {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SqlKeyword {
+pub(crate) enum SqlKeyword {
     Select,
     From,
     Where,
@@ -72,6 +72,7 @@ enum SqlKeyword {
     Outfile,
     Dumpfile,
     Information,
+    Truncate,
     // PostgreSQL/database-specific blind injection functions
     PgSleep,  // pg_sleep - PostgreSQL
     DbmsLock, // dbms_lock.sleep - Oracle
@@ -82,7 +83,7 @@ enum SqlKeyword {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SqlOp {
+pub(crate) enum SqlOp {
     Eq,   // =
     Neq,  // != or <>
     Lt,   // <
@@ -202,7 +203,11 @@ pub fn analyze_sqli(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
 }
 
 /// Tokenize an input string into SQL tokens
-fn tokenize_sql(input: &str) -> Vec<SqlToken> {
+///
+/// `pub(crate)` so the fast-path gate can run the same cheap tokenizer the
+/// analyzer uses (audit SM5 F1): the SQLi lane opens on the tokenizer's own
+/// structural triggers, so the gate can never lag the analyzer's vocabulary.
+pub(crate) fn tokenize_sql(input: &str) -> Vec<SqlToken> {
     const MAX_TOKENS: usize = 10_000;
     let mut tokens = Vec::with_capacity(input.len().min(256));
     let chars: Vec<char> = input.chars().collect();
@@ -401,6 +406,67 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
     tokens
 }
 
+/// Every word `match_keyword` recognizes — the analyzer's own keyword
+/// vocabulary. `pub(crate)` so the fast-path gate property test (audit
+/// SM5 F1) can iterate it and prove the SQLi gate opens for each; the
+/// `test_keyword_vocabulary_is_recognized` test keeps this table and
+/// `match_keyword` in lockstep.
+#[cfg(test)]
+pub(crate) const SQL_KEYWORD_WORDS: &[&str] = &[
+    "select",
+    "from",
+    "where",
+    "and",
+    "or",
+    "union",
+    "insert",
+    "update",
+    "delete",
+    "drop",
+    "alter",
+    "create",
+    "table",
+    "into",
+    "values",
+    "set",
+    "exec",
+    "execute",
+    "having",
+    "group",
+    "order",
+    "by",
+    "like",
+    "in",
+    "between",
+    "is",
+    "null",
+    "not",
+    "sleep",
+    "benchmark",
+    "waitfor",
+    "delay",
+    "if",
+    "case",
+    "when",
+    "then",
+    "else",
+    "all",
+    "load",
+    "load_file",
+    "file",
+    "outfile",
+    "dumpfile",
+    "information_schema",
+    "truncate",
+    // Database-specific blind injection functions
+    "pg_sleep",
+    "dbms_lock",
+    "utl_http",
+    "xor",
+    "regexp",
+    "rlike",
+];
+
 fn match_keyword(word: &str) -> Option<SqlKeyword> {
     match word {
         "select" => Some(SqlKeyword::Select),
@@ -445,6 +511,7 @@ fn match_keyword(word: &str) -> Option<SqlKeyword> {
         "outfile" => Some(SqlKeyword::Outfile),
         "dumpfile" => Some(SqlKeyword::Dumpfile),
         "information_schema" => Some(SqlKeyword::Information),
+        "truncate" => Some(SqlKeyword::Truncate),
         // Database-specific blind injection functions
         "pg_sleep" => Some(SqlKeyword::PgSleep),
         "dbms_lock" => Some(SqlKeyword::DbmsLock),
@@ -628,6 +695,7 @@ fn detect_stacked_queries(tokens: &[SqlToken]) -> bool {
                 | SqlKeyword::Drop
                 | SqlKeyword::Alter
                 | SqlKeyword::Create
+                | SqlKeyword::Truncate
                 | SqlKeyword::Exec,
             ) if post_semicolon => {
                 return true;
@@ -909,20 +977,51 @@ fn is_suspicious_followup(token: &SqlToken) -> bool {
     )
 }
 
-/// Detect dangerous functions (LOAD_FILE, INTO OUTFILE, etc.)
+/// Detect dangerous functions (LOAD_FILE, LOAD DATA, INTO OUTFILE/DUMPFILE).
+///
+/// Audit SM5 F7: the bare words "load" and "outfile" are ordinary English
+/// ("I can't load the file #42") yet used to fire this blocking (score 5)
+/// rule on any note or ticket body. They now require the SQL call/qualified
+/// form:
+/// - `load_file(` / `load(` — function-call form,
+/// - `load data` — the `LOAD DATA INFILE` statement,
+/// - `into outfile` / `into dumpfile` — the export pair.
+/// INFORMATION_SCHEMA access is a bare-identifier keyword and needs no
+/// extra context (the tokenizer only produces it for `information_schema`).
 fn detect_dangerous_functions(tokens: &[SqlToken]) -> bool {
-    for token in tokens {
-        if matches!(
-            token,
-            SqlToken::Keyword(SqlKeyword::Load | SqlKeyword::Outfile | SqlKeyword::Dumpfile)
-        ) {
-            return true;
-        }
-    }
-    // Check for INFORMATION_SCHEMA access
-    for token in tokens {
-        if matches!(token, SqlToken::Keyword(SqlKeyword::Information)) {
-            return true;
+    let significant: Vec<&SqlToken> = tokens
+        .iter()
+        .filter(|t| !matches!(t, SqlToken::Whitespace))
+        .collect();
+
+    for (i, token) in significant.iter().enumerate() {
+        match token {
+            // Function-call form: LOAD_FILE( / LOAD(
+            SqlToken::Keyword(SqlKeyword::Load) => {
+                match significant.get(i + 1) {
+                    Some(SqlToken::OpenParen) => return true,
+                    // LOAD DATA INFILE '...' — statement form. "data" is not
+                    // a reserved word, so it lexes as an identifier.
+                    Some(SqlToken::Identifier(word)) if word.eq_ignore_ascii_case("data") => {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            // Export pair: INTO OUTFILE / INTO DUMPFILE
+            SqlToken::Keyword(SqlKeyword::Into) => {
+                if matches!(
+                    significant.get(i + 1),
+                    Some(SqlToken::Keyword(
+                        SqlKeyword::Outfile | SqlKeyword::Dumpfile
+                    ))
+                ) {
+                    return true;
+                }
+            }
+            // INFORMATION_SCHEMA is only produced for the qualified keyword.
+            SqlToken::Keyword(SqlKeyword::Information) => return true,
+            _ => {}
         }
     }
     false
@@ -1018,6 +1117,79 @@ mod tests {
             assert!(
                 results.iter().any(|r| r.rule_id == 942500),
                 "{payload:?} must fire 942500"
+            );
+        }
+    }
+
+    #[test]
+    fn test_keyword_vocabulary_is_recognized() {
+        // Every entry in SQL_KEYWORD_WORDS must map to a keyword token — the
+        // fast-path gate property test relies on this table being complete.
+        for word in SQL_KEYWORD_WORDS {
+            assert!(
+                match_keyword(word).is_some(),
+                "SQL_KEYWORD_WORDS entry {word:?} must be recognized by match_keyword"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stacked_truncate_detected() {
+        // Audit SM5 F1 vector: `truncate` previously lexed as a plain
+        // identifier, so `1;TRUNCATE TABLE users` scored 0.
+        let results = analyze_sqli(
+            "1;TRUNCATE TABLE users",
+            MatchLocation::QueryParam("id".into()),
+        );
+        assert!(
+            results.iter().any(|r| r.rule_id == 942300),
+            "stacked TRUNCATE must fire 942300, got {:?}",
+            results.iter().map(|r| r.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_prose_load_does_not_fire_dangerous_functions() {
+        // Audit SM5 F7: the bare English word "load" (and "outfile") must
+        // not reach a blocking (score 5) verdict on ordinary ticket bodies.
+        for prose in [
+            "I can't load the file #42",
+            "please load the report when you can",
+            "the outfile was too large to print",
+            "dumpfile is a strange word",
+        ] {
+            let results = analyze_sqli(prose, MatchLocation::Body);
+            assert!(
+                !results.iter().any(|r| r.rule_id == 942700),
+                "prose {prose:?} must not fire 942700, got {:?}",
+                results
+                    .iter()
+                    .map(|r| (r.rule_id, r.score))
+                    .collect::<Vec<_>>()
+            );
+            let total: u32 = results.iter().map(|r| r.score).sum();
+            assert!(
+                total < 5,
+                "prose {prose:?} must stay below the blocking threshold, got {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dangerous_functions_sql_forms_still_fire() {
+        // The real SQL forms must keep firing 942700.
+        for payload in [
+            "UNION SELECT LOAD_FILE('/etc/passwd')",
+            "SELECT * INTO OUTFILE '/tmp/x' FROM users",
+            "SELECT * INTO DUMPFILE '/tmp/x' FROM users",
+            "LOAD DATA INFILE '/etc/passwd' INTO TABLE users",
+            "1 union select information_schema.tables",
+        ] {
+            let results = analyze_sqli(payload, MatchLocation::Body);
+            assert!(
+                results.iter().any(|r| r.rule_id == 942700),
+                "{payload:?} must fire 942700, got {:?}",
+                results.iter().map(|r| r.rule_id).collect::<Vec<_>>()
             );
         }
     }

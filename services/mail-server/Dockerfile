@@ -113,12 +113,17 @@ FROM debian:bookworm-slim AS runtime-base
 # Runtime packages from the moving bookworm-slim pool; CVE exposure is
 # gated by the Trivy images stage, and pinning these versions would freeze
 # security updates between base refreshes.
+# wget (F12): every axum-based service exposes an unauthenticated GET /health
+# on its main listener, and an HTTP healthcheck proves the router actually
+# serves instead of merely holding the port open — the same posture the
+# pdf-renderer/ha/isolation stages already use.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     tini \
     netcat-openbsd \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -159,7 +164,7 @@ USER apexmail
 EXPOSE 3000
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3000"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3000/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "api-server"]
 CMD ["--listen", "0.0.0.0:3000"]
@@ -177,7 +182,7 @@ USER apexmail
 EXPOSE 4100
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 4100"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:4100/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "billing-service"]
 CMD ["--listen", "0.0.0.0:4100"]
@@ -267,7 +272,7 @@ USER apexmail
 EXPOSE 3008
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3008"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3008/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "enterprise-server"]
 CMD ["--listen", "0.0.0.0:3008"]
@@ -317,7 +322,7 @@ USER apexmail
 EXPOSE 3010
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3010"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3010/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "sales-autopilot"]
 
@@ -336,7 +341,7 @@ USER apexmail
 EXPOSE 3011
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3011"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3011/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "compliance-server"]
 
@@ -396,7 +401,7 @@ USER apexmail
 EXPOSE 3012
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["sh", "-c", "nc -z 127.0.0.1 3012"]
+    CMD ["sh", "-c", "wget -q --spider http://127.0.0.1:3012/health || exit 1"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "ai-service"]
 

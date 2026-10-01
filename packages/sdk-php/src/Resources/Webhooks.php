@@ -12,23 +12,24 @@ use ApexMail\Client;
 class Webhooks
 {
     /**
-     * Event types the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS).
-     * Anything else is rejected with 422 by the API.
+     * Event types the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS,
+     * canonicalized 2026-09-08). Anything else is rejected with 422 by
+     * the API.
      */
     public const EVENTS = [
-        'email.delivered',
-        'email.bounced',
-        'email.complained',
-        'message.sent',
+        'message.accepted',
+        'message.queued',
+        'message.attempted',
+        'message.deferred',
         'message.delivered',
         'message.bounced',
         'message.complained',
+        'message.suppressed',
         'message.opened',
         'message.clicked',
+        'message.cancelled',
         'recipient.unsubscribed',
         'placement_test.completed',
-        'bounce',
-        'complaint',
         'inbound',
         '*',
     ];
@@ -45,7 +46,7 @@ class Webhooks
      *
      * @param array $params {
      *   @type string   $url     HTTPS endpoint URL
-     *   @type string[] $events  e.g. ["message.delivered", "email.bounced", "*"]
+     *   @type string[] $events  e.g. ["message.delivered", "message.bounced", "*"]
      * }
      */
     public function create(array $params): array

@@ -39,7 +39,7 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tokio::time::MissedTickBehavior;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use outbound_mta::ledger::{PgLedger, RelayLedger};
 use outbound_mta::mx::{DnsMxResolver, MxResolver};
@@ -301,7 +301,29 @@ async fn main() -> Result<()> {
         .await
         .context("failed to connect to DATABASE_URL")?;
     let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool.clone()));
-    let resolver = Arc::new(DnsMxResolver::new().context("failed to build the MX resolver")?);
+    // SSRF escape hatch (finding: MX → internal IP was an unfiltered
+    // surface). Default OFF: recipient domains are tenant controlled, so a
+    // private/reserved MX address is refused. The override exists ONLY for
+    // loopback test setups.
+    let allow_private_mx = std::env::var("RELAY_ALLOW_PRIVATE_MX")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if allow_private_mx {
+        warn!(
+            "RELAY_ALLOW_PRIVATE_MX=true: MX addresses in private/reserved ranges are \
+             deliverable. This is for loopback test setups only; never enable in production."
+        );
+    }
+    let resolver = Arc::new(
+        DnsMxResolver::new()
+            .context("failed to build the MX resolver")?
+            .with_allow_private_addresses(allow_private_mx),
+    );
     run(config, pool, ledger, resolver, shutdown_signal()).await
 }
 
@@ -348,12 +370,7 @@ fn build_router(app_state: AppState) -> Router {
 /// daemon acceptances onto the worker acceptance ledger. Every failure
 /// increments the error counter — a broken sweep must be visible in
 /// /metrics, never silently swallowed.
-async fn sweep_once(
-    relay: &Relay,
-    pool: &sqlx::PgPool,
-    counters: &Counters,
-    batch_size: i64,
-) {
+async fn sweep_once(relay: &Relay, pool: &sqlx::PgPool, counters: &Counters, batch_size: i64) {
     let now = Utc::now();
     if let Err(error) = relay.reclaim_expired(now).await {
         counters.errors.fetch_add(1, Ordering::Relaxed);
@@ -361,10 +378,18 @@ async fn sweep_once(
     }
     match relay.process_due(now, batch_size).await {
         Ok(report) => {
-            counters.claimed.fetch_add(report.claimed, Ordering::Relaxed);
-            counters.accepted.fetch_add(report.accepted, Ordering::Relaxed);
-            counters.retry_scheduled.fetch_add(report.retry_scheduled, Ordering::Relaxed);
-            counters.permanently_failed.fetch_add(report.permanently_failed, Ordering::Relaxed);
+            counters
+                .claimed
+                .fetch_add(report.claimed, Ordering::Relaxed);
+            counters
+                .accepted
+                .fetch_add(report.accepted, Ordering::Relaxed);
+            counters
+                .retry_scheduled
+                .fetch_add(report.retry_scheduled, Ordering::Relaxed);
+            counters
+                .permanently_failed
+                .fetch_add(report.permanently_failed, Ordering::Relaxed);
             counters.errors.fetch_add(report.errors, Ordering::Relaxed);
             if report.claimed > 0 {
                 info!(
@@ -867,7 +892,11 @@ mod tests {
         }
     }
 
-    fn daemon_config(health_addr: SocketAddr, poll_secs: u64, database_url: String) -> DaemonConfig {
+    fn daemon_config(
+        health_addr: SocketAddr,
+        poll_secs: u64,
+        database_url: String,
+    ) -> DaemonConfig {
         DaemonConfig {
             database_url,
             health_addr,
@@ -882,9 +911,7 @@ mod tests {
     async fn http_get(addr: SocketAddr, path: &str) -> std::io::Result<(u16, String)> {
         let mut stream = tokio::net::TcpStream::connect(addr).await?;
         stream
-            .write_all(
-                format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes(),
-            )
+            .write_all(format!("GET {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n").as_bytes())
             .await?;
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await?;
@@ -951,8 +978,7 @@ mod tests {
         for _ in 0..150 {
             if let Ok((200, body)) = http_get(addr, "/metrics").await {
                 metrics_body = body;
-                if counter_value(&metrics_body, "apexmail_outbound_mta_sweeps_total")
-                    .unwrap_or(0)
+                if counter_value(&metrics_body, "apexmail_outbound_mta_sweeps_total").unwrap_or(0)
                     >= 1
                 {
                     break;
@@ -982,7 +1008,10 @@ mod tests {
 
         // The health port is released again — the server drained.
         let rebinding = tokio::net::TcpListener::bind(addr).await;
-        assert!(rebinding.is_ok(), "the drained daemon must release its port");
+        assert!(
+            rebinding.is_ok(),
+            "the drained daemon must release its port"
+        );
     }
 
     /// Duplicate-instance conflict: a second daemon on the same health
@@ -1052,8 +1081,7 @@ mod tests {
         for _ in 0..300 {
             if let Ok((200, body)) = http_get(addr, "/metrics").await {
                 metrics_body = body;
-                if counter_value(&metrics_body, "apexmail_outbound_mta_errors_total")
-                    .unwrap_or(0)
+                if counter_value(&metrics_body, "apexmail_outbound_mta_errors_total").unwrap_or(0)
                     >= 1
                 {
                     break;
@@ -1068,7 +1096,10 @@ mod tests {
         // The daemon is still alive: liveness reflects the ledger, which is
         // healthy, even while a projection sweep is failing.
         let (status, health) = http_get(addr, "/healthz").await.expect("healthz");
-        assert_eq!(status, 200, "the daemon must survive projection failures: {health}");
+        assert_eq!(
+            status, 200,
+            "the daemon must survive projection failures: {health}"
+        );
 
         shutdown_tx.send(()).expect("daemon still running");
         let result = tokio::time::timeout(Duration::from_secs(10), task)

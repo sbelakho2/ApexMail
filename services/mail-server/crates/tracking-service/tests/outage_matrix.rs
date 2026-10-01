@@ -262,9 +262,9 @@ fn click_token(tenant: &str, message: &str, recipient: &str, original_url: &str)
 async fn bounded<T, F: std::future::IntoFuture<Output = T>>(cell: &str, fut: F) -> T {
     match tokio::time::timeout(BOUNDED, fut.into_future()).await {
         Ok(value) => value,
-        Err(_) => panic!(
-            "outage-matrix cell `{cell}` exceeded the {BOUNDED:?} bound — unbounded hang"
-        ),
+        Err(_) => {
+            panic!("outage-matrix cell `{cell}` exceeded the {BOUNDED:?} bound — unbounded hang")
+        }
     }
 }
 
@@ -374,11 +374,7 @@ async fn wal_has(pool: &deadpool_redis::Pool, needle: &str) -> bool {
 }
 
 /// Bounded poll: awaits `predicate` until true or `attempts` × 100 ms elapse.
-async fn poll_until(
-    cell: &str,
-    attempts: usize,
-    mut predicate: impl AsyncFnMut() -> bool,
-) {
+async fn poll_until(cell: &str, attempts: usize, mut predicate: impl AsyncFnMut() -> bool) {
     for _ in 0..attempts {
         if predicate().await {
             return;
@@ -425,7 +421,9 @@ async fn pg_down_subscription_surfaces_are_honest_bounded_and_queue_the_suppress
     let body = response.text();
     assert!(body.contains("Confirm Unsubscribe"), "{body}");
     assert!(
-        body.contains(&format!(r#"<form method="POST" action="/u/{token}/confirm">"#)),
+        body.contains(&format!(
+            r#"<form method="POST" action="/u/{token}/confirm">"#
+        )),
         "the confirm form must still POST to /confirm: {body}"
     );
 
@@ -670,11 +668,10 @@ async fn redis_down_recipient_surfaces_stay_bounded_honest_and_durable() {
         .expect("pixel token");
     let response = bounded(
         "redis_down GET /o",
-        srv.get(&format!("/o/{pixel_token}"))
-            .add_header(
-                axum::http::HeaderName::from_static("user-agent"),
-                NORMAL_UA.parse().expect("ua"),
-            ),
+        srv.get(&format!("/o/{pixel_token}")).add_header(
+            axum::http::HeaderName::from_static("user-agent"),
+            NORMAL_UA.parse().expect("ua"),
+        ),
     )
     .await;
     assert_eq!(response.status_code().as_u16(), 200);
@@ -741,9 +738,11 @@ async fn clickhouse_down_flush_still_persists_every_event_and_never_wedges() {
     // Postgres must receive every event although every ClickHouse insert
     // fails, and the WAL must drain (a ClickHouse failure NEVER re-enqueues —
     // Postgres is the source of truth).
-    poll_until("first batch persists despite ClickHouse down", 150, || async {
-        events_count(&db, &message).await >= 3
-    })
+    poll_until(
+        "first batch persists despite ClickHouse down",
+        150,
+        || async { events_count(&db, &message).await >= 3 },
+    )
     .await;
     poll_until("WAL drained for the first batch", 100, || async {
         !wal_has(&redis, &message).await
@@ -859,9 +858,13 @@ async fn processor_restart_with_postgres_down_loses_nothing_and_never_doubles() 
         100,
     ));
     Arc::clone(&b).start();
-    poll_until("restart drains the whole WAL into Postgres", 200, || async {
-        events_count(&db, &message).await >= N as i64 && !wal_has(&redis, &message).await
-    })
+    poll_until(
+        "restart drains the whole WAL into Postgres",
+        200,
+        || async {
+            events_count(&db, &message).await >= N as i64 && !wal_has(&redis, &message).await
+        },
+    )
     .await;
     b.stop().await;
 

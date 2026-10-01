@@ -35,8 +35,11 @@ pub(crate) const WEB_ROOT_BODY_CLASSES: &str = "font-apex antialiased text-[16px
 /// wordmark's "A" chevron on the brand color) served BOTH as a data: URL in
 /// every root layout's `<link rel="icon">` and as the `/favicon.ico` route's
 /// body — no new dependency, no extra asset pipeline, and browser tab chrome
-/// stops 404-ing on every console page.
-pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#4f46e5\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
+/// stops 404-ing on every console page. The fill is the pinned brand token
+/// `#dc2626` (audit SM11 F4: this was indigo `#4f46e5`, the one indigo
+/// artifact left in the red/black brand — pinned by
+/// `brand_palette_is_red_and_black` in lib.rs).
+pub const FAVICON_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#dc2626\"/><path d=\"M16 7 26 25h-5.4L16 16.6 11.4 25H6L16 7Z\" fill=\"#ffffff\"/></svg>";
 
 /// The favicon as an HTML `href` value: percent-encoded `data:image/svg+xml`
 /// (no base64 — keeps the encoded form byte-stable across renders).
@@ -44,8 +47,18 @@ pub fn favicon_data_url() -> String {
     let mut out = String::from("data:image/svg+xml,");
     for byte in FAVICON_SVG.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'(' | b')'
-            | b'*' | b'!' | b'\'' => out.push(byte as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'('
+            | b')'
+            | b'*'
+            | b'!'
+            | b'\'' => out.push(byte as char),
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
@@ -1133,7 +1146,8 @@ fn render_campaign_editor_page(
     // Native <select> — no combobox JS; the value is serialized by the
     // browser when the form is submitted.
     let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
-    let content_input = Textarea { id: Some("campaign-content"),
+    let content_input = Textarea {
+        id: Some("campaign-content"),
         value: "",
         placeholder: "Paste your HTML content here...",
         variant: "default",
@@ -3572,7 +3586,8 @@ pub fn web_list_edit_page() -> String {
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
-        name_label = Label { html_for: Some("list-edit-name"),
+        name_label = Label {
+            html_for: Some("list-edit-name"),
             text: "List Name",
             variant: "default",
             size: "default",
@@ -3580,7 +3595,8 @@ pub fn web_list_edit_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input { id: Some("list-edit-name"),
+        name_input = Input {
+            id: Some("list-edit-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -3705,7 +3721,8 @@ pub fn web_lists_new_page() -> String {
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"flex flex-col gap-3 sm:flex-row\">{save_button}</div>\
 </form></div>",
-        name_label = Label { html_for: Some("list-new-name"),
+        name_label = Label {
+            html_for: Some("list-new-name"),
             text: "List Name",
             variant: "default",
             size: "default",
@@ -3713,7 +3730,8 @@ pub fn web_lists_new_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input { id: Some("list-new-name"),
+        name_input = Input {
+            id: Some("list-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4067,7 +4085,8 @@ pub fn web_domains_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        domain_label = Label { html_for: Some("domain-new-name"),
+        domain_label = Label {
+            html_for: Some("domain-new-name"),
             text: "Domain",
             variant: "default",
             size: "default",
@@ -4075,7 +4094,8 @@ pub fn web_domains_new_page() -> String {
             optional: false
         }
         .render_html(),
-        domain_input = Input { id: Some("domain-new-name"),
+        domain_input = Input {
+            id: Some("domain-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4381,7 +4401,8 @@ pub fn web_settings_profile_page() -> String {
 <div class=\"space-y-2\">{new_label}{new_input}</div>\
 <div class=\"flex gap-3\">{update_button}</div>\
 </form></div></div>",
-        name_label = Label { html_for: Some("profile-name"),
+        name_label = Label {
+            html_for: Some("profile-name"),
             text: "Name",
             variant: "default",
             size: "default",
@@ -4389,7 +4410,8 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input { id: Some("profile-name"),
+        name_input = Input {
+            id: Some("profile-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4404,7 +4426,8 @@ pub fn web_settings_profile_page() -> String {
             name: Some("name"),
         }
         .render_html(),
-        email_label = Label { html_for: Some("profile-email"),
+        email_label = Label {
+            html_for: Some("profile-email"),
             text: "Email",
             variant: "default",
             size: "default",
@@ -4412,7 +4435,8 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        email_input = Input { id: Some("profile-email"),
+        email_input = Input {
+            id: Some("profile-email"),
             input_type: "email",
             variant: "default",
             size: "default",
@@ -4438,7 +4462,8 @@ pub fn web_settings_profile_page() -> String {
             submit: true
         }
         .render_html(),
-        current_label = Label { html_for: Some("current-password"),
+        current_label = Label {
+            html_for: Some("current-password"),
             text: "Current Password",
             variant: "default",
             size: "default",
@@ -4446,7 +4471,8 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        current_input = Input { id: Some("current-password"),
+        current_input = Input {
+            id: Some("current-password"),
             input_type: "password",
             variant: "default",
             size: "default",
@@ -4461,7 +4487,8 @@ pub fn web_settings_profile_page() -> String {
             name: Some("current_password"),
         }
         .render_html(),
-        new_label = Label { html_for: Some("new-password"),
+        new_label = Label {
+            html_for: Some("new-password"),
             text: "New Password",
             variant: "default",
             size: "default",
@@ -4469,7 +4496,8 @@ pub fn web_settings_profile_page() -> String {
             optional: false
         }
         .render_html(),
-        new_input = Input { id: Some("new-password"),
+        new_input = Input {
+            id: Some("new-password"),
             input_type: "password",
             variant: "default",
             size: "default",
@@ -4720,7 +4748,8 @@ pub fn control_plane_tenants_new_page() -> String {
 <div class=\"space-y-2\">{domain_label}{domain_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label { html_for: Some("tenant-new-name"),
+        name_label = Label {
+            html_for: Some("tenant-new-name"),
             text: "Tenant Name",
             variant: "default",
             size: "default",
@@ -4728,7 +4757,8 @@ pub fn control_plane_tenants_new_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input { id: Some("tenant-new-name"),
+        name_input = Input {
+            id: Some("tenant-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4743,7 +4773,8 @@ pub fn control_plane_tenants_new_page() -> String {
             name: Some("name"),
         }
         .render_html(),
-        domain_label = Label { html_for: Some("tenant-new-domain"),
+        domain_label = Label {
+            html_for: Some("tenant-new-domain"),
             text: "Primary Domain",
             variant: "default",
             size: "default",
@@ -4751,7 +4782,8 @@ pub fn control_plane_tenants_new_page() -> String {
             optional: false
         }
         .render_html(),
-        domain_input = Input { id: Some("tenant-new-domain"),
+        domain_input = Input {
+            id: Some("tenant-new-domain"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4829,7 +4861,8 @@ pub fn control_plane_operators_new_page() -> String {
 <div class=\"space-y-2\">{email_label}{email_input}</div>\
 <div class=\"flex gap-3\">{save_button}</div>\
 </form></div>",
-        name_label = Label { html_for: Some("operator-new-name"),
+        name_label = Label {
+            html_for: Some("operator-new-name"),
             text: "Name",
             variant: "default",
             size: "default",
@@ -4837,7 +4870,8 @@ pub fn control_plane_operators_new_page() -> String {
             optional: false
         }
         .render_html(),
-        name_input = Input { id: Some("operator-new-name"),
+        name_input = Input {
+            id: Some("operator-new-name"),
             input_type: "text",
             variant: "default",
             size: "default",
@@ -4852,7 +4886,8 @@ pub fn control_plane_operators_new_page() -> String {
             name: Some("name"),
         }
         .render_html(),
-        email_label = Label { html_for: Some("operator-new-email"),
+        email_label = Label {
+            html_for: Some("operator-new-email"),
             text: "Email",
             variant: "default",
             size: "default",
@@ -4860,7 +4895,8 @@ pub fn control_plane_operators_new_page() -> String {
             optional: false
         }
         .render_html(),
-        email_input = Input { id: Some("operator-new-email"),
+        email_input = Input {
+            id: Some("operator-new-email"),
             input_type: "email",
             autocomplete: Some("email"),
             variant: "default",
@@ -7900,7 +7936,11 @@ mod deferred_feature_view_tests {
         assert!(page.contains("name=\"recovery_code\""));
         assert_eq!(page.matches("action=\"/web/auth/mfa/verify\"").count(), 2);
         // Both forms carry the hidden email + CSRF.
-        assert_eq!(page.matches("name=\"email\" value=\"ops@example.test\"").count(), 2);
+        assert_eq!(
+            page.matches("name=\"email\" value=\"ops@example.test\"")
+                .count(),
+            2
+        );
         assert_eq!(page.matches("name=\"_csrf\"").count(), 2);
         // The single-use contract is stated, not implied.
         assert!(page.contains("works once and then stops working"));
@@ -7915,12 +7955,8 @@ mod deferred_feature_view_tests {
         assert!(page.contains("Send a fresh verification link"));
         // The address the flow knows is prefilled; anti-enumeration copy is
         // on the page ("if this address needs verification").
-        let with_email = web_verify_email_page_with_state(
-            None,
-            Some("owner@example.test"),
-            Some("error"),
-            None,
-        );
+        let with_email =
+            web_verify_email_page_with_state(None, Some("owner@example.test"), Some("error"), None);
         assert!(with_email.contains("value=\"owner@example.test\""));
         assert!(with_email.contains("needs verification"));
     }
@@ -7999,9 +8035,8 @@ mod deferred_feature_view_tests {
 
     #[test]
     fn campaign_editors_state_the_manual_start_truth() {
-        let with_values = web_campaign_edit_page_with_values(
-            &crate::view_data::CampaignEditData::default(),
-        );
+        let with_values =
+            web_campaign_edit_page_with_values(&crate::view_data::CampaignEditData::default());
         assert!(with_values.contains("the campaign waits for you to press Start"));
         let new_page = web_campaigns_new_page();
         assert!(new_page.contains("still waits for you to press Start"));
@@ -8013,9 +8048,7 @@ mod deferred_feature_view_tests {
     fn both_root_layouts_embed_the_favicon_data_url() {
         let data_url = favicon_data_url();
         assert!(data_url.starts_with("data:image/svg+xml,"));
-        let expected = format!(
-            "<link rel=\"icon\" type=\"image/svg+xml\" href=\"{data_url}\">"
-        );
+        let expected = format!("<link rel=\"icon\" type=\"image/svg+xml\" href=\"{data_url}\">");
         assert!(web_root_layout("<p>x</p>", "T").contains(&expected));
         assert!(control_plane_root_layout_with_title("<p>x</p>", "T").contains(&expected));
         // Percent-encoding is stable (deterministic goldens).

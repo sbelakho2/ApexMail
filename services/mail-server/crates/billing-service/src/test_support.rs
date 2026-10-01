@@ -72,7 +72,6 @@ pub(crate) fn assert_soft_skip_allowed(env_var: &str) {
     }
 }
 
-
 pub(crate) struct TestEnv {
     pub state: Arc<AppState>,
     pub pool: PgPool,

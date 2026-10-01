@@ -2787,11 +2787,13 @@ mod pagination_adversarial_tests {
     /// The tenant's full listing order per the SAME ORDER BY the endpoint
     /// uses — the ground truth every walk must reproduce exactly.
     async fn expected_order(pool: &sqlx::PgPool, tenant: &str) -> Vec<String> {
-        sqlx::query_scalar("SELECT id::text FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC")
-            .bind(tenant)
-            .fetch_all(pool)
-            .await
-            .expect("expected order")
+        sqlx::query_scalar(
+            "SELECT id::text FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC",
+        )
+        .bind(tenant)
+        .fetch_all(pool)
+        .await
+        .expect("expected order")
     }
 
     /// Walk the list with `page_size` per page following `meta.nextCursor`
@@ -2854,7 +2856,10 @@ mod pagination_adversarial_tests {
 
         let by_cursor = cursor_walk(&env, 1).await;
         assert_eq!(
-            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             by_cursor.len(),
             "a cursor sweep must never repeat a row"
         );
@@ -2945,11 +2950,7 @@ mod pagination_adversarial_tests {
             let (status, body) = env
                 .get(&format!("/v1/contacts?limit=2&cursor={cursor}"))
                 .await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "cursor {cursor:?}: {body}"
-            );
+            assert_eq!(status, StatusCode::BAD_REQUEST, "cursor {cursor:?}: {body}");
             assert!(
                 body.to_string().contains("invalid cursor"),
                 "cursor {cursor:?}: {body}"

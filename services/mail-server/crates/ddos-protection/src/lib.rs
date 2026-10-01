@@ -76,7 +76,7 @@ use mail_common::{
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
-pub use adaptive::AdaptiveRateLimiter;
+pub use adaptive::{AdaptiveRateLimiter, PerIpAdaptiveLimiters};
 pub use bot_detection::SessionBehavior;
 pub use config::ProtectorConfig;
 pub use cost_based::{CostBasedLimiter, RequestCost};
@@ -106,11 +106,16 @@ pub struct DdosProtector {
     /// Cost-based rate limiter
     cost_limiter: Arc<CostBasedLimiter>,
 
-    /// Per-IP adaptive rate limiter (Layer 2b, audit F2c). Constructed when
+    /// Per-IP adaptive rate limiters (Layer 2b, audit F2c). Constructed when
     /// `enable_per_ip_adaptive` is set (the default); previously the flag and
     /// the [`AdaptiveRateLimiter`] type existed but were never wired into the
     /// decide path, so the configuration was inert.
-    adaptive_limiter: Option<Arc<AdaptiveRateLimiter>>,
+    ///
+    /// Audit SM5 F2: this is now a bounded PER-CANONICAL-IP table
+    /// ([`adaptive::PerIpAdaptiveLimiters`]), not one process-wide limiter —
+    /// a single attacker IP must not tighten (or steer) the threshold every
+    /// other client is judged against.
+    adaptive_limiters: Option<Arc<adaptive::PerIpAdaptiveLimiters>>,
 
     /// IP blocklist with expiration
     blocklist: Arc<DashMap<IpAddr, BlockEntry>>,
@@ -193,6 +198,7 @@ impl DdosProtector {
         let cost_limiter = Arc::new(CostBasedLimiter::new(cost_based::CostLimiterConfig {
             default_tenant_budget: config.default_cost_budget,
             system_capacity: config.system_cost_capacity,
+            max_tracked_budgets: config.max_tracked_budgets,
         }));
 
         let session_tracker = Arc::new(SessionTracker::new(
@@ -205,20 +211,25 @@ impl DdosProtector {
         // the limiter was never constructed nor consulted). Thresholds are
         // converted from the per-IP RPM knobs to requests/second, the unit
         // the limiter works in.
+        // Audit SM5 F2: one bounded table of PER-IP limiters — each
+        // canonical client key gets its own baseline/threshold.
         let adaptive_min_rps = (config.per_ip_min_rpm / 60).max(1);
         let adaptive_max_rps = (config.per_ip_max_rpm / 60).max(adaptive_min_rps);
-        let adaptive_limiter = config.enable_per_ip_adaptive.then(|| {
-            Arc::new(AdaptiveRateLimiter::new(adaptive::AdaptiveConfig {
-                baseline_window: if config.per_ip_baseline_window_secs == 0 {
-                    Duration::from_secs(300)
-                } else {
-                    Duration::from_secs(config.per_ip_baseline_window_secs)
+        let adaptive_limiters = config.enable_per_ip_adaptive.then(|| {
+            Arc::new(adaptive::PerIpAdaptiveLimiters::new(
+                adaptive::AdaptiveConfig {
+                    baseline_window: if config.per_ip_baseline_window_secs == 0 {
+                        Duration::from_secs(300)
+                    } else {
+                        Duration::from_secs(config.per_ip_baseline_window_secs)
+                    },
+                    z_threshold: config.per_ip_z_threshold,
+                    min_threshold: adaptive_min_rps,
+                    max_threshold: adaptive_max_rps,
+                    ..adaptive::AdaptiveConfig::default()
                 },
-                z_threshold: config.per_ip_z_threshold,
-                min_threshold: adaptive_min_rps,
-                max_threshold: adaptive_max_rps,
-                ..adaptive::AdaptiveConfig::default()
-            }))
+                config.per_ip_adaptive_table_cap,
+            ))
         });
 
         let protector = Self {
@@ -226,7 +237,7 @@ impl DdosProtector {
             reputation_db: Arc::new(DashMap::new()),
             session_tracker,
             cost_limiter,
-            adaptive_limiter,
+            adaptive_limiters,
             blocklist: Arc::new(DashMap::new()),
             attack_state: Arc::new(RwLock::new(AttackState::default())),
             #[cfg(feature = "ml")]
@@ -365,7 +376,12 @@ impl DdosProtector {
         // rate under attack; a client whose (damped) request rate exceeds
         // the current adaptive threshold is limited. Previously
         // `enable_per_ip_adaptive` never influenced any decision.
-        if let Some(ref adaptive) = self.adaptive_limiter {
+        //
+        // Audit SM5 F2: the limiter consulted (and fed) here belongs to
+        // THIS canonical client key alone — other clients' rates cannot
+        // move its baseline or threshold.
+        if let Some(ref adaptive_table) = self.adaptive_limiters {
+            let adaptive = adaptive_table.limiter_for(&ctx.ip);
             let rate_rps = session_rate_per_sec(&session);
             adaptive.update(adaptive::TrafficObservation {
                 timestamp: std::time::Instant::now(),
@@ -583,6 +599,13 @@ impl DdosProtector {
 
     /// Block an IP address
     pub fn block_ip(&self, ip: IpAddr, duration: Duration, reason: String) {
+        // Audit SM5 F10: enforce the hard cap BEFORE inserting a new key
+        // so a distributed low-and-slow attack (many distinct IPs, each
+        // just below the block threshold) cannot grow the map without
+        // bound between cleanup ticks.
+        if !self.blocklist.contains_key(&ip) {
+            self.enforce_blocklist_capacity();
+        }
         let entry = BlockEntry {
             reason,
             expires_at: std::time::Instant::now() + duration,
@@ -613,7 +636,11 @@ impl DdosProtector {
         if !self.reputation_db.contains_key(ip) {
             self.enforce_reputation_capacity();
         }
-        let mut entry = self.reputation_db.entry(*ip).or_default();
+        // Audit SM5 F13: honor `initial_reputation` — the knob previously
+        // did nothing because every new entry hardcoded the neutral 50.
+        let mut entry = self.reputation_db.entry(*ip).or_insert_with(|| {
+            ReputationScore::with_initial_reputation(self.config.initial_reputation)
+        });
         entry.last_seen = std::time::Instant::now();
         entry.clone()
     }
@@ -623,7 +650,9 @@ impl DdosProtector {
         if !self.reputation_db.contains_key(ip) {
             self.enforce_reputation_capacity();
         }
-        let mut entry = self.reputation_db.entry(*ip).or_default();
+        let mut entry = self.reputation_db.entry(*ip).or_insert_with(|| {
+            ReputationScore::with_initial_reputation(self.config.initial_reputation)
+        });
         entry.last_seen = std::time::Instant::now();
         entry.score = entry.score.saturating_sub(amount);
         debug!(%ip, new_score = entry.score, "Reputation decreased");
@@ -632,6 +661,20 @@ impl DdosProtector {
     /// Number of tracked reputation entries (observability / tests).
     pub fn reputation_entry_count(&self) -> usize {
         self.reputation_db.len()
+    }
+
+    /// Number of distinct client keys that own an adaptive limiter
+    /// (observability / tests; audit SM5 F2).
+    pub fn adaptive_tracked_ips(&self) -> usize {
+        self.adaptive_limiters
+            .as_ref()
+            .map(|table| table.tracked_ips())
+            .unwrap_or(0)
+    }
+
+    /// Number of tracked blocklist entries (observability / tests).
+    pub fn blocklist_entry_count(&self) -> usize {
+        self.blocklist.len()
     }
 
     /// Enforce the hard capacity cap on the reputation table (fix G).
@@ -672,6 +715,29 @@ impl DdosProtector {
             for ip in overflow {
                 self.reputation_db.remove(&ip);
             }
+        }
+    }
+
+    /// Enforce the hard blocklist capacity cap (audit SM5 F10), mirroring
+    /// the other bounded tables (fix G / F9). When full, a 10% batch of
+    /// the entries expiring SOONEST is evicted: those blocks are the ones
+    /// closest to lapsing naturally, so eviction loses the least
+    /// protection state (LRU-by-expiry, as with `alert_counts`).
+    fn enforce_blocklist_capacity(&self) {
+        let cap = self.config.max_blocklist_entries;
+        if cap == 0 || self.blocklist.len() < cap {
+            return;
+        }
+        let target = cap.saturating_sub(cap / 10).max(1);
+        let mut candidates: Vec<(IpAddr, std::time::Instant)> = self
+            .blocklist
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().expires_at))
+            .collect();
+        candidates.sort_by_key(|(_, expires_at)| *expires_at);
+        let excess = self.blocklist.len().saturating_sub(target);
+        for (ip, _) in candidates.into_iter().take(excess) {
+            self.blocklist.remove(&ip);
         }
     }
 
@@ -755,7 +821,9 @@ impl DdosProtector {
         if !self.reputation_db.contains_key(ip) {
             self.enforce_reputation_capacity();
         }
-        let mut entry = self.reputation_db.entry(*ip).or_default();
+        let mut entry = self.reputation_db.entry(*ip).or_insert_with(|| {
+            ReputationScore::with_initial_reputation(self.config.initial_reputation)
+        });
         entry.challenges_passed = entry.challenges_passed.saturating_add(1);
         entry.last_seen = std::time::Instant::now();
         entry.score = entry.score.saturating_add(CHALLENGE_PASS_CREDIT).min(100);
@@ -812,12 +880,12 @@ impl DdosProtector {
             self.config.reputation_stale_after
         };
         self.reputation_db.retain(|_ip, entry| {
-            // Decay toward neutral
-            if entry.score < 50 {
-                entry.score = (entry.score + 1).min(50);
-            } else if entry.score > 50 {
-                entry.score = (entry.score - 1).max(50);
-            }
+            // Decay toward neutral. Audit SM5 F13: route through
+            // `decay_toward_neutral` so the trusted/flagged EXEMPTIONS the
+            // type documents actually hold — the previous inline decay
+            // dragged an admin-set trusted entry (90) back to 50 within
+            // ~40 cleanup ticks.
+            entry.decay_toward_neutral(1);
 
             // Evict if:not seen within the stale window (regardless of
             // score) OR neutral+inactive+old (previous policy).
@@ -1081,7 +1149,9 @@ mod tests {
             ip,
             BlockEntry {
                 reason: "expired".to_string(),
-                expires_at: std::time::Instant::now() - Duration::from_secs(1),
+                expires_at: std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(1))
+                    .unwrap_or(std::time::Instant::now()),
                 from_region: None,
             },
         );
@@ -1205,6 +1275,173 @@ mod tests {
             1,
             "stale tenant budget must be evicted by the cleanup pass"
         );
+    }
+
+    // ── Audit SM5 F2:per-IP adaptive sharding end-to-end ────────────
+
+    #[tokio::test]
+    async fn test_adaptive_limiters_are_per_canonical_ip() {
+        let config = ProtectorConfig::default();
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        assert!(protector.adaptive_tracked_ips() == 0, "table starts empty");
+
+        let ctx_for = |ip: &str| RequestContext {
+            ip: ip.parse().expect("hardcoded test IP"),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+
+        // A couple of requests from two distinct IPs must create two
+        // independent per-IP limiters (and IPv4-mapped IPv6 must share the
+        // IPv4 key via canonicalization).
+        let _ = protector.evaluate(&ctx_for("203.0.113.5")).await;
+        let _ = protector.evaluate(&ctx_for("198.51.100.5")).await;
+        assert_eq!(protector.adaptive_tracked_ips(), 2);
+        let _ = protector.evaluate(&ctx_for("::ffff:203.0.113.5")).await;
+        assert_eq!(
+            protector.adaptive_tracked_ips(),
+            2,
+            "IPv4-mapped IPv6 must canonicalize onto the IPv4 limiter"
+        );
+    }
+
+    // ── Audit SM5 F10:blocklist hard cap ────────────────────────────
+
+    #[tokio::test]
+    async fn test_blocklist_bounded_under_block_flood() {
+        let config = ProtectorConfig {
+            max_blocklist_entries: 100,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let first_ip: IpAddr = "192.0.2.1".parse().expect("hardcoded test IP");
+        let duration = Duration::from_secs(3600);
+        protector.block_ip(first_ip, duration, "first".to_string());
+
+        for i in 0..300u32 {
+            let ip: IpAddr = format!("198.51.{}.{}", (i >> 8) & 0xFF, i & 0xFF)
+                .parse()
+                .expect("valid IPv4");
+            protector.block_ip(ip, duration, "flood".to_string());
+            assert!(
+                protector.blocklist_entry_count() <= 100,
+                "blocklist exceeded cap at iteration {i}: {}",
+                protector.blocklist_entry_count()
+            );
+        }
+        assert!(protector.blocklist_entry_count() <= 100);
+
+        // LRU-by-expiry: all blocks share the same duration, so the
+        // EARLIEST-inserted entry (earliest expiry) must have been evicted
+        // while the latest survives.
+        assert!(
+            !protector.is_blocked(&first_ip),
+            "the soonest-expiring block must be evicted first"
+        );
+        let last_ip: IpAddr = "198.51.1.43".parse().expect("valid IPv4"); // i = 299
+        assert!(
+            protector.is_blocked(&last_ip),
+            "the latest block must survive the cap eviction"
+        );
+    }
+
+    // ── Audit SM5 F13:initial_reputation honored + decay exemptions ──
+
+    #[tokio::test]
+    async fn test_initial_reputation_config_is_honored() {
+        // The knob previously did nothing: every new entry started at the
+        // hardcoded neutral 50.
+        let config = ProtectorConfig {
+            initial_reputation: 80,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ip: IpAddr = "203.0.113.77".parse().expect("hardcoded test IP");
+        let rep = protector.get_or_create_reputation(&ip);
+        assert_eq!(
+            rep.score, 80,
+            "new entries must start at the configured initial_reputation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_decay_respects_trusted_and_flagged_exemptions() {
+        let config = ProtectorConfig {
+            reputation_stale_after: Duration::from_secs(3600),
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let trusted_ip: IpAddr = "203.0.113.10".parse().expect("hardcoded test IP");
+        let flagged_ip: IpAddr = "203.0.113.11".parse().expect("hardcoded test IP");
+        let normal_low_ip: IpAddr = "203.0.113.12".parse().expect("hardcoded test IP");
+        let normal_high_ip: IpAddr = "203.0.113.13".parse().expect("hardcoded test IP");
+
+        protector.reputation_db.insert(trusted_ip, {
+            let mut e = ReputationScore::trusted();
+            e.score = 90;
+            e
+        });
+        protector
+            .reputation_db
+            .insert(flagged_ip, ReputationScore::flagged());
+        protector.reputation_db.insert(
+            normal_low_ip,
+            ReputationScore {
+                score: 40,
+                ..Default::default()
+            },
+        );
+        protector.reputation_db.insert(
+            normal_high_ip,
+            ReputationScore {
+                score: 60,
+                ..Default::default()
+            },
+        );
+
+        protector.run_cleanup_once();
+
+        let score_of = |ip: &IpAddr| {
+            protector
+                .reputation_db
+                .get(ip)
+                .expect("entry should exist")
+                .score
+        };
+        // The whole point of the finding: trusted/flagged entries must NOT
+        // decay (the inline decay ignored the exemption).
+        assert_eq!(
+            score_of(&trusted_ip),
+            90,
+            "trusted entry must keep its score across cleanup ticks"
+        );
+        assert_eq!(
+            score_of(&flagged_ip),
+            20,
+            "flagged entry must keep its score across cleanup ticks"
+        );
+        // Untenanted entries still decay toward neutral as before.
+        assert_eq!(score_of(&normal_low_ip), 41);
+        assert_eq!(score_of(&normal_high_ip), 59);
     }
 
     // ── Fix #8:anonymous cost buckets keyed by client IP ───────────
@@ -1630,7 +1867,7 @@ mod tests {
         let protector = DdosProtector::new(config)
             .await
             .expect("test should succeed");
-        assert!(protector.adaptive_limiter.is_none());
+        assert!(protector.adaptive_limiters.is_none());
 
         let ctx = RequestContext {
             ip: "203.0.113.71".parse().expect("hardcoded test IP"),

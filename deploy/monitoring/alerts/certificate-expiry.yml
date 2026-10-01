@@ -17,7 +17,8 @@
 #     for api.apexmail.ee, track.apexmail.ee and app.apexmail.ee
 #   * job="blackbox-http-api-health" (fail_if_not_ssl) → same metric for the
 #     /health endpoints
-#   * job="blackbox-smtp" (smtp_starttls module) → same metric for the MTA
+#   * job="blackbox-smtp" (smtp_starttls module on 25/587, tcp+tls
+#     smtp_tls module on 465/993 — audit F1) → same metric for the MTA
 #     ports 25/587/465 and IMAPS 993 — the mail certificate is loaded once
 #     at MTA startup and renewal requires a manual container restart, so
 #     expiry alerting on these ports matters MORE than on nginx.

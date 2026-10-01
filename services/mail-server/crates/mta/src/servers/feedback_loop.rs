@@ -1912,7 +1912,10 @@ Original-Message-ID: <original@example.com>\r\n";
         assert!(help.contains("DATA"), "HELP lists DATA: {help:?}");
 
         // Full transaction, then a >MAX_DATA_LINE single line.
-        writer.write_all(b"MAIL FROM:<fbl@google.com>\r\n").await.unwrap();
+        writer
+            .write_all(b"MAIL FROM:<fbl@google.com>\r\n")
+            .await
+            .unwrap();
         let _ = fbl_read_reply(&mut reader).await;
         writer
             .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")

@@ -22,7 +22,7 @@ comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
     { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "none" },
     { feature = "Aceptación P95 hasta el primer intento", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">No documentado públicamente</span>', winner = "none" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
     { feature = "Calentamiento automático de IP", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automático (gestionado por Postmark)</span>', winner = "none" },
     { feature = "Soporte de BIMI", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Soporte de MTA-STS", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }

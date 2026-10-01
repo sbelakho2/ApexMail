@@ -3443,10 +3443,7 @@ mod coverage_wave_campaigns {
         }
     }
 
-    async fn wave_dispatcher(
-        pool: &PgPool,
-        domain: &str,
-    ) -> ProductionCampaignDispatcher {
+    async fn wave_dispatcher(pool: &PgPool, domain: &str) -> ProductionCampaignDispatcher {
         ProductionCampaignDispatcher::new(
             wave_dispatch_config(domain),
             pool.clone(),
@@ -3598,7 +3595,12 @@ mod coverage_wave_campaigns {
         let email = format!("ada-{}@leadco.example", &tenant[..12]);
         seed_lead_contact(&pool, &tenant, &email).await;
         let campaign = mgr
-            .create_campaign(tenant.clone(), "Wired dry".into(), template_id.clone(), "all".into())
+            .create_campaign(
+                tenant.clone(),
+                "Wired dry".into(),
+                template_id.clone(),
+                "all".into(),
+            )
             .await
             .unwrap();
         mgr.add_recipients(&tenant, campaign.id, vec![email.clone()])
@@ -3625,9 +3627,10 @@ mod coverage_wave_campaigns {
         assert!(link.starts_with("http://127.0.0.1:3010/u/"), "{report}");
         let warnings = report["warnings"].as_array().unwrap();
         assert!(
-            !warnings
-                .iter()
-                .any(|w| w.as_str().unwrap_or_default().contains("dispatcher not configured")),
+            !warnings.iter().any(|w| w
+                .as_str()
+                .unwrap_or_default()
+                .contains("dispatcher not configured")),
             "a wired dispatcher must not warn about itself: {report}"
         );
         // A dry run stamps nothing in the send ledger.
@@ -3658,14 +3661,10 @@ mod coverage_wave_campaigns {
             .unwrap();
         assert_eq!(report["sender"]["domain_verified"], false, "{report}");
         assert!(
-            report["warnings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|w| w
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("not verified/DKIM-ready")),
+            report["warnings"].as_array().unwrap().iter().any(|w| w
+                .as_str()
+                .unwrap_or_default()
+                .contains("not verified/DKIM-ready")),
             "{report}"
         );
 
@@ -3684,11 +3683,10 @@ mod coverage_wave_campaigns {
             .await
             .unwrap();
         assert!(
-            report["warnings"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|w| w.as_str().unwrap_or_default().contains("template not renderable")),
+            report["warnings"].as_array().unwrap().iter().any(|w| w
+                .as_str()
+                .unwrap_or_default()
+                .contains("template not renderable")),
             "{report}"
         );
 
@@ -3728,7 +3726,12 @@ mod coverage_wave_campaigns {
         let mut helper_campaigns = Vec::new();
         for index in 0..3 {
             let helper = mgr
-                .create_campaign(tenant.clone(), format!("Helper {index}"), "t".into(), "all".into())
+                .create_campaign(
+                    tenant.clone(),
+                    format!("Helper {index}"),
+                    "t".into(),
+                    "all".into(),
+                )
                 .await
                 .unwrap();
             sqlx::query(
@@ -3755,10 +3758,7 @@ mod coverage_wave_campaigns {
         );
         assert_eq!(funnel.due, 0, "a capped recipient is not due");
 
-        let report = mgr
-            .dry_run(&tenant, campaign.id, 10, None)
-            .await
-            .unwrap();
+        let report = mgr.dry_run(&tenant, campaign.id, 10, None).await.unwrap();
         assert_eq!(report["recipients"]["frequency_capped"], 1, "{report}");
         assert_eq!(report["recipients"]["due"], 0, "{report}");
 
@@ -3776,14 +3776,22 @@ mod coverage_wave_campaigns {
             .recipient_funnel_counts(&tenant, campaign.id)
             .await
             .unwrap();
-        assert_eq!(funnel.frequency_capped, 0, "an expired window frees the cap");
+        assert_eq!(
+            funnel.frequency_capped, 0,
+            "an expired window frees the cap"
+        );
         assert_eq!(funnel.due, 1);
 
         // The cap is per tenant: the same address in ANOTHER tenant's
         // campaign does not consume this tenant's budget.
         let other = unique_test_tenant("camp-wave-cap-o");
         let other_campaign = mgr
-            .create_campaign(other.clone(), "Other tenant".into(), "t".into(), "all".into())
+            .create_campaign(
+                other.clone(),
+                "Other tenant".into(),
+                "t".into(),
+                "all".into(),
+            )
             .await
             .unwrap();
         sqlx::query(
@@ -3876,14 +3884,12 @@ mod coverage_wave_campaigns {
         let tenant = unique_test_tenant("camp-wave-race");
         let mgr = CampaignManager::new(10, pool.clone());
         let email = format!("race-{}@example.com", &tenant[..12]);
-        sqlx::query(
-            "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')")
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO sales_contact_points \
                  (id, tenant_id, contact_id, channel, value, normalized_value, \

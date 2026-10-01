@@ -6186,14 +6186,13 @@ Bcc: victim@example.com"@example.com"#
             .await
             .expect("seed foreign rows");
 
-        let expected: Vec<String> =
-            sqlx::query_scalar(
-                "SELECT id::text FROM messages WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC",
-            )
-            .bind(&fixture.tenant)
-            .fetch_all(&fixture.pool)
-            .await
-            .expect("expected order");
+        let expected: Vec<String> = sqlx::query_scalar(
+            "SELECT id::text FROM messages WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC",
+        )
+        .bind(&fixture.tenant)
+        .fetch_all(&fixture.pool)
+        .await
+        .expect("expected order");
         assert_eq!(expected.len(), 6);
 
         // Cursor sweep at limit=1 (and page size 2, a boundary inside the
@@ -6216,8 +6215,7 @@ Bcc: victim@example.com"@example.com"#
                         seen.push(item["id"].as_str().expect("id string").to_string());
                     }
                     if body["meta"]["hasMore"].as_bool().expect("hasMore flag") {
-                        let cursor =
-                            body["meta"]["nextCursor"].as_str().expect("next cursor");
+                        let cursor = body["meta"]["nextCursor"].as_str().expect("next cursor");
                         uri = format!("/?limit={page}&cursor={cursor}");
                     } else {
                         break;
@@ -6228,7 +6226,10 @@ Bcc: victim@example.com"@example.com"#
         };
         let by_cursor = sweep(1).await;
         assert_eq!(
-            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             by_cursor.len(),
             "a cursor sweep must never repeat a row"
         );

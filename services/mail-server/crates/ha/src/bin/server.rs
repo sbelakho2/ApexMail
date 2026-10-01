@@ -124,11 +124,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let interval = config.health.interval_ms;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval));
+            // SM10 F2: this cron is now WIRED to the automatic-failover
+            // pipeline — previously it only logged, so `report_failure` had
+            // zero production callers and nothing was ever failed over
+            // automatically. Each per-component sample goes through the
+            // flap-damped gate: an `Unhealthy` component is forwarded to
+            // `report_failure` only after FLAP_DAMPING_SAMPLES consecutive
+            // unhealthy ticks (a single blip must not push a component
+            // toward the threshold), a `Healthy` tick resets that
+            // component's failure counter, and `Degraded`/`Unknown` hold
+            // the run untouched. `report_failure` itself no-ops unless
+            // `failover.enabled`, so a disabled config keeps the old
+            // observe-and-warn behavior.
+            let mut gate =
+                ha::failover::FlapDampedHealthGate::new(ha::failover::FLAP_DAMPING_SAMPLES);
             loop {
                 tick.tick().await;
                 let health = s.health.check_all().await;
                 if health.overall != HealthStatus::Healthy {
                     tracing::warn!(status = %health.overall, region = %health.region, "Health check reported non-healthy state");
+                }
+                for component in &health.components {
+                    match gate.observe(&component.name, &component.status) {
+                        ha::failover::HealthObservation::ReportFailure => {
+                            info!(
+                                component = %component.name,
+                                samples = ha::failover::FLAP_DAMPING_SAMPLES,
+                                "component persistently unhealthy — forwarding to the \
+                                 automatic-failover pipeline"
+                            );
+                            if let Err(e) = s.failover.report_failure(&component.name).await {
+                                error!(
+                                    component = %component.name,
+                                    error = %e,
+                                    "automatic failover attempt failed"
+                                );
+                            }
+                        }
+                        ha::failover::HealthObservation::ResetFailures => {
+                            s.failover.reset_failures_for(&component.name).await;
+                        }
+                        // Damped (inside the damping window) / Hold — take
+                        // no failover-pipeline action this tick.
+                        ha::failover::HealthObservation::Damped
+                        | ha::failover::HealthObservation::Hold => {}
+                    }
                 }
             }
         });

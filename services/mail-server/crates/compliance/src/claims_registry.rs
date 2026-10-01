@@ -119,26 +119,13 @@ pub fn seed_claims_registry() -> ClaimsRegistry {
     let mut registry = ClaimsRegistry::new();
     let now = Utc::now();
 
-    registry.register(MarketingClaim {
-        claim_id: "CL-001".into(),
-        exact_wording: "EEA data processing and storage".into(),
-        category: ClaimCategory::Compliance,
-        owner: "Infrastructure".into(),
-        approver: Some("Security".into()),
-        evidence_location: Some("docs/compliance/data-residency.md".into()),
-        measurement_method: Some("Infrastructure audit of all data stores".into()),
-        measurement_period: Some("Continuous".into()),
-        environment_measured: Some("Production".into()),
-        plan_applicability: vec!["all".into()],
-        geographic_scope: Some("European Economic Area".into()),
-        limitations: Some("BYOC may use customer-specified regions".into()),
-        approved_pages: vec!["/compliance/".into(), "/security/".into()],
-        review_date: NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
-        expiration_date: None,
-        status: ClaimStatus::Qualified,
-        created_at: now,
-        updated_at: now,
-    });
+    // Audit F10: the "EEA data processing and storage" claim (CL-001) and
+    // its `docs/compliance/data-residency.md` evidence pointer were REMOVED.
+    // Nothing enforces data residency anywhere in the codebase — no routing,
+    // pinning or replication constraint reads a region selection — so the
+    // claim (and the evidence document advertising it) were untrue. An
+    // untrue compliance claim must not ship; it may only return together
+    // with the mechanism that makes it true.
 
     registry.register(MarketingClaim {
         claim_id: "CL-002".into(),
@@ -852,8 +839,33 @@ mod tests {
     #[test]
     fn test_claim_can_be_retrieved_by_id() {
         let r = registry();
-        let claim = r.get("CL-001").expect("CL-001 should exist");
+        let claim = r.get("CL-002").expect("CL-002 should exist");
         assert_eq!(claim.status, ClaimStatus::Qualified);
-        assert_eq!(claim.owner, "Infrastructure");
+        assert_eq!(claim.owner, "Legal");
+    }
+
+    /// Audit F10: the data-residency claim must STAY removed. It advertised
+    /// "EEA data processing and storage" with `docs/compliance/data-residency.md`
+    /// as public evidence while no code path implements (or even reads) a
+    /// residency selection. If this test fails, the untrue claim was
+    /// reintroduced — wire the enforcement mechanism first, then re-register
+    /// the claim with real evidence.
+    #[test]
+    fn the_untrue_data_residency_claim_stays_removed() {
+        let r = registry();
+        assert!(
+            r.get("CL-001").is_none(),
+            "CL-001 (EEA data-residency claim) must not ship without an enforcement mechanism"
+        );
+        // No remaining claim may cite the data-residency evidence document
+        // either — the pointer died with the claim.
+        for claim in r.all() {
+            assert_ne!(
+                claim.evidence_location.as_deref(),
+                Some("docs/compliance/data-residency.md"),
+                "claim {} still cites the removed data-residency evidence",
+                claim.claim_id
+            );
+        }
     }
 }

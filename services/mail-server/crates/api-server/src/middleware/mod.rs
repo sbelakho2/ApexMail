@@ -5,6 +5,8 @@
 pub mod auth;
 pub mod cp_auth;
 pub mod ddos;
+// SM10 F4: data-plane STONITH fence gate for mutating requests.
+pub mod fence;
 pub mod idempotency;
 pub mod metrics;
 pub mod rate_limiter;
@@ -115,7 +117,10 @@ mod tests {
             "/cp",
             "/cp/security",
         ] {
-            assert!(is_browser_facing_path(path), "{path} must be browser-facing");
+            assert!(
+                is_browser_facing_path(path),
+                "{path} must be browser-facing"
+            );
         }
 
         for path in [

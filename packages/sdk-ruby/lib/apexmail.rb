@@ -24,7 +24,7 @@ require "time"
 
 module ApexMail
   DEFAULT_BASE_URL = "https://api.apexmail.ee"
-  SDK_VERSION      = "1.0.0"
+  SDK_VERSION      = "1.0.1"
   DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
   API_KEY_REGEX    = /\Aam_(live|test)_[A-Za-z0-9]{16,}\z/
 
@@ -728,22 +728,22 @@ module ApexMail
 
   # ── Webhooks ────────────────────────────────────────────────────────────────
 
-  # Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS) —
-  # anything else is rejected with 422.
+  # Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS,
+  # canonicalized 2026-09-08) — anything else is rejected with 422.
   KNOWN_WEBHOOK_EVENTS = [
-    "email.delivered",
-    "email.bounced",
-    "email.complained",
-    "message.sent",
+    "message.accepted",
+    "message.queued",
+    "message.attempted",
+    "message.deferred",
     "message.delivered",
     "message.bounced",
     "message.complained",
+    "message.suppressed",
     "message.opened",
     "message.clicked",
+    "message.cancelled",
     "recipient.unsubscribed",
     "placement_test.completed",
-    "bounce",
-    "complaint",
     "inbound",
     "*",
   ].freeze
@@ -782,15 +782,15 @@ module ApexMail
     #
     # @param url    [String]
     # @param events [Array<String>] valid names, e.g.
-    #   ["message.delivered", "email.bounced", "*"] (see KNOWN_WEBHOOK_EVENTS)
+    #   ["message.delivered", "message.bounced", "*"] (see KNOWN_WEBHOOK_EVENTS)
     # @param secret [String, nil] Unused by the API (ignored; server-generated)
     def create(url:, events:, secret: nil)
       self.class.validate_webhook_url!(url)
       unknown = events.reject { |event| KNOWN_WEBHOOK_EVENTS.include?(event.to_s.strip) }
-      unless unknown.empty?
-        raise ArgumentError,
-              "unknown webhook event type(s): #{unknown.join(', ')}; valid events: #{KNOWN_WEBHOOK_EVENTS.join(', ')}"
-      end
+      # Advisory only (audit SM15 F1): the server owns the vocabulary and
+      # 422s unknown names — a hard client-side gate would brick the SDK
+      # whenever the server adds a new event type.
+      warn("unknown webhook event type(s): #{unknown.join(', ')}; known events: #{KNOWN_WEBHOOK_EVENTS.join(', ')}") unless unknown.empty?
       @t.request("POST", "/v1/webhooks", body: { url: url, events: events })
     end
 
@@ -818,10 +818,8 @@ module ApexMail
       body[:url] = url if url
       if events
         unknown = events.reject { |event| KNOWN_WEBHOOK_EVENTS.include?(event.to_s.strip) }
-        unless unknown.empty?
-          raise ArgumentError,
-                "unknown webhook event type(s): #{unknown.join(', ')}; valid events: #{KNOWN_WEBHOOK_EVENTS.join(', ')}"
-        end
+        # Advisory only (audit SM15 F1) — see #create.
+        warn("unknown webhook event type(s): #{unknown.join(', ')}; known events: #{KNOWN_WEBHOOK_EVENTS.join(', ')}") unless unknown.empty?
         body[:events] = events
       end
       status = (active ? "active" : "paused") if status.nil? && !active.nil?

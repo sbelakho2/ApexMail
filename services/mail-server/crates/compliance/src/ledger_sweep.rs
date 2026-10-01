@@ -97,29 +97,45 @@ impl PayrollAmountsPolicy for EstonianPayrollPolicy {
     }
 }
 
-/// One sweep tick for the three compliance-owned financial sources.
+/// One sweep tick for the compliance-owned financial sources: the three
+/// original compliance sources plus the billing sources (invoices, payment
+/// allocations, credit notes — audit SM7 F1) whose live write hooks are
+/// best-effort, so this replay sweep is what keeps the books complete.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct LedgerSweepReport {
     pub payroll: SweepReport,
     pub expenses: SweepReport,
     pub bank_statement_lines: SweepReport,
+    pub invoices: SweepReport,
+    pub payment_allocations: SweepReport,
+    pub credit_notes: SweepReport,
 }
 
 impl LedgerSweepReport {
     pub fn total_posted(&self) -> u64 {
-        self.payroll.posted + self.expenses.posted + self.bank_statement_lines.posted
+        self.payroll.posted
+            + self.expenses.posted
+            + self.bank_statement_lines.posted
+            + self.invoices.posted
+            + self.payment_allocations.posted
+            + self.credit_notes.posted
     }
 
     /// True when this tick saw no postable work and nothing worth reporting
     /// (no claims, no unpostable rows, no missing optional store).
     pub fn is_idle(&self) -> bool {
-        self.payroll.is_idle() && self.expenses.is_idle() && self.bank_statement_lines.is_idle()
+        self.payroll.is_idle()
+            && self.expenses.is_idle()
+            && self.bank_statement_lines.is_idle()
+            && self.invoices.is_idle()
+            && self.payment_allocations.is_idle()
+            && self.credit_notes.is_idle()
     }
 }
 
-/// Run the payroll, expense and bank statement sweeps once. Idempotent; safe
-/// to call on every tick and from multiple processes (SKIP LOCKED claim, see
-/// `accounting_core::sweeps`).
+/// Run the payroll, expense, bank statement AND billing sweeps once.
+/// Idempotent; safe to call on every tick and from multiple processes
+/// (SKIP LOCKED claim, see `accounting_core::sweeps`).
 ///
 /// Bank statement lines ingested through
 /// `POST /accounting/bank-statements/import` are picked up here within one
@@ -129,10 +145,19 @@ pub async fn sweep_ledger_sources(db: &PgPool) -> anyhow::Result<LedgerSweepRepo
     let payroll = sweeps::sweep_unposted_payroll(db, &config, &EstonianPayrollPolicy).await?;
     let expenses = sweeps::sweep_unposted_expenses(db, &config).await?;
     let bank_statement_lines = sweeps::sweep_unposted_bank_statement_lines(db, &config).await?;
+    // Audit SM7 F1: the billing sources have no other replay path — their
+    // posting hooks are best-effort by policy, so a skipped posting is only
+    // repaired here. All sweeps are idempotent (unique source documents).
+    let invoices = sweeps::sweep_unposted_invoices(db, &config).await?;
+    let payment_allocations = sweeps::sweep_unposted_payment_allocations(db, &config).await?;
+    let credit_notes = sweeps::sweep_unposted_credit_notes(db, &config).await?;
     Ok(LedgerSweepReport {
         payroll,
         expenses,
         bank_statement_lines,
+        invoices,
+        payment_allocations,
+        credit_notes,
     })
 }
 

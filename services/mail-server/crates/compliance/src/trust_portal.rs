@@ -541,10 +541,16 @@ impl TrustPortalService {
         &self,
         input: AccessRequestInput,
     ) -> Result<AccessRequest, String> {
-        // Cheap email sanity check.
-        if !input.requester_email.contains('@') {
-            return Err("invalid email".into());
-        }
+        // Audit F12: shape + length validation, not just "contains @" — an
+        // unauthenticated row-spam vector previously accepted arbitrary
+        // megabyte "emails" (bounded by the body limit) into the compliance
+        // database. Same bar the OIDC email assurance uses: exactly one `@`,
+        // non-empty local part and domain, a dotted domain, no whitespace,
+        // RFC-length bound.
+        validate_requester_email(&input.requester_email)?;
+        validate_bounded_field("requester_name", Some(&input.requester_name))?;
+        validate_bounded_field("company", input.company.as_deref())?;
+        validate_bounded_field("purpose", input.purpose.as_deref())?;
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let nda_accepted_at = if input.nda_accepted { Some(now) } else { None };
@@ -860,9 +866,212 @@ impl From<AccessRequestRow> for AccessRequest {
     }
 }
 
+// ─── Anonymous submission guards (audit F12) ────────────────────────────────
+//
+// `POST /trust/access-request` is intentionally public, so the write it
+// performs into `trust_portal_access_requests` must be bounded the way the
+// DSAR endpoints are: payload validation plus a two-level (per-IP + global)
+// rate limit.
+
+/// Maximum accepted requester-email length (RFC 5321 limit is 254; a little
+/// headroom is pointless — the same bound the OIDC email bar uses).
+pub const MAX_REQUESTER_EMAIL_LEN: usize = 254;
+/// Free-text field bounds — an anonymous request does not need an essay.
+const MAX_FIELD_LEN: usize = 512;
+
+/// Shape + length validation for the anonymous requester email (audit F12).
+/// The old check was `contains('@')`, which admitted arbitrary junk. The
+/// bar mirrors the enterprise crate's `valid_oidc_email`: exactly one `@`,
+/// non-empty local part and domain, a dotted domain, no whitespace, bounded
+/// length.
+pub fn validate_requester_email(raw: &str) -> Result<(), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("requester_email is required".into());
+    }
+    if raw.len() > MAX_REQUESTER_EMAIL_LEN {
+        return Err("requester_email is too long".into());
+    }
+    let Some((local, domain)) = raw.split_once('@') else {
+        return Err("requester_email must be an email address".into());
+    };
+    if local.is_empty() || domain.is_empty() {
+        return Err("requester_email must have a local part and a domain".into());
+    }
+    if raw.split('@').count() != 2 {
+        return Err("requester_email must contain exactly one @".into());
+    }
+    if raw.chars().any(char::is_whitespace) {
+        return Err("requester_email must not contain whitespace".into());
+    }
+    if !domain.contains('.') {
+        return Err("requester_email domain must be a dotted domain".into());
+    }
+    Ok(())
+}
+
+/// Bounded free-text for the anonymous submission.
+fn validate_bounded_field(name: &str, raw: Option<&str>) -> Result<(), String> {
+    match raw.map(str::trim) {
+        None => Ok(()),
+        Some(value) if value.len() > MAX_FIELD_LEN => Err(format!(
+            "{name} is too long (max {MAX_FIELD_LEN} characters)"
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The two-level limiter for anonymous access requests (audit F12), reusing
+/// the DSAR rate limiter's pattern: an in-memory fixed window per key with a
+/// moka TTL cache, checked-and-consumed per attempt (an unauthenticated
+/// caller gets no free probes). Level 1 is the request's client IP; level 2
+/// is a single global bucket bounding the total row-creation rate.
+#[derive(Clone)]
+pub struct TrustAccessRateLimiter {
+    per_ip: moka::sync::Cache<String, u32>,
+    global: moka::sync::Cache<String, u32>,
+    max_per_ip: u32,
+    max_global: u32,
+}
+
+/// Attempts per client IP per hour.
+pub const TRUST_ACCESS_MAX_PER_IP: u32 = 10;
+/// Total attempts per hour across all clients (the row-spam bound).
+pub const TRUST_ACCESS_MAX_GLOBAL: u32 = 200;
+
+impl TrustAccessRateLimiter {
+    pub fn new() -> Self {
+        let hour = std::time::Duration::from_secs(3600);
+        Self {
+            per_ip: moka::sync::Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(hour)
+                .build(),
+            global: moka::sync::Cache::builder()
+                .max_capacity(16)
+                .time_to_live(hour)
+                .build(),
+            max_per_ip: TRUST_ACCESS_MAX_PER_IP,
+            max_global: TRUST_ACCESS_MAX_GLOBAL,
+        }
+    }
+
+    fn global_key() -> String {
+        // Hour-bucketed so the window rolls over without a sweeper.
+        format!(
+            "trust:access:global:{}",
+            chrono::Utc::now().format("%Y-%m-%d-%H")
+        )
+    }
+
+    /// Check-and-consume one attempt for `client_ip`. `false` = over a cap.
+    pub fn check_attempt(&self, client_ip: &str) -> bool {
+        let ip_count = self.per_ip.get(client_ip).unwrap_or(0);
+        if ip_count >= self.max_per_ip {
+            return false;
+        }
+        let global_key = Self::global_key();
+        let global_count = self.global.get(&global_key).unwrap_or(0);
+        if global_count >= self.max_global {
+            return false;
+        }
+        self.per_ip.insert(client_ip.to_string(), ip_count + 1);
+        self.global.insert(global_key, global_count + 1);
+        true
+    }
+}
+
+impl Default for TrustAccessRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Audit F12: anonymous access-request submission guards ──────────────
+
+    #[test]
+    fn requester_email_shape_is_enforced() {
+        for good in [
+            "alice@example.com",
+            "  bob@trust.example.co.uk  ",
+            "weird+tag@sub.example.com",
+        ] {
+            assert!(validate_requester_email(good).is_ok(), "{good}");
+        }
+        // The old bar was `contains('@')`; every one of these passed it.
+        for bad in [
+            "",
+            "   ",
+            "nope",
+            "@example.com",
+            "alice@",
+            "a@b",
+            "two@@example.com",
+            "alice example.com",
+            "al ice@example.com",
+        ] {
+            assert!(
+                validate_requester_email(bad).is_err(),
+                "'{bad}' must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn requester_email_length_is_bounded() {
+        let local = "a".repeat(MAX_REQUESTER_EMAIL_LEN);
+        assert!(validate_requester_email(&format!("{local}@example.com")).is_err());
+        let ok_local = "a".repeat(MAX_REQUESTER_EMAIL_LEN - "@example.com".len());
+        assert!(validate_requester_email(&format!("{ok_local}@example.com")).is_ok());
+    }
+
+    #[test]
+    fn free_text_fields_are_bounded() {
+        let long = "x".repeat(MAX_FIELD_LEN + 1);
+        assert!(validate_bounded_field("purpose", Some(&long)).is_err());
+        assert!(validate_bounded_field("purpose", Some("review our posture")).is_ok());
+        assert!(validate_bounded_field("company", None).is_ok());
+    }
+
+    #[test]
+    fn access_request_limiter_is_two_level() {
+        let limiter = TrustAccessRateLimiter::new();
+        let ip = "203.0.113.50";
+        // Per-IP cap: allowed up to the cap, then refused — even though the
+        // global bucket is nowhere near ITS cap.
+        for attempt in 0..TRUST_ACCESS_MAX_PER_IP {
+            assert!(
+                limiter.check_attempt(ip),
+                "attempt {attempt} for a fresh IP must pass"
+            );
+        }
+        assert!(
+            !limiter.check_attempt(ip),
+            "the attempt past the per-IP cap must be refused"
+        );
+        // A different IP still passes (its own bucket).
+        assert!(limiter.check_attempt("203.0.113.51"));
+    }
+
+    #[test]
+    fn access_request_limiter_global_cap_binds_all_ips() {
+        let limiter = TrustAccessRateLimiter::new();
+        // Drive the global bucket to ITS cap through distinct fresh IPs
+        // (each consumes 1 per-IP slot of its own).
+        let mut last_allowed = false;
+        for i in 0..TRUST_ACCESS_MAX_GLOBAL {
+            last_allowed = limiter.check_attempt(&format!("198.51.100.{i}"));
+        }
+        assert!(last_allowed, "attempts up to the global cap must pass");
+        assert!(
+            !limiter.check_attempt("198.51.100.999"),
+            "the attempt past the GLOBAL cap must be refused even from a fresh IP"
+        );
+    }
 
     #[test]
     fn severity_validates() {
@@ -1217,7 +1426,8 @@ mod db_tests {
         let Some((_pool, svc)) = service("access").await else {
             return;
         };
-        // Malformed email is refused and writes nothing.
+        // Malformed email is refused and writes nothing (audit F12: the
+        // refusal names the field — shape + length, not just "@").
         let err = svc
             .submit_access_request(AccessRequestInput {
                 document_slug: "soc2-report".into(),
@@ -1229,7 +1439,10 @@ mod db_tests {
             })
             .await
             .expect_err("malformed email must be refused");
-        assert!(err.contains("invalid email"), "{err}");
+        assert!(
+            err.contains("requester_email must be an email address"),
+            "{err}"
+        );
 
         let request = svc
             .submit_access_request(AccessRequestInput {

@@ -92,6 +92,11 @@ pub struct FakeSmtpConfig {
     pub mail_from: ScriptedReply,
     pub default_rcpt: ScriptedReply,
     pub rcpt: Arc<Mutex<HashMap<String, ScriptedReply>>>,
+    /// Raw bytes written INSTEAD of the scripted reply when a `RCPT TO`
+    /// names this address. Lets a test script a hostile RCPT reply (e.g. a
+    /// multiline reply whose lines carry mismatched codes) while the
+    /// connection itself stays open and in sync.
+    pub raw_rcpt: Option<(String, Vec<u8>)>,
     /// Reply to the `DATA` command itself (must be 354 to accept a payload).
     pub data_command: ScriptedReply,
     pub end_of_data: ScriptedReply,
@@ -103,6 +108,10 @@ pub struct FakeSmtpConfig {
     pub drop_after_command: Option<String>,
     /// Close the connection after reading the DATA payload, before replying.
     pub drop_before_data_reply: bool,
+    /// The `SIZE` value advertised in the default EHLO capability block.
+    /// The built-in default is 10485760; `0` advertises a bare `SIZE`
+    /// (no fixed limit).
+    pub ehlo_size: u64,
 }
 
 impl Default for FakeSmtpConfig {
@@ -116,12 +125,14 @@ impl Default for FakeSmtpConfig {
             mail_from: ScriptedReply::always(ReplySpec::ok()),
             default_rcpt: ScriptedReply::always(ReplySpec::ok()),
             rcpt: Arc::new(Mutex::new(HashMap::new())),
+            raw_rcpt: None,
             data_command: ScriptedReply::always(ReplySpec::new(354, "go ahead")),
             end_of_data: ScriptedReply::always(ReplySpec::new(250, "2.0.0 queued")),
             close_after_greeting: false,
             hang_after_greeting: false,
             drop_after_command: None,
             drop_before_data_reply: false,
+            ehlo_size: 10_485_760,
         }
     }
 }
@@ -287,7 +298,7 @@ async fn handle_connection(
                 if config.advertise_starttls {
                     response.push_str("250-STARTTLS\r\n");
                 }
-                response.push_str("250-SIZE 10485760\r\n");
+                response.push_str(&format!("250-SIZE {}\r\n", config.ehlo_size));
                 response.push_str("250 8BITMIME\r\n");
                 writer.write_all(response.as_bytes()).await?;
             } else {
@@ -306,6 +317,17 @@ async fn handle_connection(
                 .await?;
         } else if upper.starts_with("RCPT TO:") {
             let recipient = extract_address(&command);
+            let raw = config
+                .raw_rcpt
+                .as_ref()
+                .filter(|(address, _)| address == &recipient)
+                .map(|(_, raw)| raw.clone());
+            if let Some(raw) = raw {
+                // Scripted hostile reply: written verbatim, no verdict is
+                // recorded server-side.
+                writer.write_all(&raw).await?;
+                continue;
+            }
             let reply = {
                 let map = config
                     .rcpt

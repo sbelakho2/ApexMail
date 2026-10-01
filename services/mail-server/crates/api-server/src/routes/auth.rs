@@ -798,7 +798,13 @@ pub(crate) fn role_requires_mfa(role: &str) -> bool {
 pub(crate) fn registered_api_key_scopes() -> &'static [String] {
     static REGISTERED: OnceLock<Vec<String>> = OnceLock::new();
     REGISTERED.get_or_init(|| {
-        let mut scopes: Vec<String> = vec!["*".into()];
+        // SM3 (audit F2): `billing:read` is a MINTABLE but never a
+        // role-granted scope. Billing read endpoints (invoices, subscription,
+        // usage, quota) require it explicitly; no read-side role carries it,
+        // so the fail-closed default is that existing narrow credentials lose
+        // invoice/finance access until an operator deliberately mints a key
+        // (or a session user holds the wildcard).
+        let mut scopes: Vec<String> = vec!["*".into(), "billing:read".into()];
         for role in ["admin", "developer", "viewer", "member"] {
             for scope in scopes_for_role(role) {
                 if !scopes.contains(&scope) {
@@ -932,6 +938,16 @@ fn build_mfa_otpauth_url(email: &str, secret: &str) -> String {
 
 fn mfa_challenge_key(token: &str) -> String {
     format!("{MFA_CHALLENGE_PREFIX}{token}")
+}
+
+/// SM3 (audit F7): the emailed-MFA acceptance check. A named seam so the
+/// authentication comparison contract is pinned by test without Redis:
+/// equality is decided by the crate's timing-safe comparison
+/// (`apexmail_lib::timing_safe_compare`, the same bar as the CSRF checks) —
+/// never plain string equality, which leaks the match prefix of the 6-digit
+/// code to a guesser.
+fn emailed_mfa_code_matches(stored: &str, provided: &str) -> bool {
+    apexmail_lib::timing_safe_compare(stored, provided)
 }
 
 fn validate_password_strength(password: &str) -> Result<(), ApiError> {
@@ -1926,8 +1942,6 @@ pub struct ListApiKeysQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    #[serde(default)]
-    pub cursor: Option<i64>,
 }
 
 fn build_session_cookie(token: &str, max_age_secs: i64, secure: bool) -> String {
@@ -2529,7 +2543,14 @@ async fn login(
                     let stored: Option<String> =
                         deadpool_redis::redis::AsyncCommands::get(&mut *redis_conn, &key).await?;
                     match stored {
-                        Some(code) if code == mfa_code => {
+                        // SM3 (audit F7): authentication comparisons use the
+                        // crate's timing-safe standard (the same helper the
+                        // CSRF checks run on) — plain String equality leaked
+                        // the match prefix of the emailed 6-digit code. The
+                        // comparison runs through the named seam
+                        // [`emailed_mfa_code_matches`] so the acceptance
+                        // contract is pinned by test.
+                        Some(code) if emailed_mfa_code_matches(&code, mfa_code) => {
                             let _: () =
                                 deadpool_redis::redis::AsyncCommands::del(&mut *redis_conn, &key)
                                     .await?;
@@ -3950,7 +3971,13 @@ async fn list_api_keys(
     // must not be enumerable by every member of the tenant.
     require_scopes(&auth, &["api-keys:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
         "SELECT id::text AS id, name, key_prefix, scopes, last_used_at, created_at, expires_at
          FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -4361,6 +4388,14 @@ async fn refresh_token(
     )
     .map_err(|e| ApiError::Internal(format!("token generation failed: {e}")))?;
 
+    // SM3 (audit F6): capture the REQUEST's user-agent BEFORE the response
+    // HeaderMap below shadows the `headers` parameter — the accountability
+    // row used to read the user-agent off the response-only map (always
+    // None), losing device attribution on every refreshed session.
+    let request_user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok());
+
     let mut headers = HeaderMap::new();
     insert_private_no_store_headers(&mut headers);
     let cookie = build_session_cookie(
@@ -4376,10 +4411,7 @@ async fn refresh_token(
 
     // Refresh rotates the session id; record the new row so the accountability
     // trail names the token that is actually live.
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|value| value.to_str().ok());
-    record_issued_session(&state, &claims.jti, &user, exp, None, user_agent).await;
+    record_issued_session(&state, &claims.jti, &user, exp, None, request_user_agent).await;
 
     Ok((
         headers,
@@ -4811,6 +4843,63 @@ mod tests {
         // a minted key must not be able to mint further keys.
         assert!(!registry.contains(&"api-keys:write".to_string()));
         assert!(!registry.contains(&"api-keys:read".to_string()));
+    }
+
+    #[test]
+    fn billing_read_is_registered_but_never_role_granted() {
+        // SM3 (audit F2): `billing:read` gates every billing read surface
+        // (invoices, subscription, usage, quota). It MUST be mintable
+        // (registered) so a wildcard administrator can deliberately issue
+        // finance-scoped keys — and MUST NOT appear in any role grant, so
+        // ordinary viewer/developer sessions keep failing the billing read
+        // gates (the fail-closed default).
+        let registry = registered_api_key_scopes();
+        assert!(
+            registry.contains(&"billing:read".to_string()),
+            "billing:read must be a registered (mintable) scope"
+        );
+        for role in ["admin", "developer", "viewer", "member"] {
+            let grants = scopes_for_role(role);
+            // The admin/owner wildcard passes every gate without naming the
+            // scope; no role may carry `billing:read` explicitly.
+            assert!(
+                !grants.contains(&"billing:read".to_string()),
+                "role {role} must not be granted billing:read (fail-closed default)"
+            );
+        }
+    }
+
+    #[test]
+    fn emailed_mfa_code_comparison_is_timing_safe_equality() {
+        // SM3 (audit F7): the emailed 6-digit MFA code is an authentication
+        // comparison, so its acceptance seam must behave exactly like the
+        // crate's timing-safe comparison — full equality only, with no
+        // prefix/substring or length-loose acceptance.
+        assert!(emailed_mfa_code_matches("123456", "123456"), "exact match");
+        assert!(
+            !emailed_mfa_code_matches("123456", "123457"),
+            "a single wrong digit refuses"
+        );
+        assert!(
+            !emailed_mfa_code_matches("123456", "12345"),
+            "a too-short guess refuses (no prefix acceptance)"
+        );
+        assert!(
+            !emailed_mfa_code_matches("123456", "1234567"),
+            "a too-long guess refuses"
+        );
+        assert!(
+            !emailed_mfa_code_matches("123456", ""),
+            "an empty guess refuses"
+        );
+        assert!(
+            !emailed_mfa_code_matches("", "123456"),
+            "an empty stored code never matches a supplied one"
+        );
+        assert!(
+            emailed_mfa_code_matches("019283", "019283"),
+            "a second exact match (no state carry-over)"
+        );
     }
 
     #[test]
@@ -9560,8 +9649,7 @@ mod adversarial_auth_tests_3 {
                 auth_with(&tenant, None, &["api-keys:write"]),
                 Query(ListApiKeysQuery {
                     limit: 10,
-                    offset: 0,
-                    cursor: None
+                    offset: 0
                 })
             )
             .await,
@@ -9573,24 +9661,25 @@ mod adversarial_auth_tests_3 {
             Query(ListApiKeysQuery {
                 limit: 10_000,
                 offset: -5,
-                cursor: None,
             }),
         )
         .await
         .expect("list keys");
         assert!(listed.len() >= 3);
-        let Json(cursor_page) = list_api_keys(
+        // SM3 (audit F8): the offset field is the ONLY pagination input —
+        // the mislabeled integer `cursor` masquerade is gone. Page 2 via an
+        // honest offset.
+        let Json(offset_page) = list_api_keys(
             State(fx.state.clone()),
             admin.clone(),
             Query(ListApiKeysQuery {
                 limit: 1,
-                offset: 0,
-                cursor: Some(1),
+                offset: 1,
             }),
         )
         .await
-        .expect("cursor page");
-        assert_eq!(cursor_page.len(), 1);
+        .expect("offset page");
+        assert_eq!(offset_page.len(), 1);
         assert!(listed.iter().any(|k| k.prefix_matches(&created)));
 
         // Revoke: own key 204, repeat/foreign/unknown 404.
@@ -10303,6 +10392,74 @@ mod adversarial_auth_tests_3 {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "cookie logout needs CSRF");
+
+        fx.cleanup().await;
+    }
+
+    // ── SM3 (audit F6): refresh attributes the REQUEST user-agent ──
+
+    #[tokio::test]
+    async fn refresh_records_the_request_user_agent_not_the_response_headers() {
+        let Some(fx) = fx("adv3_refresh_ua", 20).await else {
+            return;
+        };
+        let tenant = new_tenant_id();
+        seed_tenant(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let email = format!("refresh-ua-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user(
+            &fx.pool,
+            &tenant,
+            &email,
+            Some(&bcrypt::hash(TEST_PASSWORD, 4).unwrap()),
+            "admin",
+            "active",
+            json!({}),
+        )
+        .await;
+        let user = user_row(&user_id.to_string(), &tenant, &email, "admin");
+
+        let response =
+            issue_session_response_with_codes_at(&fx.state, &user, None, Utc::now(), None, None)
+                .await
+                .expect("issue session");
+        let original = session_cookie(response.headers()).expect("session cookie");
+
+        let device = "ua-regression/1.0 (SM3-F6 attribution)";
+        let (status, _, body) = call(
+            &fx.state,
+            Method::POST,
+            "/refresh",
+            Some(&fx.csrf),
+            &[
+                (
+                    "cookie",
+                    format!("am_session={original}; csrf_token={}", fx.csrf),
+                ),
+                ("user-agent", device.to_string()),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+
+        // The ROTATED session's accountability row carries the REQUEST's
+        // User-Agent. Before the F6 fix the handler read the user-agent off
+        // the response-only HeaderMap it had just built (always None), so
+        // every refreshed session lost device attribution. (Only the refresh
+        // path writes a user-agent here — the issue call above passes None —
+        // so the existence check is deterministic.)
+        let attributed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sessions
+             WHERE user_id = $1::uuid AND user_agent = $2)",
+        )
+        .bind(user_id)
+        .bind(device)
+        .fetch_one(&fx.pool)
+        .await
+        .expect("rotated session row");
+        assert!(
+            attributed,
+            "the refreshed session must attribute the requesting device"
+        );
 
         fx.cleanup().await;
     }

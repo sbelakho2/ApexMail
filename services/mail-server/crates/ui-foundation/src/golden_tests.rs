@@ -105,7 +105,12 @@ pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     // Confirm links render as /confirm?intent=…&amp;id=…&sig=TIMESTAMP.HMAC
     // (HTML-escaped &). The signature value is base64url + '.' only.
     for needle in ["?sig=", "&amp;sig=", "&sig="] {
-        replace_until(&mut normalized, needle, &['"', '&', '<'], "<confirm-signature>");
+        replace_until(
+            &mut normalized,
+            needle,
+            &['"', '&', '<'],
+            "<confirm-signature>",
+        );
     }
     // The auto-refresh pill: <time datetime="RFC3339" title="RFC3339 UTC">
     // Updated HH:MM:SS</time> — scoped to the <time> element so other
@@ -113,7 +118,8 @@ pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     // cursor advances past each replacement (the replacement itself starts
     // with the needle, so a from-scratch re-find would loop forever).
     let needle = "<time datetime=\"";
-    let replacement = "<time datetime=\"<render-time>\" title=\"<render-time>\">Updated <render-time></time>";
+    let replacement =
+        "<time datetime=\"<render-time>\" title=\"<render-time>\">Updated <render-time></time>";
     let mut cursor = 0usize;
     while let Some(rel) = normalized[cursor..].find(needle) {
         let start = cursor + rel;

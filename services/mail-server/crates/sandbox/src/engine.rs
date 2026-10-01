@@ -271,18 +271,22 @@ fn check_for_wedged_slots(timeout: Duration) {
     }
 }
 
-/// Optional dynamic analyzer (detonation / behavioral emulation)./// **No concrete implementation is provided by this crate.** This trait is an
+/// Optional dynamic analyzer hook (external analysis backend).
+/// **No concrete implementation is provided by this crate.** This trait is an
 /// integration hook for callers that have access to a sandboxing backend such
 /// as a micro-VM detonation chamber, YARA/ClamAV scan integration, or
-/// behavioral emulation engine. To use it:/// 1. Implement `DynamicAnalyzer` for your backend.
+/// behavioral emulation engine. To use it:
+/// 1. Implement `DynamicAnalyzer` for your backend.
 /// 2. Pass it to [`SandboxEngine::with_dynamic_analyzer`].
 /// 3. If `analyze` returns `Some(finding)`, the finding's risk is added to the
 /// static verdict and the decision is escalated according to
 /// [`DynamicDecision`].
-/// **Known limitation — recursive archives:** The current static inspector
-/// does not recurse into nested ZIP/RAR archives or decompress PDF object
-/// streams. A `DynamicAnalyzer` implementation can compensate by unpacking
-/// and re-scanning inner payloads.
+/// **Known limitation — RAR/7z and PDF object streams:** ZIP-family
+/// containers are recursed into by the static inspector
+/// ([`crate::archive`], bounded extraction), but RAR and 7z archives are
+/// not decompressed (only encryption heuristics apply) and PDF object
+/// streams are not inflated here. A `DynamicAnalyzer` implementation can
+/// compensate by unpacking and re-scanning inner payloads.
 /// **Known limitation — image-based payloads:** Steganographic or image-rendered
 /// content (e.g., phishing screenshots) is not inspected. An OCR-equipped
 /// dynamic analyzer can fill this gap.
@@ -350,6 +354,34 @@ impl SandboxEngine {
         // Step 1:File inspection (static analysis)
         let mut inspection: FileInspection = file_inspector::inspect_file(data, filename);
 
+        // Step 1b:Bounded archive extraction (audit finding) — recurse into
+        // ZIP containers under the configured depth/entry/byte budgets and
+        // re-inspect every extracted entry on its DECOMPRESSED content, so
+        // payloads nested inside archives are actually scored.
+        let extraction = crate::archive::extract_and_inspect(data, &self.config);
+        let extraction_summary = extraction.summarize();
+        for finding in extraction.findings {
+            if self.config.reports_finding(finding.id) {
+                inspection.risk_score += finding.risk;
+                inspection.findings.push(finding);
+            }
+        }
+
+        // Honor the analyze_macros / analyze_embedded_urls switches for the
+        // outer container exactly like the extracted entries above: a
+        // suppressed finding also removes its risk contribution.
+        let mut kept_findings = Vec::with_capacity(inspection.findings.len());
+        let mut suppressed_risk = 0.0;
+        for finding in inspection.findings.drain(..) {
+            if self.config.reports_finding(finding.id) {
+                kept_findings.push(finding);
+            } else {
+                suppressed_risk += finding.risk;
+            }
+        }
+        inspection.findings = kept_findings;
+        inspection.risk_score = (inspection.risk_score - suppressed_risk).max(0.0);
+
         // ---- Apply configurable encrypted-archive risk (O-15.2) -----------
         // The built-in `inspect_file` hard-codes 7.0 for ARCHIVE_ENCRYPTED.
         // If the operator has configured a different value, adjust here so
@@ -395,6 +427,9 @@ impl SandboxEngine {
                 .collect(),
             timestamp: Utc::now().to_rfc3339(),
         };
+        if let Some(summary) = extraction_summary {
+            verdict.reasons.push(summary);
+        }
 
         if let Some(analyzer) = &self.dynamic_analyzer {
             if let Some(dynamic_finding) = self.run_dynamic_analyzer(data, filename, analyzer)? {
@@ -413,7 +448,11 @@ impl SandboxEngine {
     ) -> Result<Option<DynamicAnalysisFinding>, SandboxError> {
         let timeout_duration = Duration::from_secs(self.config.analysis_timeout_secs);
         let analyzer = Arc::clone(analyzer);
-        let data = data.to_vec();
+        // Arc the attachment buffer (audit finding: a bare `Vec` clone per
+        // analysis at the 25 MB cap with a full blocking pool meant ~200 MB
+        // of transient copies under one burst; the shared, reference-
+        // counted buffer lets multiple analyzer hooks share one copy).
+        let data: Arc<Vec<u8>> = Arc::new(data.to_vec());
         let filename = filename.map(str::to_string);
 
         // Run on the shared, bounded blocking pool instead of spawning a
@@ -951,6 +990,45 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_container_scores_quarantine_never_reject() {
+        // MTA cross-crate escalation: an encrypted archive scores 7.0
+        // (ARCHIVE_ENCRYPTED, QUARANTINE class). Its contents being
+        // uninspected is a CONSEQUENCE of the encryption — the extraction
+        // sweep must not stack a 3.0 ARCHIVE_ENTRY_UNREADABLE on the same
+        // container: 7 + 3 = 10 crossed reject_threshold and flipped
+        // QUARANTINE → REJECT (breaking the strip-but-never-reject posture
+        // pinned by mta's `quarantine_verdict_strips_but_never_rejects`).
+        // ZIP local header with the encrypted flag (bit 0 of the general
+        // purpose flags at offset 6) set, no central directory.
+        let mut zip = vec![0x50u8, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x01, 0x00];
+        zip.extend_from_slice(&[0u8; 64]);
+
+        let verdict = SandboxEngine::new()
+            .analyze(&zip, Some("secret.zip"))
+            .expect("analyzed");
+
+        assert!(
+            verdict.findings.iter().any(|f| f.id == "ARCHIVE_ENCRYPTED"),
+            "the encryption finding must be present: {:?}",
+            verdict.findings
+        );
+        assert!(
+            !verdict
+                .findings
+                .iter()
+                .any(|f| f.id == "ARCHIVE_ENTRY_UNREADABLE"),
+            "unreadability of an encrypted container must not be double-scored: {:?}",
+            verdict.findings
+        );
+        assert!(
+            (verdict.risk_score - 7.0).abs() < 1e-6,
+            "risk must stay at the single 7.0 encryption score, got {}",
+            verdict.risk_score
+        );
+        assert_eq!(verdict.decision, "QUARANTINE");
+    }
+
+    #[test]
     fn batch_analysis_reports_every_file() {
         let engine = SandboxEngine::new();
         let verdicts = engine.analyze_batch(&[
@@ -962,5 +1040,133 @@ mod tests {
         assert!(!SandboxEngine::any_rejected(&verdicts));
         let clean = verdicts[0].as_ref().expect("first verdict analyzed");
         assert!(!SandboxEngine::is_rejected(clean));
+    }
+
+    // ── Audit:bounded archive extraction feeds nested findings ──
+
+    /// Build an in-memory ZIP with the given (name, content) entries.
+    fn write_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, content) in entries {
+            writer
+                .start_file(name.to_string(), SimpleFileOptions::default())
+                .expect("start file");
+            writer.write_all(content).expect("write entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    #[test]
+    fn nested_archive_payload_is_inspected_and_scored() {
+        // Audit finding: attachments were never unpacked — a PE payload
+        // inside a zip inside a zip was scored on the OUTER container's
+        // bytes only. It must now surface in the verdict, with the
+        // extraction summary visible in the reasons.
+        let payload = b"MZ\x90\x00\x03\x00\x00\x00remote-thread".to_vec();
+        let inner = write_zip(&[("payload.bin", payload)]);
+        let outer = write_zip(&[("inner.zip", inner)]);
+
+        let engine = SandboxEngine::new();
+        let verdict = engine.analyze(&outer, Some("outer.zip")).expect("analyzed");
+        assert!(
+            verdict.findings.iter().any(|f| f.id == "EXECUTABLE_PE"),
+            "depth-2 PE payload must surface in the verdict: {:?}",
+            verdict.findings
+        );
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("Bounded archive extraction")),
+            "extraction must be reported in the reasons: {:?}",
+            verdict.reasons
+        );
+        assert!(
+            verdict.risk_score >= 8.0,
+            "nested PE risk must reach the score: {}",
+            verdict.risk_score
+        );
+        // PE finding (8.0) + extension mismatch inside the archive (4.0)
+        // crosses the reject threshold.
+        assert_eq!(verdict.decision, "REJECT");
+    }
+
+    #[test]
+    fn analyze_macros_switch_suppresses_macro_findings() {
+        // The previously-dead knob now governs reporting on the container
+        // and extracted entries alike. The inner DOCX (a STORED zip, so the
+        // vbaProject.bin indicator is visible in its raw bytes) is only
+        // inspectable via extraction — the outer container's compressed
+        // bytes cannot reveal it.
+        fn write_zip_stored(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+            use std::io::Write as _;
+            use zip::write::SimpleFileOptions;
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, content) in entries {
+                writer
+                    .start_file(
+                        name.to_string(),
+                        SimpleFileOptions::default()
+                            .compression_method(zip::CompressionMethod::Stored),
+                    )
+                    .expect("start file");
+                writer.write_all(content).expect("write entry");
+            }
+            writer.finish().expect("finish zip").into_inner()
+        }
+
+        let inner_docx = write_zip_stored(&[("word/vbaProject.bin", b"VBA project".to_vec())]);
+        let outer = write_zip(&[("document.docx", inner_docx)]);
+
+        let reporting = SandboxEngine::new()
+            .analyze(&outer, Some("document.docx"))
+            .expect("analyzed");
+        assert!(
+            reporting.findings.iter().any(|f| f.id == "OOXML_VBA_BIN"),
+            "default config must report the macro indicator: {:?}",
+            reporting.findings
+        );
+
+        let suppressed = SandboxEngine::with_config(SandboxConfig {
+            analyze_macros: false,
+            ..SandboxConfig::default()
+        })
+        .analyze(&outer, Some("document.docx"))
+        .expect("analyzed");
+        assert!(
+            !suppressed.findings.iter().any(|f| f.id == "OOXML_VBA_BIN"),
+            "analyze_macros=false must suppress macro findings: {:?}",
+            suppressed.findings
+        );
+    }
+
+    #[test]
+    fn blocked_mime_types_policy_is_enforced() {
+        // The previously-dead knob now rejects by canonical MIME of the
+        // magic-byte-detected type.
+        let config = SandboxConfig {
+            blocked_mime_types: ["application/pdf".to_string()].into_iter().collect(),
+            ..SandboxConfig::default()
+        };
+        let engine = SandboxEngine::with_config(config);
+        let verdict = engine
+            .analyze(b"%PDF-1.4 minimal", Some("doc.pdf"))
+            .expect("analyzed");
+        assert!(
+            verdict
+                .reasons
+                .iter()
+                .any(|r| r.contains("Blocked MIME type: application/pdf")),
+            "a blocked MIME type must reject: {:?}",
+            verdict.reasons
+        );
+        assert_eq!(verdict.decision, "REJECT");
+        // PE still maps to its canonical blocked-by-default MIME.
+        assert!(
+            crate::policy::mime_for_file_type(crate::file_inspector::FileType::PeExe, None)
+                .is_some_and(|m| m == "application/x-msdownload")
+        );
     }
 }

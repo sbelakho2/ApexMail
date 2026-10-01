@@ -12,29 +12,58 @@ The ApexMail public pricing page is served from:
 
 ## Plans Displayed
 
-| Plan       | Price/mo | Emails/mo   | Annual      |
-|------------|----------|-------------|-------------|
-| Free       | €0       | 30,000      | €0          |
-| Starter    | €25      | 50,000      | €250/yr     |
-| Pro        | €65      | 150,000     | €650/yr     |
-| Growth     | €150     | 500,000     | €1,500/yr   |
-| Scale      | €350     | 2,000,000   | €3,500/yr   |
-| Enterprise | €3,000   | 5,000,000   | €30,000/yr  |
+> **Source (regenerated 2026-09-30, audit SM15 F2):** this table is
+> generated from [`docs/pricing.md`](../pricing.md) ("Subscription
+> catalog") cross-checked against the runtime authority
+> [`billing-service/src/plans.rs`](../../services/mail-server/crates/billing-service/src/plans.rs)
+> (`default_plans()`: free 3,000 / starter €29 / pro €89 / growth €229 /
+> business €699 / enterprise €1,750 — prices in cents ×100). Parity with
+> the catalog is enforced by
+> `python3 docs/marketing/check_pricing_parity.py` (exit 1 on drift).
+> Rows use the
+> catalog plan ID, with the display name the served pricing template shows
+> (`plans.html`) in parentheses where the two differ.
+
+| Plan                     | Price/mo | Emails/mo | Annual      |
+|--------------------------|----------|-----------|-------------|
+| Free                     | €0       | 3,000¹    | €0          |
+| Starter (Developer)      | €29      | 50,000    | €290/yr     |
+| Pro                      | €89      | 150,000   | €890/yr     |
+| Growth                   | €229     | 500,000   | €2,290/yr   |
+| Scale (Business)         | €699     | 2,000,000 | €6,990/yr   |
+| Enterprise (Enterprise Cloud) | €1,750 | 5,000,000 | €17,500/yr |
+
+¹ Free includes 3,000 emails/month forever plus a one-time
+30,000-email launch allowance for the workspace's first 30 days
+(`plans.rs` `free_plan_seed`; enforced in `usage.rs`
+`resolve_plan_limits`).
 
 ## Template Logic (`plans.html`)
 
-The pricing template renders each plan as a card with:
+The pricing template renders two sections:
 
-- **Plan name** — `Free`, `Starter`, `Pro`, `Growth`, `Scale`, `Enterprise`
-- **Price** — monthly price string (e.g., `€25`)
-- **Period** — `"/mo"` for monthly plans, custom for Free (`"forever"`)
+**Self-service subscription cards** — one card per plan:
+
+- **Plan name** — `Free`, `Developer`, `Pro`, `Growth`, `Business`
+  (the card titles; the underlying Checkout plan IDs are `free`,
+  `starter`, `pro`, `growth`, `scale`)
+- **Price** — monthly price string (e.g., `€29`)
+- **Period** — `"/month"` on every card
 - **Description** — positioning tagline per tier
-- **Features** — bullet list of plan-specific features
+- **Features** — bullet list of plan-specific features (Free card
+  includes the one-time 30,000-email launch allowance)
 - **CTA Button** — call-to-action routing:
-  - Free, Starter, Pro, Growth, Scale → `config.extra.app_url ~ "/signup"` (signup flow)
-  - Enterprise → `/contact/sales/` (sales inquiry)
-- **Popular highlight** — `Pro` plan is marked as most popular
-- **Enterprise highlight** — `Enterprise` plan has distinct styling and CTA
+  - Free → `config.extra.app_url ~ "/signup"`
+  - Developer, Pro, Growth, Business → `config.extra.app_url ~ "/signup?plan=…"`
+    (`starter`, `pro`, `growth`, `scale`)
+- **Popular highlight** — `Pro` is marked as most popular
+
+**Enterprise infrastructure** — three equal cards below the subscription
+grid, all routing to `/contact/sales/`:
+
+- **Enterprise Cloud** — `from €1,750 /mo, annual contract`
+- **Dedicated Tenant** — `from €4,000 /mo + setup`
+- **BYOC** — `from €6,500 /mo + setup`
 
 ## PAYG Pricing
 

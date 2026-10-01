@@ -908,6 +908,12 @@ pub async fn tick(
         metrics::counter!("sales_actions_lease_recovered_total").increment(recovered);
     }
 
+    // Audit SM7 F2: the same recovery for the entity the actions drive — a
+    // step execution whose `executing` claim lease expired (a transient
+    // failure or crash between the claim and the terminal write) is requeued,
+    // so the next claim can deliver it instead of dead-ending the enrollment.
+    crate::sequence_worker::requeue_stale_executing_steps(queue.db()).await?;
+
     let permits = semaphore.available_permits().max(1);
     let claimed = queue.claim(permits as i64, lease_secs).await?;
     let claimed_count = claimed.len();

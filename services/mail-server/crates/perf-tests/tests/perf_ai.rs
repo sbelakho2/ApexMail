@@ -1,5 +1,6 @@
 //! AI service performance tests.
 
+use std::hint::black_box;
 use std::time::Instant;
 
 use ai_service::analytics::AnalyticsPredictor;
@@ -21,10 +22,11 @@ fn test_prediction_throughput() {
 
     let start = Instant::now();
     for i in 0..iterations {
-        let subject = subjects[i % subjects.len()];
-        let hour = (i % 24) as u8;
-        let day = (i % 7) as u8;
-        let _ = predictor.predict_open_rate(subject, hour, day);
+        let subject = black_box(subjects[i % subjects.len()]);
+        let hour = black_box((i % 24) as u8);
+        let day = black_box((i % 7) as u8);
+        let prediction = black_box(predictor.predict_open_rate(subject, hour, day));
+        black_box(prediction);
     }
     let elapsed = start.elapsed();
 
@@ -56,8 +58,9 @@ fn test_sentiment_analysis_throughput() {
 
     let start = Instant::now();
     for i in 0..iterations {
-        let text = texts[i % texts.len()];
-        let _ = assistant.analyze_sentiment(text);
+        let text = black_box(texts[i % texts.len()]);
+        let sentiment = black_box(assistant.analyze_sentiment(text));
+        black_box(sentiment);
     }
     let elapsed = start.elapsed();
 
@@ -89,8 +92,9 @@ fn test_subject_scoring_throughput() {
 
     let start = Instant::now();
     for i in 0..iterations {
-        let subject = subjects[i % subjects.len()];
-        let _ = optimizer.score_subject_line(subject);
+        let subject = black_box(subjects[i % subjects.len()]);
+        let score = black_box(optimizer.score_subject_line(subject));
+        black_box(score);
     }
     let elapsed = start.elapsed();
 

@@ -83,7 +83,14 @@ const TENANT_DELETION_EVIDENCE_TABLES: [&str; 3] =
 ///
 /// Pre-121 databases (no `legal_hold`/`retention_days` columns) degrade the
 /// same way the sweeper does: no hold, no override, deletion may proceed.
-async fn check_tenant_deletion_preconditions(db: &PgPool, tenant_id: &str) -> Result<(), ApiError> {
+/// pub(crate) for the SM3 (audit F1) account-deletion retention sweeper
+/// (`routes::account::sweep_due_account_deletions`), which must honour the
+/// SAME legal-hold / retention-obligation preconditions before purging a
+/// tenant whose 30-day erasure grace period has elapsed.
+pub(crate) async fn check_tenant_deletion_preconditions(
+    db: &PgPool,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
     #[derive(sqlx::FromRow)]
     struct TenantObligations {
         legal_hold: bool,

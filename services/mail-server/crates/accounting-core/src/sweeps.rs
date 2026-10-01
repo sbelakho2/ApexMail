@@ -23,6 +23,19 @@
 //! decision, cannot miss a writer (a future service, an admin endpoint, or
 //! plain `psql` all insert the same row), and is safe to run repeatedly.
 //!
+//! # Billing sources (audit SM7 F1)
+//!
+//! The invoice / payment-allocation / credit-note adapters DO have production
+//! writers — the billing flow's live hooks (`billing-service/src/
+//! accounting_postings.rs`). But those hooks are best-effort by policy: a
+//! posting that failed (unprovisioned ledger, closed period) is logged and
+//! the billing write commits without it. Before this pass there was NO replay
+//! for them, so a skipped posting stayed skipped forever. The three billing
+//! sweeps below mirror the payroll sweep exactly and replay every source row
+//! that has no source document yet — a skipped posting catches up within one
+//! tick of [`sweep_all_unposted`] (the combined entry point, the host the
+//! compliance cron already uses for the payroll/expense/bank sweeps).
+//!
 //! # Claim protocol — same `SKIP LOCKED` discipline as the projectors, in its
 //! strongest form
 //!
@@ -144,11 +157,31 @@ pub struct AllSweepsReport {
     pub payroll: SweepReport,
     pub expenses: SweepReport,
     pub bank_statement_lines: SweepReport,
+    /// Billing-source replays (audit SM7 F1): postings the live billing hooks
+    /// skipped (unprovisioned ledger, transient failure) catch up here.
+    pub invoices: SweepReport,
+    pub payment_allocations: SweepReport,
+    pub credit_notes: SweepReport,
 }
 
 impl AllSweepsReport {
     pub fn total_posted(&self) -> u64 {
-        self.payroll.posted + self.expenses.posted + self.bank_statement_lines.posted
+        self.payroll.posted
+            + self.expenses.posted
+            + self.bank_statement_lines.posted
+            + self.invoices.posted
+            + self.payment_allocations.posted
+            + self.credit_notes.posted
+    }
+
+    /// True when this tick saw no postable work at all, in any source.
+    pub fn is_idle(&self) -> bool {
+        self.payroll.is_idle()
+            && self.expenses.is_idle()
+            && self.bank_statement_lines.is_idle()
+            && self.invoices.is_idle()
+            && self.payment_allocations.is_idle()
+            && self.credit_notes.is_idle()
     }
 }
 
@@ -257,7 +290,7 @@ pub async fn sweep_unposted_payroll(
             continue;
         }
 
-        let legal_entity_id = match crate::chart::default_legal_entity(&mut tx).await {
+        let legal_entity_id = match crate::provisioning::ensure_default_entity_in(&mut tx).await {
             Ok(id) => id,
             Err(error) => {
                 report.failed += 1;
@@ -382,7 +415,7 @@ pub async fn sweep_unposted_expenses(pool: &PgPool, config: &SweepConfig) -> Res
         attempted.push(id);
         report.claimed += 1;
 
-        let legal_entity_id = match crate::chart::default_legal_entity(&mut tx).await {
+        let legal_entity_id = match crate::provisioning::ensure_default_entity_in(&mut tx).await {
             Ok(entity) => entity,
             Err(error) => {
                 report.failed += 1;
@@ -496,11 +529,231 @@ pub async fn sweep_unposted_bank_statement_lines(
 }
 
 // ---------------------------------------------------------------------------
+// Invoices (audit SM7 F1 — billing-source replay)
+// ---------------------------------------------------------------------------
+
+/// Claim one unposted finalized invoice, oldest issued first.
+///
+/// "Unposted" is `accounting_source_documents` absence for
+/// `('invoice', 'invoices', id)` — the adapter registers that document in the
+/// same transaction as the entry. Drafts and non-positive invoices are
+/// excluded: no journal exists for them (the adapter skips or refuses them),
+/// so claiming them would spin the batch.
+const CLAIM_INVOICE_SQL: &str = r#"
+    SELECT i.id
+    FROM invoices i
+    WHERE i.status::text <> 'draft'
+      AND COALESCE(i.total, i.subtotal + i.vat_total, i.amount, 0) > 0
+      AND NOT EXISTS (
+            SELECT 1 FROM accounting_source_documents d
+            WHERE d.source_type = 'invoice'
+              AND d.source_table = 'invoices'
+              AND d.source_id = i.id::text
+          )
+      AND NOT (i.id = ANY($1::uuid[]))
+    ORDER BY i.issued_at ASC, i.id ASC
+    FOR UPDATE OF i SKIP LOCKED
+    LIMIT 1
+"#;
+
+/// Replay every finalized, unposted invoice (up to `batch_size` per tick).
+///
+/// The live writer is the billing flow's best-effort hook; this sweep is what
+/// turns the hook's documented "replay the source event once the ledger is
+/// configured" policy into an actual replay (audit SM7 F1).
+pub async fn sweep_unposted_invoices(pool: &PgPool, config: &SweepConfig) -> Result<SweepReport> {
+    let mut report = SweepReport::default();
+    let mut attempted: Vec<Uuid> = Vec::new();
+
+    for _ in 0..config.batch_size.max(1) {
+        let mut tx = pool.begin().await?;
+        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_INVOICE_SQL)
+            .bind(&attempted)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(id) = id else {
+            tx.commit().await?;
+            break;
+        };
+        attempted.push(id);
+        report.claimed += 1;
+
+        match adapters::post_invoice_issued_in(&mut tx, id).await {
+            Ok(outcome) => {
+                report.record(outcome.status);
+                tx.commit().await?;
+            }
+            Err(error) => {
+                report.failed += 1;
+                tracing::warn!(
+                    invoice_id = %id,
+                    error = %error,
+                    "invoice sweep posting failed; claim rolled back for the next tick"
+                );
+                tx.rollback().await?;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// Payment allocations (audit SM7 F1 — billing-source replay)
+// ---------------------------------------------------------------------------
+
+/// Claim one unposted settlement allocation, oldest first. Credit-note
+/// allocations are posted by the credit-note adapter (with the invoice's VAT
+/// split) and zero amounts have no balanced journal — both excluded.
+const CLAIM_PAYMENT_ALLOCATION_SQL: &str = r#"
+    SELECT a.id, a.operation_id
+    FROM invoice_payment_allocations a
+    WHERE a.amount_cents > 0
+      AND a.source <> 'credit_note'
+      AND NOT EXISTS (
+            SELECT 1 FROM accounting_source_documents d
+            WHERE d.source_type IN ('stripe_settlement', 'wallet_settlement', 'manual_settlement')
+              AND d.source_table = 'invoice_payment_allocations'
+              AND d.source_id = a.operation_id
+          )
+      AND NOT (a.id = ANY($1::uuid[]))
+    ORDER BY a.created_at ASC, a.id ASC
+    FOR UPDATE OF a SKIP LOCKED
+    LIMIT 1
+"#;
+
+/// Replay every unposted settlement allocation (up to `batch_size` per tick).
+pub async fn sweep_unposted_payment_allocations(
+    pool: &PgPool,
+    config: &SweepConfig,
+) -> Result<SweepReport> {
+    let mut report = SweepReport::default();
+    let mut attempted: Vec<Uuid> = Vec::new();
+
+    for _ in 0..config.batch_size.max(1) {
+        let mut tx = pool.begin().await?;
+        let row: Option<(Uuid, String)> = sqlx::query_as(CLAIM_PAYMENT_ALLOCATION_SQL)
+            .bind(&attempted)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((id, operation_id)) = row else {
+            tx.commit().await?;
+            break;
+        };
+        attempted.push(id);
+        report.claimed += 1;
+
+        match adapters::post_payment_allocation_in(&mut tx, &operation_id).await {
+            Ok(outcome) => {
+                report.record(outcome.status);
+                tx.commit().await?;
+            }
+            Err(error) => {
+                report.failed += 1;
+                tracing::warn!(
+                    operation_id = %operation_id,
+                    error = %error,
+                    "payment-allocation sweep posting failed; claim rolled back for the next tick"
+                );
+                tx.rollback().await?;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// Credit notes (audit SM7 F1 — billing-source replay)
+// ---------------------------------------------------------------------------
+
+/// Claim one credit note with an unresolved part, oldest first.
+///
+/// A credit note posts up to TWO entries (debt reduction + refund), each with
+/// its own source document. "Fully posted" means every non-zero part carries
+/// its document; the claim excludes fully-posted notes so a resolved note is
+/// never re-claimed.
+const CLAIM_CREDIT_NOTE_SQL: &str = r#"
+    SELECT c.id
+    FROM credit_notes c
+    WHERE NOT (
+            (
+                COALESCE(c.debt_reduction_cents, c.amount) <= 0
+                OR EXISTS (
+                    SELECT 1 FROM accounting_source_documents d
+                    WHERE d.source_type = 'credit_note'
+                      AND d.source_table = 'credit_notes'
+                      AND d.source_id = c.id::text
+                )
+            )
+            AND (
+                COALESCE(c.refunded_cents, 0) <= 0
+                OR EXISTS (
+                    SELECT 1 FROM accounting_source_documents d
+                    WHERE d.source_type = 'credit_note_refund'
+                      AND d.source_table = 'credit_notes'
+                      AND d.source_id = c.id::text
+                )
+            )
+          )
+      AND NOT (c.id = ANY($1::uuid[]))
+    ORDER BY c.created_at ASC, c.id ASC
+    FOR UPDATE OF c SKIP LOCKED
+    LIMIT 1
+"#;
+
+/// Replay every credit note with an unposted part (up to `batch_size` per
+/// tick). Idempotent per part, so a partially-posted note catches up exactly.
+pub async fn sweep_unposted_credit_notes(
+    pool: &PgPool,
+    config: &SweepConfig,
+) -> Result<SweepReport> {
+    let mut report = SweepReport::default();
+    let mut attempted: Vec<Uuid> = Vec::new();
+
+    for _ in 0..config.batch_size.max(1) {
+        let mut tx = pool.begin().await?;
+        let id: Option<Uuid> = sqlx::query_scalar(CLAIM_CREDIT_NOTE_SQL)
+            .bind(&attempted)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(id) = id else {
+            tx.commit().await?;
+            break;
+        };
+        attempted.push(id);
+        report.claimed += 1;
+
+        match adapters::post_credit_note_in(&mut tx, id).await {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    report.record(outcome.status);
+                }
+                tx.commit().await?;
+            }
+            Err(error) => {
+                report.failed += 1;
+                tracing::warn!(
+                    credit_note_id = %id,
+                    error = %error,
+                    "credit-note sweep posting failed; claim rolled back for the next tick"
+                );
+                tx.rollback().await?;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+// ---------------------------------------------------------------------------
 // Combined entry point
 // ---------------------------------------------------------------------------
 
-/// Run all three source sweeps once. A dedicated accounting scheduler does
-/// not exist: the compliance server's cron hosts all three sources
+/// Run all source sweeps once: the payroll/expense/bank sweeps plus the
+/// billing-source replays (invoices, payment allocations, credit notes —
+/// audit SM7 F1). A dedicated accounting scheduler does not exist: the
+/// compliance server's cron hosts the sweeps
 /// (`compliance::ledger_sweep::sweep_ledger_sources`), including the bank
 /// statement sweep fed by [`crate::bank_ingest`].
 pub async fn sweep_all_unposted(
@@ -512,6 +765,9 @@ pub async fn sweep_all_unposted(
         payroll: sweep_unposted_payroll(pool, config, policy).await?,
         expenses: sweep_unposted_expenses(pool, config).await?,
         bank_statement_lines: sweep_unposted_bank_statement_lines(pool, config).await?,
+        invoices: sweep_unposted_invoices(pool, config).await?,
+        payment_allocations: sweep_unposted_payment_allocations(pool, config).await?,
+        credit_notes: sweep_unposted_credit_notes(pool, config).await?,
     })
 }
 
@@ -529,6 +785,9 @@ mod tests {
             ("payroll", CLAIM_PAYROLL_SQL),
             ("expenses", CLAIM_EXPENSE_SQL),
             ("bank", CLAIM_BANK_SQL),
+            ("invoices", CLAIM_INVOICE_SQL),
+            ("payment_allocations", CLAIM_PAYMENT_ALLOCATION_SQL),
+            ("credit_notes", CLAIM_CREDIT_NOTE_SQL),
         ] {
             assert!(
                 sql.contains("FOR UPDATE OF") && sql.contains("SKIP LOCKED"),
@@ -543,6 +802,79 @@ mod tests {
                 "{name} claim processes one row per transaction so the claim and the post commit together"
             );
         }
+    }
+
+    /// Audit SM7 F1 — the billing sweeps select EXACTLY the rows the adapters
+    /// would post: unposted per the source-document marker, and never rows the
+    /// adapter refuses/skips (draft or zero invoices, credit-note-source
+    /// allocations, fully-posted credit notes), so one claim always makes
+    /// progress and no row spins the batch.
+    #[test]
+    fn billing_claims_select_unpostable_and_already_posted_rows_out() {
+        // Invoices: drafts and non-positive totals are never claimable.
+        assert!(
+            CLAIM_INVOICE_SQL.contains("status::text <> 'draft'"),
+            "draft invoices must not be claimed — the adapter refuses them"
+        );
+        assert!(
+            CLAIM_INVOICE_SQL
+                .contains("COALESCE(i.total, i.subtotal + i.vat_total, i.amount, 0) > 0"),
+            "non-positive invoices must not be claimed — the adapter skips them"
+        );
+        assert!(
+            CLAIM_INVOICE_SQL.contains("d.source_type = 'invoice'")
+                && CLAIM_INVOICE_SQL.contains("d.source_table = 'invoices'"),
+            "the posting marker is the (invoice, invoices, id) source document"
+        );
+
+        // Payment allocations: credit-note allocations are the credit-note
+        // adapter's job; zero amounts have no balanced journal.
+        assert!(
+            CLAIM_PAYMENT_ALLOCATION_SQL.contains("a.source <> 'credit_note'")
+                && CLAIM_PAYMENT_ALLOCATION_SQL.contains("a.amount_cents > 0"),
+            "credit-note-source and zero allocations must not be claimed"
+        );
+        assert!(
+            CLAIM_PAYMENT_ALLOCATION_SQL
+                .contains("'stripe_settlement', 'wallet_settlement', 'manual_settlement'"),
+            "the marker check must cover every settlement source_type the adapter registers"
+        );
+
+        // Credit notes: fully-posted notes (every non-zero part carrying its
+        // document) are excluded so a resolved note is never re-claimed.
+        assert!(
+            CLAIM_CREDIT_NOTE_SQL.contains("'credit_note'")
+                && CLAIM_CREDIT_NOTE_SQL.contains("'credit_note_refund'"),
+            "both posting parts' documents mark the note resolved"
+        );
+        assert!(
+            CLAIM_CREDIT_NOTE_SQL.contains("COALESCE(c.debt_reduction_cents, c.amount) <= 0")
+                && CLAIM_CREDIT_NOTE_SQL.contains("COALESCE(c.refunded_cents, 0) <= 0"),
+            "zero parts never block resolution — a refund-only or debt-only note resolves"
+        );
+    }
+
+    /// The combined report sums every source, including the SM7 F1 billing
+    /// replays.
+    #[test]
+    fn all_sweeps_report_totals_every_source() {
+        let mut report = AllSweepsReport::default();
+        report.payroll.posted = 1;
+        report.payroll.claimed = 1;
+        report.expenses.posted = 2;
+        report.expenses.claimed = 2;
+        report.bank_statement_lines.posted = 3;
+        report.bank_statement_lines.claimed = 3;
+        report.invoices.posted = 4;
+        report.invoices.claimed = 4;
+        report.payment_allocations.posted = 5;
+        report.payment_allocations.claimed = 5;
+        report.credit_notes.posted = 6;
+        report.credit_notes.claimed = 6;
+        assert_eq!(report.total_posted(), 21);
+        assert!(!report.is_idle());
+        // Nothing claimed anywhere: idle.
+        assert!(AllSweepsReport::default().is_idle());
     }
 
     /// Payroll amounts are computed by the caller's policy, never defaulted:

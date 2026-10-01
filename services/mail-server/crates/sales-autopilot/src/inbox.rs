@@ -157,7 +157,10 @@ impl InboxManager {
                 Self::score(&s, SPAM_KEYWORDS).max(Self::score(&f, SPAM_SENDER_KEYWORDS)),
             ),
             (MessageCategory::Support, Self::score(&s, SUPPORT_KEYWORDS)),
-            (MessageCategory::Customer, Self::score(&s, CUSTOMER_KEYWORDS)),
+            (
+                MessageCategory::Customer,
+                Self::score(&s, CUSTOMER_KEYWORDS),
+            ),
             (MessageCategory::Lead, Self::score(&s, LEAD_KEYWORDS)),
         ];
 
@@ -420,13 +423,13 @@ mod tests {
     #[test]
     fn strong_classifications_are_concrete_with_automation_confidence() {
         let cases: [(&str, &str, MessageCategory); 6] = [
-            (
-                "Interested in a demo",
-                "alice@x.com",
-                MessageCategory::Lead,
-            ),
+            ("Interested in a demo", "alice@x.com", MessageCategory::Lead),
             ("Pricing inquiry", "a@b.com", MessageCategory::Lead),
-            ("Support ticket #1234", "bob@y.com", MessageCategory::Support),
+            (
+                "Support ticket #1234",
+                "bob@y.com",
+                MessageCategory::Support,
+            ),
             (
                 "Invoice for subscription",
                 "billing@co.com",

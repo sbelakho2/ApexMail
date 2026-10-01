@@ -97,7 +97,10 @@ impl VectorStore {
         }
         let vector = crate::embeddings::l2_normalize(vector);
 
-        // Evict if at threshold (check approximate size via len(), which is O(1) for DashMap)
+        // SM9 #11: eviction is batched — ONE sort-and-evict per threshold
+        // crossing (see [`VectorStore::evict_lru`], whose batch always
+        // lands below the threshold). The `max_vectors` hard cap below
+        // still bounds memory fail-closed.
         if self.inner.len() >= self.eviction_threshold {
             self.evict_lru();
         }
@@ -251,21 +254,40 @@ impl VectorStore {
     ///
     /// Format: one JSON object per line, followed by:
     /// `# hmac-sha256:<hex_signature>`
+    ///
+    /// SM9 #11: the signature is computed by streaming every serialized line
+    /// through the HMAC core incrementally (`Mac::update`) — the old export
+    /// ALSO accumulated the store's full serialized size in a shadow
+    /// `Vec<u8>` alongside the writer (2-3x the store's size held in memory
+    /// at snapshot scale).
     pub fn export_ndjson<W: Write>(&self, writer: &mut W) -> Result<usize, EmbeddingError> {
         let mut count = 0;
-        let mut data_bytes: Vec<u8> = Vec::new();
+        let mut mac = if !self.hmac_key.is_empty() {
+            Some(
+                HmacSha256::new_from_slice(&self.hmac_key)
+                    .map_err(|_| EmbeddingError::MissingHmacKey)?,
+            )
+        } else {
+            None
+        };
 
-        // Write all vectors and collect raw bytes for HMAC computation
+        // Write all vectors, feeding each written line into the HMAC core.
         for v in self.inner.iter() {
             let line = serde_json::to_string(&*v)?;
             writeln!(writer, "{}", line)?;
-            writeln!(data_bytes, "{}", line)?;
+            if let Some(ref mut mac) = mac {
+                // Exactly the bytes the writer emitted for this line
+                // (payload + '\n'), byte-for-byte what the import-side
+                // verifier accumulates.
+                mac.update(line.as_bytes());
+                mac.update(b"\n");
+            }
             count += 1;
         }
 
-        // Compute and append HMAC-SHA256 signature
-        if !self.hmac_key.is_empty() {
-            let sig = compute_hmac(&self.hmac_key, &data_bytes)?;
+        // Append the HMAC-SHA256 signature
+        if let Some(mac) = mac {
+            let sig = hex::encode(mac.finalize().into_bytes());
             writeln!(writer, "{}{}", HMAC_HEADER_PREFIX, sig)?;
             info!(count, "NDJSON export with HMAC integrity signature");
         } else if count > 0 {
@@ -341,10 +363,14 @@ impl VectorStore {
             );
         }
 
-        // Parse and import all vectors. Imported rows go through the same
-        // validation and normalization as `add()`: tenant-scoped metadata is
-        // required and vectors are L2-normalized (zero-norm rows rejected).
-        let mut parsed = Vec::new();
+        // SM9 #11: parse and admit line-by-line AFTER the HMAC verification.
+        // The raw lines are the only buffer (verification must complete
+        // before any deserialization, and a generic BufRead cannot be
+        // rewound); the old code additionally materialized EVERY parsed
+        // `EmbeddingVector` — a second full copy of the store — before the
+        // insert loop started. Each row is parsed, validated, normalized
+        // and inserted in turn, then dropped.
+        let mut imported = 0usize;
         for line in &lines {
             let mut v: EmbeddingVector = serde_json::from_str(line)?;
             if v.vector.len() != self.dimension {
@@ -360,17 +386,14 @@ impl VectorStore {
                 return Err(EmbeddingError::ZeroNormVector);
             }
             v.vector = crate::embeddings::l2_normalize(v.vector);
-            parsed.push(v);
-        }
 
-        // Admit through the same capacity machinery as `add()`: LRU
-        // eviction at the threshold, a hard stop at `max_vectors`. The old
-        // raw `insert()` loop bypassed both caps, so restoring a snapshot
-        // could exceed the memory budget the live path enforces. Once the
-        // cap is reached the remaining rows are dropped (warn + truncated
-        // count) rather than failing the whole restore.
-        let mut imported = 0usize;
-        for v in parsed {
+            // Admit through the same capacity machinery as `add()`: batched
+            // LRU eviction at the threshold (one sort per crossing), a hard
+            // stop at `max_vectors`. The old raw `insert()` loop bypassed
+            // both caps, so restoring a snapshot could exceed the memory
+            // budget the live path enforces. Once the cap is reached the
+            // remaining rows are dropped (warn + truncated count) rather
+            // than failing the whole restore.
             if self.inner.len() >= self.eviction_threshold {
                 self.evict_lru();
             }
@@ -389,10 +412,20 @@ impl VectorStore {
         Ok(imported)
     }
 
-    /// Evict the oldest (least recently accessed) entries.
+    /// Evict the oldest (least recently accessed) entries: one BATCH per
+    /// threshold crossing.
+    ///
+    /// SM9 #11: the batch evicts ~10% of the threshold (at least one entry)
+    /// and ALWAYS at least enough entries to drop the store back BELOW the
+    /// eviction threshold. A crossing therefore pays exactly one
+    /// sort-and-evict, and subsequent inserts run eviction-free until the
+    /// store crosses again — a threshold configured close to `max_vectors`
+    /// no longer re-sorts on every single insert. `max_vectors` remains the
+    /// fail-closed hard cap.
     fn evict_lru(&self) {
-        let target = max(1, self.eviction_threshold / 10); // Remove 10%, at least 1
-        let target = target.min(self.inner.len());
+        let ten_percent = max(1, self.eviction_threshold / 10);
+        let to_below_threshold = self.inner.len().saturating_sub(self.eviction_threshold) + 1;
+        let target = ten_percent.max(to_below_threshold).min(self.inner.len());
 
         // Collect all entries with their last_accessed times
         let mut entries: Vec<(Uuid, chrono::DateTime<Utc>)> =
@@ -423,7 +456,11 @@ impl VectorStore {
     }
 }
 
-/// Compute HMAC-SHA256 hex digest over data.
+/// Compute HMAC-SHA256 hex digest over a whole buffer. Test-only since
+/// SM9 #11: production export streams lines through the HMAC core
+/// incrementally; this remains as the whole-buffer oracle the streaming
+/// digest is pinned against.
+#[cfg(test)]
 fn compute_hmac(key: &[u8], data: &[u8]) -> Result<String, EmbeddingError> {
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| EmbeddingError::MissingHmacKey)?;
     mac.update(data);
@@ -1055,5 +1092,92 @@ mod tests {
         // The wrong key cannot verify either.
         let wrong_key = make_store_with_hmac("other-key");
         assert!(wrong_key.import_ndjson(text.as_bytes()).is_err());
+    }
+
+    // ── SM9 #11: streaming HMAC + batched eviction ──────────────────────
+
+    /// The incremental HMAC core must produce EXACTLY the digest the old
+    /// whole-buffer computation produced: the export signature is recomputed
+    /// here over the serialized lines as one buffer and compared with what
+    /// `export_ndjson` streamed into the file.
+    #[test]
+    fn streaming_hmac_digest_equals_the_whole_buffer_digest() {
+        let key = "streaming-hmac-test-key";
+        let store = make_store_with_hmac(key);
+        for index in 0..5 {
+            store
+                .add(
+                    format!("text {index}"),
+                    vec![1.0, 0.0, 0.0],
+                    tenant_metadata("tenant-a"),
+                )
+                .unwrap();
+        }
+
+        let mut buf = Vec::new();
+        let count = store.export_ndjson(&mut buf).unwrap();
+        assert_eq!(count, 5);
+
+        let output = String::from_utf8(buf).unwrap();
+        let mut data_lines: Vec<&str> = Vec::new();
+        let mut streamed_sig: Option<&str> = None;
+        for line in output.lines() {
+            // (NOT take_while: it consumes the failing element, i.e. the
+            // signature line itself.)
+            match line.strip_prefix(HMAC_HEADER_PREFIX) {
+                Some(sig) => streamed_sig = Some(sig.trim()),
+                None => data_lines.push(line),
+            }
+        }
+        let sig_line = streamed_sig.expect("trailing HMAC signature line");
+        assert_eq!(
+            data_lines.len(),
+            5,
+            "five payload lines precede the signature"
+        );
+
+        // Recompute the digest the OLD way: one whole buffer of the payload.
+        let mut whole = Vec::new();
+        for line in &data_lines {
+            whole.extend_from_slice(line.as_bytes());
+            whole.push(b'\n');
+        }
+        let expected = compute_hmac(key.as_bytes(), &whole).unwrap();
+
+        assert_eq!(
+            sig_line, expected,
+            "the incremental digest must equal the whole-buffer digest"
+        );
+
+        // And the streamed export round-trips through a fresh store.
+        let target = make_store_with_hmac(key);
+        let imported = target
+            .import_ndjson(output.as_bytes())
+            .expect("streamed export must verify");
+        assert_eq!(imported, 5);
+    }
+
+    /// SM9 #11: eviction runs as ONE batch per threshold crossing. With
+    /// threshold 20 (batch = max(1, 20/10) = 2), 25 inserts cross the
+    /// threshold three times → 3 batches = 6 evictions → 19 entries. (The
+    /// old per-insert eviction would have shed 10 and landed at 15.)
+    #[test]
+    fn eviction_is_batched_once_per_threshold_crossing() {
+        let store = VectorStore::new(3, 30, 20, Vec::new());
+        for index in 0..25 {
+            store
+                .add(
+                    format!("v{index}"),
+                    vec![1.0, 0.0, 0.0],
+                    tenant_metadata("tenant-a"),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            store.len(),
+            19,
+            "exactly three batched evictions (2 entries each) must have run"
+        );
+        assert!(store.len() <= 30, "the hard cap still bounds the store");
     }
 }

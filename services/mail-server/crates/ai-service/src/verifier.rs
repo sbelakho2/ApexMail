@@ -43,28 +43,60 @@ const ALLOWED_DOMAINS: &[&str] = crate::knowledge::ALLOWED_HOSTS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Violation {
-    ForbiddenPrice { found: f64, context: String },
-    PriceNotFound { plan: String, expected: i32 },
-    WrongEmailLimit { found: i64 },
-    WrongTeamLimit { found: i32 },
-    ForbiddenDomain { domain: String },
-    PromptInjection { pattern: String },
-    TooShort { length: usize },
-    TooLong { length: usize },
-    Repetition { phrase: String },
-    PiiPattern { pii_type: String },
-    InternalInfo { keyword: String },
-    UptimeSlaClaim { text: String },
-    CompetitorBashing { competitor: String },
+    ForbiddenPrice {
+        found: f64,
+        context: String,
+    },
+    PriceNotFound {
+        plan: String,
+        expected: i32,
+    },
+    WrongEmailLimit {
+        found: i64,
+    },
+    WrongTeamLimit {
+        found: i32,
+    },
+    ForbiddenDomain {
+        domain: String,
+    },
+    PromptInjection {
+        pattern: String,
+    },
+    TooShort {
+        length: usize,
+    },
+    TooLong {
+        length: usize,
+    },
+    Repetition {
+        phrase: String,
+    },
+    PiiPattern {
+        pii_type: String,
+    },
+    InternalInfo {
+        keyword: String,
+    },
+    UptimeSlaClaim {
+        text: String,
+    },
+    CompetitorBashing {
+        competitor: String,
+    },
     /// A factual sentence (numbers, named entities, or absolute quantifiers)
     /// that no grounding source supports (P1-GROUNDING). Presence of a `[n]`
     /// citation marker alone proves nothing: the marker must map to a chunk
     /// whose content actually overlaps the claim.
-    UnsupportedClaim { claim: String },
+    UnsupportedClaim {
+        claim: String,
+    },
     /// Fix #17/#18: a `[n]` citation marker in an answer produced while docs
     /// retrieval was UNAVAILABLE — there is no chunk the marker could map to,
     /// so the citation is unsupported by construction.
-    UnavailableCitation { claim: String },
+    UnavailableCitation {
+        claim: String,
+    },
 }
 
 impl std::fmt::Display for Violation {
@@ -457,6 +489,25 @@ impl ResponseVerifier {
             });
         }
 
+        // SM9 #1: RAW markup payloads, alongside the entity-encoded ones
+        // above. An answer carrying literal `<script>alert(1)</script>`,
+        // `<img src=x onerror=…>`, a `javascript:` URL, or an inline event
+        // handler matches none of the entity rules — the sanitizer downstream
+        // strips it, but an answer that NEEDS stripping is an answer the
+        // model was manipulated into producing, so it is refused here and
+        // follows the escalation ladder instead.
+        static RAW_XSS_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(
+                r"(?i)(<\s*/?\s*(?:script|iframe|svg|object|embed|applet|meta|base|link|style|form|input|button|textarea|select|math)\b|<img\b[^>]*\bon\w+\s*=|\bon(?:error|load|click|mouseover|mouseout|focus|blur|submit|change|input|keydown|keyup|keypress|dblclick|drag|drop|scroll|wheel|contextmenu|touchstart|touchend|pointerdown|pointerup|animationstart|animationend|transitionend)\s*=|javascript\s*:|vbscript\s*:|data\s*:\s*text\s*/\s*html)",
+            )
+            .expect("valid raw XSS regex")
+        });
+        if RAW_XSS_RE.is_match(text) {
+            violations.push(Violation::PromptInjection {
+                pattern: "stored_xss_raw_markup".into(),
+            });
+        }
+
         violations
     }
 
@@ -779,8 +830,9 @@ static CITATION_RE: Lazy<Regex> =
 
 /// Numbers with optional thousands separators / decimals / K-M suffix
 /// ("150,000", "€65.50" → 65.50, "10K", "1.5M").
-static NUMBER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"[0-9][0-9]*(?:[.,][0-9]+)*[kKmM]?").expect("valid static number regex"));
+static NUMBER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"[0-9][0-9]*(?:[.,][0-9]+)*[kKmM]?").expect("valid static number regex")
+});
 
 /// Letter-starting words (Unicode-aware so CJK text tokenizes as runs).
 static WORD_RE: Lazy<Regex> =
@@ -797,19 +849,146 @@ static ABSOLUTE_QUANTIFIER_RE: Lazy<Regex> = Lazy::new(|| {
 /// lexical-overlap ratio (quantifiers still trigger the factual check via
 /// [`ABSOLUTE_QUANTIFIER_RE`]).
 const CLAIM_STOPWORDS: &[&str] = &[
-    "the", "a", "an", "and", "or", "but", "nor", "so", "yet", "of", "to", "in", "on", "at", "by",
-    "for", "with", "from", "as", "is", "are", "was", "were", "be", "been", "being", "am", "it",
-    "its", "this", "that", "these", "those", "there", "here", "he", "she", "they", "them", "his",
-    "her", "their", "our", "your", "my", "me", "we", "us", "you", "who", "whom", "which", "what",
-    "will", "would", "shall", "should", "can", "could", "may", "might", "must", "do", "does",
-    "did", "done", "has", "have", "had", "not", "no", "if", "then", "than", "when", "while",
-    "until", "because", "about", "into", "over", "under", "per", "via", "each", "any", "some",
-    "both", "few", "more", "most", "very", "just", "also", "too", "all", "always", "never",
-    "every", "everyone", "everything", "something", "anything", "nothing", "guarantee",
-    "guarantees", "guaranteed", "unlimited", "i'm", "i've", "i'll", "i'd", "it's", "we're",
-    "we've", "we'll", "you're", "you've", "you'll", "they're", "they've", "they'll", "he's",
-    "she's", "that's", "there's", "here's", "let's", "don't", "doesn't", "didn't", "won't",
-    "can't", "couldn't", "shouldn't", "wouldn't", "aren't", "isn't", "wasn't", "weren't",
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "nor",
+    "so",
+    "yet",
+    "of",
+    "to",
+    "in",
+    "on",
+    "at",
+    "by",
+    "for",
+    "with",
+    "from",
+    "as",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "am",
+    "it",
+    "its",
+    "this",
+    "that",
+    "these",
+    "those",
+    "there",
+    "here",
+    "he",
+    "she",
+    "they",
+    "them",
+    "his",
+    "her",
+    "their",
+    "our",
+    "your",
+    "my",
+    "me",
+    "we",
+    "us",
+    "you",
+    "who",
+    "whom",
+    "which",
+    "what",
+    "will",
+    "would",
+    "shall",
+    "should",
+    "can",
+    "could",
+    "may",
+    "might",
+    "must",
+    "do",
+    "does",
+    "did",
+    "done",
+    "has",
+    "have",
+    "had",
+    "not",
+    "no",
+    "if",
+    "then",
+    "than",
+    "when",
+    "while",
+    "until",
+    "because",
+    "about",
+    "into",
+    "over",
+    "under",
+    "per",
+    "via",
+    "each",
+    "any",
+    "some",
+    "both",
+    "few",
+    "more",
+    "most",
+    "very",
+    "just",
+    "also",
+    "too",
+    "all",
+    "always",
+    "never",
+    "every",
+    "everyone",
+    "everything",
+    "something",
+    "anything",
+    "nothing",
+    "guarantee",
+    "guarantees",
+    "guaranteed",
+    "unlimited",
+    "i'm",
+    "i've",
+    "i'll",
+    "i'd",
+    "it's",
+    "we're",
+    "we've",
+    "we'll",
+    "you're",
+    "you've",
+    "you'll",
+    "they're",
+    "they've",
+    "they'll",
+    "he's",
+    "she's",
+    "that's",
+    "there's",
+    "here's",
+    "let's",
+    "don't",
+    "doesn't",
+    "didn't",
+    "won't",
+    "can't",
+    "couldn't",
+    "shouldn't",
+    "wouldn't",
+    "aren't",
+    "isn't",
+    "wasn't",
+    "weren't",
 ];
 
 /// Normalized tokens of a grounding source: every word (lowercased) and every
@@ -853,8 +1032,7 @@ impl ClaimTokens {
         // Named entities: capitalized words that are not sentence-initial and
         // not function words ("The Pro plan…" → entity "pro").
         let mut entities = Vec::new();
-        let words_original_case: Vec<&str> =
-            WORD_RE.find_iter(&bare).map(|m| m.as_str()).collect();
+        let words_original_case: Vec<&str> = WORD_RE.find_iter(&bare).map(|m| m.as_str()).collect();
         for (index, word) in words_original_case.iter().enumerate() {
             let lower = word.to_lowercase();
             let first_is_upper = word
@@ -896,9 +1074,7 @@ impl ClaimTokens {
     /// absolute quantifiers make a sentence a checkable claim. Anything else
     /// ("Let me check that for you.") needs no grounding.
     fn is_factual(&self) -> bool {
-        !self.numbers.is_empty()
-            || !self.entities.is_empty()
-            || self.has_absolute_quantifier
+        !self.numbers.is_empty() || !self.entities.is_empty() || self.has_absolute_quantifier
     }
 }
 
@@ -1023,18 +1199,22 @@ fn split_sentences(text: &str) -> Vec<String> {
             '\n' | '!' | '?' => true,
             '.' => {
                 let next = chars.get(index + 1).copied();
-                let previous = if index > 0 { Some(chars[index - 1]) } else { None };
+                let previous = if index > 0 {
+                    Some(chars[index - 1])
+                } else {
+                    None
+                };
                 match next {
                     // Decimal separator: 65.50 stays one token.
-                    Some(n) if n.is_ascii_digit() && previous.is_some_and(|p| p.is_ascii_digit()) => {
+                    Some(n)
+                        if n.is_ascii_digit() && previous.is_some_and(|p| p.is_ascii_digit()) =>
+                    {
                         false
                     }
                     // Sentence end: whitespace or end of text — unless the
                     // word before the dot is a single letter ("e.g.").
                     None => !word_before_is_single_letter(&current),
-                    Some(' ') | Some('\t') | Some('\r') => {
-                        !word_before_is_single_letter(&current)
-                    }
+                    Some(' ') | Some('\t') | Some('\r') => !word_before_is_single_letter(&current),
                     Some(_) => false,
                 }
             }
@@ -1166,6 +1346,46 @@ mod tests {
         assert!(
             verdict.passed,
             "Clean response should pass: {:?}",
+            verdict.violations
+        );
+    }
+
+    /// SM9 #1: RAW (non-entity-encoded) markup payloads are refused, in
+    /// addition to the entity-encoded ones. An answer that NEEDS stripping
+    /// was manipulated into existence — it is refused into the escalation
+    /// ladder, not cleaned in place (the downstream allowlist remains the
+    /// unconditional backstop).
+    #[test]
+    fn raw_markup_payloads_are_refused() {
+        let v = ResponseVerifier::new();
+        for payload in [
+            "Sure! <script>alert(1)</script>",
+            "<img src=x onerror=alert(2)>",
+            "See <a href=\"javascript:alert(3)\">the docs</a>",
+            "<iframe src=\"https://evil.example\"></iframe>",
+            "token: &#x3C;script&#x3E; alert(4)",
+        ] {
+            let verdict = v.verify(payload);
+            assert!(
+                !verdict.passed,
+                "raw payload must be refused: {payload:?} → {:?}",
+                verdict.violations
+            );
+            assert!(
+                verdict.violations.iter().any(|viol| matches!(
+                    viol,
+                    Violation::PromptInjection { pattern }
+                        if pattern.contains("stored_xss")
+                )),
+                "an XSS violation must be recorded: {payload:?} → {:?}",
+                verdict.violations
+            );
+        }
+        // Benign prose with ordinary angle brackets is untouched.
+        let verdict = v.verify("If 5 < 6 then the Pro plan costs €65/month with 150,000 emails.");
+        assert!(
+            verdict.passed,
+            "benign prose must pass: {:?}",
             verdict.violations
         );
     }
@@ -1558,25 +1778,29 @@ mod tests {
         let verdict = v.verify("The Enterprise plan costs \u{20ac}15,000 per month.");
         assert!(!verdict.passed);
         assert!(
-            verdict
-                .violations
-                .iter()
-                .any(|viol| matches!(viol, Violation::ForbiddenPrice { found, .. } if *found == 15_000.0)),
+            verdict.violations.iter().any(
+                |viol| matches!(viol, Violation::ForbiddenPrice { found, .. } if *found == 15_000.0)
+            ),
             "{:?}",
             verdict.violations
         );
         assert!(
-            verdict
-                .violations
-                .iter()
-                .any(|viol| matches!(viol, Violation::WrongEmailLimit { found } if *found == 15_000)),
+            verdict.violations.iter().any(
+                |viol| matches!(viol, Violation::WrongEmailLimit { found } if *found == 15_000)
+            ),
             "{:?}",
             verdict.violations
         );
         // The correction hint covers every violation via its catch-all arm.
-        let hint = verdict.correction_hint.as_deref().expect("a failing verdict carries a hint");
+        let hint = verdict
+            .correction_hint
+            .as_deref()
+            .expect("a failing verdict carries a hint");
         assert!(hint.contains("Remove \u{20ac}15000"), "{hint}");
-        assert!(hint.contains("Fix: "), "WrongEmailLimit rides the catch-all hint: {hint}");
+        assert!(
+            hint.contains("Fix: "),
+            "WrongEmailLimit rides the catch-all hint: {hint}"
+        );
     }
 
     /// Allowed hosts are examined URL-wise: fragments (`#…`) are stripped
@@ -1774,8 +1998,14 @@ mod grounding_tests {
                 _ => None,
             })
             .expect("an UnsupportedClaim violation");
-        assert!(unsupported.contains("72"), "the rejected claim is the 72-hours one: {unsupported}");
-        assert!(!unsupported.contains("warm up"), "the supported sentence stays unflagged: {unsupported}");
+        assert!(
+            unsupported.contains("72"),
+            "the rejected claim is the 72-hours one: {unsupported}"
+        );
+        assert!(
+            !unsupported.contains("warm up"),
+            "the supported sentence stays unflagged: {unsupported}"
+        );
     }
 
     /// A claim whose cited chunk genuinely contains its numbers and content
@@ -1809,7 +2039,11 @@ mod grounding_tests {
             &[],
             &grounding,
         );
-        assert!(v.passed, "canonical facts must ground the claim: {:?}", v.violations);
+        assert!(
+            v.passed,
+            "canonical facts must ground the claim: {:?}",
+            v.violations
+        );
 
         // (c) tool output: €69.00 is not canonical pricing but the
         // deterministic tool computed it — its result is the grounding text
@@ -1822,7 +2056,11 @@ mod grounding_tests {
             &[69.0],
             &grounding,
         );
-        assert!(v.passed, "tool-backed claims pass without citations: {:?}", v.violations);
+        assert!(
+            v.passed,
+            "tool-backed claims pass without citations: {:?}",
+            v.violations
+        );
 
         // Without the tool output recorded, the same answer fails grounding:
         // the allowlisted total only satisfies policy, not provenance.
@@ -1854,7 +2092,11 @@ mod grounding_tests {
             &[],
             &grounding,
         );
-        assert!(v.passed, "account context must ground the claim: {:?}", v.violations);
+        assert!(
+            v.passed,
+            "account context must ground the claim: {:?}",
+            v.violations
+        );
     }
 
     /// Non-factual sentences (no numbers, no entities, no absolute
@@ -1882,7 +2124,11 @@ mod grounding_tests {
             &[],
             &grounding,
         );
-        assert!(!v.passed, "unknown entities must be rejected: {:?}", v.violations);
+        assert!(
+            !v.passed,
+            "unknown entities must be rejected: {:?}",
+            v.violations
+        );
         assert!(v
             .violations
             .iter()
@@ -1941,9 +2187,8 @@ mod grounding_tests {
     /// accepts anything policy-clean, grounding or not.
     #[test]
     fn policy_only_verify_does_not_enforce_claim_support() {
-        let v = ResponseVerifier::new().verify(
-            "Soft bounces usually clear within 72 hours per the docs.",
-        );
+        let v = ResponseVerifier::new()
+            .verify("Soft bounces usually clear within 72 hours per the docs.");
         assert!(
             v.passed,
             "policy checks alone must not reject ungrounded claims: {:?}",
@@ -2025,7 +2270,11 @@ mod grounding_tests {
             &[],
             &grounding,
         );
-        assert!(v.passed, "the flag decided, not the chunk: {:?}", v.violations);
+        assert!(
+            v.passed,
+            "the flag decided, not the chunk: {:?}",
+            v.violations
+        );
     }
 
     /// Under Unavailable retrieval, a passage-shaped claim with NO source at

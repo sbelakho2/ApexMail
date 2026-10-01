@@ -26,7 +26,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
   <input type="hidden" name="page_language" value="en" />
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Company <span class="text-red-500">*</span></label>
-    <input type="text" id="company" name="company" required
+    <input type="text" id="company" name="company" required maxlength="200"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
       placeholder="Your organisation name" />
   </div>
@@ -56,7 +56,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
 
     <div>
       <label for="peak-hourly-volume" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Peak Hourly Volume</label>
-      <input type="text" id="peak-hourly-volume" name="peak_hourly_volume"
+      <input type="text" id="peak-hourly-volume" name="peak_hourly_volume" maxlength="200"
         class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none"
         placeholder="e.g. 50,000 per hour" />
     </div>
@@ -114,8 +114,6 @@ For enterprise buying, security review, or private-cloud planning, complete the 
         <span>HIPAA use case (not currently offered; discuss alternatives)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-      </label>
-      <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />
         <span>CCPA / US state privacy laws</span>
       </label>
@@ -162,7 +160,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
 
   <div>
     <label for="additional-context" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Additional Context</label>
-    <textarea id="additional-context" name="additional_context" rows="4"
+    <textarea id="additional-context" name="additional_context" rows="4" maxlength="2000"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none resize-y"
       placeholder="Specific integration requirements, migration plans, security architecture needs, or any other context that helps us prepare the right recommendation."></textarea>
   </div>

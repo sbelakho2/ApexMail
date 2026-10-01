@@ -39,6 +39,13 @@ struct MockState {
     fail: HashSet<String>,
     /// Recorded mutating calls: (method, detail).
     calls: Vec<(String, String)>,
+    /// SM2-F3 race injector: when armed, `uid` disappears from
+    /// `list_messages` results for (account, mailbox) from the Nth call to
+    /// that mailbox ONWARDS (1-based; SELECT counts as call 1). Models a
+    /// foreign expunge landing BETWEEN two listings inside one command.
+    hide_uid_from_list: Option<(String, String, u64, usize)>,
+    /// account|mailbox -> number of list_messages calls seen so far.
+    list_call_counts: HashMap<String, usize>,
 }
 
 impl MockMailstore {
@@ -54,6 +61,22 @@ impl MockMailstore {
 
     pub(crate) fn fail(&self, method: &str) {
         self.lock().fail.insert(method.to_string());
+    }
+
+    /// SM2-F3 race injector: arm the mock so `uid` stops appearing in
+    /// `list_messages` for (account, mailbox) from the `from_call`-th call
+    /// onwards. With SELECT as call 1, `from_call = 2` hides the message from
+    /// the NEXT single listing — the metadata pass inside a FETCH whose view
+    /// refresh was served from the (unchanged) snapshot.
+    pub(crate) fn hide_uid_from_list_call(
+        &self,
+        account: &str,
+        mailbox: &str,
+        uid: u64,
+        from_call: usize,
+    ) {
+        self.lock().hide_uid_from_list =
+            Some((account.to_string(), mailbox.to_string(), uid, from_call));
     }
 
     /// Clear all injected failures (tests re-enable the mock between phases).
@@ -370,7 +393,7 @@ impl MailstoreService for MockMailstore {
         request: tonic::Request<mail_proto::ListMessagesRequest>,
     ) -> Result<tonic::Response<mail_proto::ListMessagesResponse>, tonic::Status> {
         let req = request.into_inner();
-        let g = self.lock();
+        let mut g = self.lock();
         if g.fail.contains("list_messages") {
             return Err(tonic::Status::unavailable("mock list_messages failure"));
         }
@@ -382,6 +405,22 @@ impl MailstoreService for MockMailstore {
             .unwrap_or_default();
         messages.retain(|m| m.uid >= req.uid_min && m.uid <= req.uid_max);
         messages.sort_by_key(|m| m.uid);
+        // SM2-F3 race injector: count listings per (account, mailbox) and
+        // drop the armed uid from the Nth call onwards.
+        let list_key = format!("{}|{}", req.account_id, req.mailbox.to_lowercase());
+        let list_call = {
+            let counter = g.list_call_counts.entry(list_key).or_insert(0);
+            *counter += 1;
+            *counter
+        };
+        if let Some((acct, mb, uid, from_call)) = &g.hide_uid_from_list {
+            if acct == &req.account_id
+                && mb.to_lowercase() == req.mailbox.to_lowercase()
+                && list_call >= *from_call
+            {
+                messages.retain(|m| m.uid != *uid);
+            }
+        }
         if req.limit > 0 {
             messages.truncate(req.limit as usize);
         }
@@ -1016,6 +1055,28 @@ impl Harness {
         Self::with_session(peer_ip, true, allow_insecure_auth, send_greeting)
     }
 
+    /// A second harness driving the SAME mailstore as another harness —
+    /// models "another session" mutating the mailbox (SM2-F3: the first
+    /// session's FETCH must surface the resulting view diff).
+    fn with_shared_mock(mock: MockMailstore) -> Self {
+        let mut raw_session = ImapSession::new(mock_connected_client(mock.clone()));
+        raw_session.tls_active = true;
+        raw_session.allow_insecure_auth = false;
+        raw_session.peer_ip = "127.0.0.1".to_string();
+        let session = Arc::new(Mutex::new(raw_session));
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (sr, sw) = tokio::io::split(server);
+        let task_session = session.clone();
+        let server = tokio::spawn(async move { serve(task_session, sr, sw, true).await });
+        Self {
+            mock,
+            session,
+            io: BufReader::new(client),
+            server,
+            next_tag: 0,
+        }
+    }
+
     /// `tls_active`: session starts on a TLS leg; `allow_insecure_auth`
     /// mirrors the CLI flag; `send_greeting` drives the real `serve` entry.
     fn with_session(
@@ -1140,6 +1201,39 @@ impl Harness {
         self.send_raw(literal).await;
         self.send_line(suffix).await;
         self.read_until_tagged(&tag).await
+    }
+
+    /// SM2-F7: a command whose literal spec sits MID-LINE with `after`
+    /// following it (e.g. `UID FETCH {1} UID`): the line is sent as-is, the
+    /// continuation requested, the octets spliced in, then a bare CRLF ends
+    /// the command (the reader keeps the post-spec text it already has).
+    async fn cmd_midline_literal(
+        &mut self,
+        prefix: &str,
+        literal: &[u8],
+        after: &str,
+    ) -> (String, String) {
+        let tag = self.fresh_tag();
+        self.send_line(&format!("{tag} {prefix}{{{}}}{after}", literal.len()))
+            .await;
+        let mut cont = Vec::new();
+        let n = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.io.read_until(b'\n', &mut cont),
+        )
+        .await
+        .expect("continuation timeout")
+        .expect("read continuation");
+        assert!(n > 0, "server closed before continuation");
+        assert!(
+            cont.starts_with(b"+"),
+            "expected continuation request, got {:?}",
+            String::from_utf8_lossy(&cont)
+        );
+        self.send_raw(literal).await;
+        self.send_line("").await;
+        let out = self.read_until_tagged(&tag).await;
+        (tag, out)
     }
 
     /// Authenticate the session directly (bypassing LOGIN I/O where the test
@@ -1853,6 +1947,29 @@ async fn fetch_body_section_errors_are_bad() {
     h.shutdown().await;
 }
 
+/// SM2-F8 (repair): a STORE operation word whose ASCII-upcase ends in
+/// `.SILENT` but whose raw suffix is multi-byte (`ſ`/`ı` upcase to `S`/`I`)
+/// must be answered with a tagged BAD — the previous byte-arithmetic slice
+/// in `parse_store_args` panicked inside the connection task instead. The
+/// follow-up command proves the connection survived.
+#[tokio::test]
+async fn store_multibyte_op_word_is_bad_and_the_connection_survives() {
+    let mut h = Harness::new();
+    let _ = select_two_messages(&mut h).await;
+    let (tag, out) = h.cmd_tagged("STORE 1 +flags.ſılent (\\Seen)").await;
+    assert_eq!(
+        out,
+        format!("{tag} BAD Invalid STORE operation: +flags.ſılent (expected FLAGS, +FLAGS or -FLAGS)\r\n"),
+        "the hostile op word must be a clean BAD: {out:?}"
+    );
+    let out = h.cmd("NOOP").await;
+    assert!(out.contains("OK"), "connection must survive: {out:?}");
+    // A legal op still mutates flags on the same connection.
+    let out = h.cmd("STORE 1 +FLAGS (\\Seen)").await;
+    assert!(out.contains("OK"), "legal STORE must still work: {out:?}");
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn fetch_sequence_set_edge_cases() {
     let mut h = Harness::new();
@@ -1870,15 +1987,169 @@ async fn fetch_sequence_set_edge_cases() {
     let (tag, out) = h.cmd_tagged("FETCH 99 UID").await;
     assert_eq!(out, format!("{tag} OK FETCH completed\r\n"));
 
-    // `0` is not a valid sequence number and is skipped.
-    let out = h.cmd("FETCH 0 UID").await;
-    assert!(out.contains("OK FETCH completed"), "{out:?}");
+    // SM2-F8: `0` is not a valid sequence number (seq-number = nz-number)
+    // and is rejected with BAD instead of being silently skipped.
+    let (tag, out) = h.cmd_tagged("FETCH 0 UID").await;
+    assert_eq!(
+        out,
+        format!("{tag} BAD Sequence numbers are 1-based: 0 is not valid\r\n")
+    );
 
     // Garbage is a BAD, not a silent empty result.
     let out = h.cmd("FETCH abc UID").await;
     assert!(out.contains("BAD invalid sequence"), "{out:?}");
     let out = h.cmd("FETCH 1: UID").await;
     assert!(out.contains("BAD"), "{out:?}");
+    h.shutdown().await;
+}
+
+// ── SM2-F3: FETCH surfaces the view diff BEFORE its responses ───────────────
+
+#[tokio::test]
+async fn fetch_emits_view_diff_before_responses_after_foreign_expunge() {
+    let mock = MockMailstore::new();
+    let mut watcher = Harness::with_shared_mock(mock.clone());
+    let mut other = Harness::with_shared_mock(mock);
+
+    // Five messages in INBOX; the watcher selects and holds the view.
+    watcher.login("user@example.test", "pw").await;
+    watcher.mock.add_mailbox("acct-1", "INBOX", 7);
+    for i in 1..=5u64 {
+        watcher.mock.add_message(
+            "acct-1",
+            "INBOX",
+            &format!("m{i}"),
+            "f@x.test",
+            mail_proto::MessageFlags::default(),
+            1000 + i as i64,
+        );
+    }
+    watcher.select("INBOX").await;
+    other.login("user@example.test", "pw").await;
+    other.select("INBOX").await;
+
+    // The other session expunges message #2 (uid 2).
+    let out = other.cmd("STORE 2 +FLAGS (\\Deleted)").await;
+    assert!(out.contains("OK"), "{out:?}");
+    let out = other.cmd("EXPUNGE").await;
+    assert!(out.contains("* 2 EXPUNGE"), "{out:?}");
+
+    // The watcher's `FETCH 3 UID`: the view diff MUST be written first
+    // (`* 2 EXPUNGE` + the corrected `* 4 EXISTS`) — the old silent re-list
+    // answered `* 3 FETCH` against a map the client had never been told
+    // about, silently renumbering its view.
+    let out = watcher.cmd("FETCH 3 UID").await;
+    let expunge_pos = out
+        .find("* 2 EXPUNGE")
+        .unwrap_or_else(|| panic!("the foreign expunge must be announced: {out:?}"));
+    let exists_pos = out
+        .find("* 4 EXISTS")
+        .unwrap_or_else(|| panic!("EXISTS must follow the expunge: {out:?}"));
+    let fetch_pos = out
+        .find("* 3 FETCH")
+        .unwrap_or_else(|| panic!("the fetch response must be present: {out:?}"));
+    assert!(
+        expunge_pos < exists_pos && exists_pos < fetch_pos,
+        "EXPUNGE/EXISTS must precede the FETCH data: {out:?}"
+    );
+    // And MSN 3 resolves against the refreshed view the client now holds.
+    assert!(
+        out.contains("* 3 FETCH (UID 4)"),
+        "MSN 3 must be uid 4 in the refreshed view: {out:?}"
+    );
+
+    // The session's uid_map IS the refreshed map (no stale cache).
+    {
+        let s = watcher.session.lock().await;
+        assert_eq!(s.uid_map, vec![1, 3, 4, 5]);
+    }
+    watcher.shutdown().await;
+    other.shutdown().await;
+}
+
+/// SM2-F3 (repair): a message expunged by another session INSIDE the FETCH
+/// race window (between the view refresh and the metadata listing) must be
+/// skipped by BOTH of handle_fetch's per-message loops.
+///
+/// The emit loop already had the warn+skip arm; the `\Seen` bookkeeping loop
+/// behind it indexed `meta_map[&uid]` directly — on the missing key that
+/// index PANICS, killing the connection task mid-FETCH. This test arms the
+/// mock so uid 2 vanishes from the metadata listing only (call 2; SELECT was
+/// call 1 and the view refresh short-circuits on the unchanged snapshot), so
+/// uid 2 is resolvable against the session view but has no metadata.
+#[tokio::test]
+async fn fetch_skips_a_message_expunged_between_view_refresh_and_listing() {
+    let mut h = Harness::new();
+    h.login("user@example.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 11);
+    for i in 1..=3u64 {
+        h.mock.add_message(
+            "acct-1",
+            "INBOX",
+            &format!("m{i}"),
+            "f@x.test",
+            mail_proto::MessageFlags {
+                seen: false,
+                ..Default::default()
+            },
+            1000 + i as i64,
+        );
+    }
+    h.select("INBOX").await;
+
+    // SELECT was list_messages call 1 for this mailbox; the FETCH's view
+    // refresh short-circuits (snapshot unchanged), so the metadata listing
+    // is call 2 — hide uid 2 from it onwards.
+    h.mock.hide_uid_from_list_call("acct-1", "INBOX", 2, 2);
+
+    // A body fetch (sets \Seen) so the bookkeeping loop actually runs over
+    // the vanished uid. The old code panicked inside the task here.
+    let out = h.cmd("FETCH 1:3 BODY[]").await;
+
+    assert!(out.contains("* 1 FETCH"), "uid 1 must be served: {out:?}");
+    assert!(out.contains("* 3 FETCH"), "uid 3 must be served: {out:?}");
+    assert!(
+        !out.contains("* 2 FETCH"),
+        "the vanished uid must be skipped, not fabricated: {out:?}"
+    );
+    assert!(out.contains("OK FETCH completed"), "clean completion: {out:?}");
+    h.shutdown().await;
+}
+
+// ── SM2-F7: literals are threaded through FETCH/UID ─────────────────────────
+
+#[tokio::test]
+async fn uid_fetch_resolves_a_literal_sequence_set() {
+    let mut h = Harness::new();
+    select_two_messages(&mut h).await;
+    // `UID FETCH {1} UID`: the sequence set arrives as a synchronizing
+    // literal. handle_fetch must resolve it against the command's literals —
+    // previously it resolved against an empty list → confusing BAD.
+    let (_tag, out) = h.cmd_midline_literal("UID FETCH ", b"1", " UID").await;
+    assert!(
+        out.contains("* 1 FETCH (UID 1)"),
+        "the literal sequence set must resolve: {out:?}"
+    );
+    assert!(out.contains("OK"), "{out:?}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn uid_search_header_literal_field_resolves() {
+    let mut h = Harness::new();
+    let (u1, _u2) = select_two_messages(&mut h).await;
+    // The finding's exact shape: `UID SEARCH HEADER {7}\r\nSubject alpha`.
+    // The old whole-string resolve_token in handle_uid_command only worked
+    // when the ENTIRE sub-args was one marker; mid-args literals leaked the
+    // raw \x01LITk\x01 marker into parsing → BAD.
+    let (_tag, out) = h
+        .cmd_midline_literal("UID SEARCH HEADER ", b"Subject", " \"alpha\"")
+        .await;
+    assert!(
+        out.contains(&format!("* SEARCH {u1}")),
+        "the literal HEADER field must resolve and match: {out:?}"
+    );
+    assert!(out.contains("OK"), "{out:?}");
     h.shutdown().await;
 }
 

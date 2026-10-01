@@ -13,6 +13,35 @@ use crate::types::{Alert, AlertSeverity, AlertStatus};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// URL redaction
+// ---------------------------------------------------------------------------
+
+/// Redact everything secret-bearing from a webhook URL before it reaches the
+/// logs (SM10 F13): userinfo inside the authority and the ENTIRE query and
+/// fragment — dispatch tokens routinely travel as `?key=…` or `#/hook/…`.
+/// Scheme, host:port and path stay legible so operators can still identify
+/// the failing endpoint. Mirrors `redact_url_credentials` from the server
+/// binary (which cannot be imported from here), extended with the query and
+/// fragment stripping the webhook-log finding demands.
+fn redact_webhook_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<redacted-url>".to_string();
+    };
+    // Query and fragment never reach the log: drop everything from the
+    // first '?' or '#'.
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    // Credentials live only inside the authority component (before the
+    // first '/'), separated from host:port by '@'.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, after)| after)
+        .unwrap_or(authority);
+    format!("{scheme}://{host_port}{path}")
+}
+
+// ---------------------------------------------------------------------------
 // ComparisonOperator
 // ---------------------------------------------------------------------------
 
@@ -148,7 +177,7 @@ impl AlertManager {
                     Ok(response) => {
                         tracing::warn!(
                             rule = %alert.rule_name,
-                            webhook_url = %url,
+                            webhook_url = %redact_webhook_url(url),
                             status = %response.status(),
                             "alert webhook dispatch returned an error status"
                         );
@@ -156,7 +185,7 @@ impl AlertManager {
                     Err(err) => {
                         tracing::warn!(
                             rule = %alert.rule_name,
-                            webhook_url = %url,
+                            webhook_url = %redact_webhook_url(url),
                             error = %err,
                             "alert webhook dispatch failed"
                         );
@@ -337,6 +366,60 @@ impl Default for AlertManager {
 mod tests {
     use super::*;
     use crate::types::MetricType;
+
+    // ── redact_webhook_url: the SM10 F13 log-safety contract ───────────────
+
+    #[test]
+    fn redaction_strips_query_tokens_but_keeps_the_endpoint_legible() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.example.com/x?key=supersecret&token=abc"),
+            "https://hooks.example.com/x",
+            "query strings carry dispatch tokens and must never reach the logs"
+        );
+    }
+
+    #[test]
+    fn redaction_strips_userinfo_credentials() {
+        assert_eq!(
+            redact_webhook_url("https://user:pass@hooks.example.com/x"),
+            "https://hooks.example.com/x",
+            "userinfo credentials must be stripped from the authority"
+        );
+    }
+
+    #[test]
+    fn redaction_strips_userinfo_query_and_fragment_together() {
+        assert_eq!(
+            redact_webhook_url("http://token@hooks.example.com:8080/hook/42?k=1#frag"),
+            "http://hooks.example.com:8080/hook/42",
+        );
+    }
+
+    #[test]
+    fn redaction_keeps_clean_urls_unchanged() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.example.com/x"),
+            "https://hooks.example.com/x",
+            "a URL with nothing to hide must survive verbatim"
+        );
+    }
+
+    #[test]
+    fn redaction_fails_closed_on_scheme_less_input() {
+        assert_eq!(
+            redact_webhook_url("not-a-url"),
+            "<redacted-url>",
+            "input without a scheme is not provably parseable — redact wholesale"
+        );
+    }
+
+    #[test]
+    fn redaction_handles_pathless_urls_with_query() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.example.com?secret=1"),
+            "https://hooks.example.com",
+        );
+    }
 
     fn summary(name: &str, value: f64) -> MetricSummary {
         MetricSummary {

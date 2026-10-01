@@ -103,7 +103,11 @@ fn detect_script_tags(input: &str) -> bool {
 /// Includes the modern pointer/animation/transition/media families —
 /// attacks like `onpointerover=\talert(1)` or `onanimationstart=alert(1)`
 /// previously slipped past a short hardcoded list.
-const EVENT_HANDLER_NAMES: &[&str] = &[
+///
+/// `pub(crate)` so the fast-path gate can prove (property test, audit SM5
+/// F1) that every handler the analyzer recognizes opens the gate — the gate
+/// must never lag this vocabulary again.
+pub(crate) const EVENT_HANDLER_NAMES: &[&str] = &[
     // Classic mouse/keyboard
     "onerror",
     "onload",
@@ -250,20 +254,7 @@ fn handler_followed_by_equals(input: &str, handler: &str) -> bool {
 
 /// Detect JavaScript/VBScript URI schemes
 fn detect_js_uri(input: &str) -> bool {
-    let schemes = [
-        "javascript:",
-        "vbscript:",
-        "livescript:",
-        "data:text/html",
-        "data:application/xhtml",
-        // data:URIs with JavaScript MIME types are equally dangerous:// <script src="data:text/javascript,alert(1)"> executes in-browser.
-        "data:text/javascript",
-        "data:application/javascript",
-        "data:text/vbscript",
-        "data:application/x-javascript",
-        "data:application/ecmascript",
-    ];
-    for s in &schemes {
+    for s in JS_URI_SCHEMES {
         // Also check with whitespace evasion (java\tscript:)
         if input.contains(s) {
             return true;
@@ -277,29 +268,25 @@ fn detect_js_uri(input: &str) -> bool {
     false
 }
 
+/// URI schemes the analyzer treats as script-injection vectors. `pub(crate)`
+/// for the fast-path gate property test (audit SM5 F1).
+pub(crate) const JS_URI_SCHEMES: &[&str] = &[
+    "javascript:",
+    "vbscript:",
+    "livescript:",
+    "data:text/html",
+    "data:application/xhtml",
+    // data:URIs with JavaScript MIME types are equally dangerous:// <script src="data:text/javascript,alert(1)"> executes in-browser.
+    "data:text/javascript",
+    "data:application/javascript",
+    "data:text/vbscript",
+    "data:application/x-javascript",
+    "data:application/ecmascript",
+];
+
 /// Detect dangerous HTML tags (svg, object, embed, iframe, etc.)
 fn detect_dangerous_tags(input: &str) -> bool {
-    let tags = [
-        "<svg",
-        "<object",
-        "<embed",
-        "<iframe",
-        "<applet",
-        "<math",
-        "<base",
-        "<link",
-        "<meta",
-        "<img",
-        "<form",
-        "<isindex",
-        "<marquee",
-        "<video",
-        "<audio",
-        "<source",
-        "<details",
-        "<template",
-    ];
-    for t in &tags {
+    for t in DANGEROUS_HTML_TAGS {
         if input.contains(t) {
             return true;
         }
@@ -307,25 +294,51 @@ fn detect_dangerous_tags(input: &str) -> bool {
     false
 }
 
+/// Dangerous HTML tags the analyzer flags (rule 941400). `pub(crate)` for
+/// the fast-path gate property test (audit SM5 F1).
+pub(crate) const DANGEROUS_HTML_TAGS: &[&str] = &[
+    "<svg",
+    "<object",
+    "<embed",
+    "<iframe",
+    "<applet",
+    "<math",
+    "<base",
+    "<link",
+    "<meta",
+    "<img",
+    "<form",
+    "<isindex",
+    "<marquee",
+    "<video",
+    "<audio",
+    "<source",
+    "<details",
+    "<template",
+];
+
 /// Detect CSS expression injection
 fn detect_css_injection(input: &str) -> bool {
-    let patterns = [
-        "expression(",
-        "url(javascript:",
-        "url(vbscript:",
-        "@import",
-        "behavior:",
-        "-moz-binding:",
-        "xss:expression(",
-        "url(data:",
-    ];
-    for p in &patterns {
+    for p in CSS_INJECTION_PATTERNS {
         if input.contains(p) {
             return true;
         }
     }
     false
 }
+
+/// CSS-injection patterns the analyzer flags (rule 941500). `pub(crate)` for
+/// the fast-path gate property test (audit SM5 F1).
+pub(crate) const CSS_INJECTION_PATTERNS: &[&str] = &[
+    "expression(",
+    "url(javascript:",
+    "url(vbscript:",
+    "@import",
+    "behavior:",
+    "-moz-binding:",
+    "xss:expression(",
+    "url(data:",
+];
 
 /// Safely truncate a string at character boundary (not byte offset).
 /// Prevents panic on multi-byte UTF-8 sequences.

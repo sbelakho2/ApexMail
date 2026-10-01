@@ -40,6 +40,10 @@ sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chr
 # Redis
 deadpool-redis.workspace = true
 redis.workspace = true
+# SM10 F4: the shared STONITH fence helper (ha::fence) the inbound MAIL
+# command gates on. Path dependency: `ha` is not a workspace dependency and
+# the workspace root manifest is out of bounds for this change.
+ha = { path = "../ha" }
 
 # Crypto & TLS
 rustls.workspace = true

@@ -957,7 +957,8 @@ fn failover_lock_state_and_split_brain_are_consistent() {
         assert_eq!(json["split_brain"], false);
 
         // …and the route-level resolution path is exercised over a fresh pair
-        // of conflicting claims.
+        // of conflicting claims. SM10 F11: resolution is ADMIN-only, so the
+        // internal key is refused before the coordinator runs.
         for node in ["adv-c", "adv-d"] {
             let _: () = redis::cmd("SET")
                 .arg(format!("ha:primary:{node}"))
@@ -971,6 +972,19 @@ fn failover_lock_state_and_split_brain_are_consistent() {
             "POST",
             "/api/v1/failover/split-brain/resolve",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({"winner_node": "adv-c"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the universal internal key must not authorize split-brain resolution"
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/failover/split-brain/resolve",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"winner_node": "adv-c"})),
         )
         .await;
@@ -1059,7 +1073,9 @@ fn failover_routes_expose_state_and_enforce_the_fence_guard() {
             .any(|e| e["id"] == event_id.to_string()));
 
         // A fenced node refuses mutating requests with 503 while reads and
-        // recovery endpoints stay available.
+        // recovery endpoints stay available. SM10 F11: initiation (and the
+        // recovery routes below) are ADMIN-only, so these calls present the
+        // admin key; the internal key must not even reach the fence guard.
         let cfg = config_with(|config| {
             config.multi_region.node_id = "route-fenced-node".into();
         })
@@ -1072,11 +1088,24 @@ fn failover_routes_expose_state_and_enforce_the_fence_guard() {
             .query_async(&mut conn)
             .await
             .unwrap();
-        let (status, json) = call(
+        let (status, _) = call(
             &fenced_app,
             "POST",
             "/api/v1/failover/initiate",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({"reason": "should be refused"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the universal internal key must not authorize failover initiation"
+        );
+        let (status, json) = call(
+            &fenced_app,
+            "POST",
+            "/api/v1/failover/initiate",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"reason": "should be refused"})),
         )
         .await;
@@ -1096,7 +1125,7 @@ fn failover_routes_expose_state_and_enforce_the_fence_guard() {
             &fenced_app,
             "POST",
             "/api/v1/failover/split-brain/resolve",
-            Some(INTERNAL_KEY),
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"winner_node": "route-fenced-node"})),
         )
         .await;
@@ -1110,12 +1139,27 @@ fn failover_routes_expose_state_and_enforce_the_fence_guard() {
             .unwrap();
         drop(_split_guard);
 
-        // Malformed bodies are 4xx (never 500) and change nothing.
+        // Malformed bodies are 4xx (never 500) and change nothing. The
+        // resolve route is ADMIN-only (SM10 F11), so the malformed-body
+        // probe presents the admin key; the internal key is 401.
         let (status, _) = call(
             &app,
             "POST",
             "/api/v1/failover/split-brain/resolve",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({"winner": "wrong-field"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the universal internal key must not authorize split-brain resolution"
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/failover/split-brain/resolve",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"winner": "wrong-field"})),
         )
         .await;
@@ -1165,19 +1209,77 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
             assert!(replication.drop_slot(name).await.is_err());
         }
 
-        // A well-formed slot name is attempted; the canonical test role lacks
-        // the REPLICATION attribute, so the honest outcome is a server error —
-        // never a silent success.
+        // A well-formed-LOOKING slot name is attempted: `unique()` yields a
+        // dashed suffix, which the slot-name validator rejects before any
+        // SQL runs (a `-` is neither alphanumeric nor `_`). The outcome is
+        // therefore validator-driven and role-independent — never a silent
+        // success.
         let slot = unique("advslot");
         let created = replication.create_slot(&slot, "physical").await;
-        assert!(created.is_err(), "role cannot use replication slots");
+        assert!(created.is_err(), "the dashed name must fail validation");
         let dropped = replication.drop_slot(&slot).await;
         assert!(dropped.is_err(), "dropping a nonexistent slot must error");
 
         // Promotion on a non-standby / insufficient role is an error.
         assert!(replication.promote_standby().await.is_err());
-        // Sync-mode switching needs superuser; it must fail loudly.
-        assert!(replication.set_sync_mode(true).await.is_err());
+        // Sync-mode switching needs superuser. The canonical TEST_DATABASE_URL
+        // role IS a superuser on the shared dev cluster (ALTER SYSTEM is
+        // granted), while a locked-down deployment role must see a loud
+        // refusal — assert the honest outcome FOR THE ROLE WE ACTUALLY HAVE,
+        // and never leave the shared server forced into synchronous commit.
+        let superuser: bool = sqlx::query_scalar(
+            "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&h.db)
+        .await
+        .unwrap();
+        if superuser {
+            // pg_reload_conf() returns before the postmaster has processed
+            // the reload, so the live setting is observed with a small
+            // bounded wait instead of an immediate (racy) read.
+            async fn sync_standby_setting(db: &sqlx::PgPool) -> String {
+                let (value,): (String,) = sqlx::query_as(
+                    "SELECT setting FROM pg_settings WHERE name = 'synchronous_standby_names'",
+                )
+                .fetch_one(db)
+                .await
+                .unwrap();
+                value
+            }
+            async fn wait_for_setting(db: &sqlx::PgPool, expected: &str) -> String {
+                let mut current = sync_standby_setting(db).await;
+                for _ in 0..40 {
+                    if current == expected {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    current = sync_standby_setting(db).await;
+                }
+                current
+            }
+            replication
+                .set_sync_mode(true)
+                .await
+                .expect("a superuser toggles sync mode");
+            let applied = wait_for_setting(&h.db, "*").await;
+            assert_eq!(
+                applied, "*",
+                "the toggle must reach the live (reloaded) setting"
+            );
+            // Restore the shared server's async default — a test must never
+            // leave the cluster requiring a synchronous standby.
+            replication
+                .set_sync_mode(false)
+                .await
+                .expect("a superuser restores the async default");
+            let restored = wait_for_setting(&h.db, "").await;
+            assert_eq!(restored, "", "the shared server must end async");
+        } else {
+            assert!(
+                replication.set_sync_mode(true).await.is_err(),
+                "a non-superuser role must be refused loudly"
+            );
+        }
 
         // Lag history: recorded → read within window → retention purge.
         let old = unique("lag-old");
@@ -1226,6 +1328,15 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // The sync-mode route mirrors the service's privilege contract:
+        // a superuser test role toggles (200, back to async), a locked-down
+        // role is refused with a loud server error.
+        let superuser: bool = sqlx::query_scalar(
+            "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&h.db)
+        .await
+        .unwrap();
         let (status, _) = call(
             &app,
             "PUT",
@@ -1234,7 +1345,18 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
             Some(serde_json::json!({"synchronous": false})),
         )
         .await;
-        assert!(status.is_server_error(), "needs superuser: got {status}");
+        if superuser {
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a superuser toggles sync mode (and this call restores async)"
+            );
+        } else {
+            assert!(
+                status.is_server_error(),
+                "a non-superuser role must be refused loudly: got {status}"
+            );
+        }
     });
 }
 
@@ -1520,6 +1642,9 @@ fn multi_region_routing_is_deterministic_and_fencing_excludes_regions() {
         )
         .await;
         assert_eq!(json["status"], "inactive");
+        // SM10 F11 (adversarial pass): region fence/unfence place and lift
+        // the STONITH keys — ADMIN-only, like initiate/promote. The
+        // internal key is refused; the admin key reaches the handlers.
         let (status, _) = call(
             &app,
             "POST",
@@ -1528,16 +1653,29 @@ fn multi_region_routing_is_deterministic_and_fencing_excludes_regions() {
             Some(serde_json::json!({"reason": "adversarial"})),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, _) = call(
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the universal internal key must not fence a region"
+        );
+        let (status, json) = call(
+            &app,
+            "POST",
+            &format!("/api/v1/regions/{region}/fence"),
+            Some(ADMIN_KEY),
+            Some(serde_json::json!({"reason": "adversarial"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let (status, json) = call(
             &app,
             "POST",
             &format!("/api/v1/regions/{region}/unfence"),
-            Some(INTERNAL_KEY),
+            Some(ADMIN_KEY),
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{json}");
         let (status, _) = call(
             &app,
             "PUT",
@@ -1790,11 +1928,26 @@ fn chaos_experiments_validate_abort_and_never_corrupt_state() {
         // ENABLED (the default is off, which is itself pinned above).
         let chaos_cfg = config_with(|config| config.chaos.enabled = true).await;
         let app = build_router(h.state_with(chaos_cfg));
-        let (status, json) = call(
+        // SM10 F11: chaos-experiment START is ADMIN-only — the universal
+        // internal key is 401 before any handler/extractor runs.
+        let (status, _) = call(
             &app,
             "POST",
             "/api/v1/chaos/experiments",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({"name": "internal-key-must-not-start-chaos"})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the universal internal key must not start chaos experiments"
+        );
+        let (status, json) = call(
+            &app,
+            "POST",
+            "/api/v1/chaos/experiments",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({
                 "name": unique("route-experiment"),
                 "experiment_type": "network_partition",
@@ -1829,7 +1982,7 @@ fn chaos_experiments_validate_abort_and_never_corrupt_state() {
             &app,
             "POST",
             "/api/v1/chaos/experiments",
-            Some(INTERNAL_KEY),
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"name": "missing everything"})),
         )
         .await;
@@ -2098,7 +2251,10 @@ fn backup_service_validation_and_table_enumeration() {
             Err(error) => error,
             Ok(_) => panic!("wrong-size key must be rejected at startup"),
         };
-        assert!(error.contains("Invalid backup encryption key size"), "{error}");
+        assert!(
+            error.contains("Invalid backup encryption key size"),
+            "{error}"
+        );
 
         // Production fail-closed: no key, no service.
         let mut prod = (*h.config).clone();
@@ -2130,7 +2286,12 @@ fn backup_service_validation_and_table_enumeration() {
             .await
             .expect("empty-table backup");
         assert_eq!(empty.status, "completed");
-        assert_eq!(empty.compression_ratio, Some(1.0), "{:?}", empty.compression_ratio);
+        assert_eq!(
+            empty.compression_ratio,
+            Some(1.0),
+            "{:?}",
+            empty.compression_ratio
+        );
 
         // No table list → the FULL table enumeration runs. The allowlist
         // filter decides what is swept; the recorded table list stays NULL
@@ -2261,7 +2422,9 @@ fn backup_download_gates_and_storage_schemes() {
 
         // (a) The s3 object is NOT staged locally and no download endpoint is
         // configured: the restore refuses instead of fetching unauthenticated.
-        tokio::fs::remove_file(&staging).await.expect("drop staging copy");
+        tokio::fs::remove_file(&staging)
+            .await
+            .expect("drop staging copy");
         set_location(&h.db, created.id, &format!("s3://w6c-bucket/{object_key}")).await;
         let refused = backup
             .restore(RestoreOptions {
@@ -2278,7 +2441,10 @@ fn backup_download_gates_and_storage_schemes() {
         );
 
         // (b) Explicit acknowledgement + a failing endpoint: honest error.
-        std::env::set_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD", "I_UNDERSTAND_THIS_IS_INSECURE");
+        std::env::set_var(
+            "ALLOW_UNAUTHENTICATED_S3_DOWNLOAD",
+            "I_UNDERSTAND_THIS_IS_INSECURE",
+        );
         let statuses = Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([(
             "GET *".to_string(),
             (500_u16, "s3 down".to_string()),
@@ -2316,8 +2482,15 @@ fn backup_download_gates_and_storage_schemes() {
 
         // (d) file:// locations restore the REAL payload end-to-end.
         let payload_path = temp_backup_file("w6c-file-scheme");
-        tokio::fs::write(&payload_path, &payload).await.expect("write payload");
-        set_location(&h.db, created.id, &format!("file://{}", payload_path.display())).await;
+        tokio::fs::write(&payload_path, &payload)
+            .await
+            .expect("write payload");
+        set_location(
+            &h.db,
+            created.id,
+            &format!("file://{}", payload_path.display()),
+        )
+        .await;
         let restored = backup
             .restore(RestoreOptions {
                 backup_id: created.id,
@@ -2388,11 +2561,13 @@ fn restore_and_pitr_reject_hostile_tables_and_checksum_drift() {
 
         // A catalog table smuggled into the recorded table list is refused
         // by the restore path too — not only at creation.
-        sqlx::query("UPDATE ha_backups SET tables_included = '[\"pg_class\"]'::jsonb WHERE id = $1")
-            .bind(created.id)
-            .execute(&h.db)
-            .await
-            .expect("smuggle table");
+        sqlx::query(
+            "UPDATE ha_backups SET tables_included = '[\"pg_class\"]'::jsonb WHERE id = $1",
+        )
+        .bind(created.id)
+        .execute(&h.db)
+        .await
+        .expect("smuggle table");
         let error = backup
             .restore(RestoreOptions {
                 backup_id: created.id,
@@ -2418,7 +2593,9 @@ fn restore_and_pitr_reject_hostile_tables_and_checksum_drift() {
         let pitr = backup.pitr(Utc::now()).await.expect("pitr result");
         assert!(!pitr.success, "{:?}", pitr.message);
         assert!(
-            pitr.message.as_deref().is_some_and(|m| m.contains("checksum mismatch")),
+            pitr.message
+                .as_deref()
+                .is_some_and(|m| m.contains("checksum mismatch")),
             "{:?}",
             pitr.message
         );
@@ -2436,7 +2613,9 @@ fn restore_and_pitr_reject_hostile_tables_and_checksum_drift() {
         let pitr = backup.pitr(Utc::now()).await.expect("pitr result");
         assert!(!pitr.success);
         assert!(
-            pitr.message.as_deref().is_some_and(|m| m.contains("restore of table pg_class")),
+            pitr.message
+                .as_deref()
+                .is_some_and(|m| m.contains("restore of table pg_class")),
             "{:?}",
             pitr.message
         );
@@ -2492,13 +2671,12 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
 
         let deleted = backup.enforce_retention().await.expect("retention");
         assert!(deleted >= 1, "expired rows are deleted");
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
-        )
-        .bind(&[one])
-        .fetch_one(&h.db)
-        .await
-        .expect("rows");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
+                .bind(&[one])
+                .fetch_one(&h.db)
+                .await
+                .expect("rows");
         assert_eq!(remaining, 0);
         assert!(
             !staged.exists(),
@@ -2514,13 +2692,12 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
         let two = seed_expired(&h.db, "s3://w6c-ret/two.gz".into()).await;
         let deleted = backup.enforce_retention().await.expect("retention");
         assert!(deleted >= 1);
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
-        )
-        .bind(&[two])
-        .fetch_one(&h.db)
-        .await
-        .expect("rows");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
+                .bind(&[two])
+                .fetch_one(&h.db)
+                .await
+                .expect("rows");
         assert_eq!(remaining, 0, "a storage outage does not keep dead rows");
 
         // DELETE 404: the object is already gone — success.
@@ -2530,13 +2707,12 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
             .insert("DELETE *".to_string(), (404_u16, "gone".into()));
         let three = seed_expired(&h.db, "s3://w6c-ret/three.gz".into()).await;
         backup.enforce_retention().await.expect("retention");
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)",
-        )
-        .bind(&[three])
-        .fetch_one(&h.db)
-        .await
-        .expect("rows");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
+                .bind(&[three])
+                .fetch_one(&h.db)
+                .await
+                .expect("rows");
         assert_eq!(remaining, 0);
 
         match previous {
@@ -2631,8 +2807,12 @@ fn failover_reports_failures_and_refuses_unsafe_targets() {
 
         // Bootstrap is idempotent: the HA tables exist and accept the exact
         // rows the coordinator writes at runtime.
-        ha::failover::bootstrap_tables(&h.db).await.expect("bootstrap 1");
-        ha::failover::bootstrap_tables(&h.db).await.expect("bootstrap 2");
+        ha::failover::bootstrap_tables(&h.db)
+            .await
+            .expect("bootstrap 1");
+        ha::failover::bootstrap_tables(&h.db)
+            .await
+            .expect("bootstrap 2");
     });
 }
 
@@ -2642,13 +2822,33 @@ fn routes_exercise_every_authorized_mutating_surface() {
         let Some(h) = harness().await else { return };
         let app = h.app();
 
+        // SM10 F11: initiation, failback, restore and promotion are
+        // ADMIN-only — the universal internal key is 401, and the admin key
+        // reaches the handler.
+        for (method, path, body) in [
+            (
+                "POST",
+                "/api/v1/failover/initiate",
+                Some(serde_json::json!({"reason": "w6c route coverage"})),
+            ),
+            ("POST", "/api/v1/failover/failback", Some(serde_json::json!({}))),
+            ("POST", "/api/v1/replication/promote", Some(serde_json::json!({}))),
+        ] {
+            let (status, _) = call(&app, method, path, Some(INTERNAL_KEY), body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}: the universal internal key must not authorize topology changes"
+            );
+        }
+
         // Failover initiation without replicas is an honest 500 — the
         // handler ran, the coordinator refused.
         let (status, _) = call(
             &app,
             "POST",
             "/api/v1/failover/initiate",
-            Some(INTERNAL_KEY),
+            Some(ADMIN_KEY),
             Some(serde_json::json!({"reason": "w6c route coverage"})),
         )
         .await;
@@ -2660,7 +2860,7 @@ fn routes_exercise_every_authorized_mutating_surface() {
             &app,
             "POST",
             "/api/v1/failover/failback",
-            Some(INTERNAL_KEY),
+            Some(ADMIN_KEY),
             Some(serde_json::json!({})),
         )
         .await;
@@ -2710,11 +2910,29 @@ fn routes_exercise_every_authorized_mutating_surface() {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        let (status, validated) = call(
+        let (status, _) = call(
             &app,
             "POST",
             "/api/v1/backup/restore",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({
+                "backup_id": backup_id,
+                "target_time": null,
+                "validate_only": true,
+                "parallel_jobs": 1
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "restore is ADMIN-only (SM10 F11): the internal key must not reach the handler"
+        );
+        let (status, validated) = call(
+            &app,
+            "POST",
+            "/api/v1/backup/restore",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({
                 "backup_id": backup_id,
                 "target_time": null,
@@ -2794,6 +3012,19 @@ fn routes_exercise_every_authorized_mutating_surface() {
             "POST",
             "/api/v1/replication/promote",
             Some(INTERNAL_KEY),
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "promotion is ADMIN-only (SM10 F11): the internal key must not reach the handler"
+        );
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/v1/replication/promote",
+            Some(ADMIN_KEY),
             Some(serde_json::json!({})),
         )
         .await;

@@ -140,7 +140,7 @@ final class PayloadContractTest extends TestCase
 
         $client->webhooks->create([
             'url'     => 'https://example.com/hook',
-            'events'  => ['message.delivered', 'email.bounced', '*'],
+            'events'  => ['message.delivered', 'message.bounced', '*'],
             // Legacy inputs the API rejects — must NOT be sent:
             'name'    => 'my hook',
             'secret'  => 'whsec_legacy',
@@ -151,7 +151,7 @@ final class PayloadContractTest extends TestCase
         $this->assertSame('/v1/webhooks', $request['path']);
         $this->assertSame([
             'url'    => 'https://example.com/hook',
-            'events' => ['message.delivered', 'email.bounced', '*'],
+            'events' => ['message.delivered', 'message.bounced', '*'],
         ], $request['body']);
     }
 
@@ -176,13 +176,14 @@ final class PayloadContractTest extends TestCase
 
     public function testWebhookEventConstantsMatchServerKnownEvents(): void
     {
-        // webhooks.rs KNOWN_WEBHOOK_EVENTS
+        // webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary)
         $expected = [
-            'email.delivered', 'email.bounced', 'email.complained',
-            'message.sent', 'message.delivered', 'message.bounced',
-            'message.complained', 'message.opened', 'message.clicked',
+            'message.accepted', 'message.queued', 'message.attempted',
+            'message.deferred', 'message.delivered', 'message.bounced',
+            'message.complained', 'message.suppressed', 'message.opened',
+            'message.clicked', 'message.cancelled',
             'recipient.unsubscribed', 'placement_test.completed',
-            'bounce', 'complaint', 'inbound', '*',
+            'inbound', '*',
         ];
         $this->assertSame($expected, \ApexMail\Resources\Webhooks::EVENTS);
     }

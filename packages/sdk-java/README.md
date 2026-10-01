@@ -10,14 +10,14 @@ Official Java SDK for [ApexMail](https://apexmail.ee) — Transactional Email AP
 <dependency>
   <groupId>ee.apexmail</groupId>
   <artifactId>apexmail-java</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.1</version>
 </dependency>
 ```
 
 ### Gradle
 
 ```groovy
-implementation 'ee.apexmail:apexmail-java:1.0.0'
+implementation 'ee.apexmail:apexmail-java:1.0.1'
 ```
 
 ## Quick Start

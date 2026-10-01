@@ -9,7 +9,7 @@ competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
 competitor_description = "Resend es una API de email moderna para desarrolladores con creación de emails basada en componentes."
-pricing_as_of = "2026-05-09"
+pricing_as_of = "2026-09-05"
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 verdict_title = "¿Por qué elegir ApexMail en lugar de Resend?"
@@ -30,7 +30,7 @@ verdict_points = [
 comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
     { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "tie" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
     { feature = "Calentamiento de IP", apex = '<span class="text-brand-600 font-semibold">Automático geométrico</span>', comp = '<span class="text-surface-600">Automático (gestionado)</span>', winner = "tie" },
     { feature = "Soporte de BIMI", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
     { feature = "Firma ARC", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },

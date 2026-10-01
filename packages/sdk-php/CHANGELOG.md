@@ -32,5 +32,4 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Cursor-based pagination support on `list()` methods: `cursor` parameter added to `Emails`, `Templates`, `Events`, and `Suppressions`.
-- `tag` filter on `Suppressions.list()`.
 - `test()` method on `Webhooks` resource.

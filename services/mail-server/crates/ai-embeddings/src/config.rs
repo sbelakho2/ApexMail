@@ -91,6 +91,18 @@ fn default_timeout_ms() -> u64 {
 fn default_sidecar_tls_enabled() -> bool {
     true
 }
+
+/// SM9 #6: the DEV-ONLY escape hatch for gateway tenant assertion. When
+/// `AI_EMBEDDINGS_TRUST_BODY_TENANT=true`, `/vectors` and `/search` accept
+/// the request-body `tenant_id` WITHOUT the gateway-asserted
+/// `x-apexmail-tenant-id` header — for local runs with no gateway in front
+/// of the service. Default `false` (the header is REQUIRED); a production
+/// deployment must never set it.
+pub fn trust_body_tenant_from_env() -> bool {
+    std::env::var("AI_EMBEDDINGS_TRUST_BODY_TENANT")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
 fn default_max_vectors() -> usize {
     100_000
 }

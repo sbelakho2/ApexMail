@@ -68,6 +68,11 @@ pub enum FailoverState {
     FailedOver,
     FailingBack,
     SplitBrain,
+    /// SM10 F3: a failover that FAILED after the old primary was fenced —
+    /// the promotion did not complete, the fence stays in place (fail-closed)
+    /// and the machine parks here until an operator remediates and retries
+    /// (retries from this state are allowed).
+    Failed,
 }
 
 impl std::fmt::Display for FailoverState {
@@ -79,6 +84,7 @@ impl std::fmt::Display for FailoverState {
             Self::FailedOver => write!(f, "failed_over"),
             Self::FailingBack => write!(f, "failing_back"),
             Self::SplitBrain => write!(f, "split_brain"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -92,6 +98,7 @@ impl FailoverState {
             "failed_over" => Self::FailedOver,
             "failing_back" => Self::FailingBack,
             "split_brain" => Self::SplitBrain,
+            "failed" => Self::Failed,
             _ => Self::Normal,
         }
     }

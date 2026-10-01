@@ -11,7 +11,10 @@
     Header always set X-Frame-Options "SAMEORIGIN"
     Header always set X-Content-Type-Options "nosniff"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-    Header always set X-XSS-Protection "1; mode=block"
+    # "0" (audit SM11 F10): the header is deprecated and "1; mode=block" is
+    # attack-enabling in legacy auditor implementations — pinned in lockstep
+    # with nginx.conf and the api-server.
+    Header always set X-XSS-Protection "0"
 </IfModule>
 
 # Deny access to sensitive files

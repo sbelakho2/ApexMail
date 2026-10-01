@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 use crate::processor::ClickData;
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
+use crate::token_shape::token_log_prefix;
 
 const TRACKING_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:; script-src 'none'; style-src 'none'; object-src 'none'";
 
@@ -65,8 +66,11 @@ pub async fn handle_click(
         info!("E-190: Bot detected on click redirect, skipping recording");
     }
 
+    // SM2-F4: the prefix is extracted char-boundary-safely — the id is
+    // percent-decoded UTF-8 and a slice at a fixed byte offset used to panic
+    // when byte 20 split a multi-byte character.
     debug!(
-        id_prefix = &tracking_id[..tracking_id.len().min(20)],
+        id_prefix = token_log_prefix(&tracking_id, 20),
         has_r = q.r.is_some(),
         is_bot,
         "Click tracking request"
@@ -133,8 +137,9 @@ pub async fn handle_click(
             });
         }
     } else {
+        // SM2-F4: char-boundary-safe prefix (see the debug! above).
         warn!(
-            id_prefix = &tracking_id[..tracking_id.len().min(20)],
+            id_prefix = token_log_prefix(&tracking_id, 20),
             "Click: invalid tracking token"
         );
     }

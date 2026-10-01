@@ -1,403 +1,28 @@
-//! SQL schema constants for all ApexMail tables.
+//! Individual table DDL constants (for selective setup in tests).
 //!
-//! These can be executed sequentially via `sqlx::query(SQL).execute(pool)` to
-//! bootstrap a fresh database. For production use run proper migrations; these
-//! constants serve as a single-file reference and for integration-test setup.
+//! # Bootstrapping a database
 //!
-//! # ⚠ O-18.2 — Sequential DDL Lock Risk
+//! There is deliberately NO monolithic `SCHEMA` constant or `run_migrations`
+//! helper here anymore (audit F6): the old single-file "reference schema"
+//! drifted from the canonical migration chain — it declared
+//! `campaigns.template_id UUID REFERENCES templates(id)` while `templates.id`
+//! is `VARCHAR(26)` (migrations 064/075), a foreign key PostgreSQL rejects
+//! between incompatible types. `run_migrations` therefore could never execute
+//! successfully against a fresh database, and its string-`contains` tests
+//! passed despite the broken DDL.
 //!
-//! All DDL statements (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE`) acquire
-//! `ACCESS EXCLUSIVE` locks on the target table while they execute. When the
-//! full schema is applied inside a **single transaction** (as `run_migrations`
-//! does), every table is locked until the entire transaction commits — which
-//! means concurrent readers and writers queue behind the migration transaction.
+//! The single source of truth is the canonical migration chain in
+//! `services/mail-server/migrations/`, applied by the `migrator` crate. For
+//! tests use `migrator::test_support::fresh_canonical_pool` (or
+//! `apply_canonical_migrations`) so a green test means the code works against
+//! the byte-for-byte deploy-time schema.
 //!
-//! ## Mitigation strategies
-//!
-//! | Strategy | Description |
-//! |----------|-------------|
-//! | **Lock-avoiding DDL** | Use `CREATE INDEX CONCURRENTLY` for indexes and `SET statement_timeout` per statement so a single DDL hang does not stall the entire transaction. |
-//! | **Per-object transactions** | Run each `CREATE TABLE` / `CREATE INDEX` in its own transaction (separate `sqlx::query().execute()` calls) so locks are released after each statement. |
-//! | **Statement timeouts** | Set `lock_timeout` (e.g. `SET lock_timeout = '5s'`) before each DDL statement so a lock-wait does not block the migration indefinitely. |
-//! | **Off-peak migrations** | Schedule schema changes during maintenance windows when write traffic is minimal. |
-//! | **Retry on deadlock** | In production, use a migration framework (e.g. `sqlx::migrate!`) that can retry transactions that fail due to deadlock detection. |
-//!
-//! The current single-transaction approach (`run_migrations`) is suitable for
-//! fresh databases (integration tests, CI). For production schema changes,
-//! break DDL into per-statement transactions and use `CREATE INDEX CONCURRENTLY`.
-//!
-//! ## Example: concurrent index creation
-//! ```ignore
-//! // Each index in its own transaction with non-blocking CREATE INDEX CONCURRENTLY
-//! sqlx::query("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_tenant ON users(tenant_id)")
-//!     .execute(&pool)  // no BEGIN/COMMIT needed — CONCURRENTLY requires its own tx
-//!     .await?;
-//! ```
+//! The per-table `CREATE_*` constants below remain only for tests that need
+//! to stand up ONE table in isolation. Several reference sibling tables and
+//! therefore require those parents to exist first — they are not a schema
+//! reference and MUST NOT be used to provision a database.
 
-/// Complete DDL for all tables, executed in dependency order.
-pub const SCHEMA: &str = r#"
--- ── Tenants ─────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS tenants (
-    id          VARCHAR(26) PRIMARY KEY,
-    name        TEXT        NOT NULL,
-    slug        TEXT        UNIQUE,
-    plan        TEXT        NOT NULL DEFAULT 'free',
-    status      TEXT        NOT NULL DEFAULT 'active',
-    -- settings/metadata match the canonical chain (migration 052/064): the
-    -- api-server writes settings JSONB and metadata JSONB NOT NULL on every
-    -- tenant insert; a SCHEMA without them broke the DB-backed test suite
-    -- the moment CI_TEST_DB=ephemeral started applying this bootstrap.
-    settings    JSONB,
-    metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    -- legal_hold/retention_days match the canonical chain (migration 121):
-    -- held tenants are excluded from every retention purge; retention_days
-    -- is a per-tenant override (NULL = plan-tier default from the RET
-    -- registry).
-    legal_hold  BOOLEAN     NOT NULL DEFAULT FALSE,
-    retention_days INT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- ── Users ───────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS users (
-    id                  UUID PRIMARY KEY,
-    tenant_id           VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email               TEXT        NOT NULL UNIQUE,
-    name                TEXT,
-    password_hash       TEXT        NOT NULL,
-    role                TEXT        NOT NULL DEFAULT 'member',
-    status              TEXT        NOT NULL DEFAULT 'active',
-    mfa_enabled         BOOLEAN     NOT NULL DEFAULT FALSE,
-    mfa_secret          TEXT,
-    mfa_recovery_hashes JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    email_verified      BOOLEAN     NOT NULL DEFAULT FALSE,
-    metadata            JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_users_email  ON users(email);
-
--- ── API Keys ────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS api_keys (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name            TEXT        NOT NULL,
-    key_hash        TEXT        NOT NULL UNIQUE,
-    key_prefix      TEXT        NOT NULL,
-    scopes          JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    last_used_at    TIMESTAMPTZ,
-    expires_at      TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_api_keys_hash   ON api_keys(key_hash);
-CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
-
--- ── Domains ─────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS domains (
-    id                      UUID PRIMARY KEY,
-    tenant_id               VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name                    TEXT        NOT NULL,
-    status                  TEXT        NOT NULL DEFAULT 'pending',
-    spf_verified            BOOLEAN     NOT NULL DEFAULT FALSE,
-    dkim_verified           BOOLEAN     NOT NULL DEFAULT FALSE,
-    dmarc_verified          BOOLEAN     NOT NULL DEFAULT FALSE,
-    return_path_verified    BOOLEAN     NOT NULL DEFAULT FALSE,
-    mta_sts_verified        BOOLEAN     NOT NULL DEFAULT FALSE,
-    bimi_verified           BOOLEAN     NOT NULL DEFAULT FALSE,
-    tlsrpt_verified         BOOLEAN     NOT NULL DEFAULT FALSE,
-    dkim_selector           TEXT,
-    dkim_public_key         TEXT,
-    dkim_private_key        TEXT,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_domains_tenant ON domains(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_domains_name   ON domains(name);
-
--- ── Messages ────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS messages (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    from_email      TEXT        NOT NULL,
-    to_emails       JSONB       NOT NULL,
-    cc_emails       JSONB,
-    bcc_emails      JSONB,
-    subject         TEXT        NOT NULL,
-    html_body       TEXT,
-    text_body       TEXT,
-    status          TEXT        NOT NULL DEFAULT 'queued',
-    tags            JSONB,
-    metadata        JSONB,
-    scheduled_at    TIMESTAMPTZ,
-    sent_at         TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_messages_tenant        ON messages(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_messages_status        ON messages(tenant_id, status);
-CREATE INDEX IF NOT EXISTS idx_messages_created       ON messages(created_at DESC);
-
--- ── Events ──────────────────────────────────────────────────────
--- Canonical shape (migrations 075 + 090): VARCHAR(64) string ids, NOT UUIDs.
-CREATE TABLE IF NOT EXISTS events (
-    id              VARCHAR(64) PRIMARY KEY,
-    tenant_id       VARCHAR(26) NOT NULL,
-    message_id      VARCHAR(64),
-    domain_id       TEXT,
-    campaign_id     TEXT,
-    event_type      VARCHAR(50) NOT NULL,
-    recipient       VARCHAR(255),
-    link_id         VARCHAR(64),
-    link_url        TEXT,
-    user_agent      TEXT,
-    ip_address      VARCHAR(45),
-    bounce_type     VARCHAR(20),
-    bounce_subtype  VARCHAR(50),
-    diagnostic_code TEXT,
-    complaint_type  VARCHAR(50),
-    metadata        JSONB DEFAULT '{}',
-    raw_data        JSONB,
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_events_tenant     ON events(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_events_message    ON events(message_id);
-CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_events_recipient  ON events(recipient);
-
--- ── Templates ───────────────────────────────────────────────────
--- Canonical shape (migration 075): VARCHAR(26) string ids.
-CREATE TABLE IF NOT EXISTS templates (
-    id          VARCHAR(26) PRIMARY KEY,
-    tenant_id   VARCHAR(26) NOT NULL,
-    name        VARCHAR(255) NOT NULL,
-    slug        VARCHAR(100),
-    subject     VARCHAR(255) NOT NULL,
-    html_body   TEXT NOT NULL,
-    text_body   TEXT,
-    version     INTEGER NOT NULL DEFAULT 1,
-    status      VARCHAR(20) NOT NULL DEFAULT 'active',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_templates_tenant ON templates(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_templates_tenant_name ON templates(tenant_id, name);
-
--- ── Suppressions ────────────────────────────────────────────────
--- Canonical shape (migration 088/115): VARCHAR(26) string ids.
-CREATE TABLE IF NOT EXISTS suppressions (
-    id          VARCHAR(26) PRIMARY KEY,
-    tenant_id   VARCHAR(26) NOT NULL,
-    email       VARCHAR(255) NOT NULL,
-    reason      VARCHAR(50) NOT NULL,
-    subtype     VARCHAR(100),
-    source      VARCHAR(100),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ,
-    UNIQUE (tenant_id, email)
-);
-CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_suppressions_email  ON suppressions(tenant_id, email);
-
--- ── Webhooks ────────────────────────────────────────────────────
--- Canonical shape (migration 075): VARCHAR(26) string ids.
-CREATE TABLE IF NOT EXISTS webhooks (
-    id               VARCHAR(26) PRIMARY KEY,
-    tenant_id        VARCHAR(26) NOT NULL,
-    url              VARCHAR(2048) NOT NULL,
-    events           JSONB       NOT NULL DEFAULT '["*"]'::jsonb,
-    secret           VARCHAR(255) NOT NULL,
-    previous_secret  VARCHAR(255),
-    status           VARCHAR(20) NOT NULL DEFAULT 'active',
-    enabled          BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks(tenant_id);
-
--- gdpr_requests (canonical: migration 069) — the compliance submit path
--- writes this CP mirror on every DSR.
-CREATE TABLE IF NOT EXISTS gdpr_requests (
-    id              VARCHAR(26) PRIMARY KEY,
-    tenant_id       VARCHAR(26) NOT NULL,
-    email           VARCHAR(320) NOT NULL,
-    request_type    VARCHAR(20) NOT NULL,
-    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
-    token_hash      VARCHAR(128),
-    fulfilled_at    TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_gdpr_requests_tenant ON gdpr_requests(tenant_id, created_at DESC);
-
--- system_alerts (canonical: migration 052 + 108's writer columns) — the
--- console alerts surface reads it; 108 added component/source/fingerprint
--- with a dedupe index for alertmanager webhook redelivery.
-CREATE TABLE IF NOT EXISTS system_alerts (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       VARCHAR(26),
-    alert_type      TEXT NOT NULL,
-    message         TEXT NOT NULL,
-    severity        TEXT NOT NULL DEFAULT 'warning',
-    acknowledged    BOOLEAN NOT NULL DEFAULT FALSE,
-    acknowledged_by TEXT,
-    acknowledged_at TIMESTAMPTZ,
-    metadata        JSONB,
-    component       TEXT,
-    source          VARCHAR(64) NOT NULL DEFAULT 'system',
-    fingerprint     VARCHAR(128),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_system_alerts_source_fingerprint
-    ON system_alerts (source, fingerprint)
-    WHERE source <> 'system' AND fingerprint IS NOT NULL;
-
--- ── Audit Logs ──────────────────────────────────────────────────
--- Canonical tamper-evident shape (migrations 038 + 055): the compliance
--- crate's hash-chain writer (audit_logger::persist_entry) and the api-server
--- / billing audit writers INSERT these exact columns. The former UUID shape
--- (a separate actor column + resource_type + metadata-only JSONB) made every
--- tamper-evident INSERT fail on SCHEMA-provisioned databases — audit item F6.
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id              TEXT        PRIMARY KEY,
-    tenant_id       TEXT,
-    user_id         TEXT,
-    session_id      TEXT,
-    action          TEXT        NOT NULL,
-    resource        TEXT        NOT NULL,
-    resource_id     TEXT,
-    details         JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    ip_address      TEXT,
-    user_agent      TEXT,
-    outcome         TEXT        NOT NULL,
-    error_message   TEXT,
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    hash            TEXT        NOT NULL,
-    previous_hash   TEXT,
-    signature       TEXT        NOT NULL,
-    -- Mirror of "timestamp" for the writers that read created_at (055).
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant ON audit_logs(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_time   ON audit_logs(timestamp DESC);
-
--- Archive target for the retention trim (038: same shape, no PK — one row
--- may be archived across re-runs).
-CREATE TABLE IF NOT EXISTS audit_logs_archive (
-    id              TEXT,
-    tenant_id       TEXT,
-    user_id         TEXT,
-    session_id      TEXT,
-    action          TEXT        NOT NULL,
-    resource        TEXT        NOT NULL,
-    resource_id     TEXT,
-    details         JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    ip_address      TEXT,
-    user_agent      TEXT,
-    outcome         TEXT        NOT NULL,
-    error_message   TEXT,
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    hash            TEXT        NOT NULL,
-    previous_hash   TEXT,
-    signature       TEXT        NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_archive_time ON audit_logs_archive(timestamp DESC);
-
--- ── Contacts ────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS contacts (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email           TEXT        NOT NULL,
-    name            TEXT,
-    tags            JSONB,
-    metadata        JSONB,
-    status          TEXT        NOT NULL DEFAULT 'active',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, email)
-);
-CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_contacts_email  ON contacts(tenant_id, email);
-
--- ── Campaigns ───────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS campaigns (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name            TEXT        NOT NULL,
-    subject         TEXT        NOT NULL,
-    template_id     UUID        REFERENCES templates(id) ON DELETE SET NULL,
-    status          TEXT        NOT NULL DEFAULT 'draft',
-    scheduled_at    TIMESTAMPTZ,
-    sent_count      BIGINT      NOT NULL DEFAULT 0,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(tenant_id, status);
-
--- ── Support Tickets ─────────────────────────────────────────────
--- Canonical shape (migration 075): VARCHAR(26) string ids.
-CREATE TABLE IF NOT EXISTS support_tickets (
-    id              VARCHAR(26) PRIMARY KEY,
-    tenant_id       VARCHAR(26),
-    subject         VARCHAR(500) NOT NULL,
-    description     TEXT NOT NULL DEFAULT '',
-    tenant_name     VARCHAR(255),
-    tenant_email    VARCHAR(255),
-    status          VARCHAR(30) NOT NULL DEFAULT 'open',
-    priority        VARCHAR(20) NOT NULL DEFAULT 'normal',
-    category        VARCHAR(50),
-    assigned_to     VARCHAR(26),
-    assignee        VARCHAR(255),
-    resolved_at     TIMESTAMPTZ,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_support_tickets_tenant ON support_tickets(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(tenant_id, status);
-
--- ── Status Page Incidents ───────────────────────────────────────
--- #211:Missing tables that repos query
-CREATE TABLE IF NOT EXISTS status_page_incidents (
-    id              TEXT PRIMARY KEY,
-    title           TEXT        NOT NULL,
-    status          TEXT        NOT NULL DEFAULT 'investigating',
-    impact          TEXT        NOT NULL DEFAULT 'minor',
-    affected_components TEXT[]  NOT NULL DEFAULT '{}',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    resolved_at     TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_incidents_status ON status_page_incidents(status);
-
--- ── Status Page Incident Updates ────────────────────────────────
-CREATE TABLE IF NOT EXISTS status_page_incident_updates (
-    id              TEXT PRIMARY KEY,
-    incident_id     TEXT        NOT NULL REFERENCES status_page_incidents(id) ON DELETE CASCADE,
-    status          TEXT        NOT NULL,
-    body            TEXT        NOT NULL,
-    author          TEXT        NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON status_page_incident_updates(incident_id);
-
--- ── ISP Warmup Schedules ────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS isp_warmup_schedules (
-    id              TEXT PRIMARY KEY,
-    isp_name        TEXT        NOT NULL,
-    mx_patterns     JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    warmup_schedule JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    notes           TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_warmup_isp ON isp_warmup_schedules(isp_name);
-"#;
-
-/// Individual table DDL constants (for selective setup in tests).
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_TENANTS: &str = r#"
 CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
@@ -406,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_USERS: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -417,6 +43,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_API_KEYS: &str = r#"
 CREATE TABLE IF NOT EXISTS api_keys (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -426,6 +53,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_DOMAINS: &str = r#"
 CREATE TABLE IF NOT EXISTS domains (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -440,6 +68,7 @@ CREATE TABLE IF NOT EXISTS domains (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_MESSAGES: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -451,6 +80,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_EVENTS: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
     id VARCHAR(64) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
@@ -460,6 +90,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_TEMPLATES: &str = r#"
 CREATE TABLE IF NOT EXISTS templates (
     id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
@@ -470,6 +101,7 @@ CREATE TABLE IF NOT EXISTS templates (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_SUPPRESSIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS suppressions (
     id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
@@ -480,6 +112,7 @@ CREATE TABLE IF NOT EXISTS suppressions (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_WEBHOOKS: &str = r#"
 CREATE TABLE IF NOT EXISTS webhooks (
     id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
@@ -490,6 +123,7 @@ CREATE TABLE IF NOT EXISTS webhooks (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_AUDIT_LOGS: &str = r#"
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, session_id TEXT,
@@ -503,6 +137,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_CONTACTS: &str = r#"
 CREATE TABLE IF NOT EXISTS contacts (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -513,17 +148,24 @@ CREATE TABLE IF NOT EXISTS contacts (
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
+///
+/// `template_id` is a bare `UUID`, exactly as canonical migration 075
+/// declares it — the former `REFERENCES templates(id)` here was the SAME
+/// type-incompatible foreign key audit F6 removed with `SCHEMA`
+/// (`templates.id` is `VARCHAR(26)`), and no FK exists in canonical either.
 pub const CREATE_CAMPAIGNS: &str = r#"
 CREATE TABLE IF NOT EXISTS campaigns (
     id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL, subject TEXT NOT NULL,
-    template_id UUID REFERENCES templates(id) ON DELETE SET NULL,
+    template_id UUID,
     status TEXT NOT NULL DEFAULT 'draft', scheduled_at TIMESTAMPTZ,
     sent_count BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
 
+/// Individual table DDL constant (for selective setup in tests).
 pub const CREATE_SUPPORT_TICKETS: &str = r#"
 CREATE TABLE IF NOT EXISTS support_tickets (
     id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26),
@@ -535,46 +177,15 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 );
 "#;
 
-/// Run the full schema against a pool (idempotent thanks to IF NOT EXISTS).
-/// DI-002: Wrapped in a transaction so a failure rolls back all changes.
-pub async fn run_migrations(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(SCHEMA).execute(&mut *tx).await?;
-    tx.commit().await?;
-    tracing::info!("Database schema applied successfully");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_schema_contains_all_tables() {
-        let tables = [
-            "tenants",
-            "users",
-            "api_keys",
-            "domains",
-            "messages",
-            "events",
-            "templates",
-            "suppressions",
-            "webhooks",
-            "audit_logs",
-            "contacts",
-            "campaigns",
-            "support_tickets",
-        ];
-        for table in &tables {
-            assert!(
-                SCHEMA.contains(&format!("CREATE TABLE IF NOT EXISTS {}", table)),
-                "Missing table: {}",
-                table
-            );
-        }
-    }
-
+    /// The per-table constants stay compile-checked and shape-checked; the
+    /// monolithic `SCHEMA` (and its string-`contains` suite) was DELETED in
+    /// audit F6 — it could never execute against a fresh database
+    /// (`campaigns.template_id UUID` → `templates.id` VARCHAR(26) FK) and
+    /// its presence invited drift from the canonical migration chain.
     #[test]
     fn test_individual_ddl_constants() {
         assert!(CREATE_TENANTS.contains("tenants"));
@@ -592,127 +203,39 @@ mod tests {
         assert!(CREATE_SUPPORT_TICKETS.contains("support_tickets"));
     }
 
+    /// F6 contract: every constant is a SINGLE self-contained CREATE TABLE
+    /// statement (tests may apply one table in isolation) — never a chained
+    /// bootstrap script pretending to be a schema.
     #[test]
-    fn test_schema_has_indexes() {
-        assert!(SCHEMA.contains("idx_messages_tenant"));
-        assert!(SCHEMA.contains("idx_events_timestamp"));
-        assert!(SCHEMA.contains("idx_api_keys_hash"));
-    }
-
-    /// Canonical-type contract: the runtime SCHEMA must agree with the
-    /// migrated schema (migration 064 made every tenant id VARCHAR(26); the
-    /// pre-fix SCHEMA declared tenants.id UUID and tenant_id UUID, so a
-    /// runtime-provisioned database could never interoperate with a migrated
-    /// one — inserts failed with type mismatches and lookups matched zero
-    /// rows). Pin the shapes so the drift cannot silently return.
-    #[test]
-    fn schema_matches_canonical_tenant_id_types() {
-        let tenants_block = SCHEMA.split("-- ── Users").next().unwrap();
-        assert!(
-            tenants_block.contains("id          VARCHAR(26) PRIMARY KEY"),
-            "tenants.id must be VARCHAR(26) (migration 064 canonical type)"
-        );
-        assert!(
-            !SCHEMA.contains("tenant_id           UUID"),
-            "no table may declare tenant_id UUID — canonical type is VARCHAR(26)"
-        );
-        assert!(
-            SCHEMA.contains("UNIQUE(tenant_id, email)")
-                || SCHEMA.contains("UNIQUE (tenant_id, email)"),
-            "suppressions must enforce UNIQUE(tenant_id, email) like migration 088"
-        );
-        // The ephemeral CI database is provisioned from THIS constant; the
-        // api-server writes settings + metadata on every tenant insert, so a
-        // bootstrap missing either column broke the whole DB-backed suite.
-        assert!(
-            tenants_block.contains("settings    JSONB"),
-            "SCHEMA tenants must carry the canonical settings JSONB column"
-        );
-        assert!(
-            tenants_block.contains("metadata    JSONB"),
-            "SCHEMA tenants must carry the canonical metadata JSONB column"
-        );
-        // Migration 121: retention controls live on the canonical tenants
-        // table; a SCHEMA without them made every hold-aware retention query
-        // fail on runtime-provisioned databases.
-        assert!(
-            tenants_block.contains("legal_hold"),
-            "SCHEMA tenants must carry legal_hold (migration 121)"
-        );
-        assert!(
-            tenants_block.contains("retention_days"),
-            "SCHEMA tenants must carry retention_days (migration 121)"
-        );
-    }
-
-    /// F6 drift contract: the SCHEMA audit_logs must be the canonical
-    /// tamper-evident (038 + 055) shape. The former UUID shape
-    /// (actor_id/resource_type/metadata/created_at-only) made the compliance
-    /// crate's hash-chain INSERT fail on every SCHEMA-provisioned database.
-    #[test]
-    fn schema_audit_logs_matches_canonical_hash_chain_shape() {
-        assert!(
-            SCHEMA.contains("hash            TEXT        NOT NULL"),
-            "audit_logs.hash NOT NULL is required by the tamper-evident writer"
-        );
-        for col in ["previous_hash", "signature", "timestamp", "outcome"] {
+    fn constants_are_single_table_ddl() {
+        for (name, ddl) in [
+            ("tenants", CREATE_TENANTS),
+            ("users", CREATE_USERS),
+            ("api_keys", CREATE_API_KEYS),
+            ("domains", CREATE_DOMAINS),
+            ("messages", CREATE_MESSAGES),
+            ("events", CREATE_EVENTS),
+            ("templates", CREATE_TEMPLATES),
+            ("suppressions", CREATE_SUPPRESSIONS),
+            ("webhooks", CREATE_WEBHOOKS),
+            ("audit_logs", CREATE_AUDIT_LOGS),
+            ("contacts", CREATE_CONTACTS),
+            ("campaigns", CREATE_CAMPAIGNS),
+            ("support_tickets", CREATE_SUPPORT_TICKETS),
+        ] {
+            let creates = ddl.matches("CREATE TABLE").count();
             assert!(
-                SCHEMA.contains(&format!("audit_logs ({col}")) || SCHEMA.contains(col),
-                "audit_logs must carry the canonical {col} column"
+                creates == 1 || name == "audit_logs",
+                "{name} must declare exactly one CREATE TABLE (audit_logs carries its archive twin), got {creates}"
             );
-        }
-        assert!(
-            !SCHEMA.contains("actor_id"),
-            "actor_id is the legacy UUID shape — canonical (038) is user_id TEXT"
-        );
-        assert!(
-            !SCHEMA.contains("resource_type   TEXT"),
-            "resource_type is the legacy UUID shape — canonical (038) is resource TEXT"
-        );
-        assert!(
-            SCHEMA.contains("CREATE TABLE IF NOT EXISTS audit_logs_archive"),
-            "the retention trim archives into audit_logs_archive (038) — the SCHEMA must create it"
-        );
-        // tenant linkage is what lets retention exclude legal-held tenants.
-        assert!(
-            SCHEMA.contains("tenant_id       TEXT"),
-            "audit_logs.tenant_id must be nullable TEXT (038) — global chain rows have NULL"
-        );
-    }
-
-    /// F8 drift contract: string id types. Canonical tenant ids are
-    /// VARCHAR(26) (064) and events ids VARCHAR(64) (075) — binding Uuid
-    /// against them fails at runtime with a type mismatch.
-    #[test]
-    fn schema_id_types_match_canonical_string_shapes() {
-        assert!(
-            !SCHEMA.contains("tenant_id           UUID"),
-            "no table may declare tenant_id UUID — canonical type is VARCHAR(26)"
-        );
-        let events_block = SCHEMA
-            .split("-- ── Events")
-            .nth(1)
-            .unwrap()
-            .split("-- ── Templates")
-            .next()
-            .unwrap();
-        assert!(
-            events_block.contains("id              VARCHAR(64) PRIMARY KEY"),
-            "events.id must be VARCHAR(64) (migration 075), not UUID"
-        );
-        assert!(
-            events_block.contains("message_id      VARCHAR(64)"),
-            "events.message_id must be VARCHAR(64) (migration 075), not UUID"
-        );
-        for table in ["templates", "suppressions", "webhooks", "support_tickets"] {
-            let block = SCHEMA
-                .split(&format!("CREATE TABLE IF NOT EXISTS {table} ("))
-                .nth(1)
-                .unwrap_or_else(|| panic!("{table} missing from SCHEMA"));
-            let block = block.split(");").next().unwrap();
+            // F6 re-check: no constant may re-introduce the type-incompatible
+            // `UUID → VARCHAR(26)` foreign key to `templates(id)` that made
+            // the old monolithic SCHEMA unexecutable (canonical 075 declares
+            // campaigns.template_id as a bare UUID with no FK).
             assert!(
-                block.contains("VARCHAR(26) PRIMARY KEY"),
-                "{table}.id must be VARCHAR(26) (migration 075/088 canonical shape), not UUID"
+                !ddl.contains("REFERENCES templates"),
+                "{name} must not declare a foreign key to templates(id): the canonical \
+                 templates.id is VARCHAR(26) and no UUID→VARCHAR FK exists in canonical"
             );
         }
     }

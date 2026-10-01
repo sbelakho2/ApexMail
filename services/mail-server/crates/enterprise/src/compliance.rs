@@ -7,6 +7,7 @@
 // sequential scans on large audit tables.
 
 use chrono::Utc;
+use sha2::Digest;
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -380,6 +381,9 @@ impl ComplianceService {
     }
 
     /// Get a data access request by ID (used for tenant ownership checks).
+    ///
+    /// Audit F3: the stored `access_token` is a SHA-256 digest — reads never
+    /// surface it (masked as a non-guessable grant reference).
     pub async fn get_data_access_request(
         &self,
         id: Uuid,
@@ -393,12 +397,28 @@ impl ComplianceService {
         .map_err(|e| format!("Get data access request: {e}"))?;
 
         match row {
-            Some(r) => Ok(ApiResult::ok(r.into())),
+            Some(r) => {
+                let mut request: DataAccessRequest = r.into();
+                if request.access_token.is_some() {
+                    request.access_token = Some(format!("ref:{id}"));
+                }
+                Ok(ApiResult::ok(request))
+            }
             None => Ok(ApiResult::err("Request not found", "NOT_FOUND")),
         }
     }
 
-    /// Approve a data access request
+    /// Approve a data access request.
+    ///
+    /// Audit F3 (three hardenings):
+    /// * the UPDATE carries `AND status = 'pending'` — a completed, expired
+    ///   or already-approved request can never be re-approved to refresh its
+    ///   token (previously any row could be flipped back to `approved`);
+    /// * the database stores ONLY a SHA-256 digest of the grant token (the
+    ///   SSO bearer-token model) — a DB read can no longer recover a usable
+    ///   grant;
+    /// * the raw token is returned ONCE, in this approval response, as the
+    ///   approver's handoff to the requester.
     pub async fn approve_data_access(
         &self,
         id: Uuid,
@@ -406,14 +426,17 @@ impl ComplianceService {
         duration_minutes: i32,
     ) -> Result<ApiResult<DataAccessRequest>, String> {
         let access_token = crate::sso::generate_random_token(48);
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(access_token.as_bytes());
+        let token_digest = hex::encode(hasher.finalize());
         let expires_at = Utc::now() + chrono::Duration::minutes(duration_minutes as i64);
 
         let row = sqlx::query_as::<_, DataAccessRequestRow>(
             "UPDATE ent_data_access_requests SET status = 'approved', approved_by = $2, approved_at = NOW(),
              access_token = $3, expires_at = $4, duration_minutes = $5
-             WHERE id = $1 RETURNING *"
+             WHERE id = $1 AND status = 'pending' RETURNING *"
         )
-        .bind(id).bind(approved_by).bind(&access_token).bind(expires_at).bind(duration_minutes)
+        .bind(id).bind(approved_by).bind(&token_digest).bind(expires_at).bind(duration_minutes)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| format!("Approve data access: {e}"))?;
@@ -421,9 +444,33 @@ impl ComplianceService {
         match row {
             Some(r) => {
                 info!(id = %id, "Data access request approved");
-                Ok(ApiResult::ok(r.into()))
+                // The raw token rides the ONE-TIME approval response; the
+                // row's digest never leaves the database.
+                let mut request: DataAccessRequest = r.into();
+                request.access_token = Some(access_token);
+                Ok(ApiResult::ok(request))
             }
-            None => Ok(ApiResult::err("Request not found", "NOT_FOUND")),
+            None => {
+                // An UNKNOWN id keeps its historical `NOT_FOUND` contract; a
+                // row that exists but is no longer `pending` (already
+                // approved / completed / expired) is the state error the
+                // `AND status = 'pending'` guard produces.
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM ent_data_access_requests WHERE id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&self.db)
+                .await
+                .map_err(|e| format!("Approve data access: {e}"))?;
+                if exists {
+                    Ok(ApiResult::err(
+                        "Request is not pending (already approved, or completed)",
+                        "INVALID_STATE",
+                    ))
+                } else {
+                    Ok(ApiResult::err("Request not found", "NOT_FOUND"))
+                }
+            }
         }
     }
 

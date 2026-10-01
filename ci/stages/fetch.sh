@@ -73,7 +73,13 @@ stage_main() {
             _last_good=$(sed -n 's/.*"sha":"\([^"]*\)".*/\1/p' "$RUNS_DIR/.last-good-sha" | head -n1)
             _last_config=$(sed -n 's/.*"pipelineConfigHash":"\([^"]*\)".*/\1/p' "$RUNS_DIR/.last-good-sha" | head -n1)
         }
-        _pipeline_hash=$(cat "$CI_ROOT/pipeline.conf" "$CI_ROOT"/stages/*.sh 2>/dev/null | sha256sum | cut -d' ' -f1)
+        # Audit SM14 F10: the hash is computed by ONE shared helper
+        # (ci/lib.sh ci_pipeline_config_hash) — the same file set the
+        # blessing writer hashed, widened beyond pipeline.conf+stages to
+        # lib.sh, the Woodpecker adapter layer, .woodpecker.yml and every
+        # tools/*.py gate checker — so a checker-policy change invalidates
+        # existing blessings exactly like a stage-script change does.
+        _pipeline_hash=$(ci_pipeline_config_hash)
         _dirty=0
         [ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1)" ] && _dirty=1
         if [ -n "$_last_config" ] && [ "$_last_config" = "$_pipeline_hash" ] \

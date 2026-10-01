@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -47,6 +48,14 @@ static INBOUND_RDNS_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
 /// M26: maximum time a TLS handshake may take before the connection is
 /// dropped and the per-IP connection slot released.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Audit finding 11: wall-clock bound for the PRE-ADMISSION refusal write
+/// (the `421 Too many connections` line). Small writes normally fit the
+/// socket buffer instantly, but a peer that connects, trips the per-IP cap,
+/// and never reads must not pin the refusal task on an unbounded
+/// `writable().await` loop — the connection is refused either way, so a
+/// slow/stalled receiver just gets the socket closed.
+const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// RCPT-time mailbox resolution failure replies. The decision rule is pure
 /// ([`rcpt_resolution_reply`]) so the 550/451/accept matrix is unit-testable:
@@ -237,6 +246,132 @@ fn rcpt_resolution_reply(
 }
 
 /// Inbound SMTP server.
+// ── SM10 F4: data-plane STONITH fence gate ─────────────────────────────
+//
+// The HA failover coordinator places `ha:fenced:{node_id}` keys in Redis;
+// until now only the HA service's own HTTP routes consulted them, so a
+// fenced node kept ACCEPTING mail. This gate closes that window on the
+// inbound path: the MAIL command refuses with 421 while the node's fence
+// key stands — or while the fence authority cannot be read (fail closed:
+// a node that cannot prove it is not fenced must not accept writes).
+//
+// Environment contract (identical to the worker's `fence` module):
+// `APEXMAIL_HA_FENCING` = `true`/`1` enables enforcement (default OFF —
+// a disabled gate is a pass-through with no Redis traffic), `NODE_ID` is
+// the fence identity (default `node-{pid}`), `REDIS_URL` the authority.
+// The key layout is owned by `ha::fence`; this module only wraps it.
+
+/// A fence authority that is permanently unreadable: the construction path
+/// for "fencing explicitly enabled but the authority URL is missing or
+/// invalid" — the operator opted in, so every check fails closed.
+#[derive(Debug, Default, Clone, Copy)]
+struct UnreadableFenceStore;
+
+impl ha::fence::FenceStore for UnreadableFenceStore {
+    fn is_fenced<'a>(
+        &'a self,
+        _node: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async {
+            Err("fence authority unavailable: no usable REDIS_URL at startup".to_string())
+        })
+    }
+}
+
+/// `Arc<dyn FenceStore>` does not implement the foreign trait itself; this
+/// local wrapper gives the gate a single concrete store type while keeping
+/// tests able to inject mocks through the [`ha::fence::FenceStore`] seam.
+struct SharedFenceStore(Arc<dyn ha::fence::FenceStore>);
+
+impl std::fmt::Debug for SharedFenceStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SharedFenceStore").finish_non_exhaustive()
+    }
+}
+
+impl ha::fence::FenceStore for SharedFenceStore {
+    fn is_fenced<'a>(
+        &'a self,
+        node: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        self.0.is_fenced(node)
+    }
+}
+
+#[derive(Default)]
+struct FenceGate {
+    checker: Option<ha::fence::FenceChecker<SharedFenceStore>>,
+}
+
+impl FenceGate {
+    fn disabled() -> Self {
+        Self { checker: None }
+    }
+
+    /// Build the gate from the process environment (see the module doc).
+    fn from_env() -> Self {
+        let enabled = matches!(
+            std::env::var("APEXMAIL_HA_FENCING").as_deref(),
+            Ok("true") | Ok("1")
+        );
+        if !enabled {
+            return Self::disabled();
+        }
+        let node_id =
+            std::env::var("NODE_ID").unwrap_or_else(|_| format!("node-{}", std::process::id()));
+        match std::env::var("REDIS_URL") {
+            Ok(url) if !url.trim().is_empty() => match ha::fence::RedisFenceStore::from_url(&url) {
+                Ok(store) => {
+                    info!(
+                        node_id = %node_id,
+                        "inbound fence enforcement ENABLED (APEXMAIL_HA_FENCING)"
+                    );
+                    Self {
+                        checker: Some(ha::fence::FenceChecker::new(
+                            SharedFenceStore(Arc::new(store)),
+                            node_id,
+                        )),
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        node_id = %node_id,
+                        error = %error,
+                        "APEXMAIL_HA_FENCING is set but REDIS_URL is invalid; refusing                          every MAIL command (fail closed) until fixed"
+                    );
+                    Self {
+                        checker: Some(ha::fence::FenceChecker::new(
+                            SharedFenceStore(Arc::new(UnreadableFenceStore)),
+                            node_id,
+                        )),
+                    }
+                }
+            },
+            _ => {
+                warn!(
+                    node_id = %node_id,
+                    "APEXMAIL_HA_FENCING is set but REDIS_URL is missing; refusing                      every MAIL command (fail closed) until fixed"
+                );
+                Self {
+                    checker: Some(ha::fence::FenceChecker::new(
+                        SharedFenceStore(Arc::new(UnreadableFenceStore)),
+                        node_id,
+                    )),
+                }
+            }
+        }
+    }
+
+    /// `Ok(())` = accept mail (including "fencing disabled"). Anything else
+    /// refuses.
+    async fn ensure_can_accept(&self) -> Result<(), ha::fence::FenceError> {
+        match &self.checker {
+            None => Ok(()),
+            Some(checker) => checker.ensure_not_fenced().await,
+        }
+    }
+}
+
 pub struct InboundServer {
     config: InboundConfig,
     rate_limit_config: RateLimitConfig,
@@ -277,6 +412,9 @@ pub struct InboundServer {
     /// tracking at session admission + signature/protocol-anomaly scan of the
     /// DATA payload. `None` when `MTA_IDS_ENABLED` is unset/false.
     ids: Option<super::content_security::IdsRuntime>,
+    /// SM10 F4: data-plane STONITH gate for the MAIL command (see the
+    /// `FenceGate` docs above).
+    fence_gate: FenceGate,
 }
 
 impl InboundServer {
@@ -315,6 +453,7 @@ impl InboundServer {
             spam_analyzer: Arc::new(super::content_security::NullSpamAnalyzer),
             sandbox_engine: sandbox::engine::SandboxEngine::new(),
             ids: None,
+            fence_gate: FenceGate::from_env(),
         };
 
         // Inbound content security. The spam analyzer is installed when
@@ -1271,6 +1410,18 @@ impl InboundServer {
                 "504 5.5.4 Unrecognized authentication type\r\n".into()
             }
         } else if verb == "MAIL" {
+            // SM10 F4: data-plane STONITH. A fenced node — or one that
+            // cannot prove it is not fenced (the check fails closed) — must
+            // not accept new mail transactions: 421 sends the peer to
+            // another exchanger. Gate disabled (default): no Redis traffic.
+            if let Err(refusal) = self.fence_gate.ensure_can_accept().await {
+                warn!(
+                    client_ip = %ctx.client_ip,
+                    error = %refusal,
+                    "node is fenced; refusing MAIL (SM10 F4)"
+                );
+                return "421 4.3.2 node is fenced, try another mail exchanger\r\n".into();
+            }
             if !ctx.helo_seen {
                 return "503 5.5.1 Error: send HELO/EHLO first\r\n".into();
             }
@@ -1488,7 +1639,12 @@ impl InboundServer {
         //    verdict is recorded as a stored header; a Drop/Reject verdict
         //    refuses the message ONLY under MTA_IDS_REFUSE=true.
         let ids_scan = self.ids.as_ref().map(|runtime| {
-            super::content_security::ids_inspect_payload(runtime, ctx.client_ip, self.config.port, raw)
+            super::content_security::ids_inspect_payload(
+                runtime,
+                ctx.client_ip,
+                self.config.port,
+                raw,
+            )
         });
         if ids_scan.as_ref().is_some_and(|scan| scan.refuse) {
             metric_message("inbound", "ids_rejected");
@@ -1522,7 +1678,9 @@ impl InboundServer {
             self.spam_analyzer.as_ref(),
             &self.config.spam_filter,
             raw,
-            Some(&super::content_security::auth_results_summary(&auth_results)),
+            Some(&super::content_security::auth_results_summary(
+                &auth_results,
+            )),
             tenant_id.as_deref(),
         );
         if let super::content_security::SpamScanOutcome::Reject { reason } = &spam_outcome {
@@ -2099,7 +2257,10 @@ fn build_stored_message(
         received.len()
             + auth_results_header.len()
             + arc_headers.map_or(0, str::len)
-            + verdict_headers.iter().map(|header| header.len() + 2).sum::<usize>()
+            + verdict_headers
+                .iter()
+                .map(|header| header.len() + 2)
+                .sum::<usize>()
             + raw.len()
             + 8,
     );
@@ -2235,18 +2396,43 @@ fn should_advertise_starttls(
 }
 
 /// #138:Write all bytes to a raw TcpStream, handling partial writes.
+///
+/// Audit finding 11: the whole write is bounded by
+/// [`REFUSAL_WRITE_TIMEOUT`] — the loop below used to await
+/// `writable()` indefinitely, so a peer that tripped the per-IP connection
+/// cap and then never read could pin the refusal task forever. The refusal
+/// is best-effort: timing out simply closes the socket.
 async fn write_line_tcp(socket: &TcpStream, data: &str) -> std::io::Result<()> {
+    write_line_tcp_bounded(socket, data, REFUSAL_WRITE_TIMEOUT).await
+}
+
+/// The bounded core of [`write_line_tcp`] (parameterised so tests can drive
+/// the stall path without waiting out the production timeout).
+async fn write_line_tcp_bounded(
+    socket: &TcpStream,
+    data: &str,
+    bound: Duration,
+) -> std::io::Result<()> {
     let bytes = data.as_bytes();
-    let mut written = 0;
-    while written < bytes.len() {
-        socket.writable().await?;
-        match socket.try_write(&bytes[written..]) {
-            Ok(n) => written += n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
+    tokio::time::timeout(bound, async {
+        let mut written = 0;
+        while written < bytes.len() {
+            socket.writable().await?;
+            match socket.try_write(&bytes[written..]) {
+                Ok(n) => written += n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "pre-admission refusal write timed out; peer stalled",
+        )
+    })?
 }
 
 async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
@@ -3681,7 +3867,10 @@ mod tests {
         // No bare LF anywhere.
         for (index, byte) in stored.iter().enumerate() {
             if *byte == b'\n' {
-                assert!(index > 0 && stored[index - 1] == b'\r', "bare LF at {index}");
+                assert!(
+                    index > 0 && stored[index - 1] == b'\r',
+                    "bare LF at {index}"
+                );
             }
         }
     }
@@ -4456,6 +4645,46 @@ aY14LL/8JRUqaRQCYpFscgEyKD9ywto34vu1jzTWSB2IN/Hi8Wuc
         }
         assert_eq!(received, b"220 inbound.test ESMTP\r\n");
     }
+
+    /// Audit finding 11 regression: the pre-admission refusal write used to
+    /// loop on `writable().await` unbounded, so a peer that trips the per-IP
+    /// connection cap and never reads pinned the refusal task forever. The
+    /// write is now time-bounded: against a stalled receiver (a full socket
+    /// buffer nobody drains) it must fail with TimedOut well before the
+    /// production bound, while a normal write still completes.
+    #[tokio::test]
+    async fn refusal_write_to_a_stalled_peer_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The peer accepts but NEVER reads: the server-side send buffer
+        // fills and every further write stalls.
+        let accept = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            socket
+        });
+        // The client must connect BEFORE awaiting the accept: the kernel
+        // completes the handshake into the listen backlog, so the accept
+        // below finds a queued connection. (Awaiting the accept first
+        // deadlocks on #[tokio::test]'s current-thread runtime: nothing
+        // ever connects, and the park has no timer to wake it.)
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let server_socket = accept.await.unwrap();
+
+        // Far larger than any loopback send/receive buffer default, so the
+        // first writes fill the buffers and the rest must block.
+        let flood = "x".repeat(64 * 1024 * 1024);
+        let started = std::time::Instant::now();
+        let result =
+            write_line_tcp_bounded(&server_socket, &flood, Duration::from_millis(250)).await;
+        let elapsed = started.elapsed();
+
+        let error = result.expect_err("a stalled receiver must time the write out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the bounded write must return promptly, not after the full flood, took {elapsed:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4665,6 +4894,121 @@ mod adversarial_session_tests {
         assert!(!transcript.contains("STARTTLS"), "{transcript:?}");
     }
 
+    // ── SM10 F4: data-plane STONITH on the MAIL command ───────────────────
+
+    /// In-memory fence authority for the gate tests: missing node = not
+    /// fenced, `Ok(true)` = fenced, `Err` = unreadable (fail closed).
+    #[derive(Clone)]
+    struct FenceMock {
+        verdict: std::sync::Arc<std::sync::Mutex<Result<bool, String>>>,
+    }
+
+    impl ha::fence::FenceStore for FenceMock {
+        fn is_fenced<'a>(
+            &'a self,
+            _node: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+            Box::pin(async { self.verdict.lock().unwrap().clone() })
+        }
+    }
+
+    impl FenceMock {
+        fn not_fenced() -> Self {
+            Self {
+                verdict: std::sync::Arc::new(std::sync::Mutex::new(Ok(false))),
+            }
+        }
+        fn fenced() -> Self {
+            Self {
+                verdict: std::sync::Arc::new(std::sync::Mutex::new(Ok(true))),
+            }
+        }
+        fn unreadable() -> Self {
+            Self {
+                verdict: std::sync::Arc::new(std::sync::Mutex::new(Err(
+                    "mock authority offline".to_string()
+                ))),
+            }
+        }
+    }
+
+    fn gate_over(store: impl ha::fence::FenceStore + 'static, node: &str) -> FenceGate {
+        FenceGate {
+            checker: Some(ha::fence::FenceChecker::new(
+                SharedFenceStore(Arc::new(store)),
+                node,
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn fence_gate_semantics_mock_seam() {
+        // Disabled: always accepts, no authority consulted.
+        assert!(FenceGate::disabled().ensure_can_accept().await.is_ok());
+        // Not fenced: accepts.
+        assert!(gate_over(FenceMock::not_fenced(), "n1")
+            .ensure_can_accept()
+            .await
+            .is_ok());
+        // Fenced: refuses.
+        assert_eq!(
+            gate_over(FenceMock::fenced(), "n1")
+                .ensure_can_accept()
+                .await,
+            Err(ha::fence::FenceError::Fenced)
+        );
+        // Unreadable: fails CLOSED.
+        assert!(matches!(
+            gate_over(FenceMock::unreadable(), "n1")
+                .ensure_can_accept()
+                .await,
+            Err(ha::fence::FenceError::Unreadable(_))
+        ));
+    }
+
+    /// THE F4 regression: a fenced node must answer MAIL with 421 (and a
+    /// gate-disabled node must keep the normal session flow).
+    #[tokio::test]
+    async fn a_fenced_node_refuses_mail_with_421() {
+        // Gate disabled (the deployment default): no 421 refusal.
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO mail.example.test", "250"),
+                ("MAIL FROM:<sender@example.com>", ""),
+            ],
+        )
+        .await;
+        assert!(
+            !transcript.contains("421 4.3.2"),
+            "a gate-disabled node must not refuse MAIL: {transcript}"
+        );
+
+        // Gate enabled + fenced: MAIL gets 421 before any transaction state.
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let mut server = match Arc::try_unwrap(server) {
+            Ok(server) => server,
+            Err(_) => panic!("the test server must be uniquely owned at this point"),
+        };
+        server.fence_gate = gate_over(FenceMock::fenced(), "test-node");
+        let server = Arc::new(server);
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO mail.example.test", "250"),
+                ("MAIL FROM:<sender@example.com>", ""),
+            ],
+        )
+        .await;
+        assert!(
+            transcript.contains("421 4.3.2"),
+            "a fenced node must refuse MAIL with 421: {transcript}"
+        );
+    }
+
     #[tokio::test]
     async fn malformed_commands_and_unknown_verbs() {
         let server = session_server(lazy_pool(), 1024 * 1024).await;
@@ -4845,10 +5189,10 @@ mod content_security_session_tests {
     //! soft-skips without TEST_DATABASE_URL exactly like the other session
     //! tests.
 
-    use super::*;
     use super::adversarial_session_tests::{
         peer, read_smtp_response, unroutable_redis_pool, AcceptAllDirectory,
     };
+    use super::*;
     use crate::config::{AttachmentScanAction, SpamFilterConfig};
     use base64::Engine as _;
     use sqlx::PgPool;
@@ -5054,7 +5398,10 @@ mod content_security_session_tests {
         let text = String::from_utf8_lossy(&stored[0]);
         // The stored message carries exactly the pre-integration preamble:
         // trace header + Authentication-Results, then the client bytes.
-        assert!(text.starts_with("Received: from invalid.invalid"), "{text:?}");
+        assert!(
+            text.starts_with("Received: from invalid.invalid"),
+            "{text:?}"
+        );
         assert!(text.contains("Authentication-Results:"), "{text:?}");
         for security_header in [
             "X-Spam-Score:",
@@ -5063,7 +5410,10 @@ mod content_security_session_tests {
             "X-Apex-Attachment-Note:",
             "X-Apex-Ids-Verdict:",
         ] {
-            assert!(!text.contains(security_header), "{security_header} leaked: {text:?}");
+            assert!(
+                !text.contains(security_header),
+                "{security_header} leaked: {text:?}"
+            );
         }
         assert!(text.ends_with("hello\r\n"), "{text:?}");
     }
@@ -5103,7 +5453,10 @@ mod content_security_session_tests {
             b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n",
         )
         .await;
-        assert!(reply.starts_with("250"), "ham must pass an enabled filter: {reply}");
+        assert!(
+            reply.starts_with("250"),
+            "ham must pass an enabled filter: {reply}"
+        );
 
         let stored = stored_messages(&pool).await;
         assert_eq!(stored.len(), 2);
@@ -5114,7 +5467,10 @@ mod content_security_session_tests {
             // Tag-only never stores a REJECT verdict at the default threshold.
             assert!(!text.contains("X-Spam-Verdict: REJECT"), "{text:?}");
             // The trace header still leads the stored message.
-            assert!(text.starts_with("Received: from invalid.invalid"), "{text:?}");
+            assert!(
+                text.starts_with("Received: from invalid.invalid"),
+                "{text:?}"
+            );
         }
     }
 
@@ -5144,7 +5500,11 @@ mod content_security_session_tests {
             reply.starts_with("550 5.7.1 Message rejected by spam filter"),
             "{reply}"
         );
-        assert_eq!(stored_count(&pool).await, 0, "refused mail must not persist");
+        assert_eq!(
+            stored_count(&pool).await,
+            0,
+            "refused mail must not persist"
+        );
         // (Ham acceptance under an ENABLED filter is covered by the tag test;
         // a 2.0 threshold on a cold-start model legitimately refuses every
         // message, so this configuration is only exercised against spam.)
@@ -5275,12 +5635,18 @@ mod content_security_session_tests {
             &body,
         )
         .await;
-        assert!(reply.starts_with("250"), "strip mode accepts the message: {reply}");
+        assert!(
+            reply.starts_with("250"),
+            "strip mode accepts the message: {reply}"
+        );
 
         let stored = stored_messages(&pool).await;
         assert_eq!(stored.len(), 1);
         let text = String::from_utf8_lossy(&stored[0]);
-        assert!(!text.contains("TVqQ"), "executable bytes must be gone: {text:?}");
+        assert!(
+            !text.contains("TVqQ"),
+            "executable bytes must be gone: {text:?}"
+        );
         assert!(
             text.contains("filename=\"REMOVED-payload.exe\""),
             "the neutral replacement part must be present: {text:?}"

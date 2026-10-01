@@ -27,7 +27,7 @@ use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
 use crate::middleware::{
-    auth, cp_auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning, waf,
+    auth, cp_auth, ddos, fence, idempotency, metrics, rate_limiter, request_logger, versioning, waf,
 };
 use crate::routes;
 use crate::state::AppState;
@@ -592,6 +592,14 @@ pub fn build_app(state: AppState) -> Router {
         // Bank statement ingestion — writes bank_statement_lines, the source
         // the compliance cron's sweep posts (compliance::ledger_sweep).
         .nest("/v1/admin/accounting", routes::bank_statements::router())
+        // SM3 (audit F3): the financially destructive billing-admin routes
+        // (wallet credits, plan overrides, forced subscription status,
+        // invoice creation) ride the SAME control-plane stack as
+        // /v1/admin/* — system-tenant gate + MFA'd CP session policy —
+        // instead of the plain authenticated router. The CP gate's
+        // machine-credential carve-out (system-tenant API keys, audited as
+        // `cp_machine_key`) keeps programmatic callers alive.
+        .nest("/v1/billing/admin", routes::billing::admin_router())
         // Zero-JS control-plane form routes (/web/admin/*) ride the SAME
         // system-tenant gate as the JSON admin surface: a customer session
         // (any non-system tenant) is rejected before the handler runs.
@@ -729,6 +737,11 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             versioning::api_versioning_middleware,
         ))
+        // SM10 F4: data-plane STONITH — with APEXMAIL_HA_FENCING=true a
+        // fenced node (or one that cannot prove otherwise) answers every
+        // mutating request with 503 before any route or auth work runs.
+        // Default off: the middleware is a pass-through with no Redis I/O.
+        .layer(axum::middleware::from_fn(fence::fence_middleware))
         .layer(overload_protection)
         // Prometheus request metrics — placed after the router so MatchedPath is
         // available from extensions, but before compression/timeout so the
@@ -1433,14 +1446,13 @@ async fn render_ui_response_with_state(
         // Fail closed (outage honesty, audit #16): a storage failure is not
         // evidence of system-tenant membership, so the browser is bounced to
         // login rather than admitted.
-        let system_tenant =
-            match routes::web::is_system_tenant(state, &auth_user.tenant_id).await {
-                Ok(system_tenant) => system_tenant,
-                Err(error) => {
-                    tracing::error!(error = %error, "control-plane gate: tenant lookup failed");
-                    false
-                }
-            };
+        let system_tenant = match routes::web::is_system_tenant(state, &auth_user.tenant_id).await {
+            Ok(system_tenant) => system_tenant,
+            Err(error) => {
+                tracing::error!(error = %error, "control-plane gate: tenant lookup failed");
+                false
+            }
+        };
         if !system_tenant {
             tracing::warn!(
                 tenant_id = %auth_user.tenant_id,

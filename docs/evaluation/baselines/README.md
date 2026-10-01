@@ -225,7 +225,7 @@ Any metric that degrades by more than **10%** compared to the active baseline tr
 
 ## Comparison Tool
 
-Use the [`scripts/compare-baseline.sh`](../../scripts/compare-baseline.sh) script to compare a test run against the current baseline:
+Use the [`scripts/compare-baseline.sh`](../../../scripts/compare-baseline.sh) script to compare a test run against the current baseline:
 
 ```bash
 # Compare results.json against the latest baseline

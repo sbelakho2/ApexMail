@@ -32,4 +32,3 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Cursor-based pagination support: `cursor:` keyword parameter added to `EmailsAPI#list`, `TemplatesAPI#list`, `SuppressionsAPI#list`, and `EventsAPI#list`.
-- `tag:` keyword parameter on `SuppressionsAPI#list` for filtering suppressions by tag.

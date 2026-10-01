@@ -9,6 +9,7 @@ competitor = "Amazon SES"
 competitor_slug = "amazon-ses"
 competitor_name = "Amazon SES"
 competitor_description = "Amazon Simple Email Service (SES) ist ein cloudbasierter E-Mail-Versanddienst auf AWS-Infrastruktur, abgerechnet als Pay-as-you-go-Kapazität."
+pricing_as_of = "2026-08-19"
 last_verified = "2026-07-29"
 methodology = "Öffentliche AWS-SES-Dokumentation unter docs.aws.amazon.com/ses, geprüft am Verifikationsdatum. Preise verglichen nach Pay-as-you-go für 100.000 E-Mails/Monat. Monatliche Abrechnung. ApexMail ist verwaltete Infrastruktur; SES ist rohe Kapazität. Funktionen, Limits und Preise können sich ändern."
 volume_assumption = "100.000 E-Mails/Monat"
@@ -35,16 +36,16 @@ comparison_sections = [
     { feature = "SMTP-Relay", apex = 'Ja — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Ja — email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup>', winner = "none" },
     { feature = "Idempotenzschlüssel", apex = 'Ja (alle Tarife) — Header <code>Idempotency-Key</code>', comp = 'Nicht nativ unterstützt — AWS empfiehlt Nachrichten-Deduplizierung auf Anwendungsebene<sup><a href="#src-ses3">3</a></sup>', winner = "apexmail" },
     { feature = "Nachrichten-Ereignisverfolgung", apex = 'Diagnose-Dashboard für die Zustellung jeder Nachricht mit 7-stufiger Zeitleiste', comp = 'CloudWatch-Metriken (send, bounce, complaint, delivery) + SNS-Benachrichtigungen für Ereignisse — Zusammenbau in Eigenleistung erforderlich<sup><a href="#src-ses4">4</a></sup>', winner = "apexmail" },
-    { feature = "Eingehende E-Mails", apex = 'Scale- und Enterprise-Tarife', comp = 'Ja — SES-Empfangsregeln mit S3-, Lambda-, SNS- und SQS-Aktionen<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
+    { feature = "Eingehende E-Mails", apex = 'Business- und Enterprise-Tarife', comp = 'Ja — SES-Empfangsregeln mit S3-, Lambda-, SNS- und SQS-Aktionen<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
     { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — verwaltet, Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Konten) — standardmäßig gemeinsamer IP-Pool<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale', comp = 'Ja — €22.95 (US$24.95)/Monat pro dedizierter IP; IP-Pool-Verwaltung verfügbar<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business', comp = 'Ja — €22.95 (US$24.95)/Monat pro dedizierter IP; IP-Pool-Verwaltung verfügbar<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Selbst verwaltet — der Kunde plant dedizierte Tenancy auf AWS mit SES als Dienstkomponente<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Systemimmanent — der Kunde betreibt im eigenen AWS-Konto; SES ist ein AWS-Dienst<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE-KONTROLLEN", rows = [
-    { feature = "SAML SSO", apex = 'Scale- und Enterprise-Tarife', comp = 'Über AWS IAM Identity Center — erfordert AWS-Organizations-Setup und IAM-Konfiguration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Business- und Enterprise-Tarife', comp = 'Über AWS IAM Identity Center — erfordert AWS-Organizations-Setup und IAM-Konfiguration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
     { feature = "Verwalteter Support", apex = 'Tarifspezifische Support-Konditionen', comp = 'AWS-Support-Pläne (Developer, Business, Enterprise) — getrennt von der SES-Nutzung zu erwerben<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
     { feature = "HIPAA-Verfügbarkeit", apex = 'Derzeit nicht angeboten', comp = 'Ja — AWS-BAA verfügbar; SES ist ein HIPAA-fähiger Dienst<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},
@@ -56,7 +57,7 @@ comparison_sections = [
   { title = "BEREICHE, IN DENEN AMAZON SES STÄRKER IST", rows = [
     { feature = "Reine Kosten pro E-Mail", apex = 'Siehe den aktuellen öffentlichen Katalog und Checkout für die anwendbaren Nutzungsbedingungen', comp = '€0.09 (US$0.10)/1.000 E-Mails — niedrigste Kosten pro Nachricht unter den großen Anbietern<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "AWS-Ökosystem-Integration", apex = 'Eigenständige Plattform mit API-Integration', comp = 'Tiefe Integration mit AWS-Diensten: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
-    { feature = "Maximales Sendevolumen", apex = 'Scale unterstützt bis zu 2 Millionen E-Mails/Monat; Enterprise-Konditionen sind vertraglich vereinbart', comp = 'Praktisch unbegrenzt — begrenzt durch Konto-Sendelimits, die mit der Reputation automatisch skalieren<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Maximales Sendevolumen", apex = 'Business unterstützt bis zu 2 Millionen E-Mails/Monat; Enterprise-Konditionen sind vertraglich vereinbart', comp = 'Praktisch unbegrenzt — begrenzt durch Konto-Sendelimits, die mit der Reputation automatisch skalieren<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Globale Regionen", apex = 'Deutschland &amp; Finnland (EWR-Fokus)', comp = '22+ AWS-Regionen weltweit, darunter USA, EU, APAC, Südamerika<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]

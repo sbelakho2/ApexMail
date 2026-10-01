@@ -29,8 +29,17 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 static IDENT_REGEX: LazyLock<Option<Regex>> =
     LazyLock::new(|| Regex::new(r"^[a-z_][a-z0-9_]{0,62}$").ok());
 
-/// Table references (`FROM x`, `JOIN s.t`, `UPDATE ONLY t`, `INTO "t"`) with
-/// flexible whitespace and optional schema qualification.
+/// Table references (`FROM x`, `JOIN s.t`, `UPDATE ONLY t`, `INTO "t"`) in
+/// the WHITESPACE form, with optional schema qualification and an optional
+/// alias candidate (`FROM emails e`, `JOIN contacts AS c`).
+///
+/// The alias candidate is deliberately unfiltered here — the Rust `regex`
+/// crate has no look-arounds, so a clause keyword directly after the table
+/// (`FROM emails WHERE …`) is captured as the candidate and rejected in
+/// Rust by [`is_alias_keyword`].
+///
+/// Audit SM5 F9: the alias is what lets the predicate requirement be
+/// enforced PER TABLE reference instead of once per query.
 static TABLE_REF_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
         r#"(?ix)
@@ -40,10 +49,83 @@ static TABLE_REF_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
             (?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)*  # optional bare schema qualification
             (?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)  # the table name itself
         )
+        (?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_$]*))?
         "#,
     )
     .ok()
 });
+
+/// Table references in the ZERO-WHITESPACE QUOTED form (audit SM5 F5):
+/// PostgreSQL accepts `SELECT * FROM"emails"` — the quote terminates the
+/// clause keyword — and the old `\s+`-only pattern never captured the
+/// table, so an unscoped tenanted query validated successfully. The
+/// capture is everything between the quotes across `"`schema`".`table`"`
+/// chains; the existing rsplit/trim post-processing normalizes it.
+static TABLE_REF_QUOTED_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        \b(?:from|join|update(?:\s+only)?|into)"
+        ((?:[^"]+"\s*\.\s*)*[^"]+)
+        "
+        "#,
+    )
+    .ok()
+});
+
+/// Clause keywords that terminate a table reference — an identifier
+/// captured right after the table is only an ALIAS when it is not one of
+/// these (checked in Rust; the regex crate has no look-arounds).
+fn is_alias_keyword(word: &str) -> bool {
+    const ALIAS_STOP_KEYWORDS: &[&str] = &[
+        "where",
+        "on",
+        "using",
+        "and",
+        "or",
+        "not",
+        "group",
+        "order",
+        "limit",
+        "offset",
+        "fetch",
+        "union",
+        "intersect",
+        "except",
+        "set",
+        "values",
+        "returning",
+        "when",
+        "then",
+        "else",
+        "end",
+        "inner",
+        "outer",
+        "left",
+        "right",
+        "full",
+        "cross",
+        "natural",
+        "window",
+        "for",
+        "select",
+        "from",
+        "join",
+        "as",
+        "into",
+        "update",
+        "delete",
+        "insert",
+        "only",
+        "with",
+        "asc",
+        "desc",
+        "is",
+        "null",
+        "in",
+        "exists",
+    ];
+    ALIAS_STOP_KEYWORDS.contains(&word.to_ascii_lowercase().as_str())
+}
 
 /// Parameterized tenant predicate:`workspace_id = $N`, `workspace_id = ?`,
 /// or a current_setting-based RLS binding.
@@ -58,61 +140,251 @@ static TENANT_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     .ok()
 });
 
+/// Alias/table-QUALIFIED tenant predicate:`e.workspace_id = $N` — the
+/// qualifier (capture 1) is used to enforce the predicate PER TABLE
+/// reference (audit SM5 F9): a query joining two tenanted tables must
+/// scope BOTH, not just any one of them.
+static QUALIFIED_TENANT_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)\b([A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*(?:workspace_id|organization_id)\s*=\s*(?:\$\d+|\?)"#,
+    )
+    .ok()
+});
+
+/// current_setting-based RLS binding (`current_setting('app.current_…')`):
+/// applies to the session, so it covers EVERY table reference. The strict
+/// `app.*` argument alternation stays: the stripper preserves the content
+/// of a literal that immediately follows `current_setting(` (and only
+/// that one), so this regex sees the genuine argument while predicates
+/// smuggled inside ordinary literals are blanked away (audit SM5 F9
+/// repair).
+static RLS_BINDING_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?ix)current_setting\s*\(\s*'app\.(?:current_workspace_id|current_org_id)'"#)
+        .ok()
+});
+
 /// Extract the (lowercased, unquoted) table names referenced by
 /// FROM/JOIN/UPDATE/INTO clauses, tolerating schema qualification
 /// (`public.emails`) and quoted identifiers (`"Emails"`).
+/// Test-only convenience over [`referenced_table_aliases`] (production
+/// enforcement needs the aliases for the per-table predicate rule).
+#[cfg(test)]
 fn referenced_tables(query: &str) -> Vec<String> {
+    referenced_table_aliases(query)
+        .into_iter()
+        .map(|(table, _alias)| table)
+        .collect()
+}
+
+/// Like [`referenced_tables`], but keeps each reference's optional alias
+/// (`FROM emails e` → `("emails", Some("e"))`, `INTO "Emails"` →
+/// (`"emails"`, None)) so the predicate requirement can be enforced per
+/// table reference (audit SM5 F9).
+/// Comma-continued FROM-list entries (audit follow-up found during SM5
+/// remediation): PostgreSQL accepts `SELECT * FROM a, b WHERE …`, and a
+/// plain FROM/JOIN-keyword scan only captures `a` — the tenanted-table
+/// guard never saw `b`, so an unscoped second reference validated
+/// successfully. This pattern matches ONE continuation anchored at the
+/// comma; [`referenced_table_aliases`] walks it iteratively after each
+/// primary FROM match while the text keeps offering `, table` items.
+/// Alias capture uses the same shape and the same
+/// [`is_alias_keyword`] filter as the primary pattern.
+static TABLE_REF_COMMA_CONT_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        \s*,\s*
+        (
+            (?:"[^"]+"\s*\.\s*)*            # optional quoted schema qualification
+            (?:[A-Za-z_][A-Za-z0-9_$]*\s*\.\s*)*  # optional bare schema qualification
+            (?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)  # the table name itself
+        )
+        (?:\s+(?:as\s+)?([A-Za-z_][A-Za-z0-9_$]*))?
+        "#,
+    )
+    .ok()
+});
+
+fn referenced_table_aliases(query: &str) -> Vec<(String, Option<String>)> {
     let mut tables = Vec::new();
-    let Some(re) = TABLE_REF_RE.as_ref() else {
-        return tables;
-    };
-    for caps in re.captures_iter(query) {
-        let Some(m) = caps.get(1) else { continue };
-        let reference = m.as_str();
-        // Take the last dot-separated segment, strip quoting, lowercase.
-        let table = reference
-            .rsplit('.')
-            .next()
-            .unwrap_or(reference)
-            .trim()
-            .trim_matches('"')
-            .trim_matches('"')
-            .to_lowercase();
-        if !table.is_empty() {
-            tables.push(table);
+
+    if let Some(re) = TABLE_REF_RE.as_ref() {
+        for caps in re.captures_iter(query) {
+            let Some(m) = caps.get(1) else { continue };
+            let reference = m.as_str();
+            // Take the last dot-separated segment, strip quoting, lowercase.
+            let table = reference
+                .rsplit('.')
+                .next()
+                .unwrap_or(reference)
+                .trim()
+                .trim_matches('"')
+                .trim_matches('"')
+                .to_lowercase();
+            // The regex crate has no look-arounds: a clause keyword
+            // captured as the alias candidate is filtered out here.
+            let alias = caps
+                .get(2)
+                .map(|a| a.as_str().to_string())
+                .filter(|a| !is_alias_keyword(a))
+                .map(|a| a.to_lowercase());
+            if !table.is_empty() {
+                tables.push((table, alias));
+            }
+
+            // Walk comma-continuations (`FROM a, b, c`) starting at the
+            // end of THIS primary match so every entry of the FROM list
+            // is extracted. The continuation regex is anchored by
+            // requiring the `\s*,\s*` prefix at the scan position; the
+            // loop stops at the first non-comma text (WHERE/JOIN/…).
+            if let Some(cont_re) = TABLE_REF_COMMA_CONT_RE.as_ref() {
+                let mut pos = caps.get(0).map(|c| c.end()).unwrap_or(0);
+                while let Some(cont) = cont_re.captures_at(query, pos) {
+                    let whole = cont.get(0).unwrap();
+                    if whole.start() != pos {
+                        break;
+                    }
+                    let Some(tm) = cont.get(1) else { break };
+                    let cont_table = tm
+                        .as_str()
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(tm.as_str())
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('"')
+                        .to_lowercase();
+                    let cont_alias = cont
+                        .get(2)
+                        .map(|a| a.as_str().to_string())
+                        .filter(|a| !is_alias_keyword(a))
+                        .map(|a| a.to_lowercase());
+                    if cont_table.is_empty() {
+                        break;
+                    }
+                    tables.push((cont_table, cont_alias));
+                    pos = whole.end();
+                }
+            }
         }
     }
+
+    if let Some(re) = TABLE_REF_QUOTED_RE.as_ref() {
+        for caps in re.captures_iter(query) {
+            let Some(m) = caps.get(1) else { continue };
+            let table = m
+                .as_str()
+                .rsplit('.')
+                .next()
+                .unwrap_or(m.as_str())
+                .trim()
+                .trim_matches('"')
+                .to_lowercase();
+            if !table.is_empty() {
+                tables.push((table, None));
+            }
+        }
+    }
+
     tables
 }
 
 /// Strip SQL comments (`-- … EOL` and `/* … */`) while respecting single-quote
-/// string literals, so a predicate hidden inside a comment cannot satisfy the
-/// tenant-predicate check and comment contents cannot be used for evasion.
+/// string literals AND dollar-quoted string literals, so a predicate hidden
+/// inside a comment cannot satisfy the tenant-predicate check and comment
+/// contents cannot be used for evasion.
+///
+/// Audit SM5 F5: dollar-quoting (`$$…$$`, `$tag$…$tag$`) previously fell
+/// outside the string tracker — a literal like `$q$'$q$` flipped the
+/// stripper into single-quote mode at the `'` and swallowed the subsequent
+/// REAL `FROM emails` clause (which PostgreSQL then executed live),
+/// bypassing the tenanted-table guard. Dollar-quoted spans are now
+/// consumed so their contents can neither hide nor masquerade as query
+/// structure.
+///
+/// Audit SM5 F9 repair: the stripped view BLANKS string-literal contents
+/// (delimiters kept, content replaced with spaces). A literal is inert
+/// text to PostgreSQL — it must never satisfy the tenant-predicate /
+/// qualified-predicate / RLS-binding scans, or an attacker rides an
+/// ordinary string comparison (`note = 'workspace_id=$1'`) past the guard
+/// with no real predicate at all. The ONE literal whose content is
+/// structural — the argument of a `current_setting(…)` RLS binding call —
+/// is preserved verbatim (see [`ends_with_current_setting_call`]).
 fn strip_sql_comments(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
     let bytes = query.as_bytes();
     let mut i = 0;
     let mut in_string = false;
+    // Is the CURRENT single-quoted literal the argument of a
+    // current_setting( call? Decided at the opening quote; if true the
+    // literal's content is emitted verbatim instead of blanked.
+    let mut preserve_literal = false;
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
             if c == b'\'' {
                 // '' is an escaped quote inside the literal
                 if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                    out.push_str("''");
+                    if preserve_literal {
+                        out.push_str("''");
+                    } else {
+                        out.push_str("  ");
+                    }
                     i += 2;
                     continue;
                 }
                 in_string = false;
             }
-            out.push(c as char);
+            if preserve_literal {
+                out.push(c as char);
+            } else {
+                // Blank literal content: a space per byte keeps the output
+                // aligned without carrying attacker-controlled text into
+                // any structure scan.
+                out.push(' ');
+            }
             i += 1;
             continue;
         }
         match c {
             b'\'' => {
                 in_string = true;
+                preserve_literal = ends_with_current_setting_call(&out);
                 out.push('\'');
+                i += 1;
+            }
+            b'$' => {
+                // Dollar-quoted string: $$…$$ or $tag$…$tag$. A `$` that
+                // does not open a valid dollar quote (e.g. the `$1`
+                // parameter placeholders used everywhere in this service)
+                // is copied through unchanged. Contents are always blanked
+                // (a dollar-quoted span is never a current_setting
+                // argument — that form is single-quoted).
+                if let Some(open_end) = dollar_tag_end(bytes, i) {
+                    let tag = &query[i..open_end];
+                    match query[open_end..].find(tag) {
+                        Some(rel) => {
+                            let end = open_end + rel + tag.len();
+                            out.push_str(tag);
+                            let content = &query[open_end..open_end + rel];
+                            for _ in content.chars() {
+                                out.push(' ');
+                            }
+                            out.push_str(tag);
+                            i = end;
+                        }
+                        None => {
+                            // Unterminated dollar quote: the query can never
+                            // execute (PostgreSQL rejects it), so stay
+                            // CONSERVATIVE and copy the rest verbatim — a
+                            // live clause after a malformed literal must
+                            // still be visible to the table/predicate scans.
+                            out.push_str(&query[i..]);
+                            i = bytes.len();
+                        }
+                    }
+                    continue;
+                }
+                out.push('$');
                 i += 1;
             }
             b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
@@ -145,6 +417,34 @@ fn strip_sql_comments(query: &str) -> String {
         }
     }
     out
+}
+
+/// True when the stripped output so far ends with a `current_setting(`
+/// call opening (optionally whitespace-separated, case-insensitive) —
+/// meaning the literal about to be scanned is that call's string ARGUMENT.
+/// The argument is structural (it names the RLS GUC the app sets), so the
+/// stripper preserves it verbatim while every other literal is blanked.
+fn ends_with_current_setting_call(out: &str) -> bool {
+    const OPEN: &str = "current_setting(";
+    let trimmed = out.trim_end();
+    trimmed.len() >= OPEN.len()
+        && trimmed[trimmed.len() - OPEN.len()..].eq_ignore_ascii_case(OPEN)
+}
+
+/// If a dollar-quote tag opens at `bytes[i] == b'$'`, return the byte
+/// index just past the opening tag (`$$` or `$tag$`), else `None`.
+/// Tags are `$` + zero or more identifier chars + `$`; `$1`-style
+/// parameter placeholders contain a digit and are NOT tags.
+fn dollar_tag_end(bytes: &[u8], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    while j < bytes.len() && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'_') {
+        j += 1;
+    }
+    if j < bytes.len() && bytes[j] == b'$' {
+        Some(j + 1)
+    } else {
+        None
+    }
 }
 
 fn utf8_char_len(bytes: &[u8], i: usize) -> usize {
@@ -415,27 +715,64 @@ impl DataIsolationService {
 
         // #292:stronger table + predicate checks for SELECT/UPDATE/DELETE with
         // JOIN/CTE-aware parsing. Table extraction tolerates schema
-        // qualification (`public.emails`), quoted identifiers, and arbitrary
-        // whitespace/newlines between the clause keyword and the table name.
+        // qualification (`public.emails`), quoted identifiers, zero
+        // whitespace before quoted identifiers (`FROM"emails"`, audit
+        // SM5 F5), and arbitrary whitespace/newlines between the clause
+        // keyword and the table name.
         let tenanted_tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
-        let referenced = referenced_tables(&stripped);
-        let touches_tenanted_table = referenced
+        let referenced = referenced_table_aliases(&stripped);
+        let tenanted_refs: Vec<&(String, Option<String>)> = referenced
             .iter()
-            .any(|t| tenanted_tables.contains(&t.as_str()));
+            .filter(|(t, _)| tenanted_tables.contains(&t.as_str()))
+            .collect();
 
-        if touches_tenanted_table {
-            let has_workspace_predicate = TENANT_PREDICATE_RE
+        if !tenanted_refs.is_empty() {
+            // Audit SM5 F9: the predicate requirement is PER TABLE
+            // REFERENCE. A single global `workspace_id = $N` used to
+            // satisfy the check even when a query joined two tenanted
+            // tables and only ONE of them carried the predicate — the
+            // other stayed unscoped and could leak cross-workspace rows.
+            // Every tenanted reference now needs its own coverage:
+            // - an alias-qualified predicate (`e.workspace_id = $1`),
+            // - the session-wide RLS binding (`current_setting(…)`), or
+            // - when the query touches exactly ONE tenanted reference, a
+            //   bare predicate (the ordinary single-table shape, where an
+            //   unqualified `workspace_id` is unambiguous).
+            let rls_binding = RLS_BINDING_PREDICATE_RE
+                .as_ref()
+                .map(|re| re.is_match(&stripped))
+                .unwrap_or(false);
+            let qualified_qualifiers: std::collections::HashSet<String> =
+                QUALIFIED_TENANT_PREDICATE_RE
+                    .as_ref()
+                    .map(|re| {
+                        re.captures_iter(&stripped)
+                            .filter_map(|caps| caps.get(1))
+                            .map(|q| q.as_str().to_lowercase())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            let any_predicate = TENANT_PREDICATE_RE
                 .as_ref()
                 .map(|re| re.is_match(&stripped))
                 .unwrap_or(false);
 
-            if !has_workspace_predicate {
-                warn!(
-                    user_id = ctx.user_id,
-                    workspace_id = ctx.workspace_id,
-                    "Blocked query touching tenanted tables without required parameterized workspace/organization predicate"
-                );
-                return false;
+            for (table, alias) in &tenanted_refs {
+                let effective_alias = alias.clone().unwrap_or_else(|| table.clone());
+                let covered = rls_binding
+                    || qualified_qualifiers.contains(&effective_alias)
+                    || (tenanted_refs.len() == 1 && any_predicate);
+
+                if !covered {
+                    warn!(
+                        user_id = ctx.user_id,
+                        workspace_id = ctx.workspace_id,
+                        table = %table,
+                        alias = %effective_alias,
+                        "Blocked query: tenanted table reference without its own parameterized workspace/organization predicate"
+                    );
+                    return false;
+                }
             }
         }
 
@@ -1178,10 +1515,152 @@ mod tests {
             "SELECT * FROM contacts c JOIN emails e ON c.id = e.contact_id WHERE c.id = $1",
             &ctx
         ));
-        assert!(svc.validate_query_access(
-            "SELECT * FROM contacts c JOIN emails e ON c.id = e.contact_id WHERE e.workspace_id = $1",
+    }
+
+    // ── Audit SM5 F9:the predicate requirement is PER TABLE ──────────
+
+    #[test]
+    fn test_join_with_one_scoped_table_is_blocked() {
+        // THE finding vector: only `contacts` carries the predicate while
+        // `emails` is joined unscoped — cross-workspace email rows leak
+        // through the join if the join key does not encode tenancy.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id WHERE c.workspace_id = $1",
+                &ctx
+            ),
+            "a join with only ONE tenanted table scoped must be blocked"
+        );
+        // Symmetric case: only emails scoped, contacts unscoped.
+        assert!(!svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id WHERE e.workspace_id = $1",
             &ctx
         ));
+    }
+
+    #[test]
+    fn test_join_with_every_table_scoped_is_allowed() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+             WHERE c.workspace_id = $1 AND e.workspace_id = $2",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_single_table_bare_predicate_still_allowed() {
+        // The unqualified single-table shape is unambiguous and stays legal.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(svc.validate_query_access(
+            "SELECT * FROM emails WHERE workspace_id = $1 ORDER BY created_at DESC",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_rls_binding_covers_joined_tables() {
+        // A session-wide current_setting RLS binding scopes every reference.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+             WHERE current_setting('app.current_workspace_id') IS NOT NULL",
+            &ctx
+        ));
+    }
+
+    // ── Audit SM5 F5:zero-whitespace table refs + dollar-quote desync ─
+
+    #[test]
+    fn test_zero_whitespace_quoted_table_ref_is_detected() {
+        // `FROM"emails"` is valid PostgreSQL — the quote terminates the
+        // keyword. The old `\s+`-only pattern never captured the table, so
+        // an UNSCOPED tenanted query validated successfully.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(
+            !svc.validate_query_access("SELECT * FROM\"emails\" WHERE subject LIKE '%x%'", &ctx),
+            "zero-whitespace quoted tenanted table must be detected and blocked without a predicate"
+        );
+        // …and with the predicate it validates as usual.
+        assert!(svc.validate_query_access("SELECT * FROM\"emails\" WHERE workspace_id = $1", &ctx));
+    }
+
+    #[test]
+    fn test_dollar_quote_does_not_desync_the_comment_stripper() {
+        // `$q$'$q$` is a COMPLETE dollar-quoted literal containing a quote.
+        // The old stripper flipped into single-quote mode at the `'` and
+        // swallowed the subsequent REAL `FROM emails`, validating the
+        // unscoped query. The stripper must now consume the dollar quote
+        // and leave the live clause visible to the guard.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(
+            !svc.validate_query_access(
+                "SELECT '$q$'$q$ || id FROM emails WHERE subject LIKE '%x%'",
+                &ctx
+            ),
+            "a dollar-quoted literal must not hide the live FROM clause"
+        );
+        // The stripper output: the FROM survives; literal contents are
+        // blanked (F9 repair) — only delimiters/tags remain.
+        let stripped = strip_sql_comments("SELECT '$q$'$q$ FROM emails");
+        assert!(stripped.contains("FROM emails"), "got: {stripped}");
+        assert!(!stripped.contains("'$q$'"), "content must be blanked: {stripped}");
+    }
+
+    #[test]
+    fn test_dollar_quote_contents_are_blanked_not_preserved() {
+        // Comment markers inside a dollar-quoted literal are literal
+        // content — they must be BLANKED so a predicate hidden inside them
+        // cannot satisfy the guard, while a real predicate after the
+        // literal survives.
+        let stripped =
+            strip_sql_comments("SELECT $$-- workspace_id = $1$$ FROM t WHERE workspace_id = $2");
+        assert!(
+            stripped.contains("workspace_id = $2"),
+            "the live predicate must survive: {stripped}"
+        );
+        assert!(
+            !stripped.contains("--") && !stripped.contains("workspace_id = $1"),
+            "dollar-quoted content must be blanked: {stripped}"
+        );
+    }
+
+    #[test]
+    fn test_parameter_placeholders_are_not_dollar_quotes() {
+        // `$1`-style placeholders must pass through the stripper untouched.
+        let stripped = strip_sql_comments("SELECT * FROM t WHERE a = $1 AND b = $2");
+        assert_eq!(stripped, "SELECT * FROM t WHERE a = $1 AND b = $2");
+    }
+
+    #[test]
+    fn test_referenced_table_aliases_extracted() {
+        let refs = referenced_table_aliases(
+            "SELECT * FROM\npublic.\"Emails\" e JOIN contacts AS c ON true",
+        );
+        assert!(
+            refs.contains(&("emails".to_string(), Some("e".to_string()))),
+            "got: {refs:?}"
+        );
+        assert!(
+            refs.contains(&("contacts".to_string(), Some("c".to_string()))),
+            "got: {refs:?}"
+        );
+        // An alias captured directly after the table is kept verbatim.
+        let refs = referenced_table_aliases("SELECT * FROM templates t WHERE t.id = $1");
+        assert!(
+            refs.contains(&("templates".to_string(), Some("t".to_string()))),
+            "got: {refs:?}"
+        );
+        // A clause keyword directly after the table is not an alias.
+        let refs = referenced_table_aliases("SELECT * FROM emails WHERE workspace_id = $1");
+        assert_eq!(refs, vec![("emails".to_string(), None)], "got: {refs:?}");
     }
 
     #[test]
@@ -1200,12 +1679,99 @@ mod tests {
 
     #[test]
     fn test_strip_sql_comments_preserves_strings() {
-        // `--` inside a string literal is not a comment.
+        // `--` inside a string literal is not a comment: the clause AFTER
+        // the literal must survive (had `--` opened a comment, `FROM t`
+        // would have been swallowed).
         let stripped = strip_sql_comments("SELECT 'a--b' FROM t");
-        assert!(stripped.contains("'a--b'"), "got: {}", stripped);
+        assert!(stripped.contains("FROM t"), "got: {}", stripped);
+        // F9 repair: literal CONTENT is blanked, so a predicate inside a
+        // literal cannot satisfy the guard.
+        assert!(!stripped.contains("a--b"), "got: {}", stripped);
         // Block comment removed.
         let stripped = strip_sql_comments("SELECT 1 /* hidden workspace_id = $1 */ FROM t");
         assert!(!stripped.contains("workspace_id"), "got: {}", stripped);
+    }
+
+    // ── Audit SM5 F9 repair: literals cannot satisfy predicate scans ──
+
+    #[test]
+    fn test_literal_contents_cannot_satisfy_workspace_predicate() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // The ONLY "predicate" lives inside a dead string literal. The
+        // old scans matched it and validated an unscoped query.
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM emails WHERE note = 'workspace_id=$1'",
+                &ctx
+            ),
+            "a predicate smuggled inside a literal must not satisfy the guard"
+        );
+        // The same shape for the RLS binding form.
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM emails WHERE note = 'current_setting(''app.current_workspace_id'')'",
+                &ctx
+            ),
+            "an RLS binding smuggled inside a literal must not satisfy the guard"
+        );
+        // …and the genuine predicate next to a literal still validates.
+        assert!(svc.validate_query_access(
+            "SELECT * FROM emails WHERE note = 'workspace_id=$1' AND workspace_id = $1",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_literal_contents_cannot_cover_a_join_alias() {
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        // F9 per-alias coverage defeated by a smuggled QUALIFIED predicate:
+        // `emails` looks scoped, but its "predicate" is inert literal text.
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+                 WHERE c.workspace_id = $1 AND e.note = 'e.workspace_id=$2'",
+                &ctx
+            ),
+            "a smuggled alias-qualified predicate must not cover the joined table"
+        );
+        // The genuine form stays allowed.
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+             WHERE c.workspace_id = $1 AND e.workspace_id = $2",
+            &ctx
+        ));
+    }
+
+    #[test]
+    fn test_current_setting_argument_is_preserved_for_rls_binding() {
+        // The one literal whose content is structural: the argument of a
+        // current_setting( RLS binding call must survive blanking so the
+        // genuine binding keeps covering joined tables.
+        let stripped = strip_sql_comments(
+            "SELECT * FROM emails WHERE current_setting('app.current_workspace_id') IS NOT NULL",
+        );
+        assert!(
+            stripped.contains("'app.current_workspace_id'"),
+            "current_setting argument must be preserved: {stripped}"
+        );
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+             WHERE current_setting('app.current_workspace_id') IS NOT NULL",
+            &ctx
+        ));
+        // A non-app argument is NOT an RLS binding.
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM contacts c JOIN emails e ON e.contact_id = c.id \
+                 WHERE current_setting('statement_timeout') IS NOT NULL",
+                &ctx
+            ),
+            "an unrelated current_setting argument must not act as an RLS binding"
+        );
     }
 
     #[test]
@@ -1217,6 +1783,65 @@ mod tests {
             "got: {:?}",
             tables
         );
+    }
+
+    // ── Comma-continued FROM lists (SM5-remediation follow-up) ───────
+
+    #[test]
+    fn test_comma_continued_from_list_extracts_every_table() {
+        // PostgreSQL accepts `FROM a, b` — a FROM/JOIN-keyword-only scan
+        // captures `a` and silently misses `b`.
+        let refs = referenced_table_aliases("SELECT * FROM contacts c, emails e");
+        assert!(
+            refs.contains(&("contacts".to_string(), Some("c".to_string()))),
+            "got: {refs:?}"
+        );
+        assert!(
+            refs.contains(&("emails".to_string(), Some("e".to_string()))),
+            "got: {refs:?}"
+        );
+
+        // Three entries, unaliased, still all captured.
+        let refs = referenced_table_aliases("SELECT * FROM contacts, emails, templates");
+        assert_eq!(refs.len(), 3, "got: {refs:?}");
+        for t in ["contacts", "emails", "templates"] {
+            assert!(
+                refs.iter().any(|(table, _)| table == t),
+                "missing {t} in {refs:?}"
+            );
+        }
+
+        // The list ends at the next clause — nothing after WHERE is a table.
+        let refs =
+            referenced_table_aliases("SELECT * FROM contacts, emails WHERE workspace_id = $1");
+        assert_eq!(refs.len(), 2, "got: {refs:?}");
+
+        // Function-argument commas are not list continuations.
+        let refs = referenced_table_aliases(
+            "SELECT * FROM generate_series(1, 10) g WHERE g.workspace_id = $1",
+        );
+        assert_eq!(refs.len(), 1, "got: {refs:?}");
+    }
+
+    #[test]
+    fn test_comma_continued_from_list_enforces_predicate_per_table() {
+        // THE enforcement consequence: with `contacts c, emails e`, a
+        // predicate on contacts alone must NOT validate — emails is an
+        // unscoped tenanted reference exactly like the JOIN case.
+        let svc = loaded_svc();
+        let ctx = make_ctx();
+        assert!(
+            !svc.validate_query_access(
+                "SELECT * FROM contacts c, emails e WHERE c.workspace_id = $1",
+                &ctx
+            ),
+            "a comma list with only ONE tenanted table scoped must be blocked"
+        );
+        assert!(svc.validate_query_access(
+            "SELECT * FROM contacts c, emails e \
+             WHERE c.workspace_id = $1 AND e.workspace_id = $2",
+            &ctx
+        ));
     }
 
     #[test]

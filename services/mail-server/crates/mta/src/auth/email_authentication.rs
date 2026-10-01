@@ -884,10 +884,15 @@ fn evaluate_dmarc(
             let result = if spf_aligned || dkim_aligned {
                 DmarcVerdict::Pass
             } else {
-                match record.policy {
-                    DmarcPolicy::None => DmarcVerdict::None,
-                    _ => DmarcVerdict::Fail,
-                }
+                // Audit finding 5: an unaligned evaluation is a DMARC FAIL
+                // that carries the record's policy — including `p=none`
+                // (RFC 7489 §6.6.3: "none" is only for "no usable record").
+                // The old mapping of unaligned p=none to `DmarcVerdict::None`
+                // made the operator's `allow_soft_fail=false` quarantine arm
+                // in `disposition_for` unreachable (a dead knob): a failing
+                // DMARC evaluation with p=none must surface as Fail+None so
+                // the policy matrix sees it.
+                DmarcVerdict::Fail
             };
             (
                 result,
@@ -1319,6 +1324,17 @@ mod tests {
         }
     }
 
+    /// Like [`results_with`], but carries a fully-specified DMARC outcome
+    /// (used by the finding-5 tests that must pin result AND policy).
+    fn results_with_raw(dmarc: DmarcOutcome) -> AuthenticationResults {
+        AuthenticationResults {
+            spf: spf_outcome(SpfVerdict::Fail, "evil.com"),
+            dkim: vec![dkim_outcome(DkimVerdict::Fail, "evil.com")],
+            dmarc,
+            auth_results_header: String::new(),
+        }
+    }
+
     fn enforced_config() -> EmailAuthConfig {
         EmailAuthConfig {
             require_spf: false,
@@ -1508,7 +1524,11 @@ mod tests {
     }
 
     #[test]
-    fn test_dmarc_policy_none_without_alignment_is_none_not_fail() {
+    fn test_dmarc_policy_none_without_alignment_is_fail_carrying_the_none_policy() {
+        // Audit finding 5: an unaligned p=none evaluation is a DMARC FAIL
+        // whose policy is the record's `p=none` (RFC 7489 §6.6.3) — never a
+        // bare `None`, which would hide the failure from the disposition
+        // matrix and make `allow_soft_fail=false` a dead knob.
         let none_record = DmarcRecord {
             policy: DmarcPolicy::None,
             ..reject_record()
@@ -1520,7 +1540,48 @@ mod tests {
             &[],
             DmarcLookup::Record(none_record),
         );
-        assert_eq!(dmarc.result, DmarcVerdict::None);
+        assert_eq!(dmarc.result, DmarcVerdict::Fail);
+        assert_eq!(dmarc.policy, DmarcPolicy::None);
+        assert!(!dmarc.alignment.spf);
+        assert!(!dmarc.alignment.dkim);
+    }
+
+    /// Audit finding 5 regression, both arms: a published p=none record with
+    /// NO aligned pass must yield Fail+None from `evaluate_dmarc`, so
+    /// `allow_soft_fail=true` accepts while `allow_soft_fail=false`
+    /// quarantines — the operator knob actually does something.
+    #[test]
+    fn allow_soft_fail_decides_the_disposition_for_unaligned_p_none() {
+        let none_record = DmarcRecord {
+            policy: DmarcPolicy::None,
+            ..reject_record()
+        };
+        let dmarc = evaluate_dmarc(
+            "example.com",
+            "evil.com",
+            &spf_outcome(SpfVerdict::Fail, "evil.com"),
+            &[dkim_outcome(DkimVerdict::Pass, "evil.com")],
+            DmarcLookup::Record(none_record),
+        );
+        assert_eq!(dmarc.result, DmarcVerdict::Fail);
+        assert_eq!(dmarc.policy, DmarcPolicy::None);
+
+        // Arm 1: soft-fail allowed → accept (monitored mode).
+        let mut config = enforced_config();
+        config.allow_soft_fail = true;
+        assert_eq!(
+            disposition_for(&config, &results_with_raw(dmarc.clone())),
+            MessageDisposition::Accept
+        );
+
+        // Arm 2: soft-fail disallowed → quarantine (the arm that used to be
+        // unreachable when p=none evaluated to `None`).
+        config.allow_soft_fail = false;
+        assert_eq!(
+            disposition_for(&config, &results_with_raw(dmarc)),
+            MessageDisposition::Quarantine,
+            "allow_soft_fail=false must quarantine unaligned p=none mail"
+        );
     }
 
     #[test]
@@ -1856,10 +1917,8 @@ mod wire_gap_tests {
     }
 
     fn plain_message(from_domain: &str) -> Vec<u8> {
-        format!(
-            "From: sender@{from_domain}\r\nTo: rcpt@dest.test\r\nSubject: t\r\n\r\nhello\r\n"
-        )
-        .into_bytes()
+        format!("From: sender@{from_domain}\r\nTo: rcpt@dest.test\r\nSubject: t\r\n\r\nhello\r\n")
+            .into_bytes()
     }
 
     fn txt(strings: Vec<&str>) -> DnsAnswer {
@@ -1869,10 +1928,7 @@ mod wire_gap_tests {
     #[tokio::test]
     async fn a_second_identical_spf_evaluation_is_served_from_the_cache() {
         let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
-        rules.insert(
-            "cache.example",
-            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
-        );
+        rules.insert("cache.example", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
         let dns = MockDns::start(rules).await;
         let auth = authenticator(dns.port, false);
 
@@ -1898,7 +1954,8 @@ mod wire_gap_tests {
             .await
             .expect("second authenticate");
         assert_eq!(
-            second.spf.status, SpfStatus::Cached,
+            second.spf.status,
+            SpfStatus::Cached,
             "an identical (ip, helo, mail_from) must hit the cache"
         );
         assert_eq!(second.spf.explanation.as_deref(), Some("cached"));
@@ -1941,10 +1998,7 @@ mod wire_gap_tests {
         );
         // SPF passes and is aligned, so the verdict difference is driven by
         // the recovered policy alone.
-        rules.insert(
-            "sub.example.com",
-            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
-        );
+        rules.insert("sub.example.com", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
         let dns = MockDns::start(rules).await;
         let auth = authenticator(dns.port, true);
 
@@ -1959,11 +2013,13 @@ mod wire_gap_tests {
             .expect("authenticate");
         assert_eq!(results.spf.result, SpfVerdict::Pass, "{:?}", results.spf);
         assert_eq!(
-            results.dmarc.policy, DmarcPolicy::Reject,
+            results.dmarc.policy,
+            DmarcPolicy::Reject,
             "the org record's sp=reject must be the effective policy for the subdomain"
         );
         assert_eq!(
-            results.dmarc.result, DmarcVerdict::Pass,
+            results.dmarc.result,
+            DmarcVerdict::Pass,
             "aligned SPF pass with p=none-family policy is a DMARC pass"
         );
         dns.stop();
@@ -1974,18 +2030,9 @@ mod wire_gap_tests {
         let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
         // v=DMARC1 without a usable p= is a PERMERROR (RFC 7489 §6.6.3) at
         // the exact From domain — the org-domain record still applies.
-        rules.insert(
-            "_dmarc.a.b.example.net",
-            txt(vec!["v=DMARC1; p=banana"]),
-        );
-        rules.insert(
-            "_dmarc.example.net",
-            txt(vec!["v=DMARC1; p=quarantine"]),
-        );
-        rules.insert(
-            "a.b.example.net",
-            txt(vec!["v=spf1 ip4:203.0.113.10 -all"]),
-        );
+        rules.insert("_dmarc.a.b.example.net", txt(vec!["v=DMARC1; p=banana"]));
+        rules.insert("_dmarc.example.net", txt(vec!["v=DMARC1; p=quarantine"]));
+        rules.insert("a.b.example.net", txt(vec!["v=spf1 ip4:203.0.113.10 -all"]));
         let dns = MockDns::start(rules).await;
         let auth = authenticator(dns.port, true);
 
@@ -1999,7 +2046,8 @@ mod wire_gap_tests {
             .await
             .expect("authenticate");
         assert_eq!(
-            results.dmarc.policy, DmarcPolicy::Quarantine,
+            results.dmarc.policy,
+            DmarcPolicy::Quarantine,
             "the malformed subdomain record must not hide the org policy: {:?}",
             results.dmarc
         );
@@ -2048,7 +2096,8 @@ mod wire_gap_tests {
             .await
             .expect("authenticate");
         assert_eq!(
-            first.dmarc.result, DmarcVerdict::TempError,
+            first.dmarc.result,
+            DmarcVerdict::TempError,
             "SERVFAIL must be a TempError, not a policy-none: {:?}",
             first.dmarc
         );
@@ -2068,11 +2117,11 @@ mod wire_gap_tests {
             .await
             .expect("authenticate");
         assert_eq!(
-            second.dmarc.policy, DmarcPolicy::Reject,
+            second.dmarc.policy,
+            DmarcPolicy::Reject,
             "a recovered DNS answer must apply immediately: {:?}",
             second.dmarc
         );
         server.abort();
     }
-
 }

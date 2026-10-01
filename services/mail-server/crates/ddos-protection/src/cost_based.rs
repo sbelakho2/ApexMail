@@ -81,6 +81,11 @@ pub struct CostLimiterConfig {
     pub default_tenant_budget: u64,
     /// System-wide capacity
     pub system_capacity: u64,
+    /// Hard cap on tracked budget entries (audit SM5 F3). Anonymous
+    /// buckets are keyed by client IP, so IPv6-/64 rotation mints one
+    /// entry per address; without a cap the map grew without bound.
+    /// 0 disables the cap (not recommended).
+    pub max_tracked_budgets: usize,
 }
 
 impl Default for CostLimiterConfig {
@@ -88,6 +93,7 @@ impl Default for CostLimiterConfig {
         Self {
             default_tenant_budget: 100_000,
             system_capacity: 10_000_000,
+            max_tracked_budgets: 100_000,
         }
     }
 }
@@ -110,6 +116,8 @@ pub struct CostBasedLimiter {
     system_budget: Arc<AtomicU64>,
     /// System capacity
     system_capacity: u64,
+    /// Hard cap on tracked budget entries (audit SM5 F3)
+    max_tracked_budgets: usize,
 }
 
 impl CostBasedLimiter {
@@ -120,6 +128,7 @@ impl CostBasedLimiter {
             default_budget: config.default_tenant_budget,
             system_budget: Arc::new(AtomicU64::new(config.system_capacity)),
             system_capacity: config.system_capacity,
+            max_tracked_budgets: config.max_tracked_budgets,
         }
     }
 
@@ -143,7 +152,12 @@ impl CostBasedLimiter {
             };
         }
 
-        // Check tenant budget
+        // Check tenant budget. Audit SM5 F3: enforce the entry cap BEFORE
+        // inserting a new key so a flood of fresh client-IP keys cannot
+        // grow the map past the cap between cleanup ticks.
+        if !self.tenant_budgets.contains_key(tenant_id) {
+            self.enforce_budget_capacity();
+        }
         let budget_entry = self
             .tenant_budgets
             .entry(tenant_id.to_string())
@@ -249,6 +263,9 @@ impl CostBasedLimiter {
 
     /// Set custom budget for a tenant
     pub fn set_tenant_budget(&self, tenant_id: &str, capacity: u64, refill_rate: u64) {
+        if !self.tenant_budgets.contains_key(tenant_id) {
+            self.enforce_budget_capacity();
+        }
         let entry = self
             .tenant_budgets
             .entry(tenant_id.to_string())
@@ -268,20 +285,52 @@ impl CostBasedLimiter {
     }
 
     /// Cleanup stale tenant budget entries to prevent unbounded memory growth.
-    /// Bug E-105 fix:Evicts entries that have been inactive (budget at capacity
-    /// and last_refill > 1 hour ago) to reclaim memory from ephemeral tenants.
+    /// Bug E-105 fix: evicts entries that have been inactive (last_refill
+    /// > 1 hour ago) to reclaim memory from ephemeral tenants.
+    ///
+    /// Audit SM5 F3: the old rule only evicted entries that were BOTH
+    /// stale AND at full capacity, so a PARTIALLY-drained bucket (the
+    /// common case after a handful of requests) was immortal — an
+    /// attacker rotating IPv6 /64s minted one permanent entry per
+    /// address. Staleness alone now evicts, regardless of remaining
+    /// budget; the hard cap is re-enforced as well.
     pub fn cleanup(&self) {
         let eviction_threshold = Duration::from_secs(3600); // 1 hour
 
         self.tenant_budgets.retain(|_tenant_id, entry| {
             let budget = entry.read();
-            // Keep entries that have recent activity or are not at full capacity
-            let is_at_capacity = budget.remaining >= budget.capacity;
-            let is_stale = budget.last_refill.elapsed() > eviction_threshold;
-
-            // Evict if at full capacity AND stale (no recent consumption)
-            !(is_at_capacity && is_stale)
+            // Keep only entries with recent activity.
+            budget.last_refill.elapsed() <= eviction_threshold
         });
+
+        // Periodic enforcement of the hard capacity cap between
+        // insert-time checks.
+        self.enforce_budget_capacity();
+    }
+
+    /// Enforce the hard cap on tracked budget entries (audit SM5 F3),
+    /// mirroring `SessionTracker::enforce_capacity`: when the map is at
+    /// capacity, a 10% batch of the entries with the OLDEST `last_refill`
+    /// (least-recently-used) is evicted before a new key is inserted, so
+    /// the cap holds even between cleanup ticks.
+    fn enforce_budget_capacity(&self) {
+        if self.max_tracked_budgets == 0 || self.tenant_budgets.len() < self.max_tracked_budgets {
+            return;
+        }
+        let target = self
+            .max_tracked_budgets
+            .saturating_sub(self.max_tracked_budgets / 10)
+            .max(1);
+        let mut candidates: Vec<(String, Instant)> = self
+            .tenant_budgets
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().read().last_refill))
+            .collect();
+        candidates.sort_by_key(|(_, last_refill)| *last_refill);
+        let excess = self.tenant_budgets.len().saturating_sub(target);
+        for (tenant_id, _) in candidates.into_iter().take(excess) {
+            self.tenant_budgets.remove(&tenant_id);
+        }
     }
 
     /// Test-only: force a tenant entry into the stale-and-full state so
@@ -301,7 +350,17 @@ impl CostBasedLimiter {
             });
         let mut budget = entry.write();
         budget.remaining = budget.capacity;
-        budget.last_refill = Instant::now() - Duration::from_secs(7200);
+        budget.last_refill = stale_instant_for_test(Instant::now());
+    }
+
+    /// Test-only: age a tenant entry's `last_refill` without touching its
+    /// remaining budget, so the partially-drained eviction case (audit
+    /// SM5 F3) can be exercised without waiting an hour.
+    #[cfg(test)]
+    pub(crate) fn age_last_refill_for_test(&self, tenant_id: &str) {
+        if let Some(entry) = self.tenant_budgets.get(tenant_id) {
+            entry.write().last_refill = stale_instant_for_test(Instant::now());
+        }
     }
 
     /// Get number of tracked tenants (for monitoring)
@@ -365,6 +424,13 @@ pub enum CostDecision {
     },
 }
 
+/// Monotonic-safe back-dating for tests (audit SM5 F4: plain
+/// `Instant::now() - 2h` panics on a low-uptime CI host).
+#[cfg(test)]
+fn stale_instant_for_test(now: Instant) -> Instant {
+    now.checked_sub(Duration::from_secs(7200)).unwrap_or(now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +447,7 @@ mod tests {
         let config = CostLimiterConfig {
             default_tenant_budget: 10000,
             system_capacity: 100000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -420,6 +487,7 @@ mod tests {
         let limiter = CostBasedLimiter::new(CostLimiterConfig {
             default_tenant_budget: 10_000,
             system_capacity: 1_000_000,
+            ..Default::default()
         });
 
         // An active tenant (recent consumption, below capacity).
@@ -437,5 +505,75 @@ mod tests {
         // The survivor is the active one.
         let _ = limiter.check("active", "/v1/health", None);
         assert_eq!(limiter.tracked_tenants(), 1);
+    }
+
+    // ── Audit SM5 F3: the budget map is hard-capped and stale entries
+    //    are evicted regardless of remaining budget ─────────────────────
+
+    /// Fail-first for the finding: a PARTIALLY-drained bucket (remaining
+    /// < capacity) used to be immortal — `cleanup` evicted only
+    /// at-capacity entries, so client-IP rotation grew the map forever.
+    #[test]
+    fn test_cleanup_evicts_partially_drained_stale_bucket() {
+        let limiter = CostBasedLimiter::new(CostLimiterConfig {
+            default_tenant_budget: 10_000,
+            system_capacity: 1_000_000,
+            max_tracked_budgets: 0, // cap disabled for this scenario
+        });
+
+        // One request leaves the bucket partially drained.
+        let _ = limiter.check("rotating-client", "/v1/health", None);
+        assert!(
+            limiter.get_remaining("rotating-client") < 10_000,
+            "bucket must be partially drained for this scenario"
+        );
+        assert_eq!(limiter.tracked_tenants(), 1);
+
+        limiter.age_last_refill_for_test("rotating-client");
+        limiter.cleanup();
+
+        assert_eq!(
+            limiter.tracked_tenants(),
+            0,
+            "a stale PARTIALLY-drained bucket must be evicted too"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_keeps_recent_partially_drained_bucket() {
+        let limiter = CostBasedLimiter::new(CostLimiterConfig::default());
+
+        let _ = limiter.check("active-client", "/v1/health", None);
+        limiter.cleanup();
+        assert_eq!(
+            limiter.tracked_tenants(),
+            1,
+            "recent activity must survive cleanup regardless of remaining"
+        );
+    }
+
+    /// 2× cap distinct client keys must never grow the map past the cap.
+    #[test]
+    fn test_budget_map_hard_capped_under_key_flood() {
+        let cap = 100;
+        let limiter = CostBasedLimiter::new(CostLimiterConfig {
+            default_tenant_budget: 10_000,
+            system_capacity: 100_000_000,
+            max_tracked_budgets: cap,
+        });
+
+        for i in 0..(cap * 2) {
+            let decision = limiter.check(&format!("anon:10.{i}.0.1"), "/v1/ping", None);
+            assert!(
+                matches!(decision, CostDecision::Allowed { .. }),
+                "flood requests must be allowed (cap bounds memory, not throughput), got {decision:?} at {i}"
+            );
+            assert!(
+                limiter.tracked_tenants() <= cap,
+                "budget map exceeded cap at iteration {i}: {}",
+                limiter.tracked_tenants()
+            );
+        }
+        assert!(limiter.tracked_tenants() <= cap);
     }
 }

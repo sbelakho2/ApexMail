@@ -89,13 +89,19 @@
 
     <!-- Profiles -->
     <profiles>
+        <!-- F16 (audit): max_memory_usage is a PER-QUERY budget and used to be
+             10 GB inside a memory: 4G container — a query sanctioned to 10 GB
+             was cgroup-OOM-killed instead of failing with ClickHouse's own
+             "memory limit exceeded" error, restarting the server for all
+             tenants. 3 GB leaves the server itself (merge sorter, background
+             merges, the 4G-minus-query headroom) room to operate. -->
         <default>
-            <max_memory_usage>10000000000</max_memory_usage>
+            <max_memory_usage>3000000000</max_memory_usage>
             <load_balancing>random</load_balancing>
             <log_queries>0</log_queries>
         </default>
         <readwrite>
-            <max_memory_usage>10000000000</max_memory_usage>
+            <max_memory_usage>3000000000</max_memory_usage>
             <load_balancing>random</load_balancing>
             <log_queries>1</log_queries>
         </readwrite>

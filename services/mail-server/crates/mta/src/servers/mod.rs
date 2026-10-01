@@ -1,11 +1,11 @@
 //! SMTP servers:inbound, bounce, feedback‑loop, submission.
 
 pub mod bounce;
+pub(crate) mod content_security;
 pub mod fbl_registry;
 pub mod feedback_loop;
 pub mod inbound;
 pub mod inbound_delivery;
-pub(crate) mod content_security;
 pub mod submission;
 pub(crate) mod util;
 

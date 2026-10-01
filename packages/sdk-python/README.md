@@ -112,13 +112,14 @@ domains = client.domains.list()
 # Create a webhook
 webhook = client.webhooks.create(
     url="https://example.com/webhook",
-    events=["message.delivered", "email.bounced", "*"],
+    events=["message.delivered", "message.bounced", "*"],
     # Valid event names (KNOWN_WEBHOOK_EVENTS on the server):
-    #   email.delivered / email.bounced / email.complained
-    #   message.sent / message.delivered / message.bounced /
-    #   message.complained / message.opened / message.clicked
+    #   message.accepted / message.queued / message.attempted /
+    #   message.deferred / message.delivered / message.bounced /
+    #   message.complained / message.suppressed / message.opened /
+    #   message.clicked / message.cancelled
     #   recipient.unsubscribed / placement_test.completed
-    #   bounce / complaint / inbound / * (wildcard)
+    #   inbound / * (wildcard)
 )
 
 # List webhooks

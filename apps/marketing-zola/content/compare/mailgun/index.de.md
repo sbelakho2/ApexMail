@@ -9,6 +9,7 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun von Sinch ist eine E-Mail-Versandplattform mit APIs zum Senden, Empfangen und Verfolgen von E-Mails."
+pricing_as_of = "2026-08-19"
 last_verified = "2026-07-29"
 methodology = "Öffentliche Mailgun-Dokumentation unter mailgun.com/docs, geprüft am Verifikationsdatum. Preise verglichen mit dem Foundation-100K-Tarif. Monatliche Abrechnung. Funktionen, Limits und Preise können sich ändern."
 volume_assumption = "100.000 E-Mails/Monat"
@@ -35,16 +36,16 @@ comparison_sections = [
     { feature = "Batch-Versand", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja — Batch-Versand über <code>recipient-variables</code> mit bis zu 1.000 Empfängern<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
     { feature = "Idempotenzschlüssel", apex = 'Ja (alle Tarife) — Header <code>Idempotency-Key</code>', comp = 'Nicht unterstützt — Anwendungen müssen Deduplizierungslogik selbst implementieren<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
     { feature = "Geplantes Senden", apex = 'Verfügbar, sofern für den gebuchten Tarif aktiviert', comp = 'Ja — Parameter <code>o:deliverytime</code> (RFC 2822-Format, bis zu 3 Tage)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Eingehende E-Mails", apex = 'Scale- und Enterprise-Tarife', comp = 'Ja — Inbound-Routen mit Weiterleitungs-, Speicher- und Webhook-Aktionen<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "Eingehende E-Mails", apex = 'Business- und Enterprise-Tarife', comp = 'Ja — Inbound-Routen mit Weiterleitungs-, Speicher- und Webhook-Aktionen<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
     { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "ENTERPRISE-KONTROLLEN", rows = [
-    { feature = "SAML SSO", apex = 'Scale- und Enterprise-Tarife', comp = 'Ab dem Tarif Foundation 100K und darüber<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Business- und Enterprise-Tarife', comp = 'Ab dem Tarif Foundation 100K und darüber<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Enterprise-Tarif', comp = 'Zum Verifikationsdatum nicht dokumentiert — Benutzer-Provisioning über die Mailgun-API<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Audit-Logs", apex = 'Ab Growth-Tarif — Kontoaktivität, API-Schlüssel-Nutzung, Konfigurationsänderungen; durchsuchbar, exportierbar', comp = 'Ereignisprotokolle über die Events API zugänglich; Aufbewahrung je nach Tarif; kein zusammengeführter Audit-Trail auf Kontoebene<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
@@ -55,7 +56,7 @@ comparison_sections = [
   ]},
   { title = "BEREICHE, IN DENEN MAILGUN STÄRKER IST", rows = [
     { feature = "E-Mail-Validierung", apex = 'E-Mail-Grader-API (DNS/SPF/DKIM/DMARC/Inhalt/Reputation)', comp = 'Dedizierte E-Mail-Validierungs-API mit Echtzeit- und Massenvalidierung<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },
-    { feature = "Verarbeitung eingehender E-Mails", apex = 'Eingehende E-Mails in den Scale- und Enterprise-Tarifen', comp = 'Inbound-Routing mit Weiterleitungs-, HTTP-Webhook- und Speicheraktionen; in allen Tarifen enthalten<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
+    { feature = "Verarbeitung eingehender E-Mails", apex = 'Eingehende E-Mails in den Business- und Enterprise-Tarifen', comp = 'Inbound-Routing mit Weiterleitungs-, HTTP-Webhook- und Speicheraktionen; in allen Tarifen enthalten<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
     { feature = "E-Mail-Test-Sandbox", apex = 'Sandbox-Umgebung mit Sandbox-Domains und Ratenbegrenzungen', comp = 'Sandbox-Domain zum Testen in allen Tarifen mit separaten Test-Zugangsdaten<sup><a href="#src-mg3">3</a></sup>', winner = "none" }
   ]}
 ]

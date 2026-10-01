@@ -5269,15 +5269,24 @@ paths:
       summary: Create a webhook
       description: |
         Register a webhook endpoint to receive real-time event notifications.
-        
-        Available events:
-        - `message.accepted` - Message accepted for delivery
+
+        Available events (KNOWN_WEBHOOK_EVENTS in webhooks.rs; unknown
+        names are rejected with 422):
+        - `message.accepted` - Message accepted for delivery (API 202)
+        - `message.queued` - Message entered the outbound queue
+        - `message.attempted` - Delivery attempt started
+        - `message.deferred` - Recipient server deferred (4xx); retry scheduled
         - `message.delivered` - Message delivered to recipient
-        - `message.bounced` - Message bounced
-        - `message.complained` - Recipient marked as spam
+        - `message.bounced` - Permanent failure (5xx / hard bounce)
+        - `message.complained` - Recipient marked as spam (feedback loop)
+        - `message.suppressed` - Recipient added to the suppression list
         - `message.opened` - Message opened (if tracking enabled)
         - `message.clicked` - Link clicked (if tracking enabled)
+        - `message.cancelled` - Scheduled send cancelled before dispatch
         - `recipient.unsubscribed` - Recipient unsubscribed
+        - `placement_test.completed` - Inbox-placement test finished
+        - `inbound` - Inbound email received
+        - `*` - Wildcard; every webhook selector honours it
       tags:
         - Webhooks
       parameters:
@@ -10303,6 +10312,8 @@ components:
       required:
         - url
         - events
+      # The server struct is #[serde(deny_unknown_fields)]: exactly {url, events}.
+      additionalProperties: false
       properties:
         url:
           type: string
@@ -10314,16 +10325,28 @@ components:
             type: string
             enum:
               - message.accepted
+              - message.queued
+              - message.attempted
+              - message.deferred
               - message.delivered
               - message.bounced
               - message.complained
+              - message.suppressed
               - message.opened
               - message.clicked
+              - message.cancelled
               - recipient.unsubscribed
+              - placement_test.completed
+              - inbound
+              - '*'
           minItems: 1
 
     UpdateWebhookRequest:
       type: object
+      # The server struct is #[serde(deny_unknown_fields)]: exactly
+      # {url?, events?, status?} — there is no `active` property; a
+      # spec-following client sending {"active": false} would get a 422.
+      additionalProperties: false
       properties:
         url:
           type: string
@@ -10334,17 +10357,38 @@ components:
             type: string
             enum:
               - message.accepted
+              - message.queued
+              - message.attempted
+              - message.deferred
               - message.delivered
               - message.bounced
               - message.complained
+              - message.suppressed
               - message.opened
               - message.clicked
+              - message.cancelled
               - recipient.unsubscribed
-        active:
-          type: boolean
+              - placement_test.completed
+              - inbound
+              - '*'
+          minItems: 1
+        status:
+          type: string
+          enum:
+            - active
+            - paused
+            - disabled
+          description: Pause or resume the webhook.
 
     Webhook:
       type: object
+      required:
+        - id
+        - url
+        - events
+        - status
+        - created_at
+        - updated_at
       properties:
         id:
           type: string
@@ -10356,12 +10400,19 @@ components:
           type: array
           items:
             type: string
-        active:
-          type: boolean
         secret:
           type: string
-          description: Webhook signing secret (only returned on creation)
-        createdAt:
+          description: Webhook signing secret (only returned on creation and secret rotation)
+        status:
+          type: string
+          enum:
+            - active
+            - paused
+            - disabled
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time
 

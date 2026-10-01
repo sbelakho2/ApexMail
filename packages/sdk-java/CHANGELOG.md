@@ -4,6 +4,14 @@ All notable changes to the ApexMail Java SDK will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] — 2026-05-14
+
+### Added
+
+- Cursor-based pagination support: `cursor` accepted in the options `Map` of
+  every list method (`emails().list`, `templates().list`, `suppressions().list`,
+  `events().list`), forwarded as the `cursor` query parameter.
+
 ## [1.0.0] — 2026-03-11
 
 ### Added

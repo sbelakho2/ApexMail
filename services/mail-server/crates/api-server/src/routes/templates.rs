@@ -85,8 +85,6 @@ pub struct ListTemplatesQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    #[serde(default)]
-    pub cursor: Option<i64>,
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -172,7 +170,13 @@ async fn list_templates(
 ) -> Result<Json<Vec<TemplateResponse>>, ApiError> {
     require_scopes(&auth, &["templates:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, TemplateRow>(
         "SELECT id, name, subject, html_body, text_body, version, status, created_at, updated_at
          FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
@@ -1037,7 +1041,6 @@ mod adversarial_tests {
             Query(ListTemplatesQuery {
                 limit: 1,
                 offset: 0,
-                cursor: None,
             }),
         )
         .await
@@ -1049,7 +1052,6 @@ mod adversarial_tests {
             Query(ListTemplatesQuery {
                 limit: i64::MAX,
                 offset: -5,
-                cursor: Some(-3),
             }),
         )
         .await
@@ -1171,7 +1173,6 @@ mod adversarial_tests {
             Query(ListTemplatesQuery {
                 limit: 10,
                 offset: 0,
-                cursor: None,
             }),
         )
         .await

@@ -34,11 +34,12 @@ ignore = [
     # responses; ApexMail uses trusted DNS resolvers. Tracked in #DEP-02.
     "RUSTSEC-2026-0119",
 
-    # ── protobuf (RUSTSEC-2024-0437) ─────────────────────────────────────
-    # Pulled in transitively by opentelemetry-proto for OTEL export. The
-    # uncontrolled recursion crash requires crafted protobuf input. ApexMail
-    # only deserializes protobuf from trusted OTEL collectors. Tracked in #DEP-03.
-    "RUSTSEC-2024-0437",
+    # NOTE (audit SM14 F11): RUSTSEC-2024-0437 (protobuf < 2.28) was removed
+    # here to match ci/pipeline.conf CI_CARGO_AUDIT_IGNORES, which dropped it
+    # when the stack moved to protobuf 3.7.x (opentelemetry-proto's `prost`
+    # path — the vulnerable rust-protobuf 2.x line is gone from Cargo.lock).
+    # The two ignore lists are in EXACT lockstep and
+    # `ci/pipeline.sh selftest` asserts equality.
 
     # ── rsa (RUSTSEC-2023-0071) ──────────────────────────────────────────
     # "Marvin Attack" timing sidechannel. No fixed upgrade available. The

@@ -954,6 +954,7 @@ mod multi_vector_tests {
         let cost_config = CostLimiterConfig {
             default_tenant_budget: 100000,
             system_capacity: 1000000,
+            ..Default::default()
         };
         let cost_limiter = CostBasedLimiter::new(cost_config);
 

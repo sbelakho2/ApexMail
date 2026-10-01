@@ -3530,7 +3530,11 @@ mod tests {
             "the fallback resolution must find the healthy point: {:?}",
             clean.reasons
         );
-        assert!(clean.checked.contains(&GATE_SUPPRESSION), "{:?}", clean.checked);
+        assert!(
+            clean.checked.contains(&GATE_SUPPRESSION),
+            "{:?}",
+            clean.checked
+        );
         assert!(
             clean.checked.contains(&GATE_ADDRESS_VERIFICATION),
             "{:?}",
@@ -3616,9 +3620,14 @@ mod tests {
         // (a) Never assessed: fail closed, never "assume healthy".
         let outcome = decide(&pool, never_assessed).await.unwrap();
         assert_eq!(outcome.enforcement, Enforcement::Denied, "{outcome:?}");
-        assert!(outcome.block_reasons.iter().any(|reason| reason
-            .starts_with("sender_health_denied:")
-            && reason.contains("never been health-assessed")), "{outcome:?}");
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("sender_health_denied:")
+                    && reason.contains("never been health-assessed")),
+            "{outcome:?}"
+        );
 
         // (b) Below the minimum score: refused with the numbers named.
         let low_sender = Uuid::new_v4();
@@ -3647,9 +3656,14 @@ mod tests {
         low.selected_sender = Some(low_sender);
         let outcome = decide(&pool, low).await.unwrap();
         assert_eq!(outcome.enforcement, Enforcement::Denied);
-        assert!(outcome.block_reasons.iter().any(|reason| reason
-            .starts_with("sender_health_denied:")
-            && reason.contains("below the minimum")), "{outcome:?}");
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("sender_health_denied:")
+                    && reason.contains("below the minimum")),
+            "{outcome:?}"
+        );
 
         // (c) Paused: refused at decide time, and an ALREADY-APPROVED
         // decision cannot ride over a pause that happened after approval.
@@ -3681,11 +3695,13 @@ mod tests {
 
         let after_pause = decide(&pool, assessed).await.unwrap();
         assert_eq!(after_pause.enforcement, Enforcement::Denied);
-        assert!(after_pause
-            .block_reasons
-            .iter()
-            .any(|reason| reason.starts_with("sender_health_denied:")
-                && reason.contains("paused")));
+        assert!(
+            after_pause
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("sender_health_denied:")
+                    && reason.contains("paused"))
+        );
         let reapproved = revalidate_execution(&pool, healthy_first.decision_id)
             .await
             .unwrap();
@@ -3875,13 +3891,17 @@ mod tests {
             .await
             .unwrap();
         assert!(first.allowed, "{:?}", first.reasons);
-        let (state,): (String,) =
-            sqlx::query_as("SELECT state FROM sales_account_touch_reservations WHERE account_id = $1")
-                .bind(fixture.account_id)
-                .fetch_one(&pool)
-                .await
-                .expect("reservation row");
-        assert_eq!(state, "reserved", "the crash strands the slot as 'reserved'");
+        let (state,): (String,) = sqlx::query_as(
+            "SELECT state FROM sales_account_touch_reservations WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reservation row");
+        assert_eq!(
+            state, "reserved",
+            "the crash strands the slot as 'reserved'"
+        );
 
         // The stranded slot holds the weekly budget: with a budget of ONE,
         // a NEW logical send is refused while the crashed run's reservation
@@ -3922,7 +3942,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(rows, 1, "the same logical send never consumes a second slot");
+        assert_eq!(
+            rows, 1,
+            "the same logical send never consumes a second slot"
+        );
 
         // Recovery path B — the gates now REFUSE (the recipient suppressed
         // while the worker was dead): the refusal releases the crashed run's
@@ -3941,12 +3964,13 @@ mod tests {
             "a suppressed recipient must refuse: {:?}",
             refused.reasons
         );
-        let (state,): (String,) =
-            sqlx::query_as("SELECT state FROM sales_account_touch_reservations WHERE account_id = $1")
-                .bind(fixture.account_id)
-                .fetch_one(&pool)
-                .await
-                .expect("reservation row");
+        let (state,): (String,) = sqlx::query_as(
+            "SELECT state FROM sales_account_touch_reservations WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .expect("reservation row");
         assert_eq!(
             state, "released",
             "the refused re-validation must free the crashed run's slot"

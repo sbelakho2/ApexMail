@@ -417,7 +417,10 @@ mod tests {
     #[test]
     fn html_file_names_are_surface_prefixed_and_stable() {
         assert_eq!(auth_html_file("web-login"), "web-login.html");
-        assert_eq!(marketing_html_file("marketing", "/pricing"), "marketing-pricing.html");
+        assert_eq!(
+            marketing_html_file("marketing", "/pricing"),
+            "marketing-pricing.html"
+        );
         assert_eq!(
             marketing_html_file("marketing", "/pricing/calculator"),
             "marketing-pricing-calculator.html"
@@ -430,7 +433,9 @@ mod tests {
 
     #[test]
     fn marketing_public_dir_defaults_and_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::remove_var("MARKETING_PUBLIC_DIR");
         assert_eq!(
             marketing_public_dir(),
@@ -451,15 +456,27 @@ mod tests {
         // Quoted, unquoted, and absolute-production variants must all end
         // up relative so the exported fixture renders from the filesystem.
         let cases = [
-            ("href=\"/assets/globals.css\"", "href=\"assets/globals.css\""),
+            (
+                "href=\"/assets/globals.css\"",
+                "href=\"assets/globals.css\"",
+            ),
             ("href=/assets/globals.css", "href=assets/globals.css"),
             ("href=\"/css/site.css\"", "href=\"css/site.css\""),
             ("href=/css/site.css", "href=css/site.css"),
-            ("href=\"https://apexmail.ee/css/site.css\"", "href=\"css/site.css\""),
-            ("href=\"https://apexmail.ee/fonts/x.woff2\"", "href=\"fonts/x.woff2\""),
+            (
+                "href=\"https://apexmail.ee/css/site.css\"",
+                "href=\"css/site.css\"",
+            ),
+            (
+                "href=\"https://apexmail.ee/fonts/x.woff2\"",
+                "href=\"fonts/x.woff2\"",
+            ),
             ("href=\"/fonts/x.woff2\"", "href=\"fonts/x.woff2\""),
             ("src=\"/images/logo.png\"", "src=\"images/logo.png\""),
-            ("src=\"https://apexmail.ee/images/logo.png\"", "src=\"images/logo.png\""),
+            (
+                "src=\"https://apexmail.ee/images/logo.png\"",
+                "src=\"images/logo.png\"",
+            ),
             ("content=\"/images/og.png\"", "content=\"images/og.png\""),
             ("href=\"/icon.svg\"", "href=\"icon.svg\""),
             ("href=\"/manifest.json\"", "href=\"manifest.json\""),
@@ -484,7 +501,10 @@ mod tests {
                    d{background:url('../already/relative.png')}";
         let rewritten = rewrite_fixture_css_urls(css, "../");
         assert!(rewritten.contains("url('../images/a.png')"), "{rewritten}");
-        assert!(rewritten.contains("url(\"../fonts/x.woff2\")"), "{rewritten}");
+        assert!(
+            rewritten.contains("url(\"../fonts/x.woff2\")"),
+            "{rewritten}"
+        );
         assert!(rewritten.contains("url(../images/c.png)"), "{rewritten}");
         assert!(
             rewritten.contains("url('../already/relative.png')"),
@@ -534,24 +554,38 @@ mod tests {
         let css = std::fs::read_to_string(dir.join("site.css")).expect("read css");
         assert!(css.contains("url('../images/a.png')"), "{css}");
         let txt = std::fs::read_to_string(dir.join("notes.txt")).expect("read txt");
-        assert!(txt.contains("url('/images/keep.png')"), "non-css untouched: {txt}");
+        assert!(
+            txt.contains("url('/images/keep.png')"),
+            "non-css untouched: {txt}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn export_fixture_assets_writes_globals_and_copies_the_marketing_public_tree() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let public = temp_dir("public");
         let out = temp_dir("assets_out");
         for dir in ["css", "fonts", "images"] {
             std::fs::create_dir_all(public.join(dir)).expect("mkdir");
         }
-        std::fs::write(public.join("css/site.css"), "a{background:url('/images/x.png')}")
-            .expect("write");
+        std::fs::write(
+            public.join("css/site.css"),
+            "a{background:url('/images/x.png')}",
+        )
+        .expect("write");
         std::fs::write(public.join("fonts/inter.woff2"), b"W2").expect("write");
         std::fs::write(public.join("images/logo.png"), b"PNG").expect("write");
-        for file in ["giallo.css", "icon.svg", "manifest.json", "robots.txt", "sitemap.xml"] {
+        for file in [
+            "giallo.css",
+            "icon.svg",
+            "manifest.json",
+            "robots.txt",
+            "sitemap.xml",
+        ] {
             std::fs::write(public.join(file), format!("/* {file} */")).expect("write");
         }
         std::env::set_var("MARKETING_PUBLIC_DIR", &public);
@@ -563,7 +597,13 @@ mod tests {
         let globals = std::fs::read_to_string(out.join("assets/globals.css")).expect("globals");
         assert!(!globals.contains("href="), "globals.css is css, not html");
         // Top-level marketing files are copied when present.
-        for file in ["giallo.css", "icon.svg", "manifest.json", "robots.txt", "sitemap.xml"] {
+        for file in [
+            "giallo.css",
+            "icon.svg",
+            "manifest.json",
+            "robots.txt",
+            "sitemap.xml",
+        ] {
             assert!(out.join(file).exists(), "{file} must be copied");
         }
         // Copied css was rewritten.
@@ -582,7 +622,9 @@ mod tests {
     #[test]
     fn export_auth_fixtures_writes_three_pages_and_manifest_entries() {
         let out = temp_dir("auth_out");
-        let mut manifest = FixtureManifest { fixtures: Vec::new() };
+        let mut manifest = FixtureManifest {
+            fixtures: Vec::new(),
+        };
         export_auth_fixtures(&out, &mut manifest).expect("auth fixtures");
         assert_eq!(manifest.fixtures.len(), AUTH_FIXTURES.len());
         for entry in &manifest.fixtures {
@@ -604,7 +646,9 @@ mod tests {
     #[test]
     fn export_marketing_fixtures_writes_every_route_for_both_viewports() {
         let out = temp_dir("marketing_out");
-        let mut manifest = FixtureManifest { fixtures: Vec::new() };
+        let mut manifest = FixtureManifest {
+            fixtures: Vec::new(),
+        };
         export_marketing_fixtures(&out, &mut manifest).expect("marketing fixtures");
         assert_eq!(
             manifest.fixtures.len(),
@@ -626,7 +670,9 @@ mod tests {
 
     #[test]
     fn run_exports_default_manifest_and_every_entry_has_a_html_file() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let public = temp_dir("run_public");
         std::fs::create_dir_all(public.join("css")).expect("mkdir");
         std::env::set_var("MARKETING_PUBLIC_DIR", &public);
@@ -651,10 +697,7 @@ mod tests {
             assert!(entry["surface"].is_string(), "{entry}");
             assert!(entry["route"].is_string(), "{entry}");
             let html_file = entry["htmlFile"].as_str().expect("htmlFile");
-            assert!(
-                out.join(html_file).exists(),
-                "{html_file} must exist"
-            );
+            assert!(out.join(html_file).exists(), "{html_file} must exist");
             assert!(entry["snapshotFile"].is_string(), "{entry}");
             assert!(entry["viewport"]["width"].is_u64(), "{entry}");
             assert!(entry["viewport"]["height"].is_u64(), "{entry}");
@@ -673,10 +716,7 @@ mod tests {
         );
         for entry in full_fixtures {
             let html_file = entry["htmlFile"].as_str().expect("htmlFile");
-            assert!(
-                full_out.join(html_file).exists(),
-                "{html_file} must exist"
-            );
+            assert!(full_out.join(html_file).exists(), "{html_file} must exist");
         }
 
         std::env::remove_var("MARKETING_PUBLIC_DIR");

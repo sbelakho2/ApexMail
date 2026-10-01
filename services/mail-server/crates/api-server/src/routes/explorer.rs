@@ -57,6 +57,9 @@ const EMERGENCY_PRUNE_THRESHOLD: usize = 10_000;
 
 struct Sandbox {
     api_key: String,
+    /// HMAC of [`Sandbox::api_key`] as stored in `api_keys.key_hash` — the
+    /// liveness probe that keeps the process cache honest.
+    key_hash: String,
 }
 
 /// The sandbox tenant id is a fixed 26-char value (VARCHAR(26) per migration
@@ -65,25 +68,157 @@ const SANDBOX_TENANT_ID: &str = "sbx0explorer0000000000000x";
 
 /// Advisory-lock key serializing concurrent sandbox provisions ACROSS
 /// processes (multi-replica deployments race the same fixed tenant row; the
-/// per-process OnceCell below cannot see sibling processes).
+/// per-process cache below cannot see sibling processes).
 const SANDBOX_PROVISION_LOCK: &str = "apexmail:explorer-sandbox-provision";
 
 /// Fix (P1 cold-start race): the previous `OnceLock` + check-revoke-create
 /// sequence let two concurrent first requests interleave, and the loser's
 /// `OnceLock::set` silently failed — leaving a REVOKED credential in the
-/// static sandbox (broken until restart). `tokio::sync::OnceCell` guarantees
+/// static sandbox (broken until restart). A cached provision guarantees
 /// exactly ONE provision per process: concurrent first requests await the
 /// winner's result instead of racing their own.
-static SANDBOX: tokio::sync::OnceCell<Sandbox> = tokio::sync::OnceCell::const_new();
+static SANDBOX: tokio::sync::RwLock<Option<std::sync::Arc<Sandbox>>> =
+    tokio::sync::RwLock::const_new(None);
 
-/// Provision (idempotently) and memoize the sandbox tenant + api key.
-async fn sandbox(state: &AppState) -> Result<&'static Sandbox, String> {
-    SANDBOX
-        .get_or_try_init(|| provision_sandbox(state))
-        .await
+/// Serializes provision attempts within THIS process so a cold-start burst
+/// cannot run several DELETE+INSERT rotations back to back (the raw key is
+/// un-recoverable from the row — only its hash is stored — so every extra
+/// rotation invalidates a key another request just received).
+static SANDBOX_PROVISION_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Where the CURRENT sandbox raw key is published for SIBLING processes.
+/// `api_keys` keeps only the key's HMAC (hash-only storage), so a cold
+/// process cannot recover the live raw key from the row alone — without a
+/// shared publication, every cold start would rotate the single row out
+/// from under every other replica (the audit-F4 churn the DELETE+INSERT cap
+/// fixed within one process). The sandbox key never leaves the server and
+/// only dispatches to `example.com`, so a shared Redis cache is a
+/// proportionate home for it.
+const SANDBOX_KEY_REDIS: &str = "apexmail:explorer:sandbox-key";
+/// Refreshed on every provision; expiry only costs one extra rotation.
+const SANDBOX_KEY_REDIS_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Is the cached sandbox key still the ONE live `api_keys` row? A sibling
+/// replica's cold-start provision (or an operator's touch) re-mints the
+/// single row — SM3 (audit F4) rotation — which silently invalidates every
+/// OTHER process's cached raw key. One indexed probe per anonymous exec
+/// keeps the cache self-healing instead of broken-until-restart. A probe
+/// that CANNOT be answered (storage outage) is treated as not-live: the
+/// provision attempt that follows fails honestly on the same dead storage,
+/// so a degraded deployment sees its usual 503/500, never a stale-credential
+/// dispatch.
+async fn sandbox_key_is_live(state: &AppState, sandbox: &Sandbox) -> bool {
+    match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND key_hash = $2",
+    )
+    .bind(SANDBOX_TENANT_ID)
+    .bind(&sandbox.key_hash)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(count) => count > 0,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "sandbox key liveness probe failed — falling through to provision"
+            );
+            false
+        }
+    }
 }
 
-/// The actual provisioning, run at most once per process by [`SANDBOX`].
+/// ADOPT the sandbox key a sibling process published in Redis, if it is
+/// still the live row. `None` means "no shared publication, or it no longer
+/// matches the row — provision".
+async fn adopted_shared_sandbox(state: &AppState) -> Option<Sandbox> {
+    let raw: String = match state.redis.get().await {
+        Ok(mut conn) => match deadpool_redis::redis::cmd("GET")
+            .arg(SANDBOX_KEY_REDIS)
+            .query_async::<Option<String>>(&mut *conn)
+            .await
+        {
+            Ok(Some(raw)) if !raw.is_empty() => raw,
+            Ok(_) => return None,
+            Err(error) => {
+                tracing::warn!(%error, "sandbox shared-key read failed — falling through to provision");
+                return None;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "sandbox shared-key redis unavailable — falling through to provision");
+            return None;
+        }
+    };
+    let candidate = Sandbox {
+        key_hash: apexmail_lib::hash_api_key_with_secret(&raw, &state.config.api_key_hash_secret),
+        api_key: raw,
+    };
+    if sandbox_key_is_live(state, &candidate).await {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Publish a freshly provisioned sandbox key for sibling processes
+/// (best-effort: a failed publish costs the siblings one rotation).
+async fn publish_shared_sandbox(state: &AppState, sandbox: &Sandbox) {
+    match state.redis.get().await {
+        Ok(mut conn) => {
+            let result: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+                &mut *conn,
+                SANDBOX_KEY_REDIS,
+                &sandbox.api_key,
+                SANDBOX_KEY_REDIS_TTL_SECS,
+            )
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(%error, "sandbox shared-key publish failed");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "sandbox shared-key publish: redis unavailable");
+        }
+    }
+}
+
+/// Provision (idempotently) and memoize the sandbox tenant + api key.
+async fn sandbox(state: &AppState) -> Result<std::sync::Arc<Sandbox>, String> {
+    // Fast path 1: a cached key that is still the live row.
+    if let Some(cached) = SANDBOX.read().await.clone() {
+        if sandbox_key_is_live(state, &cached).await {
+            return Ok(cached);
+        }
+    }
+    // Fast path 2: ADOPT the live key a sibling process published, instead
+    // of rotating it out from under them.
+    if let Some(shared) = adopted_shared_sandbox(state).await {
+        let shared = std::sync::Arc::new(shared);
+        *SANDBOX.write().await = Some(std::sync::Arc::clone(&shared));
+        return Ok(shared);
+    }
+
+    // Slow path: provision under the in-process lock, re-checking both
+    // caches once acquired (a concurrent awaiter may have published a live
+    // key while we waited).
+    let _guard = SANDBOX_PROVISION_MUTEX.lock().await;
+    if let Some(cached) = SANDBOX.read().await.clone() {
+        if sandbox_key_is_live(state, &cached).await {
+            return Ok(cached);
+        }
+    }
+    if let Some(shared) = adopted_shared_sandbox(state).await {
+        let shared = std::sync::Arc::new(shared);
+        *SANDBOX.write().await = Some(std::sync::Arc::clone(&shared));
+        return Ok(shared);
+    }
+    let provisioned = std::sync::Arc::new(provision_sandbox(state).await?);
+    *SANDBOX.write().await = Some(std::sync::Arc::clone(&provisioned));
+    Ok(provisioned)
+}
+
+/// The actual provisioning, run only when no live cached key exists
+/// ([`sandbox`] guards it).
 ///
 /// Everything happens in ONE transaction: a transaction-scoped advisory lock
 /// serializes racing provisions (cross-process too), and revoke-old +
@@ -156,36 +291,22 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
         .map_err(|e| format!("sandbox domain provision failed: {e}"))?;
     }
 
-    // API key: generate fresh only when the tenant has none.
+    // API key: generate fresh only when the tenant has none. SM3 (audit F4):
+    // the sandbox key NEVER leaves the server (the explorer dispatches
+    // in-process), so rotation reclaims the superseded rows outright — the
+    // previous revoke-only rotation left every superseded row in place, and
+    // each process restart grew the api_keys table without bound (and
+    // bypassed mint_api_key's per-tenant key ceiling with its raw insert).
+    // DELETE-then-INSERT in this transaction caps the sandbox tenant at
+    // exactly ONE live key row across all processes.
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash =
         apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
-    let has_key: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL)",
-    )
-    .bind(SANDBOX_TENANT_ID)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("sandbox key check failed: {e}"))?;
-    if has_key {
-        // A previous process created the key but its plaintext is lost
-        // (hashed at rest). Rotate: revoke old, insert new — the explorer is
-        // stateless so rotation is invisible. Atomic here: within this
-        // transaction there is never a moment where the sandbox tenant has
-        // ONLY revoked keys visible to a committed read.
-        // coverage: justified — the rotation UPDATE below can only fail on a
-        // database error inside the provision transaction; no test can fail a
-        // healthy in-transaction UPDATE, so the error-mapping closure's
-        // region (through the closing brace) stays at zero by design.
-        sqlx::query(
-            "UPDATE api_keys SET revoked_at = $2 WHERE tenant_id = $1 AND revoked_at IS NULL",
-        )
+    sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
         .bind(SANDBOX_TENANT_ID)
-        .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("sandbox key rotation failed: {e}"))?;
-    }
+        .map_err(|e| format!("sandbox key reclaim failed: {e}"))?;
     let prefix: String = "sbx_".to_string();
     sqlx::query(
         "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
@@ -205,7 +326,15 @@ async fn provision_sandbox(state: &AppState) -> Result<Sandbox, String> {
         .await
         .map_err(|e| format!("sandbox provision commit failed: {e}"))?;
 
-    Ok(Sandbox { api_key: raw_key })
+    // Publish the new raw key for sibling processes IMMEDIATELY — the row
+    // and the shared publication must move together, or every other
+    // replica's liveness probe fails and churns yet another rotation.
+    let provisioned = Sandbox {
+        api_key: raw_key,
+        key_hash,
+    };
+    publish_shared_sandbox(state, &provisioned).await;
+    Ok(provisioned)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,18 +399,16 @@ async fn redis_rate_limit(state: &AppState, key: &str) -> Result<bool, ()> {
 /// is STRICTER than [`RATE_LIMIT_PER_MINUTE`]. The `now` parameter keeps the
 /// window logic deterministic under test.
 fn emergency_allow(ip: &str, now: std::time::Instant) -> bool {
-    let map = EMERGENCY_LIMITER
-        .get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let map =
+        EMERGENCY_LIMITER.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
     let mut map = map.lock();
     if map.len() > EMERGENCY_PRUNE_THRESHOLD {
         map.retain(|_, w| now.duration_since(w.window_start) < EMERGENCY_WINDOW);
     }
-    let window = map
-        .entry(ip.to_string())
-        .or_insert(EmergencyWindow {
-            count: 0,
-            window_start: now,
-        });
+    let window = map.entry(ip.to_string()).or_insert(EmergencyWindow {
+        count: 0,
+        window_start: now,
+    });
     if now.duration_since(window.window_start) >= EMERGENCY_WINDOW {
         window.count = 0;
         window.window_start = now;
@@ -319,7 +446,36 @@ fn api_router(state: &AppState) -> &'static Router {
 
 /// Dispatch a request through the real application router and capture the
 /// verbatim status + body.
+///
+/// A 401 on the FIRST attempt with the process-cached sandbox key means the
+/// key was rotated out from under this process between its liveness probe
+/// and the dispatch (a sibling's cold start re-mints the single row). The
+/// process cache is dropped, a fresh key is adopted, and the SAME request
+/// is retried exactly once — the explorer's own answer to the audit-F4
+/// cross-process rotation window. A second 401 (or a 401 with an unchanged
+/// key — a genuine rejection, e.g. the send lane's policy) is surfaced
+/// verbatim; nothing retries blind.
 async fn dispatch(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    api_key: &str,
+    json_body: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let (status, value) = dispatch_once(state, method.clone(), uri, api_key, json_body).await;
+    if status != 401 {
+        return (status, value);
+    }
+    *SANDBOX.write().await = None;
+    let fresh = match sandbox(state).await {
+        Ok(fresh) if fresh.api_key != api_key => fresh,
+        _ => return (status, value),
+    };
+    dispatch_once(state, method, uri, &fresh.api_key, json_body).await
+}
+
+/// One dispatch attempt — the retryable core of [`dispatch`].
+async fn dispatch_once(
     state: &AppState,
     method: Method,
     uri: &str,
@@ -968,7 +1124,7 @@ mod tests {
         assert!(all_recipients_example_com(&bad_cc).is_err());
         let missing = serde_json::json!({"subject": "hi"});
         assert!(all_recipients_example_com(&missing).is_ok()); // real handler rejects missing to
-        // A bare STRING (not an array) is checked by the same policy.
+                                                               // A bare STRING (not an array) is checked by the same policy.
         assert!(all_recipients_example_com(&serde_json::json!({"to": "solo@example.com"})).is_ok());
         assert!(all_recipients_example_com(&serde_json::json!({"to": "solo@evil.com"})).is_err());
     }
@@ -1339,6 +1495,136 @@ mod adversarial_tests {
         });
     }
 
+    /// SM3 (audit F4): the sandbox key is provisioned ONCE per process and
+    /// reused across requests, and the sandbox tenant is capped at exactly
+    /// ONE api_keys row — re-provisioning (what a restarted process does)
+    /// reclaims the superseded row instead of stockpiling revoked ones.
+    #[test]
+    fn sandbox_key_is_cached_per_process_and_capped_at_one_row() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                // The per-process cache hands out the SAME credential on
+                // every call — no per-request inserts.
+                let first = sandbox(&state).await.expect("provision").api_key.clone();
+                let second = sandbox(&state).await.expect("cached").api_key.clone();
+                assert_eq!(
+                    first, second,
+                    "the process-wide cache must reuse the provisioned key"
+                );
+
+                let key_stats = |state: &AppState| {
+                    let pool = state.db.clone();
+                    async move {
+                        let (rows, live): (i64, i64) = sqlx::query_as(
+                            "SELECT COUNT(*), COUNT(*) FILTER (WHERE revoked_at IS NULL)
+                             FROM api_keys WHERE tenant_id = $1",
+                        )
+                        .bind(SANDBOX_TENANT_ID)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("sandbox key stats");
+                        (rows, live)
+                    }
+                };
+
+                let (rows, live) = key_stats(&state).await;
+                assert_eq!(rows, 1, "the sandbox tenant carries exactly one key row");
+                assert_eq!(live, 1, "and that row is live");
+
+                // A fresh provision (a restarted process's cold cache) must
+                // reclaim the old row: no unbounded growth across restarts,
+                // and the key ceiling the raw insert used to bypass holds.
+                provision_sandbox(&state).await.expect("re-provision");
+                let (rows, live) = key_stats(&state).await;
+                assert_eq!(rows, 1, "superseded rows are deleted on rotation");
+                assert_eq!(live, 1, "exactly one live key survives rotation");
+            })
+        });
+    }
+
+    /// SM3 (audit F4) self-heal: a SIBLING process's rotation re-mints the
+    /// single key row out from under this process's cache (the raw key is
+    /// stored hash-only, so the sibling cannot reuse ours — it must mint a
+    /// new one). The cache must notice via the liveness probe and hand back
+    /// a key that matches the live row — not keep dispatching with the dead
+    /// one until restart.
+    #[test]
+    fn sandbox_cache_self_heals_when_a_sibling_re_mints_the_key_row() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let stale = sandbox(&state).await.expect("initial provision");
+                let stale_key = stale.api_key.clone();
+
+                // A sibling replica's cold cache DELETES + re-mints the row.
+                let sibling = provision_sandbox(&state)
+                    .await
+                    .expect("sibling re-provision");
+                assert_ne!(
+                    sibling.api_key, stale_key,
+                    "the sibling minted a fresh raw key"
+                );
+
+                // This process's NEXT sandbox() call must not serve the
+                // now-dead key: the liveness probe detects the invalidated
+                // row and re-provisions.
+                let healed = sandbox(&state).await.expect("healed provision");
+                assert_ne!(
+                    healed.api_key, stale_key,
+                    "the dead cached key must not be served"
+                );
+
+                let live_hash: String =
+                    sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
+                        .bind(SANDBOX_TENANT_ID)
+                        .fetch_one(&state.db)
+                        .await
+                        .expect("the single live sandbox key row");
+                assert_eq!(healed.key_hash, live_hash, "the healed key IS the live row");
+                // And the cache converged: subsequent calls reuse the healed
+                // key instead of rotating again.
+                let again = sandbox(&state).await.expect("cached heal");
+                assert_eq!(again.api_key, healed.api_key, "the heal is memoized");
+            })
+        });
+    }
+
+    /// SM3 (audit F4) cross-process adoption: a cold SIBLING process (same
+    /// DB + Redis, empty process cache) must ADOPT the live shared key via
+    /// the Redis publication instead of rotating it out from under every
+    /// other replica.
+    #[test]
+    fn sandbox_adopts_the_shared_key_across_processes_without_rotating() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let first = sandbox(&state).await.expect("initial provision");
+                let first_key = first.api_key.clone();
+
+                // Simulate the sibling's cold start: same shared DB + Redis,
+                // an empty process cache.
+                *SANDBOX.write().await = None;
+                let adopted = sandbox(&state).await.expect("sibling adopts");
+                assert_eq!(
+                    adopted.api_key, first_key,
+                    "the cold process must adopt the live shared key, not rotate it"
+                );
+
+                // Adoption did not churn the row either.
+                let rows: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
+                        .bind(SANDBOX_TENANT_ID)
+                        .fetch_one(&state.db)
+                        .await
+                        .expect("sandbox key count");
+                assert_eq!(rows, 1, "adoption rotates nothing");
+
+                // A third cold process converges on the same key again.
+                *SANDBOX.write().await = None;
+                let third = sandbox(&state).await.expect("third process");
+                assert_eq!(third.api_key, first_key);
+            })
+        });
+    }
+
     #[test]
     fn redis_rate_limit_fails_closed_at_the_bucket_and_the_emergency_limiter_takes_over() {
         with_dkim_env(|state| {
@@ -1349,9 +1635,11 @@ mod adversarial_tests {
                         // coverage: justified — the closure fires only if
                         // Redis fails during a test asserting Redis health;
                         // a healthy test Redis keeps it at zero.
-                        redis_rate_limit(&state, &key).await.unwrap_or_else(
-                            |_| panic!("redis is healthy: requests within the budget pass")
-                        ),
+                        redis_rate_limit(&state, &key)
+                            .await
+                            .unwrap_or_else(|_| panic!(
+                                "redis is healthy: requests within the budget pass"
+                            )),
                         "requests within the budget pass"
                     );
                 }
@@ -1496,10 +1784,8 @@ mod adversarial_tests {
                 .expect("live key hash");
                 assert!(
                     plaintexts.iter().any(|k| {
-                        apexmail_lib::hash_api_key_with_secret(
-                            k,
-                            &state.config.api_key_hash_secret,
-                        ) == stored_hash
+                        apexmail_lib::hash_api_key_with_secret(k, &state.config.api_key_hash_secret)
+                            == stored_hash
                     }),
                     "the served plaintext of the surviving provision must match the stored hash"
                 );
@@ -1507,10 +1793,15 @@ mod adversarial_tests {
         });
     }
 
-    /// The process-wide OnceCell: concurrent first `sandbox()` calls all
-    /// receive the SAME instance (exactly one provision per process).
+    /// The process-wide sandbox cache: concurrent first `sandbox()` calls
+    /// must NEVER error and NEVER serve a broken/revoked credential (the P1
+    /// cold-start race this cache replaced), and the process must CONVERGE
+    /// on the live row. Sibling processes legitimately rotate the single
+    /// row (each has its own cache), so "identical keys" is not the
+    /// invariant — "no caller is left holding a dead credential, and the
+    /// cache ends live" is.
     #[test]
-    fn concurrent_first_requests_share_one_sandbox_instance() {
+    fn concurrent_first_requests_converge_on_a_live_sandbox_key() {
         with_dkim_env(|state| {
             Box::pin(async move {
                 let mut handles = Vec::new();
@@ -1521,15 +1812,24 @@ mod adversarial_tests {
                     }));
                 }
                 let keys = futures::future::join_all(handles).await;
-                let mut keys = keys.into_iter().map(|k| k.expect("join"));
-                let first = keys.next().expect("at least one caller");
-                assert!(!first.is_empty());
-                for k in keys {
-                    assert_eq!(
-                        k, first,
-                        "every concurrent first request must be served the SAME credential"
-                    );
-                }
+                let keys: Vec<String> = keys.into_iter().map(|k| k.expect("join")).collect();
+                assert!(keys.iter().all(|k| !k.is_empty()), "every caller is served");
+
+                // Convergence: the process cache ends holding the LIVE row's
+                // credential (a served key from a superseded epoch must not
+                // be what the process keeps).
+                let cached = SANDBOX.read().await.clone().expect("cache populated");
+                let live_hash: Option<String> =
+                    sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
+                        .bind(SANDBOX_TENANT_ID)
+                        .fetch_optional(&state.db)
+                        .await
+                        .expect("sandbox key row");
+                assert_eq!(
+                    live_hash.as_deref(),
+                    Some(cached.key_hash.as_str()),
+                    "the process cache converges on the live row"
+                );
             })
         });
     }
@@ -1756,8 +2056,13 @@ mod adversarial_tests {
         let mut rest = chunk;
         while let Some(dollar) = find(rest, b"$") {
             let after = &rest[dollar + 1..];
-            let Some(crlf) = find(after, b"\r\n") else { break };
-            let Ok(len) = std::str::from_utf8(&after[..crlf]).unwrap_or("x").parse::<usize>() else {
+            let Some(crlf) = find(after, b"\r\n") else {
+                break;
+            };
+            let Ok(len) = std::str::from_utf8(&after[..crlf])
+                .unwrap_or("x")
+                .parse::<usize>()
+            else {
                 break;
             };
             if after.len() < crlf + 2 + len {
@@ -1854,7 +2159,10 @@ mod adversarial_tests {
             let _guard = crate::test_db::DKIM_ENV_MUTEX
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, planted);
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                planted,
+            );
         }
         with_dkim_env(|_state| Box::pin(async move {}));
         let current = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV)
@@ -1931,11 +2239,15 @@ mod adversarial_tests {
             network_timeout_seconds: 1,
             ..email_grader::GraderConfig::default()
         };
-        let engine = email_grader::GraderEngine::new(grader_config.clone(), None)
-            .expect("grader engine");
+        let engine =
+            email_grader::GraderEngine::new(grader_config.clone(), None).expect("grader engine");
         let gs = std::sync::Arc::new(
-            email_grader::GraderState::new(std::sync::Arc::new(engine), grader_config, pool.clone())
-                .expect("grader state"),
+            email_grader::GraderState::new(
+                std::sync::Arc::new(engine),
+                grader_config,
+                pool.clone(),
+            )
+            .expect("grader state"),
         );
         let config = crate::app::test_support::test_config();
         let redis_url = std::env::var("TEST_REDIS_URL")

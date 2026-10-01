@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use futures::stream::{self, StreamExt};
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Notify;
 use tokio::time::sleep;
@@ -244,6 +245,11 @@ pub struct ReplyHandler {
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
     shutdown_notify: Arc<Notify>,
+    /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
+    /// the claim loop refuses to claim (or complete) replies while this
+    /// node's `ha:fenced:{node}` key stands — or while the fence authority
+    /// cannot be read (fail closed). Default off: zero behavior change.
+    fence_gate: crate::fence::FenceGate,
 }
 
 impl ReplyHandler {
@@ -268,6 +274,7 @@ impl ReplyHandler {
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
             shutdown_notify: Arc::new(Notify::new()),
+            fence_gate: crate::fence::FenceGate::from_env(),
         }
     }
 
@@ -316,6 +323,17 @@ impl ReplyHandler {
     /// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
+            // SM10 F4: a fenced node must not claim or complete replies; an
+            // unreadable fence authority fails closed. Disabled by default.
+            if let Err(refusal) = self.fence_gate.ensure_can_claim().await {
+                error!(
+                    error = %refusal,
+                    "node is fenced; reply claim loop paused (SM10 F4)"
+                );
+                sleep(self.config.base.poll_interval).await;
+                continue;
+            }
+
             // Check capacity
             let available = self
                 .config
@@ -335,23 +353,7 @@ impl ReplyHandler {
                     }
                 }
                 Ok(messages) => {
-                    for msg in messages {
-                        let msg_id = msg.id.clone();
-                        if let Err(e) = self.process_message(msg).await {
-                            error!(msg_id = %msg_id, error = %e, "Failed to process message");
-                            // F2:release the claim immediately so the row is
-                            // retried on the next poll instead of waiting out
-                            // the staleness window (mirrors the analytics
-                            // processor's reset_processing).
-                            if let Err(reset_err) = self.reset_claim(&msg_id).await {
-                                error!(
-                                    msg_id = %msg_id,
-                                    error = %reset_err,
-                                    "Failed to reset processing claim; the stale-claim reclaim in fetch_messages will recover it"
-                                );
-                            }
-                        }
-                    }
+                    self.process_batch(messages, available).await;
                     sleep(Duration::from_millis(100)).await;
                 }
                 Err(e) => {
@@ -360,6 +362,36 @@ impl ReplyHandler {
                 }
             }
         }
+    }
+
+    /// Process one claimed batch CONCURRENTLY, bounded by `available`
+    /// (SM10 F17) — exactly like the webhook processor.
+    ///
+    /// The old sequential `for` loop ran every classification and AI call
+    /// one after another — effective concurrency 1 no matter what
+    /// WORKER_CONCURRENCY said — so one slow AI reply stalled every
+    /// subsequent message in the batch. Each task owns its error handling:
+    /// a failure logs and releases its own claim without touching its peers.
+    async fn process_batch(&self, messages: Vec<InboundMessage>, available: usize) {
+        stream::iter(messages)
+            .for_each_concurrent(available, |msg| async {
+                let msg_id = msg.id.clone();
+                if let Err(e) = self.process_message(msg).await {
+                    error!(msg_id = %msg_id, error = %e, "Failed to process message");
+                    // F2:release the claim immediately so the row is
+                    // retried on the next poll instead of waiting out
+                    // the staleness window (mirrors the analytics
+                    // processor's reset_processing).
+                    if let Err(reset_err) = self.reset_claim(&msg_id).await {
+                        error!(
+                            msg_id = %msg_id,
+                            error = %reset_err,
+                            "Failed to reset processing claim; the stale-claim reclaim in fetch_messages will recover it"
+                        );
+                    }
+                }
+            })
+            .await;
     }
 
     /// Fetch unprocessed inbound messages (O-16.5: with size truncation).
@@ -3322,6 +3354,108 @@ mod tests {
     async fn classifier_name_accessor_matches_the_configured_classifier() {
         let handler = ReplyHandler::new(dead_pool(), loop_config());
         assert!(!handler.classifier_name().is_empty());
+    }
+
+    // ── SM10 F17: a claimed batch is processed CONCURRENTLY ────────────────
+
+    /// Classifier probe: records how many classifications are IN FLIGHT at
+    /// once (the concurrency fingerprint) plus the total attempts.
+    struct ConcurrencyProbe {
+        delay: Duration,
+        calls: AtomicUsize,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+    }
+
+    impl ConcurrencyProbe {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                calls: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                peak_in_flight: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ReplyClassifier for ConcurrencyProbe {
+        async fn classify(
+            &self,
+            _input: &ReplyInput,
+        ) -> Result<super::super::types::AiClassification, ClassifyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(super::super::types::AiClassification {
+                disposition: ReplyDisposition::Unknown,
+                confidence: 0.5,
+                reasoning: "probe".to_string(),
+                model_version: Some("probe-v1".to_string()),
+                prompt_version: Some("probe".to_string()),
+                evidence: vec![],
+            })
+        }
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+    }
+
+    fn batch_message(id: &str) -> InboundMessage {
+        InboundMessage {
+            id: id.to_string(),
+            tenant_id: None,
+            lead_id: None,
+            from_email: "sender@example.com".to_string(),
+            to_email: "sales@apex.example".to_string(),
+            subject: "Re: nothing".to_string(),
+            body_text: Some("plain body".to_string()),
+            body_html: None,
+            headers: None,
+            message_id_header: None,
+            received_at: Utc::now(),
+            processed_at: None,
+            classification: None,
+        }
+    }
+
+    /// THE F17 regression: three messages whose classifications each take
+    /// ~150 ms must overlap inside one `process_batch` call. The old
+    /// sequential `for` loop capped in-flight classifications at 1 and made
+    /// one slow AI reply stall the whole batch. Every message is attempted
+    /// even though each ultimately fails downstream (dead pool — failure
+    /// independence), and the active-job counter drains back to zero.
+    #[tokio::test] // real time: measures overlapping classifier latencies
+    async fn process_batch_classifies_messages_concurrently_and_independently() {
+        crate::test_support::install_test_tracing();
+        let probe = Arc::new(ConcurrencyProbe::new(Duration::from_millis(150)));
+        let handler = Arc::new(ReplyHandler::with_classifier(
+            dead_pool(),
+            loop_config(),
+            Arc::clone(&probe) as Arc<dyn ReplyClassifier>,
+        ));
+
+        let messages: Vec<InboundMessage> = (0..3)
+            .map(|i| batch_message(&format!("batch-{i}")))
+            .collect();
+        handler.process_batch(messages, 8).await;
+
+        assert_eq!(
+            probe.calls.load(Ordering::SeqCst),
+            3,
+            "every claimed message must be attempted even though each fails downstream"
+        );
+        assert!(
+            probe.peak_in_flight.load(Ordering::SeqCst) >= 2,
+            "classifications must overlap — a sequential batch peaks at 1 in flight"
+        );
+        assert_eq!(
+            handler.active_jobs.load(Ordering::SeqCst),
+            0,
+            "the active-job counter must drain after the batch"
+        );
     }
 }
 

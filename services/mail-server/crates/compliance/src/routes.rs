@@ -58,6 +58,9 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// DSAR rate limiter (SEC-15): stricter rate limits for DSAR endpoints.
     pub dsar_rate_limiter: DsarRateLimiter,
+    /// Audit F12: two-level (per-IP + global) limiter for the ANONYMOUS
+    /// trust-portal access-request endpoint.
+    pub trust_access_limiter: crate::trust_portal::TrustAccessRateLimiter,
 }
 
 // ── Router factory ────────────────────────────────────────────────────────
@@ -503,6 +506,36 @@ async fn scan_content(
 
 // ── Audit endpoints ───────────────────────────────────────────────────────
 
+/// Maximum accepted length for a request-supplied resource id (canonical
+/// ids are UUIDs / ULIDs; anything longer is noise, never a real id).
+const MAX_RESOURCE_ID_LEN: usize = 128;
+
+/// Audit F5: bind the body's ACTUAL `resource_id`. `AuditLogger::log`'s
+/// third parameter is the resource id — the endpoint used to pass the
+/// TENANT id there (the body's resource_id was never even parsed), so every
+/// ingested entry recorded `resource_id == tenant_id` and downstream
+/// `resource_id = $1` queries (e.g. the SAR export's subject match) could
+/// never work. `None` when the body omits it — a missing resource id is
+/// never silently replaced by the tenant id.
+fn bounded_resource_id(raw: Option<&str>) -> Result<Option<String>, ()> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(value) if value.len() > MAX_RESOURCE_ID_LEN => Err(()),
+        Some(value) => Ok(Some(value.to_string())),
+    }
+}
+
+/// Audit F5: body-supplied actor ids are UNTRUSTED metadata (the crate's own
+/// `extract_caller_id` policy, E-3): they are stored with an explicit
+/// `claimed_user_id:` prefix so they cannot be mistaken for an authoritative
+/// actor in the tamper-evident trail. The same treatment is applied to the
+/// body's session id (it is equally client-asserted).
+fn claimed_actor_label(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|claimed| format!("claimed_user_id:{claimed}"))
+}
+
 /// POST /audit — create an audit log entry.
 async fn audit_create(
     State(state): State<Arc<AppState>>,
@@ -534,6 +567,16 @@ async fn audit_create(
     let resource = parse_audit_resource(resource_str)
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Invalid resource"))?;
 
+    // Audit F5: the body's real resource_id, parsed and bound — never the
+    // tenant id. An overlong value is a 400, not a silent truncation.
+    let resource_id = bounded_resource_id(entry.get("resource_id").and_then(|v| v.as_str()))
+        .map_err(|_| {
+            err_json(
+                StatusCode::BAD_REQUEST,
+                "resource_id must be at most 128 characters",
+            )
+        })?;
+
     let details = entry
         .get("details")
         .cloned()
@@ -554,14 +597,12 @@ async fn audit_create(
         // The validated, trimmed tenant from above — never the raw body value
         // (a padded value must not mint a differently-keyed chain).
         tenant_id: Some(tenant_id.to_string()),
-        user_id: entry
-            .get("user_id")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        session_id: entry
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        // Audit F5: client-asserted actor/session ids are stored with the
+        // `claimed_user_id:` prefix (the crate's own E-3 policy, previously
+        // applied on the secrets endpoints but not here). A forged
+        // attribution can no longer enter the trail verbatim.
+        user_id: claimed_actor_label(entry.get("user_id").and_then(|v| v.as_str())),
+        session_id: claimed_actor_label(entry.get("session_id").and_then(|v| v.as_str())),
         ip_address: entry.get("ip").and_then(|v| v.as_str()).map(String::from),
         user_agent: entry
             .get("user_agent")
@@ -574,7 +615,7 @@ async fn audit_create(
         .log(
             action,
             resource,
-            Some(tenant_id),
+            resource_id.as_deref(),
             details,
             outcome,
             None,
@@ -1955,6 +1996,89 @@ mod tests {
         assert!(!constant_time_eq("token-!_@-#$", "token-!_@-#X"));
     }
 
+    // ── Audit F5: ingest binding + claimed-actor prefixing ────────────────
+
+    #[test]
+    fn resource_id_is_bound_from_the_body_not_the_tenant() {
+        assert_eq!(
+            bounded_resource_id(Some("req-uuid-1234")).expect("valid"),
+            Some("req-uuid-1234".to_string())
+        );
+        // Absent / blank / whitespace-only → None (never the tenant id).
+        assert_eq!(bounded_resource_id(None).expect("valid"), None);
+        assert_eq!(bounded_resource_id(Some("   ")).expect("valid"), None);
+        assert_eq!(bounded_resource_id(Some("")).expect("valid"), None);
+    }
+
+    #[test]
+    fn overlong_resource_id_is_a_caller_error() {
+        let long = "x".repeat(MAX_RESOURCE_ID_LEN + 1);
+        assert!(bounded_resource_id(Some(&long)).is_err());
+        // Exactly at the cap is fine.
+        let at_cap = "x".repeat(MAX_RESOURCE_ID_LEN);
+        assert_eq!(
+            bounded_resource_id(Some(&at_cap)).expect("valid"),
+            Some(at_cap)
+        );
+    }
+
+    #[test]
+    fn body_actor_ids_are_never_stored_verbatim() {
+        // E-3 policy: a client-supplied id is a CLAIM, stored prefixed.
+        assert_eq!(
+            claimed_actor_label(Some("forged-admin-42")).expect("some"),
+            "claimed_user_id:forged-admin-42"
+        );
+        assert_eq!(claimed_actor_label(None), None);
+        assert_eq!(claimed_actor_label(Some("  ")), None);
+        // Trimmed before prefixing: a padded value must not mint a
+        // different attribution key.
+        assert_eq!(
+            claimed_actor_label(Some("  admin-7  ")).expect("some"),
+            "claimed_user_id:admin-7"
+        );
+    }
+
+    /// Audit F5 (verifier repair): the HELPERS being correct is not enough —
+    /// `audit_create` must actually WIRE them (parse the body's resource_id,
+    /// prefix the claimed actor/session). A revert of the handler wiring
+    /// (e.g. passing `tenant_id` as the resource id again, or the raw body
+    /// user_id) fails here even though every helper test still passes.
+    #[test]
+    fn audit_create_wires_the_ingest_bindings() {
+        let source = include_str!("routes.rs");
+        let marker = "async fn audit_create(";
+        let start = source
+            .find(marker)
+            .expect("audit_create handler disappeared from routes.rs")
+            + marker.len();
+        let rest = &source[start..];
+        let end = rest.find("\nasync fn ").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("bounded_resource_id(entry.get(\"resource_id\")"),
+            "audit_create must bind the body's resource_id (never the tenant id)"
+        );
+        assert!(
+            body.contains("claimed_actor_label(entry.get(\"user_id\")"),
+            "audit_create must store the body actor as a claimed_user_id: label"
+        );
+        assert!(
+            body.contains("claimed_actor_label(entry.get(\"session_id\")"),
+            "audit_create must store the body session id as a claimed label"
+        );
+        // The logger's resource-id parameter receives the PARSED value —
+        // never `Some(&tenant_id)` (the original argument bug).
+        assert!(
+            body.contains("resource_id.as_deref()"),
+            "audit_create must pass the parsed resource_id to AuditLogger::log"
+        );
+        assert!(
+            !body.contains("Some(&tenant_id)"),
+            "audit_create must never pass the tenant id as the resource id"
+        );
+    }
+
     fn test_config(auth_token: &str) -> ComplianceConfig {
         ComplianceConfig {
             port: 0,
@@ -2785,6 +2909,7 @@ mod tests {
                 config.dsar_rate_limit.clone(),
                 None, // No Redis in tests; uses in-memory fallback
             ),
+            trust_access_limiter: crate::trust_portal::TrustAccessRateLimiter::new(),
         })
     }
 
@@ -5347,8 +5472,12 @@ mod db_tests {
         // Overlong tenant on the LIST route is a 400 before any store call.
         let overlong = "t".repeat(MAX_TENANT_ID_LEN + 1);
         let (code, body) = error_of(
-            secret_list(State(state.clone()), auth(), query(&[("tenant_id", overlong.as_str())]))
-                .await,
+            secret_list(
+                State(state.clone()),
+                auth(),
+                query(&[("tenant_id", overlong.as_str())]),
+            )
+            .await,
         );
         assert_eq!(code, StatusCode::BAD_REQUEST);
         assert!(
@@ -5370,7 +5499,12 @@ mod db_tests {
         .await
         .expect("orphan grant row");
         let (code, _) = error_of(
-            secret_get(State(state.clone()), auth_as("owner@apexmail.ee"), path(&ghost)).await,
+            secret_get(
+                State(state.clone()),
+                auth_as("owner@apexmail.ee"),
+                path(&ghost),
+            )
+            .await,
         );
         assert_eq!(code, StatusCode::NOT_FOUND);
     }
@@ -5416,7 +5550,10 @@ mod db_tests {
         assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["error"], "rate_limited");
         assert!(
-            body["message"].as_str().unwrap_or_default().contains("Tenant"),
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Tenant"),
             "the tenant variant names the tenant quota, got {body}"
         );
         assert!(
@@ -5565,7 +5702,10 @@ mod db_tests {
             .expect("body");
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert!(
-            body["data"].as_str().unwrap_or_default().contains(&record.id),
+            body["data"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&record.id),
             "certificate must bind the record id: {body}"
         );
 

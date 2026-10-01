@@ -163,6 +163,16 @@ impl ThreatIntelEngine {
             push_source(&entry.source);
         }
 
+        // Rejection accounting lives OUTSIDE the lock scope so the
+        // saturation handling below can see it. The DOMAIN path is counted
+        // the same way: `DomainBlocklist::add` returns `false` at the cap,
+        // and discarding that result silently is exactly the fail-open the
+        // IP-path fix closed (adversarial verification found it still
+        // open here).
+        let ip_total = ip_entries.len();
+        let mut ip_rejected = 0usize;
+        let domain_total = domain_entries.len();
+        let mut domain_rejected = 0usize;
         {
             let ips = self.ip_blocklist.write();
             let domains = self.domain_blocklist.write();
@@ -190,17 +200,55 @@ impl ThreatIntelEngine {
                 }
             }
 
+            // Audit finding: a full blocklist previously discarded feed
+            // entries SILENTLY (`let _ = add_cidr(...)` discards the
+            // BlocklistFull error, `add_ip_str`'s false is ignored). Once
+            // `max_ip_entries` was reached, every refresh reported success
+            // while absorbing zero new IoCs — newly listed attacker
+            // infrastructure scored Clean indefinitely. Rejections are now
+            // counted, logged, and surfaced: a material drop refuses to
+            // report success (degraded state + failure counter) instead of
+            // pretending the feed refreshed.
             for (cidr, entry) in ip_entries {
-                if cidr.contains('/') {
-                    let _ = ips.add_cidr(&cidr, entry);
+                let accepted = if cidr.contains('/') {
+                    ips.add_cidr(&cidr, entry).is_ok()
                 } else {
-                    ips.add_ip_str(&cidr, entry);
+                    ips.add_ip_str(&cidr, entry)
+                };
+                if !accepted {
+                    ip_rejected += 1;
                 }
             }
             ips.optimize();
 
             for (domain, entry) in domain_entries {
-                domains.add(&domain, entry);
+                if !domains.add(&domain, entry) {
+                    domain_rejected += 1;
+                }
+            }
+        }
+
+        let rejected = ip_rejected + domain_rejected;
+        let total = ip_total + domain_total;
+        if rejected > 0 {
+            FEED_ENTRIES_REJECTED.fetch_add(rejected as u64, Ordering::Relaxed);
+            tracing::warn!(
+                rejected,
+                total,
+                ip_rejected,
+                domain_rejected,
+                "blocklist saturation: feed entries dropped on refresh (they were NOT loaded)"
+            );
+            let dropped_fraction = rejected as f64 / total.max(1) as f64;
+            if dropped_fraction >= FEED_SATURATION_REFUSAL_FRACTION {
+                // Material drop: the entries that fit remain loaded
+                // (degraded), but the refresh must not read as success —
+                // the failure counter increments and
+                // `last_successful_refresh` does not advance.
+                self.record_refresh_failure(&format!(
+                    "blocklist saturated: {rejected} of {total} feed entries dropped — refresh is DEGRADED, not fully applied"
+                ));
+                return false;
             }
         }
 
@@ -462,6 +510,26 @@ impl ThreatIntelEngine {
 /// feeds can never produce Enforce (Block) verdicts — see
 /// [`ThreatIntelEngine::feed_adjusted_score`].
 const UNCONFIGURED_FEED_TRUST: f64 = 3.0;
+
+/// Fraction of a refresh's IP entries that may be dropped because the
+/// blocklist is full before the refresh stops reporting success (audit:
+/// silent fail-open on saturation). Below this threshold the drop is still
+/// counted and logged, but a refresh absorbing almost all of its payload is
+/// not treated as failed.
+const FEED_SATURATION_REFUSAL_FRACTION: f64 = 0.1;
+
+/// Process-wide total of feed entries DROPPED because a blocklist was at
+/// capacity (audit: previously discarded with `let _ = ...`, invisible to
+/// operators). Observable via [`feed_entries_rejected_total`].
+pub static FEED_ENTRIES_REJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// Total feed entries dropped due to blocklist saturation since process
+/// start. A steadily increasing value means the configured
+/// `max_ip_entries` cap is too small for the live feeds and verdicts are
+/// computed from an incomplete IoC set.
+pub fn feed_entries_rejected_total() -> u64 {
+    FEED_ENTRIES_REJECTED.load(Ordering::Relaxed)
+}
 
 #[cfg(feature = "events")]
 impl ThreatIntelEngine {
@@ -943,6 +1011,129 @@ mod tests {
             engine.check_ip("198.51.100.20").action,
             ThreatAction::Flag,
             "other sources' entries must survive a per-source refresh"
+        );
+    }
+
+    // ── Blocklist saturation: dropped entries are counted, never silent ──
+
+    #[test]
+    fn saturated_blocklist_refresh_does_not_report_success() {
+        // Audit finding: `add_cidr`/`add_ip_str` rejections were discarded
+        // with `let _ = ...`, so a saturated blocklist kept reporting every
+        // refresh as successful while absorbing zero new IoCs.
+        let config = ThreatIntelConfig {
+            max_ip_entries: 4, // tiny cap on purpose
+            ..ThreatIntelConfig::default()
+        };
+        let engine = ThreatIntelEngine::with_config(config);
+        let entries: Vec<_> = (0..10)
+            .map(|i| {
+                let ip = format!("198.51.100.{i}");
+                (ip.clone(), ip_entry(&ip))
+            })
+            .collect();
+        let rejected_before = feed_entries_rejected_total();
+
+        // 6 of 10 entries cannot fit — a material drop (60% ≥ 10%) must
+        // refuse to report success.
+        assert!(
+            !engine.apply_feed_refresh(entries, Vec::new()),
+            "a refresh dropping most of its payload must not report success"
+        );
+        assert!(
+            engine.refresh_failure_count() >= 1,
+            "saturation must be recorded as a refresh failure"
+        );
+        assert!(
+            feed_entries_rejected_total() >= rejected_before + 6,
+            "every dropped entry must be counted"
+        );
+        assert_eq!(
+            engine.stats().ip_exact_entries,
+            4,
+            "only the entries that fit are loaded (degraded, not wiped)"
+        );
+        assert!(
+            engine.last_successful_refresh().is_none(),
+            "a saturated refresh must not advance last_successful_refresh"
+        );
+    }
+
+    #[test]
+    fn marginal_blocklist_saturation_is_counted_but_refresh_succeeds() {
+        // A single dropped entry (≈7.7% < 10%) is logged and counted but is
+        // not a failed refresh.
+        let config = ThreatIntelConfig {
+            max_ip_entries: 12,
+            ..ThreatIntelConfig::default()
+        };
+        let engine = ThreatIntelEngine::with_config(config);
+        let entries: Vec<_> = (0..13)
+            .map(|i| {
+                let ip = format!("203.0.113.{i}");
+                (ip.clone(), ip_entry(&ip))
+            })
+            .collect();
+        let rejected_before = feed_entries_rejected_total();
+        assert!(
+            engine.apply_feed_refresh(entries, Vec::new()),
+            "a sub-material drop must not fail the refresh"
+        );
+        assert!(
+            feed_entries_rejected_total() >= rejected_before + 1,
+            "the dropped entry must still be counted"
+        );
+        assert_eq!(
+            engine.refresh_failure_count(),
+            0,
+            "sub-material saturation must not count as a refresh failure"
+        );
+    }
+
+    #[test]
+    fn saturated_domain_blocklist_drops_are_counted_and_refuse_success() {
+        // Adversarial verification of the saturation fix: the DOMAIN
+        // blocklist has the same saturation semantics
+        // (`DomainBlocklist::add` returns `false` at the cap), and its
+        // result was still discarded after the IP path was repaired — a
+        // saturated domain list silently absorbed zero new IoC domains
+        // while every refresh reported success. The same discipline must
+        // apply: counted, logged, refused at a material fraction.
+        let config = ThreatIntelConfig {
+            max_domain_entries: 4, // tiny cap on purpose
+            ..ThreatIntelConfig::default()
+        };
+        let engine = ThreatIntelEngine::with_config(config);
+        let entries: Vec<_> = (0..10)
+            .map(|i| {
+                let domain = format!("evil{i}.example");
+                (domain.clone(), domain_entry(&domain))
+            })
+            .collect();
+        let rejected_before = feed_entries_rejected_total();
+
+        // 6 of 10 domain entries cannot fit — a material drop (60% ≥ 10%)
+        // must refuse to report success.
+        assert!(
+            !engine.apply_feed_refresh(Vec::new(), entries),
+            "a refresh dropping most of its domain payload must not report success"
+        );
+        assert!(
+            engine.refresh_failure_count() >= 1,
+            "domain saturation must be recorded as a refresh failure"
+        );
+        assert!(
+            feed_entries_rejected_total() >= rejected_before + 6,
+            "every dropped domain entry must be counted"
+        );
+        assert_eq!(
+            engine.stats().domain_entries,
+            4,
+            "only the domain entries that fit are loaded (degraded, not wiped)"
+        );
+        assert!(
+            engine.last_successful_refresh().is_none(),
+            "a saturated refresh must not advance last_successful_refresh"
         );
     }
 

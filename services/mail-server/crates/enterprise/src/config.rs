@@ -255,13 +255,19 @@ pub struct SubAccountConfig {
     pub volume_allocation_mode: VolumeAllocationMode,
 }
 
+/// Compliance-relevant environment knobs for the enterprise service.
+///
+/// Audit F10: `data_residency` / `data_residency_regions` were REMOVED.
+/// They were parsed from `DATA_RESIDENCY` / `DATA_RESIDENCY_REGIONS` and
+/// never read by any code path — no routing, pinning or replication
+/// constraint backed them. A knob that does nothing is configuration
+/// theater; a residency knob may only return together with the mechanism
+/// that enforces it.
 #[derive(Debug, Clone)]
 pub struct ComplianceEnvConfig {
     pub hipaa_enabled: bool,
     pub zero_retention_enabled: bool,
-    pub data_residency_regions: Vec<String>,
     pub audit_retention_days: i32,
-    pub data_residency: String,
 }
 
 #[derive(Debug, Clone)]
@@ -482,16 +488,10 @@ impl Config {
                 zero_retention_enabled: env::var("ZERO_RETENTION_ENABLED")
                     .map(|v| v == "true")
                     .unwrap_or(false),
-                data_residency_regions: env::var("DATA_RESIDENCY_REGIONS")
-                    .unwrap_or_else(|_| "us,eu".into())
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect(),
                 audit_retention_days: env::var("AUDIT_RETENTION_DAYS")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(2555),
-                data_residency: env::var("DATA_RESIDENCY").unwrap_or_default(),
             },
             log_stream: LogStreamEnvConfig {
                 buffer_size: env::var("LOG_STREAM_BUFFER_SIZE")
@@ -716,10 +716,13 @@ mod tests {
     fn test_compliance_defaults() {
         env::remove_var("HIPAA_ENABLED");
         env::remove_var("AUDIT_RETENTION_DAYS");
+        // Audit F10: DATA_RESIDENCY* are gone — the env vars are no longer
+        // read anywhere, so a stale environment cannot reintroduce the knob.
+        env::remove_var("DATA_RESIDENCY");
+        env::remove_var("DATA_RESIDENCY_REGIONS");
         let cfg = Config::from_env().unwrap();
         assert!(!cfg.compliance.hipaa_enabled);
         assert_eq!(cfg.compliance.audit_retention_days, 2555);
-        assert_eq!(cfg.compliance.data_residency_regions, vec!["us", "eu"]);
     }
 
     #[test]

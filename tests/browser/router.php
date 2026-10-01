@@ -86,8 +86,52 @@ function writeCapture(string $name, string $rawBody): void
 // record shape.
 function chainStateFile(): string
 {
+    // Per-run store: the Playwright webServer command exports a unique
+    // KIWI_FIXTURE_RUN_ID per server start (reuseExistingServer: false —
+    // one fresh php -S per run), so every run models a FRESH shared
+    // store instead of inheriting the half-expired chain state of an
+    // earlier run. The historical shared file was the chaining suite's
+    // instability: a passed test leaves its open obligation alive for
+    // the chain TTL (300s), so a re-run inside that window auto-resumed
+    // a stage-2 challenge whose record had already expired (record TTL
+    // 120s) — the verifier answers an honest 'expired' and the test
+    // fails deterministically until the obligation lapses. Without the
+    // env (a manually started server for debugging) the historical
+    // shared filename applies.
+    $runId = (string) getenv('KIWI_FIXTURE_RUN_ID');
+    if ($runId !== '' && preg_match('/^[A-Za-z0-9._:-]{1,64}$/D', $runId) === 1) {
+        return sys_get_temp_dir().'/kiwicaptacha-chain-state-'.$runId.'.json';
+    }
+
     return sys_get_temp_dir().'/kiwicaptacha-chain-state.json';
 }
+
+/**
+ * Best-effort temp hygiene: every fixture file under the kiwicaptacha-
+ * prefix is a cache with a lifetime far below an hour (records 120s,
+ * metadata/captures minutes, the chain store per run and rewritten on
+ * every save, so its mtime stays fresh while a run lives), so files
+ * older than an hour can no longer belong to a live run. The sweep is
+ * time-gated through a marker file (php -S resets per-request state, so
+ * an in-process static cannot carry the gate across requests) and never
+ * fails the request.
+ */
+function fixtureTempGc(): void
+{
+    $marker = sys_get_temp_dir().'/kiwicaptacha-gc-marker.json';
+    if (is_file($marker) && (int) filemtime($marker) > time() - 600) {
+        return;
+    }
+    @touch($marker);
+    $files = glob(sys_get_temp_dir().'/kiwicaptacha-*.json') ?: [];
+    $cutoff = time() - 3600;
+    foreach ($files as $file) {
+        if (is_file($file) && (int) filemtime($file) < $cutoff) {
+            @unlink($file);
+        }
+    }
+}
+fixtureTempGc();
 
 /**
  * The chained-challenge state store of the fixture: the transactional
@@ -690,7 +734,11 @@ function chainedChallenge(array $body, string $scope, ?string $ticket): ?array
  */
 function inspectIssuedStage2(string $chainId, string $stage2Nonce, \BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService $chainService): ?array
 {
-    $record = challengeRecordOf($stage2Nonce);
+    // The TTL-faithful lookup: an expired pending record is ABSENT (the
+    // production shared store's TTL), so the chain rearms for a fresh
+    // stage-2 mint instead of recovering a challenge the verifier would
+    // honestly refuse.
+    $record = liveChallengeRecordOf($stage2Nonce);
     if ($record === null) {
         try {
             $rearmed = $chainService->rearmIssued($chainId, $stage2Nonce);
@@ -722,10 +770,30 @@ function challengeRecordOf(string $nonce): ?array
     return $raw;
 }
 
+/**
+ * The persisted LIVE record of a nonce: an expired record is ABSENT —
+ * the mirror of the production shared store's TTL (a record past its
+ * expires_at is no longer readable there, so the chain stage-2 recovery
+ * must never hand out an already-expired challenge; the issued-state
+ * recovery falls through to the rearm path — a fresh stage-2 mint, never
+ * a stage-1). The unfiltered challengeRecordOf() stays for the
+ * verification paths, where the expired record must stay loadable so the
+ * verifier answers its honest 'expired' verdict.
+ */
+function liveChallengeRecordOf(string $nonce): ?array
+{
+    $record = challengeRecordOf($nonce);
+    if ($record === null || (int) ($record['expires_at'] ?? 0) <= time()) {
+        return null;
+    }
+
+    return $record;
+}
+
 /** The recovered issuance response of an issued challenge, or null. */
 function recoverIssuedResponse(string $stage2Nonce): ?array
 {
-    $record = challengeRecordOf($stage2Nonce);
+    $record = liveChallengeRecordOf($stage2Nonce);
     if ($record === null) {
         return null;
     }
@@ -1558,8 +1626,17 @@ $assetSpecs = [
     'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
     'worker' => ['file' => 'kiwi-worker.js', 'type' => 'application/javascript; charset=UTF-8'],
     'execution' => ['file' => 'execution-interpreter.js', 'type' => 'application/javascript; charset=UTF-8'],
+    // The lazy risk module (widget-risk.js: the adaptive solve tier, the
+    // execution runner and the server-issued decoy machinery) and the
+    // lazy locale packs (widget-locales.js) — served like the bundle's
+    // AssetController so the container's data-kiwi-risk-src and
+    // data-kiwi-locales-src URLs resolve (the driver fetches each only
+    // when an armed response / memory-hard challenge / non-default
+    // language requires it).
+    'risk' => ['file' => 'widget-risk.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'locales' => ['file' => 'widget-locales.js', 'type' => 'application/javascript; charset=UTF-8'],
 ];
-if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution|risk|locales)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
     [, $assetName, $assetHash, $assetExt] = $m;
     $spec = $assetSpecs[$assetName];
     if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
@@ -1659,9 +1736,20 @@ if ($path === '/' || $path === '/index.html') {
     $css = file_get_contents($assets.'/widget.css');
     $wasm = file_get_contents($assets.'/kiwicaptcha-wasm.js');
     $driver = file_get_contents($assets.'/widget-driver.js');
+    $risk = file_get_contents($assets.'/widget-risk.js');
     $csp = ($_GET['csp'] ?? '') === 'strict'
         ? '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; style-src \'unsafe-inline\'">'
         : '';
+    // The strict CSP is ALSO delivered as an HTTP response header: a
+    // <meta>-inserted policy is not inherited by dedicated workers on
+    // Chromium (a blob: worker escapes a meta-only policy), so a meta-only
+    // policy never reaches the worker solve tier — the argon2id solver
+    // would compile wasm inside the worker the meta policy was meant to
+    // gate. The header policy is inherited by the driver's blob workers,
+    // so wasm compilation is genuinely blocked where the solver runs.
+    if (($_GET['csp'] ?? '') === 'strict') {
+        header("Content-Security-Policy: script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    }
     $algorithmParam = (string) ($_GET['algorithm'] ?? '');
     $algorithm = $algorithmParam === 'argon2id' || $algorithmParam === 'rsw' ? $algorithmParam : 'sha256';
     $workerAttr = '';
@@ -1732,6 +1820,7 @@ if ($path === '/' || $path === '/index.html') {
             'driver' => 'widget-driver.js',
             'worker' => 'kiwi-worker.js',
             'execution' => 'execution-interpreter.js',
+            'risk' => 'widget-risk.js',
         ];
         $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
             $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
@@ -1747,6 +1836,7 @@ if ($path === '/' || $path === '/index.html') {
         $runtimeAsset = $assetLink('runtime', 'js');
         $workerAsset = $assetLink('worker', 'js');
         $executionAsset = $assetLink('execution', 'js');
+        $riskAsset = $assetLink('risk', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
             .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
@@ -1756,14 +1846,33 @@ if ($path === '/' || $path === '/index.html') {
         // ride the container and the driver fetches it only when an
         // armed challenge arrives (a SHA-only page pays zero bytes).
         $executionAttrFiles = ' data-kiwi-execution-src="'.$executionAsset['url'].'" data-kiwi-execution-integrity="'.$executionAsset['sri'].'"';
+        // The lazy risk module (widget-risk.js) is a files-tier lazy asset
+        // too, exactly like the production theme: its URL + SRI ride the
+        // container (data-kiwi-risk-src / data-kiwi-risk-integrity) and the
+        // driver fetches it only when an armed response (decoy/execution)
+        // or a memory-hard challenge requires it.
+        $riskAttrFiles = ' data-kiwi-risk-src="'.$riskAsset['url'].'" data-kiwi-risk-integrity="'.$riskAsset['sri'].'"';
     } else {
         $executionAttrFiles = '';
+        $riskAttrFiles = '';
     }
+    // The lazy locale packs ride the container in BOTH tiers, exactly
+    // like the production theme: the bundle's form_div_layout.html.twig
+    // emits data-kiwi-locales-src / data-kiwi-locales-integrity
+    // unconditionally (KiwiCaptchaRuntime::localesSrc()), and the driver
+    // lazy-fetches widget-locales.js only when a non-default language
+    // resolves — a default-language page pays zero bytes for
+    // translations. The compat tier gets the same module through the
+    // /api.js locales marker (window.__kiwiCaptchaCompatLocales), whose
+    // content-addressed URL this route serves.
+    $localesBody = (string) file_get_contents($assets.'/widget-locales.js');
+    $localesAttr = ' data-kiwi-locales-src="/kiwi-captcha/assets/locales.'.hash('sha256', $localesBody).'.js"'
+        .' data-kiwi-locales-integrity="sha256-'.base64_encode(hash('sha256', $localesBody, true)).'"';
     header('Content-Type: text/html');
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttrFiles}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttrFiles}{$riskAttrFiles}{$localesAttr}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
@@ -1776,7 +1885,14 @@ if ($path === '/' || $path === '/index.html') {
 </div>
 ";
     }
-    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>';
+    // The inline tier mirrors the production page (the bundle's
+    // form_div_layout.html.twig): the glue and the driver are embedded
+    // first, then the lazy risk module widget-risk.js — the adaptive-risk
+    // solve tier + armed-evidence machinery is embedded on EVERY inline
+    // page (a decoy or memory-hard challenge can be armed per response;
+    // the module registers on the driver's core bridge, so it must come
+    // after the driver script).
+    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script><script>'.$risk.'</script>';
     echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}{$assetTags}</head><body>
 {$containers}{$inlineScripts}</body></html>";
 

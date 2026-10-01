@@ -521,7 +521,10 @@ mod tests {
             ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
         ];
         let cfg = with_env(&base, load).expect("baseline config");
-        assert_eq!(cfg.tracking.token_max_age_days, None, "unset = codec default");
+        assert_eq!(
+            cfg.tracking.token_max_age_days, None,
+            "unset = codec default"
+        );
 
         let cfg = with_env(
             &[
@@ -543,7 +546,11 @@ mod tests {
             load,
         )
         .expect("indefinite config");
-        assert_eq!(cfg.tracking.token_max_age_days, Some(0), "0 = intended-indefinite");
+        assert_eq!(
+            cfg.tracking.token_max_age_days,
+            Some(0),
+            "0 = intended-indefinite"
+        );
 
         let cfg = with_env(
             &[
@@ -554,7 +561,10 @@ mod tests {
             load,
         )
         .expect("garbage config");
-        assert_eq!(cfg.tracking.token_max_age_days, None, "garbage degrades to the codec default");
+        assert_eq!(
+            cfg.tracking.token_max_age_days, None,
+            "garbage degrades to the codec default"
+        );
 
         let cfg = with_env(
             &[

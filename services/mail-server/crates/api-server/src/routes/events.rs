@@ -29,8 +29,6 @@ pub struct ListEventsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
-    pub cursor: Option<i64>,
-    #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]
     pub message_id: Option<String>,
@@ -113,7 +111,13 @@ async fn list_events(
 ) -> Result<Json<Vec<EventResponse>>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
 
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
 
     let mut sql = String::from(
         "SELECT id, message_id, event_type, recipient, metadata, timestamp FROM events WHERE tenant_id = $1",
@@ -525,8 +529,17 @@ mod adversarial_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["id"], delivered);
 
-        // Pagination: cursor wins over offset; hostile values clamp.
+        // Pagination (SM3 audit F8): the mislabeled integer `cursor` is
+        // GONE from the contract — an unknown query field is refused loudly
+        // (deny_unknown_fields) instead of silently meaning "offset" — and
+        // hostile `offset`/`limit` values still clamp.
         let (status, body) = env.get("/v1/events?limit=1&offset=99&cursor=1").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the removed cursor param must be refused, not honoured: {body}"
+        );
+        let (status, body) = env.get("/v1/events?limit=1&offset=1").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body.as_array().map(Vec::len), Some(1));
         let (status, body) = env.get("/v1/events?limit=99999&offset=-9").await;

@@ -775,7 +775,10 @@ impl EventProcessor {
                     // adversarial tests.
                     warn!(
                         error = %e,
-                        raw = &entry[..entry.len().min(100)],
+                        // SM2-F4: char-boundary-safe prefix (WAL entries are
+                        // externally influenced envelopes; a fixed-offset
+                        // byte slice used to panic on multibyte content).
+                        raw = crate::token_shape::token_log_prefix(entry, 100),
                         "WAL entry parse error — dead-lettering"
                     );
                     unparsable.push(entry.clone());
@@ -927,8 +930,12 @@ impl EventProcessor {
         }
 
         if !poison.is_empty() {
-            self.dead_letter_entries(poison.as_slice(), DEAD_LETTER_REASON_MAX_RETRIES, MAX_EVENT_RETRIES as u64)
-                .await;
+            self.dead_letter_entries(
+                poison.as_slice(),
+                DEAD_LETTER_REASON_MAX_RETRIES,
+                MAX_EVENT_RETRIES as u64,
+            )
+            .await;
         }
     }
 
@@ -966,7 +973,8 @@ impl EventProcessor {
                     );
                     return;
                 }
-                metrics::counter!("apexmail_tracking_dead_letter_total").increment(raw.len() as u64);
+                metrics::counter!("apexmail_tracking_dead_letter_total")
+                    .increment(raw.len() as u64);
                 // coverage: justified — llvm-cov region-counter artifact: this tracing
                 // field-argument line EXECUTES (verified: the log line prints its fields
                 // under an instrumented single-test run with --nocapture, and the
@@ -1064,7 +1072,10 @@ impl EventProcessor {
                 );
                 break;
             }
-            info!(remaining = pending + processing, "Draining Redis WAL on shutdown");
+            info!(
+                remaining = pending + processing,
+                "Draining Redis WAL on shutdown"
+            );
             if let Err(e) = self.flush().await {
                 error!(error = %e, "drain_all: flush error, stopping drain");
                 break;
@@ -1515,7 +1526,9 @@ impl EventProcessor {
                 // regions are never counted. The arm itself is driven by the
                 // adversarial tests.
                 warn!(
-                    raw = &entry[..entry.len().min(100)],
+                    // SM2-F4: char-boundary-safe prefix (same pattern as the
+                    // WAL dead-letter log above).
+                    raw = crate::token_shape::token_log_prefix(entry, 100),
                     "Unparseable suppression retry entry released (it can never parse)"
                 );
                 self.release_lease(&mut conn, entry, None).await;
@@ -1569,8 +1582,7 @@ impl EventProcessor {
                     // a poison entry (None) is simply released (same
                     // drop-after-budget semantics as before the fix).
                     let was_requeued = requeued.is_some();
-                    self.release_lease(&mut conn, entry, requeued)
-                        .await;
+                    self.release_lease(&mut conn, entry, requeued).await;
                     if was_requeued {
                         warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed — re-queued");
                     }
@@ -1881,7 +1893,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 /// Serialize a [`DeadLetterEntry`] for the DLQ list.
-fn build_dead_letter_entry(raw: &str, failure_reason: &str, attempts: u64, now: DateTime<Utc>) -> String {
+fn build_dead_letter_entry(
+    raw: &str,
+    failure_reason: &str,
+    attempts: u64,
+    now: DateTime<Utc>,
+) -> String {
     let entry = DeadLetterEntry {
         payload: raw.to_string(),
         failure_reason: failure_reason.to_string(),

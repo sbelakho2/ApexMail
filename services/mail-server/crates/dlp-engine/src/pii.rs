@@ -389,7 +389,37 @@ pub fn scan_pii_with_context(
     detect_email: bool,
     context_aware: bool,
 ) -> Vec<PiiMatch> {
+    scan_pii_with_spans(
+        text,
+        detect_cc,
+        detect_ssn,
+        detect_phone,
+        detect_email,
+        context_aware,
+    )
+    .0
+}
+
+/// Like [`scan_pii_with_context`], but additionally returns the exact
+/// matched byte span `(offset, end)` of every finding, PARALLEL to the
+/// returned matches vector. Offsets and spans refer to the NORMALIZED text
+/// (see [`normalize_pii_text`]) — the same coordinate system as
+/// [`PiiMatch::offset`]. The engine's chunked scanner uses the spans to
+/// de-duplicate findings that a chunk's 64-byte carry-over window scanned
+/// twice (audit finding: chunk-seam evasion).
+pub fn scan_pii_with_spans(
+    text: &str,
+    detect_cc: bool,
+    detect_ssn: bool,
+    detect_phone: bool,
+    detect_email: bool,
+    context_aware: bool,
+) -> (Vec<PiiMatch>, Vec<(usize, usize)>) {
     let mut matches = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    // Matched spans of card findings only, used for the spaced-digit
+    // pass's overlap suppression (see the audit note below).
+    let mut card_spans: Vec<(usize, usize)> = Vec::new();
 
     // Normalize FIRST:strip invisible characters (which can silently split
     // card numbers, defeating the patterns) and apply NFKC (fullwidth digit
@@ -418,6 +448,8 @@ pub fn scan_pii_with_context(
                         offset: m.start(),
                         context_modifier: modifier,
                     });
+                    spans.push((m.start(), m.end()));
+                    card_spans.push((m.start(), m.end()));
                 }
             }
         }
@@ -428,8 +460,14 @@ pub fn scan_pii_with_context(
     // the grouped pattern; overlaps with already-reported cards are skipped.
     if detect_cc {
         if let Some(re) = spaced_card_regex() {
-            let taken: Vec<(usize, usize)> =
-                matches.iter().map(|m| (m.offset, m.offset + 16)).collect();
+            // Audit finding: the overlap check previously hardcoded a
+            // 16-byte card match (`offset + 16`). Grouped card matches are
+            // 16–19 bytes ("4111 1111 1111 1111" is 19, so the hardcoded
+            // end under-extended by 3 bytes) and a shorter match would have
+            // been over-extended. Use the ACTUAL matched span of each
+            // already-reported card so suppression is exact in both
+            // directions.
+            let taken: Vec<(usize, usize)> = card_spans.clone();
             for m in re.find_iter(text) {
                 let candidate = m.as_str();
                 let digit_count = candidate.chars().filter(|c| c.is_ascii_digit()).count();
@@ -459,6 +497,7 @@ pub fn scan_pii_with_context(
                     offset: m.start(),
                     context_modifier: modifier,
                 });
+                spans.push((m.start(), m.end()));
             }
         }
     }
@@ -490,6 +529,7 @@ pub fn scan_pii_with_context(
                             offset: m.start(),
                             context_modifier: modifier,
                         });
+                        spans.push((m.start(), m.end()));
                     }
                 }
             }
@@ -515,6 +555,7 @@ pub fn scan_pii_with_context(
                     offset: m.start(),
                     context_modifier: modifier,
                 });
+                spans.push((m.start(), m.end()));
             }
         }
     }
@@ -538,11 +579,12 @@ pub fn scan_pii_with_context(
                     offset: m.start(),
                     context_modifier: modifier,
                 });
+                spans.push((m.start(), m.end()));
             }
         }
     }
 
-    matches
+    (matches, spans)
 }
 
 #[cfg(test)]
@@ -873,6 +915,85 @@ mod tests {
         assert!(
             !matches.iter().any(|m| m.pii_type == PiiType::CreditCard),
             "Luhn-failing spaced digits must not be flagged"
+        );
+    }
+
+    // ── Audit: overlap dedup uses the TRUE matched span, not +16 ──
+
+    #[test]
+    fn card_spans_reflect_true_match_length_not_hardcoded_16() {
+        // Audit finding: the spaced-pass `taken` ranges were built as
+        // `(offset, offset + 16)`, but grouped card matches are 16–19
+        // bytes ("4111 1111 1111 1111" is 19). The spans handed back by
+        // `scan_pii_with_spans` must be the real match spans.
+        let (matches, spans) = scan_pii_with_spans(
+            "cards 4111 1111 1111 1111 and 5500 0000 0000 0004 on file",
+            true,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            spans.len(),
+            matches.len(),
+            "spans must run parallel to matches"
+        );
+        let cards: Vec<_> = matches
+            .iter()
+            .filter(|m| m.pii_type == PiiType::CreditCard)
+            .collect();
+        assert_eq!(cards.len(), 2, "two distinct cards, no double-report");
+        for (i, span) in spans.iter().enumerate() {
+            assert_eq!(span.0, matches[i].offset, "span offset must match finding");
+            assert_eq!(
+                span.1 - span.0,
+                19,
+                "grouped 4+4+4+4 card with separators spans 19 bytes, not 16: {span:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spaced_candidate_overlapping_reported_card_is_suppressed_exactly() {
+        // The spaced-digit heuristic must not re-report the same card the
+        // grouped pattern already found — including candidates whose span
+        // extends past a hardcoded 16-byte end (the pre-fix behavior).
+        // "4111 1111 1111 1111" is 19 bytes; a spaced candidate starting
+        // inside its tail must be suppressed by the true-span taken range.
+        let text = "card 4111 1111 1111 1111 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 end";
+        let (matches, spans) = scan_pii_with_spans(text, true, false, false, false, false);
+        let cards: Vec<&PiiMatch> = matches
+            .iter()
+            .filter(|m| m.pii_type == PiiType::CreditCard)
+            .collect();
+        // Exactly one card finding for the leading number; any second
+        // finding must be a genuinely disjoint span, never an overlap.
+        assert!(!cards.is_empty(), "card must be detected");
+        for (i, (start, end)) in spans.iter().enumerate() {
+            for (j, (start2, end2)) in spans.iter().enumerate().skip(i + 1) {
+                assert!(
+                    end <= start2 || end2 <= start,
+                    "findings {i} and {j} overlap in {text:?}: ({start},{end}) vs ({start2},{end2})"
+                );
+            }
+        }
+        assert!(cards.iter().all(|m| m.offset + 16 <= text.len()), "sanity");
+    }
+
+    #[test]
+    fn adjacent_distinct_number_after_card_is_not_suppressed() {
+        // Over-extension guard: the taken range must not grow past the real
+        // match, or a genuinely distinct adjacent number would be lost.
+        let text = "4111 1111 1111 1111 5500 0000 0000 0004";
+        let matches = scan_pii(text, true, false, false, false);
+        let cards = matches
+            .iter()
+            .filter(|m| m.pii_type == PiiType::CreditCard)
+            .count();
+        assert_eq!(
+            cards, 2,
+            "both adjacent cards must be reported: {matches:?}"
         );
     }
 }

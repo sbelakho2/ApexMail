@@ -60,8 +60,6 @@ pub struct ListSuppressionsQuery {
     #[serde(default)]
     pub offset: i64,
     #[serde(default)]
-    pub cursor: Option<i64>,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -223,7 +221,13 @@ async fn list_suppressions(
     Query(params): Query<ListSuppressionsQuery>,
 ) -> Result<Json<Vec<SuppressionResponse>>, ApiError> {
     require_scopes(&auth, &["suppressions:read"])?;
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+    // SM3 (audit F8): `cursor` used to be accepted here as a raw integer
+    // OFFSET — contradicting the crate's documented opaque-keyset contract.
+    // The mislabeled param is gone; pagination is the honestly-named
+    // `offset`. (This list returns a plain array, so a true keyset migration
+    // needs the CursorPage envelope — a breaking client contract — and is
+    // deliberately out of this pass.)
+    let offset = params.offset.clamp(0, 100_000);
     let rows = sqlx::query_as::<_, SuppressionRow>(
         "SELECT id, email, reason, source, created_at
          FROM suppressions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -601,14 +605,24 @@ mod adversarial_tests {
         let (status, body) = env.get("/v1/suppressions?limit=1").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body.as_array().map(Vec::len), Some(1));
+        // SM3 (audit F8): the mislabeled integer `cursor` is GONE from the
+        // contract — an unknown query field is refused loudly
+        // (deny_unknown_fields) instead of silently meaning "offset" — and
+        // a hostile negative `offset` still clamps to 0.
         let (status, body) = env
             .get("/v1/suppressions?limit=99&offset=-4&cursor=1")
             .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the removed cursor param must be refused, not honoured: {body}"
+        );
+        let (status, body) = env.get("/v1/suppressions?limit=99&offset=-4").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             body.as_array().map(Vec::len),
-            Some(1),
-            "cursor wins over offset"
+            Some(2),
+            "hostile negative offset clamps, both rows still serve"
         );
 
         // Delete is tenant-bound; the neighbour's id is an opaque 404.

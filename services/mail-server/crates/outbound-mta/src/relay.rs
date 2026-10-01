@@ -1030,6 +1030,28 @@ impl Relay {
                 }
             }
 
+            // ── SIZE (RFC 1870) ──────────────────────────────────────────
+            // A peer that advertises a nonzero SIZE has told us its maximum
+            // before we send a byte: transmitting anyway burns the full
+            // bandwidth and connect time only to be answered 552 after
+            // end-of-DATA. Skip this target BEFORE MAIL FROM; the MX walk
+            // takes the next one. (`Some(0)` is a bare `SIZE` — no fixed
+            // limit — and never skips.)
+            if peer_size_rejects(capabilities.size, message.len()) {
+                let advertised = capabilities.size.unwrap_or_default();
+                last_transient = Some(DeliveryFailure::Transient {
+                    mx: Some(target.exchange.clone()),
+                    stage: AttemptStage::EndOfData,
+                    message: format!(
+                        "peer advertises SIZE {advertised}, message is {} bytes; target skipped \
+                         before MAIL FROM (RFC 1870)",
+                        message.len()
+                    ),
+                });
+                session.quit().await;
+                continue;
+            }
+
             // ── MAIL FROM ────────────────────────────────────────────────
             let mail_reply = match session.mail_from(row.envelope_from.as_deref()).await {
                 Ok(reply) => reply,
@@ -1119,6 +1141,47 @@ impl Relay {
             if rcpt_aborted && accepted.is_empty() {
                 session.quit().await;
                 continue;
+            }
+            if rcpt_aborted {
+                // A transport failure (timeout, reset, unparseable reply)
+                // interrupted the RCPT loop after at least one acceptance:
+                // recipients after the failure point were never attempted,
+                // yet the session can still complete DATA with a 250 — and
+                // the unit is then pinned accepted below. Every recipient
+                // without a verdict must be classified NOW or it would be
+                // silently lost: absent from the acceptance record, with no
+                // follow-up unit and no DSN. The cause is a connection blip
+                // (never a per-recipient 5xx), so they are Deferred and
+                // continue on the follow-up unit.
+                let failure =
+                    last_transient
+                        .clone()
+                        .unwrap_or_else(|| DeliveryFailure::Transient {
+                            mx: Some(target.exchange.clone()),
+                            stage: AttemptStage::RcptTo,
+                            message: "RCPT sequence aborted by a transport error".to_string(),
+                        });
+                let attempted: std::collections::HashSet<String> = accepted
+                    .iter()
+                    .chain(rejected.iter())
+                    .chain(deferred.iter())
+                    .map(|result| result.recipient.clone())
+                    .collect();
+                for recipient in recipients {
+                    if attempted.contains(recipient) {
+                        continue;
+                    }
+                    let mut result = RecipientResult::from_failure(
+                        recipient,
+                        RecipientOutcome::Deferred,
+                        &failure,
+                    );
+                    // from_failure cannot know the session state; the
+                    // deferred verdict keeps the real MX/TLS facts.
+                    result.mx = Some(target.exchange.clone());
+                    result.tls_used = tls_used;
+                    deferred.push(result);
+                }
             }
             if accepted.is_empty() {
                 if !rejected.is_empty() && deferred.is_empty() {
@@ -1585,6 +1648,18 @@ fn reply_results(
         .iter()
         .map(|recipient| RecipientResult::from_reply(recipient, outcome, reply, mx, tls_used))
         .collect()
+}
+
+/// RFC 1870: a peer that advertises a nonzero SIZE has told us the message
+/// will not fit — the client is expected to skip the target instead of
+/// transmitting the full body to be answered 552 after end-of-DATA.
+/// `None` is "not advertised"; `Some(0)` is a bare `SIZE` (no fixed limit).
+/// Pure step, exposed for tests.
+fn peer_size_rejects(advertised_size: Option<u64>, message_len: usize) -> bool {
+    match advertised_size {
+        Some(max) if max != 0 => (message_len as u64) > max,
+        _ => false,
+    }
 }
 
 fn summarize_failures(
@@ -2984,6 +3059,174 @@ mod tests {
         assert!(
             !data_drop.server.messages().is_empty(),
             "the message WAS transmitted before the connection dropped"
+        );
+    }
+
+    /// The audit regression: a transport error during RCPT (here: a
+    /// protocol-confused multiline reply whose lines carry mismatched codes)
+    /// aborts the RCPT loop. When at least one recipient was already
+    /// accepted, the relay used to proceed to DATA anyway, and recipients
+    /// after the failure point landed in NO list — no verdict, no follow-up
+    /// unit, no DSN — while the unit was pinned accepted: silent mail loss.
+    /// They must be classified Deferred and continue on the follow-up unit.
+    #[tokio::test]
+    async fn rcpt_transport_abort_after_an_accept_defers_the_unattempted_recipients() {
+        let mut server_config = FakeSmtpConfig::default();
+        // Recipient b gets a hostile reply: the client's RCPT read fails as
+        // a transport error (unparseable multiline reply), while the
+        // connection itself stays open and in sync — DATA still completes.
+        server_config.raw_rcpt = Some((
+            "b@example.com".to_string(),
+            b"250-OK\r\n550 protocol-confused\r\n".to_vec(),
+        ));
+        let harness = harness(relay_config(), server_config).await;
+        let mut request = request();
+        request.recipients = vec![
+            "a@example.com".to_string(),
+            "b@example.com".to_string(),
+            "c@example.com".to_string(),
+        ];
+
+        let record = harness
+            .relay
+            .submit(request)
+            .await
+            .expect("the post-DATA 250 still pins the unit accepted");
+        assert_eq!(record.state, "accepted");
+        let mut outcomes: HashMap<&str, RecipientOutcome> = record
+            .recipients
+            .iter()
+            .map(|result| (result.recipient.as_str(), result.outcome))
+            .collect();
+        assert_eq!(
+            outcomes.len(),
+            3,
+            "every recipient must carry a verdict: {outcomes:?}"
+        );
+        assert_eq!(
+            outcomes.remove("a@example.com"),
+            Some(RecipientOutcome::Accepted)
+        );
+        assert_eq!(
+            outcomes.remove("b@example.com"),
+            Some(RecipientOutcome::Deferred),
+            "the recipient at the abort point must not vanish"
+        );
+        assert_eq!(
+            outcomes.remove("c@example.com"),
+            Some(RecipientOutcome::Deferred),
+            "recipients never attempted must not vanish"
+        );
+        assert!(
+            record
+                .recipients
+                .iter()
+                .filter(|result| result.outcome == RecipientOutcome::Deferred)
+                .all(|result| result.mx.as_deref() == Some("mx.example.com")),
+            "the deferred verdicts keep the session's MX"
+        );
+
+        // The deferred pair continues on the follow-up unit, committed with
+        // the acceptance.
+        let plan = record
+            .deferred_retry
+            .as_ref()
+            .expect("the un-attempted recipients must be scheduled for retry");
+        assert_eq!(
+            plan.send_unit,
+            deferred_retry_unit(&record.send_unit, record.attempt)
+        );
+        assert_eq!(
+            plan.recipients,
+            vec!["b@example.com".to_string(), "c@example.com".to_string()]
+        );
+        let child = harness
+            .ledger
+            .get(&plan.send_unit)
+            .await
+            .expect("ledger read")
+            .expect("the follow-up unit is committed with the acceptance");
+        assert_eq!(child.state, "pending");
+
+        // The original delivery carried ONLY the accepted recipient.
+        let messages = harness.server.messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].recipients,
+            vec!["a@example.com".to_string()],
+            "no second copy of an accepted recipient, no silent drop of the rest"
+        );
+    }
+
+    /// The audit regression: a peer-advertised SIZE below the message length
+    /// was parsed but never enforced — the full body was transmitted only to
+    /// be answered 552 after end-of-DATA. The relay must skip the target
+    /// BEFORE MAIL FROM and take the next MX (RFC 1870).
+    #[tokio::test]
+    async fn peer_advertised_size_below_the_message_skips_to_the_next_mx() {
+        let small = FakeSmtpServer::start(FakeSmtpConfig {
+            ehlo_size: 32,
+            ..FakeSmtpConfig::default()
+        })
+        .await;
+        let good = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger = Arc::new(MemoryLedger::new());
+        let resolver = Arc::new(StaticMxResolver::new().with_targets(
+            "example.com",
+            vec![
+                MxTarget {
+                    preference: 10,
+                    exchange: "mx-small.example".to_string(),
+                    addresses: vec![small.addr()],
+                },
+                MxTarget {
+                    preference: 20,
+                    exchange: "mx-good.example".to_string(),
+                    addresses: vec![good.addr()],
+                },
+            ],
+        ));
+        let relay = Relay::new(ledger.clone(), resolver, relay_config());
+
+        let record = relay.submit(request()).await.expect("the next MX accepts");
+        assert_eq!(record.state, "accepted");
+        assert_eq!(
+            record.remote_mx.as_deref(),
+            Some("mx-good.example"),
+            "delivery must land on the MX whose SIZE admits the message"
+        );
+
+        // The too-small MX was connected and greeted, but never received the
+        // message: no MAIL FROM, no DATA.
+        let small_commands = small.commands();
+        assert!(small_commands
+            .iter()
+            .any(|command| command.starts_with("EHLO")));
+        assert!(
+            !small_commands
+                .iter()
+                .any(|command| command.starts_with("MAIL FROM")),
+            "the SIZE refusal must happen before MAIL FROM: {small_commands:?}"
+        );
+        assert!(small.messages().is_empty());
+        assert_eq!(good.messages().len(), 1);
+    }
+
+    #[test]
+    fn peer_size_decision_matches_rfc_1870_semantics() {
+        assert!(!peer_size_rejects(None, 69), "no SIZE advertised: deliver");
+        assert!(
+            !peer_size_rejects(Some(0), 69),
+            "a bare SIZE (0) means no fixed limit"
+        );
+        assert!(
+            !peer_size_rejects(Some(69), 69),
+            "a message exactly at the limit fits"
+        );
+        assert!(!peer_size_rejects(Some(10_485_760), 69));
+        assert!(
+            peer_size_rejects(Some(32), 69),
+            "a peer whose SIZE is below the message is skipped"
         );
     }
 

@@ -25,7 +25,7 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_paths() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let path_len = rng.random_range(0..500);
@@ -45,7 +45,7 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_queries() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let qs_len = rng.random_range(0..300);
@@ -65,7 +65,7 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_bodies() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..3_000 {
             let body_len = rng.random_range(0..1_000);
@@ -85,7 +85,7 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_random_headers() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..3_000 {
             let num_headers = rng.random_range(0..20);
@@ -111,7 +111,7 @@ mod waf_fuzz {
     #[test]
     fn fuzz_waf_inspect_unicode() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let path = random_unicode(rng.random_range(0..200));
@@ -175,7 +175,7 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_inspect_random_payloads() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let payload_len = rng.random_range(0..2_000);
@@ -197,7 +197,7 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_inspect_protocol_strings() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         let protocols = [
             "tcp", "udp", "smtp", "dns", "tls", "http", "", "UNKNOWN", "💀",
@@ -229,7 +229,7 @@ mod ids_fuzz {
     #[test]
     fn fuzz_ids_binary_payloads() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         // All possible byte values
         for _ in 0..1_000 {
@@ -251,7 +251,7 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_analyze_random_bodies() {
         let engine = SpamEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..3_000 {
             let body_len = rng.random_range(0..2_000);
@@ -266,7 +266,7 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_analyze_with_headers() {
         let engine = SpamEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let body = random_ascii(rng.random_range(0..500));
@@ -292,7 +292,7 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_unicode_bodies() {
         let engine = SpamEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let body = random_unicode(rng.random_range(0..1_000));
@@ -304,7 +304,7 @@ mod spam_fuzz {
     #[test]
     fn fuzz_spam_training_no_panic() {
         let engine = SpamEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..1_000 {
             let text_len = rng.random_range(0..500);
@@ -338,7 +338,7 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_scan_random_text() {
         let engine = DlpEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let body_len = rng.random_range(0..1_000);
@@ -355,7 +355,7 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_scan_with_domains() {
         let engine = DlpEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
         let domains = ["example.com", "internal.corp", "gov.us", "partner.io"];
 
         for _ in 0..2_000 {
@@ -389,7 +389,7 @@ mod dlp_fuzz {
     #[test]
     fn fuzz_dlp_unicode() {
         let engine = DlpEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let body = random_unicode(rng.random_range(0..500));
@@ -409,7 +409,7 @@ mod sandbox_fuzz {
     #[test]
     fn fuzz_sandbox_analyze_random_bytes() {
         let engine = SandboxEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..3_000 {
             let data_len = rng.random_range(0..5_000);
@@ -450,7 +450,7 @@ mod sandbox_fuzz {
 
         // ZIP magic header followed by random data
         let mut data = vec![0x50, 0x4B, 0x03, 0x04];
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
         for _ in 0..500 {
             data.push(rng.random::<u8>());
         }
@@ -508,7 +508,7 @@ mod ato_fuzz {
     #[test]
     fn fuzz_ato_evaluate_random_logins() {
         let engine = make_engine();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let event = LoginEvent {
@@ -586,7 +586,7 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_check_random_ips() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let ip = if rng.random_bool(0.5) {
@@ -609,7 +609,7 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_check_random_domains() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let domain = if rng.random_bool(0.5) {
@@ -628,7 +628,7 @@ mod threat_intel_fuzz {
     #[test]
     fn fuzz_threat_intel_combined_check() {
         let engine = ThreatIntelEngine::new();
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..3_000 {
             let ip = if rng.random_bool(0.7) {
@@ -665,7 +665,7 @@ mod stix_fuzz {
 
     #[test]
     fn fuzz_stix_extract_indicators_random() {
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..5_000 {
             let pattern = random_ascii(rng.random_range(0..500));
@@ -675,7 +675,7 @@ mod stix_fuzz {
 
     #[test]
     fn fuzz_stix_extract_indicators_unicode() {
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let pattern = random_unicode(rng.random_range(0..300));
@@ -685,7 +685,7 @@ mod stix_fuzz {
 
     #[test]
     fn fuzz_stix_bundle_parse_random_json() {
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..2_000 {
             let json = random_ascii(rng.random_range(0..500));
@@ -708,6 +708,128 @@ mod stix_fuzz {
 
         for json in &almost_valid {
             let _ = serde_json::from_str::<StixBundle>(json);
+        }
+    }
+
+    // ── SM12 F12: output oracles (the loops above discarded results, so a
+    //    constant-empty extractor or a parse that always failed would pass
+    //    every iteration) ─────────────────────────────────────────────────
+
+    fn first_indicator_id(bundle: &StixBundle) -> String {
+        for obj in &bundle.objects {
+            if let threat_intel::stix_taxii::StixObject::Indicator(ind) = obj {
+                return ind.id.clone();
+            }
+        }
+        String::new()
+    }
+
+    /// Oracle: every observable EMBEDDED in a randomized pattern must be
+    /// extracted with its exact value. A constant-empty `extract_indicators`
+    /// fails on the first iteration.
+    #[test]
+    fn fuzz_stix_extract_finds_embedded_observables() {
+        let mut rng = fuzz_tests::fuzz_rng();
+        for i in 0..2_000 {
+            let ip = format!("10.{i}.{}.{}", rng.random_range(0..256), rng.random_range(0..256));
+            let domain = format!("evil-{i}.example.test");
+            let email = format!("bad{i}@evil-{i}.example.test");
+            let url = format!("http://{domain}/payload{i}");
+            let hash = format!("{:064x}", i as u128);
+            let noise = random_ascii(rng.random_range(0..40));
+            let pattern = format!(
+                "{noise}[ipv4-addr:value = '{ip}'] AND [domain-name:value = '{domain}'] AND [url:value = '{url}'] AND [email-addr:value = '{email}'] AND [file:hashes.'SHA-256' = '{hash}']"
+            );
+
+            let extracted = extract_indicators(&pattern);
+            assert!(
+                !extracted.is_empty(),
+                "constant-empty extractor regression: nothing found in pattern {i}"
+            );
+            assert!(
+                extracted.iter().any(|ind| matches!(ind,
+                    threat_intel::stix_taxii::ExtractedIndicator::Ipv4(v) if *v == ip)),
+                "embedded IPv4 {ip} not extracted from pattern {i}: {extracted:?}"
+            );
+            assert!(
+                extracted.iter().any(|ind| matches!(ind,
+                    threat_intel::stix_taxii::ExtractedIndicator::Domain(v) if *v == domain)),
+                "embedded domain {domain} not extracted from pattern {i}: {extracted:?}"
+            );
+            assert!(
+                extracted.iter().any(|ind| matches!(ind,
+                    threat_intel::stix_taxii::ExtractedIndicator::Url(v) if *v == url)),
+                "embedded URL {url} not extracted from pattern {i}"
+            );
+            assert!(
+                extracted.iter().any(|ind| matches!(ind,
+                    threat_intel::stix_taxii::ExtractedIndicator::Email(v) if *v == email)),
+                "embedded email {email} not extracted from pattern {i}"
+            );
+            assert!(
+                extracted.iter().any(|ind| matches!(ind,
+                    threat_intel::stix_taxii::ExtractedIndicator::FileHash(alg, v)
+                        if alg == "SHA-256" && *v == hash)),
+                "embedded SHA-256 hash not extracted from pattern {i}"
+            );
+        }
+    }
+
+    /// Oracle: a VALID bundle serializes, parses back, and `process_bundle`
+    /// surfaces the embedded indicator — a deserializer that always failed
+    /// (or a processor that always returned empty) fails here.
+    #[test]
+    fn fuzz_stix_bundle_round_trip() {
+        let mut rng = fuzz_tests::fuzz_rng();
+        for i in 0..1_000 {
+            let domain = format!("c2-{i}-{}.evil.test", rng.random_range(0..100_000));
+            let bundle = StixBundle {
+                object_type: "bundle".to_string(),
+                id: format!("bundle--{:08x}-0000-4000-8000-{:012x}", i, i as u128),
+                objects: vec![threat_intel::stix_taxii::StixObject::Indicator(
+                    threat_intel::stix_taxii::StixIndicator {
+                        id: format!("indicator--{:08x}-1111-4000-8000-{:012x}", i, i as u128),
+                        created: None,
+                        modified: None,
+                        name: Some(format!("indicator {i}")),
+                        description: None,
+                        pattern: Some(format!("[domain-name:value = '{domain}']")),
+                        pattern_type: Some("stix".to_string()),
+                        indicator_types: vec!["malicious-activity".to_string()],
+                        valid_from: None,
+                        valid_until: None,
+                        confidence: Some(80),
+                        kill_chain_phases: vec![],
+                    },
+                )],
+            };
+
+            let json = serde_json::to_string(&bundle).expect("bundle serializes");
+            let parsed: StixBundle =
+                serde_json::from_str(&json).expect("our own serialized bundle must parse back");
+
+            let processed = threat_intel::stix_taxii::process_bundle(&parsed);
+            assert_eq!(
+                processed.len(),
+                1,
+                "process_bundle must surface the embedded indicator"
+            );
+            assert_eq!(processed[0].stix_id, first_indicator_id(&bundle));
+            assert!(
+                matches!(
+                    &processed[0].indicator,
+                    threat_intel::stix_taxii::ExtractedIndicator::Domain(v) if *v == domain
+                ),
+                "the embedded domain {domain} must survive the round trip, got {:?}",
+                processed[0].indicator
+            );
+
+            // Trailing whitespace is legal JSON — the parser must not
+            // regress on it.
+            let padded = format!("{json}  ");
+            let reparsed: StixBundle =
+                serde_json::from_str(&padded).expect("bundle + trailing whitespace must parse");
+            assert_eq!(reparsed.id, bundle.id);
         }
     }
 }
@@ -741,7 +863,7 @@ mod combined_fuzz {
         let dlp = DlpEngine::new();
         let sandbox_eng = SandboxEngine::new();
 
-        let mut rng = rand::rng();
+        let mut rng = fuzz_tests::fuzz_rng();
 
         for _ in 0..1_000 {
             // 1. WAF

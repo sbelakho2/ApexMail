@@ -993,6 +993,7 @@ async fn download_test_state(pool: PgPool) -> std::sync::Arc<compliance::routes:
             compliance::config::DsarRateLimitConfig::default(),
             None,
         ),
+        trust_access_limiter: compliance::trust_portal::TrustAccessRateLimiter::new(),
     })
 }
 

@@ -30,7 +30,7 @@ verdict_points = [
 comparison_sections = [
   { title = "ENTREGABILIDAD", rows = [
     { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "none" },
-    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mes; IP dedicadas a petición</span>', winner = "none" },
+    { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/mes; IP dedicadas a petición</span>', winner = "none" },
     { feature = "Calentamiento de IP", apex = '<span class="text-brand-600 font-semibold">Automático</span>', comp = '<span class="text-surface-600">Automático</span>', winner = "tie" },
     { feature = "Rotación DKIM", apex = '<span class="text-brand-600 font-semibold">Automática y configurable</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Circuit breaker de reputación", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },

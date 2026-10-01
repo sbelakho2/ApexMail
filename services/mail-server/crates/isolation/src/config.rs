@@ -131,6 +131,13 @@ pub struct Config {
     pub environment: String,
     pub internal_api_key: String,
     pub internal_api_keys: Vec<String>,
+    /// Audit SM5 F15: require the edge-supplied `x-org-id` claim header on
+    /// every request. The claim model previously failed OPEN when the
+    /// header was absent ("internal service-to-service traffic"), so a
+    /// client whose header was not stripped by the edge could reach any
+    /// organization. Defaults to TRUE in production (fail-closed) and can
+    /// be forced with `ISOLATION_REQUIRE_ORG_CLAIM=true|false`.
+    pub require_org_claim: bool,
     pub database: DatabaseConfig,
     pub redis: RedisConfig,
     pub tenant: TenantConfig,
@@ -286,6 +293,15 @@ impl Config {
             environment,
             internal_api_key,
             internal_api_keys,
+            // Audit SM5 F15: fail-closed default — production REQUIRES the
+            // org claim header; an explicit env knob can force either mode.
+            require_org_claim: std::env::var("ISOLATION_REQUIRE_ORG_CLAIM")
+                .ok()
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    v == "true" || v == "1" || v == "yes" || v == "on"
+                })
+                .unwrap_or(is_production),
             database: DatabaseConfig {
                 host: env_or("ISOLATION_DB_HOST", "127.0.0.1"),
                 port: env_or_u16("ISOLATION_DB_PORT", 5432),
@@ -461,7 +477,10 @@ mod tests {
     #[test]
     fn test_production_missing_internal_api_key_is_refused() {
         set_env("NODE_ENV", "production");
-        set_env("TENANT_ENCRYPTION_KEY", "prod-tenant-encryption-key-0123456789abcdef");
+        set_env(
+            "TENANT_ENCRYPTION_KEY",
+            "prod-tenant-encryption-key-0123456789abcdef",
+        );
         unset_env("ISOLATION_INTERNAL_API_KEY");
         unset_env("ISOLATION_INTERNAL_API_KEYS");
 
@@ -492,19 +511,26 @@ mod tests {
     #[test]
     fn test_production_explicit_secrets_are_used_verbatim() {
         set_env("NODE_ENV", "production");
-        set_env("TENANT_ENCRYPTION_KEY", "explicit-prod-tenant-encryption-key");
+        set_env(
+            "TENANT_ENCRYPTION_KEY",
+            "explicit-prod-tenant-encryption-key",
+        );
         set_env("ISOLATION_INTERNAL_API_KEY", "explicit-prod-internal-key");
         unset_env("ISOLATION_INTERNAL_API_KEYS");
 
-        let cfg = Config::from_env()
-            .expect("production config with explicit secrets must load");
+        let cfg = Config::from_env().expect("production config with explicit secrets must load");
         assert_eq!(
             cfg.security.encryption_key.as_str(),
             "explicit-prod-tenant-encryption-key"
         );
         assert_eq!(cfg.internal_api_key, "explicit-prod-internal-key");
-        assert!(!cfg.internal_api_key.starts_with("isolation-internal-api-key-"));
-        assert!(!cfg.security.encryption_key.starts_with("tenant-encryption-key-"));
+        assert!(!cfg
+            .internal_api_key
+            .starts_with("isolation-internal-api-key-"));
+        assert!(!cfg
+            .security
+            .encryption_key
+            .starts_with("tenant-encryption-key-"));
     }
 
     /// Production accepts `ISOLATION_INTERNAL_API_KEYS` alone (pre-existing
@@ -513,7 +539,10 @@ mod tests {
     #[test]
     fn test_production_accepts_key_list_without_single_key() {
         set_env("NODE_ENV", "production");
-        set_env("TENANT_ENCRYPTION_KEY", "prod-tenant-encryption-key-0123456789abcdef");
+        set_env(
+            "TENANT_ENCRYPTION_KEY",
+            "prod-tenant-encryption-key-0123456789abcdef",
+        );
         unset_env("ISOLATION_INTERNAL_API_KEY");
         set_env("ISOLATION_INTERNAL_API_KEYS", "prod-key-one, prod-key-two");
 
@@ -541,7 +570,8 @@ mod tests {
                 "ephemeral encryption key expected (value redacted)"
             );
             assert!(
-                cfg.internal_api_key.starts_with("isolation-internal-api-key-"),
+                cfg.internal_api_key
+                    .starts_with("isolation-internal-api-key-"),
                 "ephemeral internal key expected, got: {}",
                 cfg.internal_api_key
             );
@@ -566,12 +596,13 @@ mod tests {
 
         set_env("NODE_ENV", "development");
         let dev = Config::from_env().expect("development generates ephemeral values");
-        assert!(
-            dev.security
-                .encryption_key
-                .starts_with("tenant-encryption-key-")
-        );
-        assert!(dev.internal_api_key.starts_with("isolation-internal-api-key-"));
+        assert!(dev
+            .security
+            .encryption_key
+            .starts_with("tenant-encryption-key-"));
+        assert!(dev
+            .internal_api_key
+            .starts_with("isolation-internal-api-key-"));
 
         set_env("NODE_ENV", "production");
         let prod_err = Config::from_env().unwrap_err();

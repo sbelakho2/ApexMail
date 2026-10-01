@@ -140,10 +140,7 @@ pub(crate) fn resolver_at(port: u16) -> TokioResolver {
 /// Build the wire response for one incoming query per the rule table.
 /// Exposed so tests can run their OWN UDP mock with a mutable rule table
 /// (the fixed `MockDns` cannot change answers mid-test).
-pub(crate) fn answer(
-    query_bytes: &[u8],
-    rules: &HashMap<&'static str, DnsAnswer>,
-) -> Message {
+pub(crate) fn answer(query_bytes: &[u8], rules: &HashMap<&'static str, DnsAnswer>) -> Message {
     let query = match Message::from_vec(query_bytes) {
         Ok(query) => query,
         Err(_) => Message::error_msg(0, OpCode::Query, ResponseCode::FormErr),

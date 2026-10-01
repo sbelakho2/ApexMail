@@ -6,6 +6,7 @@ pub mod field_encryption;
 pub mod log_streaming;
 pub mod private_deploy;
 pub mod qbr;
+pub mod rate_limit;
 pub mod routes;
 pub mod sso;
 pub mod sub_accounts;

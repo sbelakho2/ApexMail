@@ -8,7 +8,7 @@
 //! - Data URI schemes and javascript:URIs
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Maximum number of HTTP redirects to follow during URL detonation.
 const MAX_REDIRECT_HOPS: usize = 10;
@@ -366,8 +366,9 @@ pub struct DetonationReport {
 
 /// Follow HTTP redirects for a single URL and return the chain.
 /// This uses a HEAD-only request with no cookies and a 5-second timeout per
-/// hop. The `reqwest` client is configured with `redirect::Policy::none`
-/// so that we can manually track each hop and enforce our own limit.
+/// hop. Each hop's `reqwest` client carries a DNS resolver PINNED to the
+/// addresses the SSRF guard validated, with `redirect::Policy::none` so we
+/// can manually track each hop and enforce our own limit.
 /// When the `phishing` feature is **not** enabled, this always returns an
 /// error result without making any network calls.
 ///
@@ -375,8 +376,11 @@ pub struct DetonationReport {
 /// Every hop (the initial URL *and* each `Location` redirect) must resolve
 /// to a public address:private, loopback, link-local (including the cloud
 /// metadata range 169.254.0.0/16), ULA and other reserved ranges are
-/// refused before any request is made. Detonations are additionally bounded
-/// by a shared concurrency semaphore and a shared pooled HTTP client.
+/// refused before any request is made. The hop is then sent to EXACTLY the
+/// validated addresses: the connection never re-resolves the hostname, so
+/// an attacker controlling DNS cannot serve a public answer to the guard
+/// and a private answer to the request (DNS rebinding). Detonations are
+/// additionally bounded by a shared concurrency semaphore.
 pub async fn detonate_url(url: &str) -> DetonationResult {
     #[cfg(feature = "phishing")]
     {
@@ -402,22 +406,6 @@ pub const MAX_CONCURRENT_DETONATIONS: usize = 16;
 fn detonation_semaphore() -> &'static tokio::sync::Semaphore {
     static SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_DETONATIONS))
-}
-
-/// Shared pooled HTTP client for detonations (connection reuse instead of a
-/// fresh client — and fresh connection pool — per URL).
-#[cfg(feature = "phishing")]
-fn shared_detonation_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(REDIRECT_TIMEOUT_SECS))
-            .user_agent("Mozilla/5.0 (compatible; ApexMail-UrlScanner/1.0)")
-            .danger_accept_invalid_certs(false)
-            .build()
-            .expect("failed to build shared URL detonation client")
-    })
 }
 
 /// Whether an IP address is private, loopback, link-local (this covers the
@@ -454,31 +442,42 @@ pub fn ip_is_private_or_reserved(ip: std::net::IpAddr) -> bool {
 /// SSRF pre-flight check for a URL:IP literals are checked directly;
 /// hostnames must resolve, and *any* resolved address in a private/reserved
 /// range blocks the detonation. Resolution failure also blocks (fail-closed).
+///
+/// On success this returns the VALIDATED socket addresses. The caller MUST
+/// make its request through a client pinned to exactly these addresses —
+/// re-resolving the hostname for the request would reopen a DNS-rebinding
+/// window (public answer to the guard, private answer to the connection).
 #[cfg(feature = "phishing")]
-async fn url_blocked_by_ssrf_guard(url_str: &str) -> Option<String> {
+async fn ssrf_guard_validated_addrs(url_str: &str) -> Result<Vec<std::net::SocketAddr>, String> {
     let parsed = match url::Url::parse(url_str) {
         Ok(u) => u,
-        Err(e) => return Some(format!("invalid URL: {e}")),
+        Err(e) => return Err(format!("invalid URL: {e}")),
     };
+    let port = parsed.port_or_known_default().unwrap_or(80);
     let host = match parsed.host() {
         Some(url::Host::Domain(d)) => d.to_string(),
         Some(url::Host::Ipv4(v4)) => {
             return if ip_is_private_or_reserved(std::net::IpAddr::V4(v4)) {
-                Some(format!("SSRF guard:private/reserved IP literal {v4}"))
+                Err(format!("SSRF guard:private/reserved IP literal {v4}"))
             } else {
-                None
+                Ok(vec![std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(v4),
+                    port,
+                )])
             };
         }
         Some(url::Host::Ipv6(v6)) => {
             return if ip_is_private_or_reserved(std::net::IpAddr::V6(v6)) {
-                Some(format!("SSRF guard:private/reserved IP literal {v6}"))
+                Err(format!("SSRF guard:private/reserved IP literal {v6}"))
             } else {
-                None
+                Ok(vec![std::net::SocketAddr::new(
+                    std::net::IpAddr::V6(v6),
+                    port,
+                )])
             };
         }
-        None => return Some("SSRF guard:URL has no host".into()),
+        None => return Err("SSRF guard:URL has no host".into()),
     };
-    let port = parsed.port_or_known_default().unwrap_or(80);
 
     // Resolve via getaddrinfo on the blocking pool (async-safe).
     let host_for_resolve = host.clone();
@@ -492,20 +491,60 @@ async fn url_blocked_by_ssrf_guard(url_str: &str) -> Option<String> {
 
     match addrs {
         Ok(Ok(socks)) if !socks.is_empty() => {
-            for sock in socks {
+            for sock in &socks {
                 if ip_is_private_or_reserved(sock.ip()) {
-                    return Some(format!(
+                    return Err(format!(
                         "SSRF guard:host {host} resolves to private/reserved address {}",
                         sock.ip()
                     ));
                 }
             }
-            None
+            Ok(socks)
         }
-        _ => Some(format!(
+        _ => Err(format!(
             "SSRF guard:host {host} could not be resolved (fail-closed)"
         )),
     }
+}
+
+/// DNS resolver that returns a FIXED, pre-validated set of socket addresses
+/// for every lookup, deliberately ignoring the queried name. The SSRF guard
+/// validates exactly these addresses; pinning them into the client means
+/// the connection cannot be pointed at a different (rebound) DNS answer.
+/// The URI host is untouched for TLS SNI and the Host header.
+#[cfg(feature = "phishing")]
+struct PinnedResolver {
+    validated: Arc<[std::net::SocketAddr]>,
+}
+
+#[cfg(feature = "phishing")]
+impl reqwest::dns::Resolve for PinnedResolver {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let validated = self.validated.clone();
+        Box::pin(async move {
+            let owned: Vec<std::net::SocketAddr> = validated.iter().copied().collect();
+            let addrs: reqwest::dns::Addrs = Box::new(owned.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// Build the detonation client for one validated hop: identical policy to
+/// the previous shared client (no redirects, per-hop timeout, scanner UA)
+/// plus a DNS resolver pinned to the SSRF-validated addresses.
+#[cfg(feature = "phishing")]
+fn pinned_detonation_client(
+    validated: &[std::net::SocketAddr],
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(REDIRECT_TIMEOUT_SECS))
+        .user_agent("Mozilla/5.0 (compatible; ApexMail-UrlScanner/1.0)")
+        .danger_accept_invalid_certs(false)
+        .dns_resolver(Arc::new(PinnedResolver {
+            validated: validated.iter().copied().collect(),
+        }))
+        .build()
 }
 
 #[cfg(feature = "phishing")]
@@ -515,8 +554,6 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
         .acquire()
         .await
         .expect("detonation semaphore is never closed");
-
-    let client = shared_detonation_client();
 
     let mut current = url.to_string();
     let mut chain: Vec<String> = Vec::new();
@@ -529,17 +566,42 @@ async fn detonate_url_impl(url: &str) -> DetonationResult {
             break;
         }
 
-        // SSRF pre-flight on every hop (initial URL and each redirect).
-        if let Some(reason) = url_blocked_by_ssrf_guard(&current).await {
-            return DetonationResult {
-                original_url: url.to_string(),
-                final_url: current,
-                redirect_chain: chain,
-                hops,
-                truncated: false,
-                error: Some(reason),
-            };
-        }
+        // SSRF pre-flight on every hop (initial URL and each redirect):
+        // resolve ONCE and keep the validated addresses. The request below
+        // connects ONLY to these addresses — the hostname is never resolved
+        // a second time, so a DNS rebinding attack (public answer to the
+        // guard, private answer to the connection) has no window to act in.
+        let validated = match ssrf_guard_validated_addrs(&current).await {
+            Ok(addrs) => addrs,
+            Err(reason) => {
+                return DetonationResult {
+                    original_url: url.to_string(),
+                    final_url: current,
+                    redirect_chain: chain,
+                    hops,
+                    truncated: false,
+                    error: Some(reason),
+                };
+            }
+        };
+
+        // Per-hop client whose DNS resolver returns exactly the validated
+        // addresses (Host header / TLS SNI still use the URI hostname).
+        let client = match pinned_detonation_client(&validated) {
+            Ok(client) => client,
+            Err(e) => {
+                return DetonationResult {
+                    original_url: url.to_string(),
+                    final_url: current,
+                    redirect_chain: chain,
+                    hops,
+                    truncated: false,
+                    error: Some(format!(
+                        "Failed to build pinned detonation client at hop {hops}: {e}"
+                    )),
+                };
+            }
+        };
 
         let resp = match client.head(&current).send().await {
             Ok(r) => r,
@@ -1037,6 +1099,162 @@ mod tests {
 
     #[cfg(feature = "phishing")]
     async fn ip_literal_is_blocked(url: &str) -> bool {
-        super::url_blocked_by_ssrf_guard(url).await.is_some()
+        super::ssrf_guard_validated_addrs(url).await.is_err()
+    }
+
+    // ── Audit:SSRF resolve-once / connect-validated (DNS rebinding closed) ──
+
+    /// Mock resolver modeling the rebinding attack: the first lookup (the
+    /// guard's) gets a public answer, every later lookup (the request's)
+    /// gets the cloud-metadata address.
+    #[cfg(feature = "phishing")]
+    struct FlippingResolver {
+        first: std::net::SocketAddr,
+        second: std::net::SocketAddr,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "phishing")]
+    impl reqwest::dns::Resolve for FlippingResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            use std::sync::atomic::Ordering;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let addr = if call == 0 { self.first } else { self.second };
+            let addrs: reqwest::dns::Addrs = Box::new(std::iter::once(addr));
+            Box::pin(async move { Ok(addrs) })
+        }
+    }
+
+    #[cfg(feature = "phishing")]
+    #[tokio::test]
+    async fn guard_hands_back_validated_addresses() {
+        // A public IP literal passes through as the validated address —
+        // no DNS, fully hermetic.
+        let addrs = ssrf_guard_validated_addrs("http://93.184.216.34/x")
+            .await
+            .expect("public literal must pass");
+        assert_eq!(
+            addrs,
+            vec!["93.184.216.34:80"]
+                .iter()
+                .map(|a| a.parse::<std::net::SocketAddr>().expect("addr"))
+                .collect::<Vec<_>>()
+        );
+        // Reserved literals are refused, and an unresolvable name fails
+        // closed (.invalid is reserved by RFC 2606 — hermetic).
+        assert!(ssrf_guard_validated_addrs("http://169.254.169.254/")
+            .await
+            .is_err());
+        assert!(
+            ssrf_guard_validated_addrs("http://this-host-does-not-exist.invalid/")
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "phishing")]
+    #[tokio::test]
+    async fn rebinding_flipping_resolver_models_the_attack_the_pin_blocks() {
+        use std::str::FromStr as _;
+        use std::sync::atomic::Ordering;
+        // Trait must be in scope to call `resolve` on the implementors.
+        use reqwest::dns::Resolve as _;
+
+        // The attack: DNS answers a public address to the guard and the
+        // metadata address to the request. The flipping resolver produces
+        // exactly those divergent answers.
+        let flip = FlippingResolver {
+            first: "93.184.216.34:80".parse().expect("addr"),
+            second: "169.254.169.254:80".parse().expect("addr"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let first = flip
+            .resolve(reqwest::dns::Name::from_str("attacker.example").expect("name"))
+            .await
+            .expect("resolve")
+            .collect::<Vec<_>>();
+        let second = flip
+            .resolve(reqwest::dns::Name::from_str("attacker.example").expect("name"))
+            .await
+            .expect("resolve")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first,
+            vec!["93.184.216.34:80"
+                .parse::<std::net::SocketAddr>()
+                .expect("a")]
+        );
+        assert_eq!(
+            second,
+            vec!["169.254.169.254:80"
+                .parse::<std::net::SocketAddr>()
+                .expect("b")],
+            "the flipping resolver must model divergent DNS answers"
+        );
+        assert_eq!(flip.calls.load(Ordering::SeqCst), 2);
+
+        // The production resolver is PINNED to the guard-validated set: it
+        // ignores the queried name, so a second (rebound) answer cannot
+        // exist. Every lookup returns the identical validated addresses.
+        let validated: Arc<[std::net::SocketAddr]> = Arc::from([flip.first]);
+        let pinned = super::PinnedResolver {
+            validated: validated.clone(),
+        };
+        for _ in 0..3 {
+            let got = pinned
+                .resolve(reqwest::dns::Name::from_str("anything-else.example").expect("name"))
+                .await
+                .expect("resolve")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                got,
+                validated.to_vec(),
+                "pinned resolver must serve exactly the validated addrs, ignoring the name"
+            );
+        }
+    }
+
+    #[cfg(feature = "phishing")]
+    #[tokio::test]
+    async fn detonation_request_is_served_by_the_validated_address_only() {
+        // Fail-first end-to-end: pre-fix, the guard resolved the hostname
+        // and then `client.head(...)` resolved it AGAIN inside reqwest.
+        // Here the target host is a guaranteed-nonexistent name (RFC 6761
+        // `.test`), so any second, DNS-based resolution would fail the
+        // request. The request can only succeed by connecting to the
+        // guard-validated address — a local listener standing in for the
+        // approved destination.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let validated = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await; // request head
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let client = pinned_detonation_client(&[validated]).expect("pinned client builds");
+        let url = format!(
+            "http://rebind-attacker-metadata.example.test:{}/latest/meta-data/",
+            validated.port()
+        );
+        let resp = client
+            .head(&url)
+            .send()
+            .await
+            .expect("request must reach the validated address, never a re-resolved one");
+        assert_eq!(resp.status(), 200);
     }
 }

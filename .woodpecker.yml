@@ -18,9 +18,22 @@
 # the deploy host's versions. CI_MISSING_TOOLS=fail is set on every step so
 # `ci_have_tool` fails closed instead of warn-and-skipping security gates on
 # a non-deploy-host executor, and the first step asserts the exact toolchain
-# (ci/woodpecker/toolchain.sh — it also runs at image build time, so a broken
-# image cannot be pushed). Bump the image tag whenever a pinned version
-# changes.
+# (`apexmail-ci-toolchain --assert` — the same assertion the image build ends
+# with, so a drifted image cannot be pushed or run).
+#
+# AUDIT SM14 F9 — the image is referenced BY DIGEST, never by a mutable tag:
+# `:1` was re-pushed on every tool bump, silently replacing every
+# scanner/tool version CI runs (with GITHUB_TOKEN mounted). OPERATOR ACTION
+# after every image change (see the ci/ci-image/Dockerfile header):
+#   docker build -t ghcr.io/sbelakho2/apexmail-ci ci/ci-image/
+#   docker push ghcr.io/sbelakho2/apexmail-ci
+#   docker buildx imagetools inspect ghcr.io/sbelakho2/apexmail-ci \
+#     | grep -o 'sha256:[0-9a-f]*'
+# ...then paste THAT digest into the &ci_image anchor below. The validate
+# stage mechanically FAILS any run whose apexmail-ci references here lack a
+# @sha256:<digest> pin, so the contract cannot silently regress. The
+# all-zero digest below is the committed PLACEHOLDER — pipelines stay
+# intentionally broken (loudly) until the operator pins the real digest.
 #
 # Scope: validate → test → security. The host-only stages (fetch/migrate/
 # deploy/verify/notify) are deliberately NOT here: they act on the deploy host
@@ -30,10 +43,18 @@
 # stages run in `service` mode (CI_TEST_DB=service / CI_TEST_REDIS=service), so
 # the DB-gated test suites RUN instead of self-skipping. The canonical
 # migration chain is applied to the provided database by the stage itself.
+# The SECOND postgres (postgres-fresh) is never migrated: the security
+# stage's fresh-DB chain validation targets it via TEST_FRESH_DATABASE_URL
+# (audit SM14 F5 — the gate no longer depends on docker inside the executor).
 # =============================================================================
 
 when:
   - event: [push, pull_request, manual]
+
+# Audit SM14 F9: the ONE executor-image reference, digest-pinned. YAML anchor
+# dereferenced (`*ci_image`) by every step — bump the digest in ONE place.
+variables:
+  - &ci_image ghcr.io/sbelakho2/apexmail-ci@sha256:0000000000000000000000000000000000000000000000000000000000000000  # PLACEHOLDER — operator: replace with the pushed image digest
 
 # Full history: the secret scan inspects every commit (clone depth 0).
 clone:
@@ -53,6 +74,9 @@ services:
   # regression test (applied_count == 0 before any chain is applied) needs a
   # truly empty database, which the canonical one cannot be. Its soft skip is
   # a release-mode failure (audit CI-2), so the fixture is provided here.
+  # Audit SM14 F5: the security stage's fresh-DB migration chain validation
+  # also targets it (TEST_FRESH_DATABASE_URL below) so that REQUIRED gate
+  # runs on the executor without docker.
   - name: postgres-fresh
     image: postgres:16-alpine
     environment:
@@ -78,9 +102,9 @@ secrets:
     required: false
 
 steps:
-  # --- first-stage assertion: print and check the exact toolchain ----------
+  # --- first-stage assertion: the exact toolchain of the pushed image -------
   - name: toolchain
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     environment:
       CI_MISSING_TOOLS: fail
     commands:
@@ -88,7 +112,7 @@ steps:
 
   # --- static validation gates (env-file/compose sanity, repo gates, migration lint) ---
   - name: validate
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     environment:
       CI_MISSING_TOOLS: fail
     commands:
@@ -100,7 +124,7 @@ steps:
   # green (see the CI_UI_* block in ci/pipeline.conf); fixtures are exported
   # into the run dir, never the working tree.
   - name: ui
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     environment:
       CI_MISSING_TOOLS: fail
       # Release-mode soft-skip contract (audit CI-2): a REQUIRES-INFRASTRUCTURE
@@ -114,7 +138,7 @@ steps:
   #     deny, cargo test --workspace against the postgres service, coverage
   #     ratchet, PHP/SDK/satellite lanes when their toolchains are present) ---
   - name: test
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     environment:
       CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
@@ -157,7 +181,7 @@ steps:
   # --- security + supply chain (gitleaks, cargo audit/vet, semgrep,
   #     fresh-database migration validation, trivy) ---
   - name: security
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     environment:
       CI_MISSING_TOOLS: fail
       CI_TEST_DB: service
@@ -169,6 +193,10 @@ steps:
       TEST_REDIS_URL: redis://redis:6379
       REDIS_TEST_URL: redis://redis:6379
       CLICKHOUSE_TEST_URL: http://clickhouse:8123
+      # Audit SM14 F5: the fresh-DB migration chain validation runs against
+      # this NEVER-MIGRATED service database (no docker needed in the
+      # executor; absence of BOTH this URL and docker is a hard failure).
+      TEST_FRESH_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres-fresh:5432/apexmail_fresh
     commands:
       - ./ci/woodpecker/stage.sh security
 
@@ -182,17 +210,22 @@ steps:
   # outage from flipping a green pipeline red (the missing status then blocks
   # the branch VISIBLY instead of lying about a red gate). Without the
   # GITHUB_TOKEN secret (required: false above) the script skips loudly.
+  #
+  # Audit SM14 F14: the PASS/FAIL counts are computed ONLY from THIS
+  # pipeline's run dir (ci/woodpecker/run-dir.sh resolves the same
+  # ci/runs/wp<pipeline-number> the stage steps wrote to) — grepping the
+  # whole ci/runs/ tree let stale logs from earlier pipelines on a reused
+  # workspace inflate the status description.
   - name: notify-github-success
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     failure: ignore
     when:
       - status: [success]
     commands:
-      # Stage results + check counts come from the per-stage logs the
-      # ci/woodpecker/stage.sh wrapper wrote under ci/runs/ (shared workspace).
       - |
-        _p=$(grep -h 'PASS: ' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
-        _f=$(grep -h 'FAIL:' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        . ci/woodpecker/run-dir.sh
+        _p=$(grep -h 'PASS: ' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        _f=$(grep -h 'FAIL:' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
         GITHUB_STATUS_STATE=success \
         GITHUB_STATUS_CONTEXT=woodpecker \
         STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \
@@ -200,13 +233,14 @@ steps:
         tools/post_github_status.sh
 
   - name: notify-github-failure
-    image: ghcr.io/sbelakho2/apexmail-ci:1
+    image: *ci_image
     failure: ignore
     when:
       - status: [failure]
     commands:
       - |
-        _f=$(grep -h 'FAIL:' ci/runs/*/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
+        . ci/woodpecker/run-dir.sh
+        _f=$(grep -h 'FAIL:' "$WP_RUN_DIR"/stages/*.log 2>/dev/null | wc -l | tr -d ' ')
         GITHUB_STATUS_STATE=failure \
         GITHUB_STATUS_CONTEXT=woodpecker \
         STATUS_TARGET_URL="${CI_PIPELINE_URL:-${CI_PIPELINE_LINK:-}}" \

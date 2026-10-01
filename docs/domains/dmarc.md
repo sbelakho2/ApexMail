@@ -72,4 +72,4 @@ ApexMail handles alignment automatically when domains are properly configured.
 - [SPF](spf.md)
 - [DKIM](dkim.md)
 - [Return Path](return-path.md)
-- [Email Authentication Guide](../../security/email-authentication.md)
+- [Email Authentication Guide](../security/email-authentication.md)

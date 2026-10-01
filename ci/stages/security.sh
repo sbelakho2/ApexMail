@@ -180,6 +180,21 @@ justified .trivyignore entry (revisit on every feed refresh)"
 # pre-deploy re-scan of what is on disk.
 trivy_images() {
     ci_have_tool trivy || return "$CI_EXIT_OK"
+    # Audit SM14 F5: docker-absence used to look identical to "nothing to
+    # scan". On the deploy host that is a POLICY failure under
+    # CI_MISSING_TOOLS=fail (the pre-deploy re-scan silently vanished); on a
+    # CI executor there are BY DESIGN no locally built images to re-scan —
+    # the authoritative post-build scan runs in the images stage on the
+    # deploy host — so the skip is stated loudly instead of being silent.
+    if ! ci_docker_ok; then
+        if ci_on_deploy_host && [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
+            ci_err "docker unavailable on the deploy host and CI_MISSING_TOOLS=fail — the pre-deploy image re-scan cannot silently vanish (audit SM14 F5, fail closed)"
+            return "$CI_EXIT_FAIL"
+        fi
+        ci_info "trivy: no local docker images to re-scan (executor context — the authoritative \
+post-build image scan runs in the images stage on the deploy host; audit SM14 F5)"
+        return "$CI_EXIT_OK"
+    fi
     _ns=${GHCR_NS:-ghcr.io/sbelakho2/apexmail}
     for _svc in api-server mta; do
         for _tag in "$CI_SHA" latest; do
@@ -211,6 +226,15 @@ _trivy_sbom() {
 # 2. sqlx migrate run (x2)    — the chain applies to a CLEAN database and is
 #                               idempotent on a current schema, exactly the
 #                               two assertions the GitHub workflow made.
+# Fresh-DB TARGET (audit SM14 F5), in priority order:
+#   1. TEST_FRESH_DATABASE_URL — a CI executor provides a NEVER-MIGRATED
+#      database as a Woodpecker `service` (postgres-fresh in
+#      .woodpecker.yml): the full chain-apply proof runs WITHOUT docker
+#      inside the executor.
+#   2. an ephemeral docker postgres (the deploy-host path).
+#   3. NEITHER — under CI_MISSING_TOOLS=fail this is a HARD FAILURE (the
+#      gate used to silently vanish on the executor while the pipeline
+#      still posted "release gates GREEN"); otherwise a loud skip.
 # F7 — same include_dir staleness fix as ci/stages/test.sh apply_test_schema:
 # sqlx::migrate! embeds via include_dir; some cargo versions miss new files
 # in the tracked dir on incremental rebuilds, so a freshly added migration
@@ -221,25 +245,44 @@ _trivy_sbom() {
 # (see ci/README.md § "Known pipeline findings"); CI_MIGRATION_CHECK=advisory
 # downgrades this check until the migration is fixed.
 migration_validation() {
-    ci_info "migration validation (ephemeral postgres)"
-    ci_docker_ok || { ci_warn "docker unavailable — migration validation skipped"; return "$CI_EXIT_OK"; }
+    if ci_dry; then
+        ci_info "dry-run: migration validation (migrator --dry-run + fresh-DB chain apply x2)"
+        return "$CI_EXIT_OK"
+    fi
+    ci_info "migration validation"
+    _mv_url=''
+    if [ -n "${TEST_FRESH_DATABASE_URL:-}" ]; then
+        _mv_url=$TEST_FRESH_DATABASE_URL
+        ci_info "fresh-DB target: the executor-provided never-migrated database (TEST_FRESH_DATABASE_URL)"
+    elif ci_docker_ok; then
+        ci_info "fresh-DB target: ephemeral postgres"
+        _mv_port=$(ci_free_port)
+        ci_ephem_postgres apexmail-ci-sec-pg apexmail apexmail apexmail_sec "$_mv_port" \
+            || ci_die "ephemeral postgres failed to start"
+        _mv_url="postgres://apexmail:apexmail@127.0.0.1:$_mv_port/apexmail_sec"
+    else
+        # Audit SM14 F5: route docker-absence through the missing-tools
+        # policy instead of silently skipping a REQUIRED gate.
+        if [ "${CI_MISSING_TOOLS:-auto}" = fail ]; then
+            ci_err "no fresh database available (TEST_FRESH_DATABASE_URL unset, docker unavailable) \
+and CI_MISSING_TOOLS=fail — the REQUIRED fresh-DB migration gate cannot silently vanish (fail closed)"
+            return "$CI_EXIT_FAIL"
+        fi
+        ci_warn "docker unavailable — migration validation skipped"
+        return "$CI_EXIT_OK"
+    fi
 
     # (1) embedded migration set lists cleanly (touch: see the F7 note above)
     touch "$WS/crates/migrator/src/main.rs"
     (cd "$WS" && ci_check "migrator --dry-run" cargo run --locked -p migrator -- --dry-run) \
         || return "$CI_EXIT_FAIL"
 
-    # (2) apply the chain to a clean database, twice
-    _mv_port=$(ci_free_port)
-    ci_ephem_postgres apexmail-ci-sec-pg apexmail apexmail apexmail_sec "$_mv_port" \
-        || ci_die "ephemeral postgres failed to start"
-    _mv_url="postgres://apexmail:apexmail@127.0.0.1:$_mv_port/apexmail_sec"
-
-    # Alpine's entrypoint restarts postgres once after first-init (the
-    # password bootstrap) — pg_isready can pass against the bootstrap
-    # process and the next real connection fails with a protocol reset
-    # ("unexpected response from SSLRequest: 0x00"). Retry the first apply;
-    # the idempotency apply then runs against the settled server.
+    # (2) apply the chain to the fresh database, twice. The retry loop
+    # absorbs postgres's first-init restart (the alpine entrypoint's
+    # password bootstrap) on BOTH targets: pg_isready can pass against the
+    # bootstrap process and the next real connection fails with a protocol
+    # reset ("unexpected response from SSLRequest: 0x00"); the idempotency
+    # apply then runs against the settled server.
     _mv_settle=0
     if command -v sqlx >/dev/null 2>&1; then
         for _mv_try in 1 2 3; do

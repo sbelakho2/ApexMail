@@ -21,6 +21,13 @@
 **/target
 
 # Secrets and live local state — NEVER part of a build context
+# Audit F5: the root-anchored entries below are matched from the context
+# root ONLY, so services/mail-server/secrets/ (real credential files) and
+# services/mail-server/dump.rdb were still tarred into every build context
+# and COPY'd into builder layers by `COPY services/mail-server .`. The
+# **/ patterns close that hole (same convention as .gitignore).
+**/secrets/
+**/dump.rdb
 secrets/
 dump.rdb
 data/

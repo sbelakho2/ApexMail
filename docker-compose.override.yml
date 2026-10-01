@@ -20,7 +20,13 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
+      # F4 (audit): the host bind is HARDCODED to 127.0.0.1 OUTSIDE the
+      # variable (same form as docker-compose.yml, same fix as the
+      # GRAFANA_PORT footgun). The old "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
+      # default embedded host:port, so a BARE POSTGRES_PORT=5432 (as shipped
+      # in .env.example) expanded to "5432:5432" — an all-interfaces bind.
+      # The variable now selects ONLY the host port number.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail}"]
       interval: 5s
@@ -44,7 +50,9 @@ services:
       - redis_data:/data
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     ports:
-      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
+      # F4 (audit): loopback bind hardcoded outside the variable — a bare
+      # REDIS_PORT=6379 (.env.example) must stay loopback-only.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$(cat /run/secrets/redis_password 2>/dev/null || echo '')\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 5s
@@ -105,8 +113,11 @@ services:
       - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/apexmail-users.xml:ro
       - ./deploy/clickhouse/initdb:/docker-entrypoint-initdb.d:ro
     ports:
-      - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
-      - "${CLICKHOUSE_NATIVE_PORT:-127.0.0.1:9000}:9000"
+      # F4 (audit): loopback bind hardcoded outside the variable — bare
+      # CLICKHOUSE_HTTP_PORT / CLICKHOUSE_NATIVE_PORT values (.env.example)
+      # must stay loopback-only.
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 10s

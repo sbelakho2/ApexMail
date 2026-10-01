@@ -439,78 +439,110 @@ mod auth_security {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SSRF Protection
+// SSRF Protection (audit SM12 F7 rewrite)
 // ═══════════════════════════════════════════════════════════════════════════
 
 mod ssrf_protection {
     use std::net::IpAddr;
 
-    /// Parse and check if an IP is private (mirrors webhook_tester logic)
-    fn is_private_ip(ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-            }
-            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-        }
+    // The REAL predicate used by the production webhook tester
+    // (devex-service::webhook_tester::is_private_ip). The previous version of
+    // this module asserted on a local copy that "mirrored" the logic — a
+    // regression that dropped, say, cloud-metadata coverage there stayed
+    // green here. Now the production function itself is under test: if its
+    // range coverage shrinks, these tests fail.
+    use devex_service::webhook_tester::is_private_ip;
+
+    fn ip(v: &str) -> IpAddr {
+        v.parse().expect("test IP literal")
     }
 
     #[test]
     fn blocks_private_ipv4_ranges() {
-        let private_ips = [
+        for ip_str in [
             "10.0.0.1",
             "10.255.255.255",
             "172.16.0.1",
             "172.31.255.255",
             "192.168.0.1",
             "192.168.255.255",
-        ];
-        for ip_str in private_ips {
-            let ip: IpAddr = ip_str.parse().unwrap();
-            assert!(is_private_ip(ip), "{ip_str} must be blocked as private");
+        ] {
+            assert!(is_private_ip(&ip(ip_str)), "{ip_str} must be blocked as private");
         }
     }
 
     #[test]
     fn blocks_loopback() {
-        let loopback_ips = ["127.0.0.1", "127.0.0.2", "::1"];
-        for ip_str in loopback_ips {
-            let ip: IpAddr = ip_str.parse().unwrap();
-            assert!(is_private_ip(ip), "{ip_str} must be blocked as loopback");
+        for ip_str in ["127.0.0.1", "127.0.0.2", "127.255.255.254", "::1"] {
+            assert!(is_private_ip(&ip(ip_str)), "{ip_str} must be blocked as loopback");
         }
     }
 
     #[test]
-    fn blocks_link_local() {
-        let link_local = ["169.254.0.1", "169.254.169.254"];
-        for ip_str in link_local {
-            let ip: IpAddr = ip_str.parse().unwrap();
+    fn blocks_link_local_including_cloud_metadata() {
+        for ip_str in ["169.254.0.1", "169.254.169.254"] {
             assert!(
-                is_private_ip(ip),
-                "{ip_str} must be blocked as link-local (AWS metadata)"
+                is_private_ip(&ip(ip_str)),
+                "{ip_str} must be blocked as link-local (AWS/GCP metadata endpoint)"
+            );
+        }
+        // The production predicate also covers unique-local IPv6.
+        assert!(
+            is_private_ip(&ip("fe80::1")),
+            "fe80::1 must be blocked as v6 link-local"
+        );
+        assert!(
+            is_private_ip(&ip("fd00::1")),
+            "fd00::1 must be blocked as v6 unique-local"
+        );
+    }
+
+    #[test]
+    fn blocks_cgnat_documentation_broadcast_and_unspecified() {
+        for (ip_str, why) in [
+            ("100.64.0.1", "CGNAT 100.64/10"),
+            ("192.0.2.1", "documentation TEST-NET-1"),
+            ("198.51.100.7", "documentation TEST-NET-2"),
+            ("203.0.113.5", "documentation TEST-NET-3"),
+            ("255.255.255.255", "broadcast"),
+            ("0.0.0.0", "unspecified v4"),
+            ("::", "unspecified v6"),
+        ] {
+            assert!(
+                is_private_ip(&ip(ip_str)),
+                "{ip_str} must be blocked ({why}) — a dropped range is an SSRF hole"
             );
         }
     }
 
     #[test]
-    fn blocks_unspecified() {
-        let unspecified = ["0.0.0.0", "::"];
-        for ip_str in unspecified {
-            let ip: IpAddr = ip_str.parse().unwrap();
-            assert!(is_private_ip(ip), "{ip_str} must be blocked as unspecified");
+    fn blocks_ipv4_mapped_ipv6_wrappers_of_private_addresses() {
+        // The mapped form must be judged by the EMBEDDED address, so a
+        // global-looking v6 wrapper cannot smuggle a private v4 target.
+        for ip_str in [
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.10",
+            "::ffff:169.254.169.254",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                is_private_ip(&ip(ip_str)),
+                "{ip_str} (IPv4-mapped private) must be blocked"
+            );
         }
     }
 
     #[test]
     fn allows_public_ips() {
-        let public_ips = ["8.8.8.8", "1.1.1.1", "151.101.1.140", "104.18.32.7"];
-        for ip_str in public_ips {
-            let ip: IpAddr = ip_str.parse().unwrap();
-            assert!(!is_private_ip(ip), "{ip_str} must be allowed as public");
+        for ip_str in ["8.8.8.8", "1.1.1.1", "151.101.1.140", "104.18.32.7"] {
+            assert!(
+                !is_private_ip(&ip(ip_str)),
+                "{ip_str} must be allowed as public — over-blocking breaks outbound webhooks"
+            );
         }
+        assert!(
+            !is_private_ip(&ip("::ffff:8.8.8.8")),
+            "a mapped PUBLIC address stays allowed"
+        );
     }
 }

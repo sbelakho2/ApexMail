@@ -123,7 +123,10 @@ fn control_is_labelled(document: &str, tag: &str) -> bool {
 fn control_is_exempt_kind(tag: &str) -> bool {
     let lower = tag.to_ascii_lowercase();
     let input_type = attribute_value(&lower, "type").unwrap_or("");
-    matches!(input_type, "hidden" | "submit" | "button" | "reset" | "image")
+    matches!(
+        input_type,
+        "hidden" | "submit" | "button" | "reset" | "image"
+    )
 }
 
 fn unlabeled_controls(surface: &str, path: &str, html: &str) -> Vec<String> {

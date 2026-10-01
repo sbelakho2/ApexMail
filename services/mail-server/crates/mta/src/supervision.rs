@@ -243,7 +243,11 @@ mod tests {
             Ok(())
         });
         let results = supervisor.join_all(Duration::from_secs(5)).await;
-        assert_eq!(results.len(), 1, "the pending straggler is aborted silently");
+        assert_eq!(
+            results.len(),
+            1,
+            "the pending straggler is aborted silently"
+        );
         assert_eq!(results[0].0, "<listener-task-panicked>");
         assert!(
             results[0].1.is_err(),

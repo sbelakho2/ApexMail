@@ -1,6 +1,9 @@
 [package]
 name = "kiwicaptcha-risk"
-version = "0.1.0"
+# Family lockstep version (audit SM15 F10): tracks the canonical Rust core
+# crate `kiwicaptcha` — see ../VERSIONING.md for the protocol-version ->
+# package-version mapping. Do not version this port independently.
+version = "1.7.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"

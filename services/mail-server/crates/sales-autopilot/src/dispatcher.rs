@@ -326,6 +326,24 @@ pub struct UnsubscribeTokenData {
 /// Token version prefix; embedded in the signed payload.
 const UNSUB_TOKEN_VERSION: &str = "v1";
 
+/// Redact a recipient address for operational logs (audit SM7 F11). The
+/// local part is personal data — warn-level send-refusal logs used to carry
+/// the raw B2B address — so it is replaced by a short SHA-256 prefix while
+/// the DOMAIN stays legible: the same domain-only discipline the enrichment
+/// providers use. A value without an '@' (malformed) is hashed in full, so
+/// the helper is total.
+fn redact_recipient(recipient_email: &str) -> String {
+    // Trim + lowercase: the same canonicalization the suppression stores
+    // apply, so one address hashes to one pseudonym in every log line.
+    let trimmed = recipient_email.trim().to_lowercase();
+    let digest = Sha256::digest(trimmed.as_bytes());
+    let prefix = hex_encode(&digest[..6]);
+    match trimmed.rsplit_once('@') {
+        Some((_, domain)) if !domain.is_empty() => format!("sha256:{prefix}@{domain}"),
+        _ => format!("sha256:{prefix}"),
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1405,7 +1423,7 @@ impl ProductionCampaignDispatcher {
             tracing::warn!(
                 tenant_id = %tenant_id,
                 campaign_id = %campaign_id,
-                recipient = %recipient_email,
+                recipient = %redact_recipient(recipient_email),
                 "campaign send skipped: idempotency key already enqueued"
             );
             tx.commit()
@@ -1623,7 +1641,7 @@ impl ProductionCampaignDispatcher {
             tracing::warn!(
                 action_id = %action_fence.action_id,
                 tenant_id = %tenant_id,
-                recipient = %recipient_email,
+                recipient = %redact_recipient(recipient_email),
                 "sequence step send refused: action lease fence is stale (work recovered by another worker)"
             );
             metrics::counter!("sales_sequence_send_lease_lost_total").increment(1);
@@ -1693,7 +1711,7 @@ impl ProductionCampaignDispatcher {
             // twice; a replay of the action is a no-op.
             tracing::warn!(
                 tenant_id = %tenant_id,
-                recipient = %recipient_email,
+                recipient = %redact_recipient(recipient_email),
                 idempotency_key = %idempotency_key,
                 "sequence step send skipped: idempotency key already enqueued"
             );
@@ -2183,6 +2201,47 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "test-unsub-secret-0123456789abcdef";
+
+    // ------------------------------------------------------------------
+    // Audit SM7 F11 — warn-level send-refusal logs never carry the raw
+    // recipient address: the local part is hashed, the domain stays legible
+    // (the enrichment providers' domain-only discipline).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn redact_recipient_hides_the_local_part_and_keeps_the_domain() {
+        let redacted = redact_recipient("jane.doe@corp.example");
+        assert!(
+            !redacted.contains("jane.doe"),
+            "the local part must never appear: {redacted}"
+        );
+        assert!(
+            redacted.ends_with("@corp.example"),
+            "the domain stays legible for ops: {redacted}"
+        );
+        assert!(redacted.starts_with("sha256:"), "{redacted}");
+
+        // Deterministic, and distinct per address (an operator can still
+        // correlate two log lines about the same recipient).
+        assert_eq!(redact_recipient("jane.doe@corp.example"), redacted);
+        assert_ne!(
+            redact_recipient("jane.doe@corp.example"),
+            redact_recipient("john.doe@corp.example")
+        );
+
+        // Whitespace is normalized before hashing, so the same address in
+        // two shapes redacts identically.
+        assert_eq!(
+            redact_recipient("  Jane.Doe@Corp.Example "),
+            redact_recipient("jane.doe@corp.example")
+        );
+
+        // Malformed input is hashed in full — total, never a panic.
+        let malformed = redact_recipient("not-an-address");
+        assert!(malformed.starts_with("sha256:"), "{malformed}");
+        assert!(!malformed.contains("not-an-address"), "{malformed}");
+        assert_eq!(redact_recipient(""), redact_recipient(""));
+    }
 
     #[test]
     fn token_roundtrip() {

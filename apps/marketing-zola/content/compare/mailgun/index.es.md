@@ -9,6 +9,7 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun de Sinch es una plataforma de entrega de email con APIs para enviar, recibir y rastrear emails."
+pricing_as_of = "2026-08-19"
 last_verified = "2026-07-29"
 methodology = "Documentación pública de Mailgun en mailgun.com/docs revisada en la fecha de verificación. Precios comparados en el plan Foundation 100K. Facturación mensual. Las funciones, los límites y los precios pueden cambiar."
 volume_assumption = "100.000 emails/mes"
@@ -39,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "MODELOS DE DESPLIEGUE", rows = [
     { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant, alojado en la UE', comp = 'Sí (todos los planes)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
-    { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale', comp = 'Disponible como complemento en el plan Foundation y superiores<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business', comp = 'Disponible como complemento en el plan Foundation y superiores<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Inquilino dedicado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Consulte la documentación del proveedor<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / despliegue privado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Consulte la documentación del proveedor<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},

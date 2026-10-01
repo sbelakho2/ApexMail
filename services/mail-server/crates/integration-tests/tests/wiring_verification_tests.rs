@@ -8,80 +8,153 @@
 //! 3. Component outputs flow through to the response
 //! 4. Error handling propagates correctly through the stack
 
-use std::collections::HashMap;
-
 // ===========================================================================
-// RATE LIMITER WIRING TESTS
+// RATE LIMITER WIRING TESTS (audit SM12 F8 rewrite)
 // ===========================================================================
 
-/// Verify the rate limiter crate's sliding window actually counts requests.
+/// Verify the REAL `apexmail-rate-limiter` primitives: the previous version
+/// of this module incremented a local `u64` and a local `HashMap` — it never
+/// touched the crate its header claimed to test. Every test below drives the
+/// production types (`SlidingWindowCounter`, `KeyedRateLimiter`,
+/// `GovernorLimiter`).
 #[cfg(test)]
 mod rate_limiter_wiring {
+    use apexmail_rate_limiter::{
+        GovernorLimiter, KeyedRateLimiter, RateLimitConfig, SlidingWindowCounter,
+    };
     use std::time::Duration;
 
     #[test]
-    fn test_sliding_window_counter_increments() {
-        // This tests that the apexmail-rate-limiter crate's SlidingWindowCounter
-        // actually increments and blocks after threshold
+    fn sliding_window_counter_increments_and_blocks() {
+        // The production SlidingWindowCounter must count EVERY admitted
+        // request, deny past the threshold, and report the real count.
+        let counter = SlidingWindowCounter::from_params(Duration::from_secs(60), 10);
 
-        // Simulate sliding window behavior
-        let _window_size = Duration::from_secs(60);
-        let max_requests = 10u64;
-        let mut current_count = 0u64;
-
-        // Simulate requests
-        for _ in 0..max_requests {
-            current_count += 1;
+        for i in 0..10 {
+            let decision = counter.check_and_increment();
+            assert!(
+                decision.is_allowed(),
+                "request {} within the limit must pass",
+                i + 1
+            );
         }
-
         assert_eq!(
-            current_count, max_requests,
-            "Counter must track all requests"
+            counter.current_count(),
+            10,
+            "the counter must track all admitted requests"
         );
 
-        // Next request should exceed limit
-        current_count += 1;
+        let eleventh = counter.check_and_increment();
         assert!(
-            current_count > max_requests,
-            "Counter must exceed limit on 11th request"
+            eleventh.is_denied(),
+            "the 11th request must be denied — an always-allow limiter is not wired"
+        );
+        // A denied request must not consume budget.
+        assert_eq!(counter.current_count(), 10, "denials must not count");
+    }
+
+    #[test]
+    fn sliding_window_counter_rolls_windows() {
+        let window = Duration::from_millis(60);
+        let counter = SlidingWindowCounter::from_params(window, 2);
+
+        assert!(counter.check_and_increment().is_allowed());
+        assert!(counter.check_and_increment().is_allowed());
+        assert!(counter.check_and_increment().is_denied());
+
+        // Idle past two full windows: the budget must fully reset.
+        std::thread::sleep(window * 2 + Duration::from_millis(25));
+        assert!(
+            counter.check_and_increment().is_allowed(),
+            "window rollover must re-admit after events age out"
         );
     }
 
     #[test]
-    fn test_keyed_rate_limiter_separates_keys() {
-        // Verify per-tenant rate limiting uses separate counters
-        let mut counters: HashMap<String, u64> = HashMap::new();
+    fn keyed_rate_limiter_separates_tenants() {
+        // Per-tenant isolation on the REAL KeyedRateLimiter: tenant A
+        // exhausting its own bucket must leave tenant B untouched. The old
+        // local-HashMap version could never catch a shared-bucket regression.
+        let limiter = KeyedRateLimiter::from_params(/* rps */ 10, /* burst */ 3, /* max_keys */ 100);
 
-        // Tenant A makes 5 requests
-        for _ in 0..5 {
-            *counters.entry("tenant_a".to_string()).or_insert(0) += 1;
-        }
-
-        // Tenant B makes 3 requests
         for _ in 0..3 {
-            *counters.entry("tenant_b".to_string()).or_insert(0) += 1;
+            assert!(
+                limiter.check("tenant_a").is_allowed(),
+                "tenant_a within burst must pass"
+            );
         }
-
-        assert_eq!(
-            counters.get("tenant_a"),
-            Some(&5),
-            "Tenant A should have 5 requests"
-        );
-        assert_eq!(
-            counters.get("tenant_b"),
-            Some(&3),
-            "Tenant B should have 3 requests"
+        assert!(
+            limiter.check("tenant_a").is_denied(),
+            "tenant_a must be denied once its own bucket is drained"
         );
 
-        // Verify tenants are isolated
-        assert_ne!(
-            counters.get("tenant_a"),
-            counters.get("tenant_b"),
-            "Per-tenant counters must be isolated"
+        assert!(
+            limiter.check("tenant_b").is_allowed(),
+            "tenant_b must keep its own isolated budget"
+        );
+        assert!(
+            limiter.check("tenant_c").is_allowed(),
+            "an unseen tenant starts with a fresh budget"
+        );
+
+        assert_eq!(
+            limiter.key_count(),
+            3,
+            "each tenant must own exactly one limiter key"
+        );
+        assert!(
+            limiter.total_denied() >= 1,
+            "the aggregate denial counter must observe the denial"
+        );
+        // Removing a tenant's key resets it to a fresh budget.
+        limiter.remove("tenant_a");
+        assert!(
+            limiter.check("tenant_a").is_allowed(),
+            "a removed key must re-provision a fresh bucket"
         );
     }
 
-    use super::*;
+    #[test]
+    fn governor_limiter_enforces_burst_then_refills() {
+        // The token-bucket primitive: `burst` immediate admissions, denial
+        // beyond it, and (configured rps) refill over time.
+        let config = RateLimitConfig::new(100).with_burst(4);
+        let limiter = GovernorLimiter::new(&config);
+        assert_eq!(
+            limiter.burst_size(),
+            4,
+            "burst_size must echo the production config"
+        );
+
+        for _ in 0..4 {
+            assert!(limiter.check().is_allowed(), "burst tokens must pass");
+        }
+        assert!(
+            limiter.check().is_denied(),
+            "past the burst the governor must deny"
+        );
+
+        // ~1s at rps=100 refills ~100 tokens, far more than the 4 drained:
+        // the bucket must be replenished (a stub that never refills fails).
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(
+            limiter.check().is_allowed(),
+            "the token bucket must refill at the configured rate"
+        );
+    }
+
+    #[test]
+    fn rate_limit_config_builder_holds_its_parameters() {
+        let config = RateLimitConfig::new(25).with_burst(7);
+        assert_eq!(config.requests_per_second.get(), 25);
+        assert_eq!(config.effective_burst().get(), 7);
+        // burst below rps is clamped up to a usable bucket, never to zero.
+        let tiny = RateLimitConfig::new(5).with_burst(0);
+        assert!(
+            tiny.effective_burst().get() >= 1,
+            "effective_burst must never be zero — a zero bucket denies everything"
+        );
+    }
 }
 
 // ===========================================================================

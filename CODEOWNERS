@@ -1,3 +1,34 @@
+# =============================================================================
+# CODEOWNERS — review ownership map.
+# =============================================================================
+# AUDIT SM14 F15 — READ BEFORE RELYING ON THIS FILE.
+#
+# REQUIRED-REVIEW DEPENDENCY (not verifiable from this repository): a
+# CODEOWNERS file only BITES when branch protection on main requires review
+# from a code owner before merging. If that setting is off, everything below
+# is documentation, not enforcement. OPERATOR CHECKLIST (GitHub → Settings →
+# Branches → main → Protect):
+#   1. "Require a pull request before merging" = ON.
+#   2. "Require review from Code Owners" = ON.
+#   3. (recommended) "Require approval of the most recent reviewable push".
+# The CI system also posts the required "woodpecker" commit status — keep
+# that context required too (ci/README.md §12).
+#
+# SINGLE-POINT-OF-OWNERSHIP RISK: every path below — including /ci/,
+# /deploy/ and .woodpecker.yml, the exact files that gate everything else —
+# is owned by the SAME single account. One owner means NO review separation
+# for CI/release changes: the person (or a compromised token of the person)
+# who changes a gate can approve their own change. RECOMMENDATION: add a
+# second owner or a team to the release-critical paths, e.g.
+#     /ci/              @sbelakho2 @apexmail-release-engineering
+#     /deploy/          @sbelakho2 @apexmail-release-engineering
+#     /.woodpecker.yml  @sbelakho2 @apexmail-release-engineering
+# (create the team with at least one human who is not the sole deploy
+# admin). Until then, treat CI/release changes as self-reviewed and rely on
+# the mechanical gates: the validate stage's pipeline-config sanity checks,
+# the digest-pinned executor image (audit SM14 F9) and the blessing manifest
+# whose pipelineConfigHash covers every gate script (audit SM14 F10).
+
 # Global fallback owner
 * @sbelakho2
 
@@ -35,3 +66,6 @@
 # Tooling, data, and experiments
 /tools/ @sbelakho2
 /data/ @sbelakho2
+
+# The executor pipeline definition is release-critical (it gates the gates):
+/.woodpecker.yml @sbelakho2

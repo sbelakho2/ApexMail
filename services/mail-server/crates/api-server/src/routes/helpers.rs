@@ -266,8 +266,8 @@ static CAPABILITY_CACHE: std::sync::OnceLock<
     parking_lot::Mutex<std::collections::HashMap<(String, String), bool>>,
 > = std::sync::OnceLock::new();
 
-fn capability_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<(String, String), bool>>
-{
+fn capability_cache(
+) -> &'static parking_lot::Mutex<std::collections::HashMap<(String, String), bool>> {
     CAPABILITY_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -316,7 +316,11 @@ pub async fn table_exists(db: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::E
 ///
 /// Same contract as [`table_exists`]: `Err` is a degraded database, never a
 /// "column missing" verdict.
-pub async fn column_exists(db: &sqlx::PgPool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
+pub async fn column_exists(
+    db: &sqlx::PgPool,
+    table: &str,
+    column: &str,
+) -> Result<bool, sqlx::Error> {
     let key = (pool_identity(db), format!("column:{table}.{column}"));
     if let Some(cached) = capability_cache().lock().get(&key) {
         return Ok(*cached);
@@ -453,8 +457,7 @@ mod tests {
             .connect_lazy_with(options.clone());
         let identity = pool_identity(&socket_pool);
         assert_eq!(
-            identity,
-            "unix:/tmp/apexmail-capability-probe.sock|probe_user|",
+            identity, "unix:/tmp/apexmail-capability-probe.sock|probe_user|",
             "socket path, username and (defaulted) database name the identity"
         );
 
@@ -524,7 +527,10 @@ mod tests {
         );
         // A second Cookie header (RFC 6265 allows several) containing a
         // pair with NO `=` at all — it must be skipped, never panic.
-        headers.append("cookie", axum::http::HeaderValue::from_static("junk-noequals"));
+        headers.append(
+            "cookie",
+            axum::http::HeaderValue::from_static("junk-noequals"),
+        );
 
         assert_eq!(
             extract_cookie(&headers, "theme").as_deref(),
@@ -628,7 +634,9 @@ mod tests {
         // the capability cache instead of re-querying the catalog.
         let before_columns = capability_cache_len();
         assert!(
-            column_exists(&pool, "tenants", "id").await.expect("column probe"),
+            column_exists(&pool, "tenants", "id")
+                .await
+                .expect("column probe"),
             "tenants.id exists in the canonical schema"
         );
         assert!(

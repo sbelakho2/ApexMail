@@ -47,9 +47,10 @@ impl KpiCardData {
     }
 }
 
-/// A single table cell. `Raw` cells are trusted, pre-escaped HTML built by
-/// the renderer itself (status pills, action links); every other variant
-/// is escaped at render time.
+/// A single table cell. Every variant is escaped at render time:
+/// `Text`/`Mono` escape their value, `Link` escapes href + label, and
+/// `Status` renders through `StatusIndicator` (whose badge escapes the
+/// label — including the raw fallback for unrecognized status strings).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataCell {
     /// Plain text (HTML-escaped).

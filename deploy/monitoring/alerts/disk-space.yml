@@ -1,9 +1,19 @@
 # ==============================================================================
 # ApexMail — Disk Space Alerting Rules
 # ==============================================================================
-# MON-18: Disk space + inode monitoring for the single Docker Compose host.
+# MON-18: Inode monitoring for the single Docker Compose host.
 #
 # Loaded by: prometheus.yml -> rule_files
+#
+# F10 (audit) — the byte-identical NodeDiskSpaceWarning /
+# NodeDiskSpaceCritical / NodeDiskPredictedFull alerts that used to live here
+# double-paged the HostDiskSpaceWarning / HostDiskSpaceCritical /
+# HostDiskPredictedFull family in
+# deploy/prometheus/alerts/infrastructure-alerts.yml (same
+# node_filesystem_*{job="node"} selectors, different alert names — a full disk
+# fired FOUR alerts through both rule files). infrastructure-alerts.yml is the
+# ONE canonical disk-pressure family; this file now covers only what it does
+# not: INODE exhaustion.
 #
 # F8 (audit) — this is a Docker Compose deployment: there are no kubelet
 # volume stats, no cAdvisor container_* metrics and no dedicated postgres
@@ -18,61 +28,6 @@
 groups:
   - name: apexmail-disk-space
     rules:
-      # ── Node-Level Disk Pressure ───────────────────────────────────────────
-
-      - alert: NodeDiskSpaceWarning
-        expr: |
-          (1 - (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}
-          / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"})) * 100 > 80
-        for: 10m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "Disk usage above 80% on {{ $labels.instance }} {{ $labels.mountpoint }}"
-          description: |
-            Filesystem {{ $labels.mountpoint }} is {{ $value | humanizePercentage }}
-            full (over 80%). All compose volumes live here.
-            * docker system prune, old container images, unused volumes
-            * check the postgres_backups / clickhouse_backups volumes
-              (BACKUP_KEEP_COUNT retention) and the offsite mirror
-            * docker logs grow unbounded only if a container lost its
-              json-file rotation anchor (see the compose x-logging defaults)
-          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
-
-      - alert: NodeDiskSpaceCritical
-        expr: |
-          (1 - (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}
-          / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"})) * 100 > 90
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "CRITICAL: Disk usage above 90% on {{ $labels.instance }} {{ $labels.mountpoint }}"
-          description: |
-            Filesystem {{ $labels.mountpoint }} is {{ $value | humanizePercentage }}
-            full — Postgres/ClickHouse writes fail when it hits 100%.
-            IMMEDIATE ACTION REQUIRED.
-            * du -sh /var/lib/docker/volumes/* | sort -rh | head
-            * prune old encrypted backups beyond the retention count
-          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
-
-      - alert: NodeDiskPredictedFull
-        expr: |
-          predict_linear(node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}[6h], 86400) < 0
-        for: 30m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Disk {{ $labels.mountpoint }} on {{ $labels.instance }} predicted to fill within 24 hours"
-          description: |
-            Based on the current consumption rate the filesystem fills within
-            24h. Check WAL accumulation (Postgres), the ClickHouse parts
-            directory, backup retention and container log rotation.
-          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space-recovery"
-
       # ── Inode Exhaustion ───────────────────────────────────────────────────
       # Inode exhaustion can cause "No space left on device" even when
       # disk usage appears normal (many small files).

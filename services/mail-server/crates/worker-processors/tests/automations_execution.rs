@@ -426,14 +426,18 @@ mod fi {
     /// Remove the armed fault: recovery (the re-run) may proceed.
     pub async fn disarm(pool: &PgPool, tag: &str) {
         let trigger = format!("_fi_{tag}");
-        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON automation_runs"))
-            .execute(pool)
-            .await
-            .expect("disarm trigger (automation_runs)");
-        sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON automation_run_actions"))
-            .execute(pool)
-            .await
-            .expect("disarm trigger (automation_run_actions)");
+        sqlx::query(&format!(
+            "DROP TRIGGER IF EXISTS {trigger} ON automation_runs"
+        ))
+        .execute(pool)
+        .await
+        .expect("disarm trigger (automation_runs)");
+        sqlx::query(&format!(
+            "DROP TRIGGER IF EXISTS {trigger} ON automation_run_actions"
+        ))
+        .execute(pool)
+        .await
+        .expect("disarm trigger (automation_run_actions)");
         sqlx::query(&format!("DELETE FROM {STATE_TABLE} WHERE tag = $1"))
             .bind(tag)
             .execute(pool)
@@ -1262,7 +1266,10 @@ async fn half_executed_action_ladder_resumes_without_repeating_effects() {
     .fetch_one(&pool)
     .await
     .expect("list membership after resume");
-    assert_eq!(list_rows, 1, "the re-executed list action must not duplicate");
+    assert_eq!(
+        list_rows, 1,
+        "the re-executed list action must not duplicate"
+    );
     let messages = message_categories(&pool, &tenant).await;
     assert_eq!(messages.len(), 1, "the send happened exactly once");
     assert_eq!(queue_categories(&pool, &tenant).await.len(), 1);
@@ -1330,8 +1337,15 @@ async fn crash_between_send_commit_and_bookkeeping_reuses_message_and_quota() {
     let messages = message_categories(&pool, &tenant).await;
     assert_eq!(messages.len(), 1, "the send committed before the crash");
     assert_eq!(queue_categories(&pool, &tenant).await.len(), 1);
-    assert!(action_rows(&pool, &tenant).await.is_empty(), "bookkeeping lost");
-    assert_eq!(backend.used(), 1, "the quota reserve is orphaned, not rolled back");
+    assert!(
+        action_rows(&pool, &tenant).await.is_empty(),
+        "bookkeeping lost"
+    );
+    assert_eq!(
+        backend.used(),
+        1,
+        "the quota reserve is orphaned, not rolled back"
+    );
     let (run_status,): (String,) =
         sqlx::query_as("SELECT status FROM automation_runs WHERE tenant_id = $1")
             .bind(&tenant)

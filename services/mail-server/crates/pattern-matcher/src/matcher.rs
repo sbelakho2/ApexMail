@@ -271,16 +271,32 @@ impl PatternMatcher {
     pub fn find_first(&self, text: &str) -> Option<MatchResult> {
         let normalized = Self::normalize(text);
         let offsets_are_normalized = matches!(normalized, Cow::Owned(_));
-        self.automaton.as_ref()?.find(normalized.as_ref()).map(|m| {
-            let entry = &self.patterns[m.pattern().as_usize()];
-            MatchResult::new(
-                m.pattern().as_usize(),
-                m.start(),
-                m.end(),
-                &entry.label,
-                offsets_are_normalized,
-            )
-        })
+
+        if let Some(automaton) = self.automaton.as_ref() {
+            return automaton.find(normalized.as_ref()).map(|m| {
+                let entry = &self.patterns[m.pattern().as_usize()];
+                MatchResult::new(
+                    m.pattern().as_usize(),
+                    m.start(),
+                    m.end(),
+                    &entry.label,
+                    offsets_are_normalized,
+                )
+            });
+        }
+
+        // Fallback literal scan (automaton build failed):keep matching.
+        // Previously this method returned `None` for EVERY input in degraded
+        // mode (the `?` on the automaton exited before any fallback), so any
+        // consumer calling `find_first` lost all detection exactly when the
+        // pattern set was oversized.
+        let text_lower = normalized.as_ref().to_lowercase();
+        self.find_all_fallback(&text_lower)
+            .first()
+            .map(|&(idx, start, end)| {
+                let entry = &self.patterns[idx];
+                MatchResult::new(idx, start, end, &entry.label, offsets_are_normalized)
+            })
     }
 
     /// Number of patterns in the automaton.
@@ -489,6 +505,41 @@ mod tests {
         assert_eq!(results.len(), 2, "fallback counts repeated occurrences");
         assert!(results.iter().all(|r| r.label == "bot:google"));
         assert_eq!(matcher.count_matches("curl/ and curl/ and curl/"), 3);
+    }
+
+    #[test]
+    fn test_find_first_falls_back_when_automaton_unavailable() {
+        // Audit finding: `find_first` used `self.automaton.as_ref()?` with no
+        // fallback arm, so in degraded mode it returned None for EVERY input
+        // — all detection was silently lost for consumers calling this
+        // method while `find_all`/`is_match`/`count_matches` kept working.
+        let matcher = PatternMatcher {
+            automaton: None,
+            fallback: Some(vec![("googlebot".to_string(), 0), ("curl/".to_string(), 1)]),
+            patterns: vec![
+                PatternEntry {
+                    label: "bot:google".into(),
+                },
+                PatternEntry {
+                    label: "tool:curl".into(),
+                },
+            ],
+        };
+        assert!(!matcher.is_healthy());
+        let first = matcher.find_first("User-Agent: Googlebot/2.1");
+        assert!(
+            first.is_some(),
+            "degraded find_first must keep detecting via the literal fallback"
+        );
+        let first = first.expect("degraded find_first match");
+        assert_eq!(first.label, "bot:google");
+        assert_eq!(first.pattern_index, 0);
+        assert_eq!(
+            &"User-Agent: Googlebot/2.1"[first.start..first.end],
+            "Googlebot"
+        );
+        // No match stays None (a real miss, not a detection loss).
+        assert!(matcher.find_first("plain text").is_none());
     }
 
     #[test]

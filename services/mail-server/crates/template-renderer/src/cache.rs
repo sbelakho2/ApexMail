@@ -312,7 +312,12 @@ mod tests {
             missing_field_fallback: None,
         };
         use sha2::{Digest, Sha256};
-        let hash = |version: u8| format!("{:x}", Sha256::digest(serde_json::to_string(&inputs(version)).unwrap().as_bytes()));
+        let hash = |version: u8| {
+            format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_string(&inputs(version)).unwrap().as_bytes())
+            )
+        };
         assert_ne!(hash(1), hash(2), "key version must rotate the key");
     }
 

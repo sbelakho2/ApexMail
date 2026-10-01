@@ -44,10 +44,15 @@ echo "      Working directory: $MAIL_SERVER_DIR"
 cd "$MAIL_SERVER_DIR"
 
 # SEC-17: cargo audit with advisory ignore list
-# This list must match .cargo/audit.toml and deny.toml
+# This list must match .cargo/audit.toml, deny.toml [_ignore], and
+# ci/pipeline.conf CI_CARGO_AUDIT_IGNORES (the authoritative ledger —
+# `ci/pipeline.sh selftest` asserts deny.toml equality; keep all four
+# ledgers in EXACT lockstep when triaging a new advisory).
 cargo audit --deny warnings \
+    --ignore RUSTSEC-2026-0258 \
+    --ignore RUSTSEC-2026-0194 \
+    --ignore RUSTSEC-2026-0195 \
     --ignore RUSTSEC-2026-0119 \
-    --ignore RUSTSEC-2024-0437 \
     --ignore RUSTSEC-2023-0071 \
     --ignore RUSTSEC-2026-0098 \
     --ignore RUSTSEC-2026-0099 \
@@ -61,6 +66,9 @@ cargo audit --deny warnings \
     --ignore RUSTSEC-2024-0320 \
     --ignore RUSTSEC-2023-0086 \
     --ignore RUSTSEC-2026-0002 \
+    --ignore RUSTSEC-2026-0192 \
+    --ignore RUSTSEC-2026-0206 \
+    --ignore RUSTSEC-2026-0205 \
     2>&1 | tee "$MAIL_SERVER_DIR/cargo-audit-report.txt"
 
 echo ""

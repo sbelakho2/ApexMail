@@ -8,6 +8,12 @@
 //! generator → verifier → sanitizer → DRAFT (never a send). Anything the
 //! guards or verifier reject marks the message processed WITHOUT a draft and
 //! leaves a human-review note in `ai_response`.
+//!
+//! SM9 #7: this module is UNWIRED LIBRARY CODE — no binary routes traffic
+//! through `EmailAnswerer` today (the poll loop has no `bin` owner). The
+//! defenses below are maintained so the module is safe to wire, not because
+//! anything currently exercises them; its guarantees protect nothing until
+//! a binary actually drives the poll loop.
 
 use crate::defense::{self, ThreatLevel};
 use crate::governor::RateGovernor;
@@ -1112,8 +1118,25 @@ pub(crate) fn build_prompt(from: &str, subject: &str, body: &str) -> String {
     )
 }
 
+/// SM9 #7c: neutralize attacker-controlled header text (`From`, `Subject`)
+/// before it is embedded into the stored draft body that the approval
+/// control plane later releases. The ammonia allowlist strips markup and
+/// escapes stray angle brackets, and CR/LF are removed so a forged header
+/// value can neither re-enter the draft as markup nor forge quoted-body /
+/// header structure.
+fn sanitize_quoted_header_text(value: &str) -> String {
+    crate::content::sanitize_model_output(value)
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n')
+        .collect()
+}
+
 /// Format the reply email body with quoting of the original message.
-/// The AI response is sanitized against HTML/XSS injection before inclusion.
+/// The AI response is sanitized against HTML/XSS injection before inclusion,
+/// and the quoted `From`/`Subject` header text — ATTACKER-CONTROLLED — runs
+/// through [`sanitize_quoted_header_text`] first (SM9 #7c): only the AI
+/// response used to be sanitized, so raw header text re-entered the stored
+/// draft verbatim.
 pub(crate) fn format_reply(
     from: &str,
     subject: &str,
@@ -1122,6 +1145,8 @@ pub(crate) fn format_reply(
 ) -> String {
     // Sanitize the LLM output to strip any HTML/JS injection the model may have generated.
     let sanitized_response = defense::sanitize_email_body(ai_response, false);
+    let from = sanitize_quoted_header_text(from);
+    let subject = sanitize_quoted_header_text(subject);
 
     let mut reply = String::new();
     reply.push_str(&sanitized_response);
@@ -1154,6 +1179,11 @@ pub struct ProcessEmailResult {
 /// The raw LLM output is routed through the same sanitization pipeline as
 /// the poll path (LLM-output XSS stripping + hard truncation) before it is
 /// returned, so the manual endpoint cannot bypass the defense layer.
+///
+/// SM9 #7d: an LLM failure is an ERROR to the caller. It is never converted
+/// into a 200-shaped canned response string — failure stays structurally
+/// distinguishable from success instead of hiding behind
+/// `tokens_used: None` with a fake answer.
 pub async fn generate_email_reply(
     llm: &LlmClient,
     system_prompt: &str,
@@ -1161,32 +1191,24 @@ pub async fn generate_email_reply(
     subject: &str,
     body: &str,
     max_tokens: usize,
-) -> ProcessEmailResult {
+) -> anyhow::Result<ProcessEmailResult> {
     let prompt = build_prompt(from, subject, body);
-    let (response, tokens) = match llm
+    let response = llm
         .generate(system_prompt, &prompt, max_tokens as u32)
         .await
-    {
-        Ok(r) => {
-            let count = r.split_whitespace().count();
-            (r, Some(count))
-        }
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!(error = %e, "LLM generation failed for manual process-email");
-            (
-                "Failed to generate response. Please try again.".into(),
-                None,
-            )
-        }
-    };
+            anyhow::anyhow!("llm generation failed: {e}")
+        })?;
+    let tokens = response.split_whitespace().count();
     let sanitized = sanitize_reply_for_api(&response);
     if sanitized != response {
         tracing::warn!("Manual process-email response contained unsafe content — sanitized");
     }
-    ProcessEmailResult {
+    Ok(ProcessEmailResult {
         response: sanitized,
-        tokens_used: tokens,
-    }
+        tokens_used: Some(tokens),
+    })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

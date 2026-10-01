@@ -81,13 +81,20 @@ services:
     # --maxmemory-policy derived from the REDIS_MAXMEMORY /
     # REDIS_MAXMEMORY_POLICY env vars below (plus the ACL file). Tune
     # memory/eviction via those env vars; the entrypoint owns the config.
-    # Dev: 512mb + allkeys-lru (stale keys evicted rather than write
-    # failures when memory fills). The prod overlay raises memory to 1gb
-    # and switches the policy to volatile-lru.
+    # Dev: 512mb + noeviction (audit F7 — examined, not copied from prod
+    # blindly): the tracking WAL/DLQ lists (apexmail:events:pending /
+    # apexmail:events:dead, crates/tracking-service src/processor.rs) are
+    # RPUSH'd with NO TTL — the only EXPIREs in that file are the click/
+    # suppression dedup keys. Under allkeys-lru a full Redis SILENTLY
+    # evicted durable WAL/DLQ entries (analytics events vanished with no
+    # error anywhere); under noeviction the RPUSH fails loudly instead.
+    # The dev override (docker-compose.override.yml) already ran
+    # 256mb/noeviction for exactly this reason — the base now agrees.
+    # The prod overlay raises memory to 768mb under a 1G container cap.
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_MAXMEMORY: "512mb"
-      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
+      REDIS_MAXMEMORY_POLICY: "noeviction"
     volumes:
       - redis_data:/data
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
@@ -454,7 +461,15 @@ services:
     environment:
       RUST_LOG: ${ENTERPRISE_LOG_LEVEL:-info}
       HOST: 0.0.0.0
-      PORT: 3002
+      # F11 (audit): the CONTAINER port is pinned to 3008 in every
+      # environment so it matches the prod overlay (and its nginx upstream)
+      # AND the static `enterprise:3008` target in deploy/prometheus.yml —
+      # Prometheus config cannot interpolate env vars, so a dev-only port
+      # left the apexmail-enterprise job dead (up==0 → critical
+      # EnterpriseServiceDown after 2m on every dev machine running the
+      # monitoring profile). The DEV host-side mapping below stays
+      # env-selectable via ENTERPRISE_PORT (default 3002).
+      PORT: 3008
       BASE_URL: ${ENTERPRISE_BASE_URL:-https://api.apexmail.ee}
       DB_HOST: postgres
       DB_PORT: 5432
@@ -473,9 +488,11 @@ services:
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
-      - "127.0.0.1:${ENTERPRISE_PORT:-3002}:3002"
+      # Host side is dev-selectable (ENTERPRISE_PORT); container side stays
+      # pinned to 3008 — see the PORT comment above (F11).
+      - "127.0.0.1:${ENTERPRISE_PORT:-3002}:3008"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 3002"]
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3008"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -524,9 +541,16 @@ services:
     # accepted-but-unpersisted submission DATA on every redeploy).
     stop_grace_period: 90s
     ports:
-      - "25:25"
-      - "587:587"
-      - "465:465"
+      # F14 (audit): the host bind address is a VARIABLE defaulting to
+      # loopback — same convention as the mail-server dev stack
+      # (services/mail-server/docker-compose.yml SMTP_EDGE_BIND). The old
+      # bare "25:25"/"587:587"/"465:465" published the MTA on ALL
+      # interfaces, turning a laptop dev stack into a LAN-reachable SMTP
+      # endpoint. Set SMTP_EDGE_BIND=0.0.0.0 explicitly to opt in to
+      # LAN/VM-host mail-flow testing.
+      - "${SMTP_EDGE_BIND:-127.0.0.1}:25:25"
+      - "${SMTP_EDGE_BIND:-127.0.0.1}:587:587"
+      - "${SMTP_EDGE_BIND:-127.0.0.1}:465:465"
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
@@ -707,9 +731,13 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       # The daemon dials out only; no SMTP ports. The health listener answers
-      # /healthz (process liveness) and /readyz (ledger queue stats; a ledger
-      # failure is 503, never masked).
-      OUTBOUND_MTA_HEALTH_ADDR: 127.0.0.1:8093
+      # /healthz (process liveness), /readyz (ledger queue stats; a ledger
+      # failure is 503, never masked) and /metrics. F2 (audit): this MUST
+      # bind 0.0.0.0 — the listener is only reachable on the internal
+      # compose networks (no host ports), and binding 127.0.0.1 made the
+      # apexmail-outbound-mta scrape job (deploy/prometheus.yml) and both
+      # outbound-MTA alerts permanently dead.
+      OUTBOUND_MTA_HEALTH_ADDR: 0.0.0.0:8093
       OUTBOUND_MTA_POLL_SECS: ${OUTBOUND_MTA_POLL_SECS:-5}
       OUTBOUND_MTA_BATCH_SIZE: ${OUTBOUND_MTA_BATCH_SIZE:-100}
       OUTBOUND_MTA_MAX_ATTEMPTS: ${OUTBOUND_MTA_MAX_ATTEMPTS:-12}
@@ -758,6 +786,13 @@ services:
       PDF_PORT: "3004"
       RUST_LOG: ${PDF_LOG_LEVEL:-info}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # F9 (audit): pdf-renderer's is_production_mode() treats an UNSET
+      # APP_ENV as production and REFUSES to boot without the dedicated
+      # PDF_RENDERER_AUTH_TOKEN — the base (dev) stack must declare the dev
+      # posture explicitly to keep the legacy universal-token window open.
+      # The prod overlay wires the dedicated token as a Docker secret
+      # instead (docker-compose.prod.yml, pdf_renderer_auth_token).
+      APP_ENV: ${APP_ENV:-development}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
       interval: 15s
@@ -1444,6 +1479,11 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}'
       - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}'
+      # F6 (audit): Tempo's metrics_generator remote-writes span metrics to
+      # http://prometheus:9090/api/v1/write (deploy/tempo/tempo.yaml) —
+      # without this flag the receiver is disabled and every remote-write
+      # 404s, leaving the generator with no reachable output.
+      - '--web.enable-remote-write-receiver'
       # SECURITY (SEC-105): the --web.enable-lifecycle flag is OMITTED
       # entirely, which DISABLES the lifecycle API (no unauthenticated
       # remote shutdown/reload). Prometheus boolean flags take no `=value`
@@ -1630,6 +1670,16 @@ services:
       - apexmail_monitoring
     profiles:
       - monitoring
+    # F13 (audit): cap the monitoring sidecars like their siblings
+    # (prometheus/grafana/loki 512M, clickhouse-exporter/synthetic-monitor
+    # 128M) so the OOM posture of the monitoring profile matches the app
+    # services.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
@@ -1665,6 +1715,13 @@ services:
       - apexmail_data_internal
     profiles:
       - monitoring
+    # F13 (audit): same cap as the sibling clickhouse-exporter.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
     secrets:
       - postgres_password
     logging: *default-logging
@@ -1675,13 +1732,17 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
     container_name: apexmail-redis-exporter
-    # DEV/DEFAULT: password via env. The scratch image has no shell, and the
-    # exporter's --redis.password-file only accepts a JSON MAP of
-    # {"redis://addr": "password"} (a plain password file is a parse error
-    # that crash-loops the container). The production overlay overrides this
-    # with a dedicated JSON-map Docker secret, keeping the credential out of
-    # `docker inspect` there.
-    entrypoint: ["/redis_exporter"]
+    # F15 (audit): DEV password now arrives via the SAME Docker-secret file
+    # bridge as redis itself and every app service — load-secret-env.sh reads
+    # /run/secrets/redis_password (single credential source, survives secret
+    # rotation) and exports REDIS_PASSWORD before exec'ing the exporter. The
+    # image DOES ship /bin/sh (the old "scratch, no shell" note here was
+    # wrong), so the repo-standard bridge works. The production overlay
+    # switches to the exporter's own JSON-map --redis.password-file flag
+    # instead, keeping the credential out of /proc/<pid>/environ there; that
+    # flag takes precedence over the REDIS_PASSWORD env the wrapper exports,
+    # so the two patterns compose cleanly.
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "/redis_exporter"]
     command:
       - --redis.addr=redis://redis:6379
     restart: unless-stopped
@@ -1691,16 +1752,28 @@ services:
       - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      # Blank so the wrapper bridges the secret file.
+      REDIS_PASSWORD: ""
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       # Export the length of the tracking-service WAL list (backing the
       # TrackingWalBacklog alert in deploy/alerting-rules.yml). A single
       # exact key — no SCAN pattern cost.
       REDIS_EXPORTER_CHECK_KEYS: "apexmail:events:pending"
+    volumes:
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
       - apexmail_data_internal
     profiles:
       - monitoring
+    secrets:
+      - redis_password
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
     logging: *default-logging
 
   # =========================================================================
@@ -1765,6 +1838,13 @@ services:
       - apexmail_monitoring
     profiles:
       - monitoring
+    # F13 (audit): small fixed cap — node-exporter is a constant-cost scraper.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
     logging: *default-logging
 
   # =========================================================================
@@ -1797,6 +1877,14 @@ services:
       - apexmail_backend
     profiles:
       - monitoring
+    # F13 (audit): cap covers the SMTP/TLS probe handshakes (small bursty
+    # allocations); 128M matches the sibling monitoring sidecars.
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
     logging: *default-logging
 
   # =========================================================================

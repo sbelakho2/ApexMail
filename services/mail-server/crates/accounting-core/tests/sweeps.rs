@@ -565,9 +565,11 @@ fn policy_trait_accepts_closures_and_named_types() {
 // ---------------------------------------------------------------------------
 
 /// A policy that fails, and a record the adapter refuses, are both counted as
-/// `failed` and rolled back — the rows stay unposted and are retried. A sweep
-/// with no default legal entity (or no open period) also reports instead of
-/// posting a guessed entry.
+/// `failed` and rolled back — the rows stay unposted and are retried. A
+/// posting into a CLOSED fiscal period fails closed and is reported, never
+/// silently re-dated (audit SM7 F1). An UNPROVISIONED ledger, by contrast, is
+/// no longer a failure at all: the posting path auto-provisions the default
+/// entity, chart, and covering open period and posts (audit SM7 F1).
 #[tokio::test]
 async fn sweep_failures_are_counted_rolled_back_and_retried() {
     let Some(pool) = provision("failures").await else {
@@ -642,8 +644,11 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     assert_eq!(report.claimed, 2, "failed rows are retried next tick");
     assert_eq!(report.failed, 2);
 
-    // Expenses: with the optional store present but no default legal entity,
-    // the positive row is claimed and the posting failure is reported.
+    // Expenses: with the optional store present and NO default legal entity,
+    // the sweep does NOT report a failure any more — the posting path
+    // auto-provisions the default entity + chart + covering open period and
+    // posts (audit SM7 F1: an unprovisioned ledger must never again mean
+    // every posting is skipped/failed forever).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS operating_costs ( \
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(), \
@@ -666,13 +671,51 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
         .expect("expense sweep");
     assert_eq!(report.claimed, 1, "{report:?}");
     assert_eq!(
-        report.failed, 1,
-        "no default entity ⇒ reported failure, not a guessed posting: {report:?}"
+        report.posted, 1,
+        "no default entity ⇒ auto-provisioned and posted (audit SM7 F1): {report:?}"
     );
+    assert_eq!(report.failed, 0, "{report:?}");
     assert!(!report.source_table_missing);
 
-    // Bank: a non-zero line whose date has no open period fails the posting
-    // and is reported (the entity/account exist, the period does not).
+    // The auto-provisioning is real and observable: a default entity exists
+    // and an OPEN fiscal period covers the row's document date.
+    let default_entity: Uuid = sqlx::query_scalar(
+        "SELECT id FROM legal_entities WHERE is_default LIMIT 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("default entity lookup")
+    .expect("the sweep auto-provisioned the default legal entity (audit SM7 F1)");
+    let covering: Uuid = sqlx::query_scalar(
+        "SELECT id FROM fiscal_periods \
+         WHERE legal_entity_id = $1 AND status = 'open' \
+           AND start_date <= DATE '2026-03-01' AND end_date >= DATE '2026-03-01'",
+    )
+    .bind(default_entity)
+    .fetch_optional(&pool)
+    .await
+    .expect("covering period lookup")
+    .expect("the sweep auto-provisioned the covering open fiscal period (audit SM7 F1)");
+    let cost_id: Uuid = sqlx::query_scalar("SELECT id FROM operating_costs LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .expect("expense row id");
+    let expense_entries: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE idempotency_key = $1",
+    )
+    .bind(format!("expense:operating_costs:{cost_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("expense posting");
+    assert_eq!(
+        expense_entries, 1,
+        "the auto-provisioned posting committed exactly one journal entry"
+    );
+    let _ = covering;
+
+    // Bank, fail-closed (audit SM7 F1): the entity/account exist and a CLOSED
+    // period covers the line's date — provisioning must NOT backdate into
+    // closed books, so the posting fails NoOpenPeriod and is reported.
     let mut conn = pool.acquire().await.expect("conn");
     let entity = chart::create_legal_entity(
         &mut conn,
@@ -698,7 +741,20 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     let bank_ledger = chart::resolve_account_role(&mut conn, entity, ROLE_BANK)
         .await
         .expect("bank role");
+    let closed_period = periods::ensure_period(
+        &mut conn,
+        entity,
+        "month",
+        "2031-05",
+        date(2031, 5, 1),
+        date(2031, 5, 31),
+    )
+    .await
+    .expect("closed period");
     drop(conn);
+    periods::close_period(&pool, closed_period, "sm7-f1-test")
+        .await
+        .expect("close the covering period");
     let account_id: Uuid = sqlx::query_scalar(
         "INSERT INTO bank_accounts (legal_entity_id, name, iban, currency, account_id) \
          VALUES ($1, 'No Period', 'EE00NOPERIOD000001', 'EUR', $2) RETURNING id",
@@ -722,16 +778,66 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
     assert_eq!(report.claimed, 1, "{report:?}");
     assert_eq!(
         report.failed, 1,
-        "no open period ⇒ reported failure: {report:?}"
+        "a CLOSED period covering the date fails closed, never a guessed posting: {report:?}"
     );
     assert_eq!(report.posted, 0);
 
-    // Combined sweep folds the three reports and reports nothing posted.
+    // Bank, provisioned (audit SM7 F1): a line whose date NOTHING covers is
+    // posted — the covering open month is auto-provisioned first.
+    sqlx::query(
+        "INSERT INTO bank_statement_lines (bank_account_id, external_id, statement_date, amount_cents, currency, reference) \
+         VALUES ($1, 'NOPERIOD-2', DATE '2031-07-15', 1100, 'EUR', 'R')",
+    )
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .expect("line");
+    let report = sweeps::sweep_unposted_bank_statement_lines(&pool, &config)
+        .await
+        .expect("bank sweep (provisioning path)");
+    assert_eq!(
+        report.posted, 1,
+        "no covering period ⇒ the open month is provisioned and the line posts: {report:?}"
+    );
+    assert_eq!(
+        report.failed, 1,
+        "the closed-period line is retried in the same tick and still fails: {report:?}"
+    );
+    let provisioned_month: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM fiscal_periods \
+         WHERE legal_entity_id = $1 AND status = 'open' \
+           AND start_date = DATE '2031-07-01' AND end_date = DATE '2031-07-31'",
+    )
+    .bind(entity)
+    .fetch_one(&pool)
+    .await
+    .expect("provisioned month lookup");
+    assert_eq!(
+        provisioned_month, 1,
+        "the sweep provisioned the covering July 2031 month (audit SM7 F1)"
+    );
+
+    // Combined sweep folds the reports: the payroll refusals still count as
+    // failures; the closed-period bank line retries and still fails; the
+    // posted expense/bank rows are no longer claimable.
     let combined = sweeps::sweep_all_unposted(&pool, &config, &policy)
         .await
         .expect("combined sweep");
-    assert_eq!(combined.total_posted(), 0);
     assert!(combined.payroll.failed >= 2);
-    assert!(!combined.expenses.is_idle() || combined.expenses.claimed == 1);
+    assert!(
+        combined.expenses.is_idle(),
+        "the posted expense row is no longer claimable: {:?}",
+        combined.expenses
+    );
+    assert_eq!(
+        combined.bank_statement_lines.claimed, 1,
+        "only the closed-period line is still unposted: {:?}",
+        combined.bank_statement_lines
+    );
+    assert_eq!(
+        combined.bank_statement_lines.failed, 1,
+        "the closed-period line keeps failing until a human reopens the books: {:?}",
+        combined.bank_statement_lines
+    );
     let _ = second_id;
 }

@@ -78,35 +78,18 @@ fn shell_icon(name: &str, class_name: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Content-Security-Policy header value for all shell surfaces.
-///
-/// Restricts script sources to same-origin and inline style hashes,
-/// disables `object-src`, `frame-src`, and `base-uri` to prevent
-/// XSS and data injection. The `strict-dynamic` fallback preserves
-/// existing script execution while blocking arbitrary inline handlers.
-pub fn shell_csp_header() -> &'static str {
-    "default-src 'self'; \
-     script-src 'self' 'strict-dynamic'; \
-     style-src 'self' 'unsafe-inline'; \
-     img-src 'self' data: https:; \
-     font-src 'self' data:; \
-     connect-src 'self'; \
-     frame-src 'none'; \
-     object-src 'none'; \
-     base-uri 'self'; \
-     form-action 'self'; \
-     upgrade-insecure-requests"
-}
-
-/// Render a `<meta http-equiv="Content-Security-Policy">` tag for embedding
-/// in shell HTML output. This provides defense-in-depth alongside HTTP
-/// response headers set by the Axum server layer.
-pub fn render_csp_meta_tag() -> String {
-    format!(
-        "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">",
-        shell_csp_header()
-    )
-}
+// ── Content-Security-Policy ──────────────────────────────────────────────
+// NOTE: this crate intentionally defines NO CSP constant. Former members
+// `shell_csp_header()` / `render_csp_meta_tag()` advertised a permissive
+// policy (`script-src 'self' 'strict-dynamic'`, `style-src 'unsafe-inline'`,
+// `img-src https:`) that contradicted the actually-served policy and was a
+// trap for anyone wiring the "foundation" CSP in good faith (audit SM11 F5).
+// The one CSP source of truth is the api-server:
+//   services/mail-server/crates/api-server/src/app.rs
+// (`browser_csp_header_with_sources` — serves `script-src 'none'` on every
+// web/control-plane surface). Marketing-site CSP copies live in
+// apps/marketing-zola/static/_headers + nginx.conf (+ the deploy/nginx edge
+// vhost), kept in lockstep.
 
 pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
     [

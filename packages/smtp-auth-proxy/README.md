@@ -29,4 +29,9 @@ error: failed to parse manifest ... `src/main.rs` does not exist
 ## Using the real proxy
 
 Run the SMTP AUTH proxy from the mail-server workspace — see
-`services/mail-server/crates/mta` for configuration and deployment.
+`services/mail-server/crates/mta` for configuration and deployment:
+
+```
+cd services/mail-server
+cargo run -p mta --bin mta-server
+```

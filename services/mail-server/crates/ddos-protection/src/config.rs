@@ -39,6 +39,12 @@ pub struct ProtectorConfig {
     /// Per-IP maximum rate limit (requests per minute).
     pub per_ip_max_rpm: u64,
 
+    /// Hard cap on the per-IP adaptive limiter table (audit SM5 F2): the
+    /// number of distinct canonical client keys that get their own
+    /// [`crate::adaptive::AdaptiveRateLimiter`]. Least-recently-seen
+    /// entries are evicted when full. 0 disables the cap (not recommended).
+    pub per_ip_adaptive_table_cap: usize,
+
     // ─── Reputation ───────────────────────────────────────────
     /// Score below which requests are blocked
     pub block_threshold: u8,
@@ -58,6 +64,15 @@ pub struct ProtectorConfig {
     /// Entries not seen for this long are evicted by the periodic cleanup
     /// regardless of their score. 0 uses the default (1 hour).
     pub reputation_stale_after: Duration,
+
+    /// Hard cap on tracked blocklist entries (audit SM5 F10). When full,
+    /// the entries expiring soonest are evicted before new blocks are
+    /// inserted. 0 disables the cap (not recommended).
+    pub max_blocklist_entries: usize,
+
+    /// Hard cap on tracked cost-budget entries (audit SM5 F3); passed
+    /// through to [`crate::cost_based::CostLimiterConfig`]. 0 disables.
+    pub max_tracked_budgets: usize,
 
     /// Penalize requests that carry NO TLS fingerprint. Defaults to FALSE:
     /// no HTTP deployment in this repo populates `tls_fingerprint` (rustls
@@ -125,6 +140,7 @@ impl Default for ProtectorConfig {
             per_ip_baseline_window_secs: 300, // 5 minutes
             per_ip_min_rpm: 10,
             per_ip_max_rpm: 10_000,
+            per_ip_adaptive_table_cap: 100_000, // matches the session table
 
             // Reputation
             block_threshold: 10,
@@ -132,6 +148,8 @@ impl Default for ProtectorConfig {
             initial_reputation: 50,
             max_reputation_entries: 250_000,
             reputation_stale_after: Duration::from_secs(3600),
+            max_blocklist_entries: 100_000, // audit SM5 F10
+            max_tracked_budgets: 100_000,   // audit SM5 F3
             penalize_missing_fingerprint: false,
 
             // Session tracking

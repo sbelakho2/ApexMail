@@ -265,8 +265,9 @@ mod tests {
     async fn invalid_base_url_fails_without_panicking() {
         // PERF #24: construction now returns a typed Result; the bounded
         // client build succeeds in tests, so unwrap is honest here.
-        let source = HttpDiscoverySource::try_new("provider_api", "http://127.0.0.1:1", "k", vec![])
-            .expect("bounded client construction succeeds");
+        let source =
+            HttpDiscoverySource::try_new("provider_api", "http://127.0.0.1:1", "k", vec![])
+                .expect("bounded client construction succeeds");
         let result = source.discover(&DiscoveryQuery::default(), None).await;
         assert!(result.is_err());
         assert!(source.last_http_status().is_none());

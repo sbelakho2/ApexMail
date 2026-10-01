@@ -39,12 +39,50 @@ pub struct User {
     pub tenant_id: String,
     pub email: String,
     pub name: Option<String>,
+    /// Credential material. Only the LOGIN fetch
+    /// (`UsersRepo::find_by_email_for_login`) selects this column, and it is
+    /// excluded from serialization (audit F12) — one accidental
+    /// `Json(user)` must not leak the credential table.
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub role: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Credential-free user projection (audit F12): the shape returned by every
+/// non-login read (`create`, `find_by_id`, `update`, `list_by_tenant`,
+/// `list_keyset`). Carries no `password_hash` field AT ALL — the defense is
+/// not merely `#[serde(skip)]` on a struct that still SELECTs the hash, but
+/// a projection that never fetches it, so an accidental serialization (or a
+/// debug log) of a listing cannot include credential material.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UserPublic {
+    pub id: Uuid,
+    /// VARCHAR(26) tenant reference (migration 064).
+    pub tenant_id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<User> for UserPublic {
+    fn from(user: User) -> Self {
+        Self {
+            id: user.id,
+            tenant_id: user.tenant_id,
+            email: user.email,
+            name: user.name,
+            role: user.role,
+            status: user.status,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        }
+    }
 }
 
 // ─── API Keys ──────────────────────────────────────────────────
@@ -171,6 +209,14 @@ pub struct Webhook {
     pub tenant_id: String,
     pub url: String,
     pub events: serde_json::Value,
+    /// MASKED PREFIX for display (audit F4) — never the signing secret.
+    ///
+    /// The stored value is the `secret_at_rest` encrypted envelope
+    /// (AAD = `webhook={id}`); every repo read projects only a masked
+    /// prefix of the decrypted secret into this field. The plaintext is
+    /// available exclusively through
+    /// [`crate::repos::webhooks::WebhooksRepo::secret_for_signing`] — the
+    /// authorized fetch for the outbound-signing path.
     #[serde(skip_serializing)]
     pub secret: String,
     pub status: String,

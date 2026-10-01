@@ -40,23 +40,24 @@ class DomainStatus(str, Enum):
 class WebhookEvent(str, Enum):
     """Webhook event types.
 
-    Mirrors KNOWN_WEBHOOK_EVENTS in api-server/src/routes/webhooks.rs —
+    Mirrors KNOWN_WEBHOOK_EVENTS in api-server/src/routes/webhooks.rs
+    (canonical `message.*` vocabulary, canonicalized 2026-09-08) —
     the server rejects any other name with 422.
     """
 
-    EMAIL_DELIVERED = "email.delivered"
-    EMAIL_BOUNCED = "email.bounced"
-    EMAIL_COMPLAINED = "email.complained"
-    MESSAGE_SENT = "message.sent"
+    MESSAGE_ACCEPTED = "message.accepted"
+    MESSAGE_QUEUED = "message.queued"
+    MESSAGE_ATTEMPTED = "message.attempted"
+    MESSAGE_DEFERRED = "message.deferred"
     MESSAGE_DELIVERED = "message.delivered"
     MESSAGE_BOUNCED = "message.bounced"
     MESSAGE_COMPLAINED = "message.complained"
+    MESSAGE_SUPPRESSED = "message.suppressed"
     MESSAGE_OPENED = "message.opened"
     MESSAGE_CLICKED = "message.clicked"
+    MESSAGE_CANCELLED = "message.cancelled"
     RECIPIENT_UNSUBSCRIBED = "recipient.unsubscribed"
     PLACEMENT_TEST_COMPLETED = "placement_test.completed"
-    BOUNCE = "bounce"
-    COMPLAINT = "complaint"
     INBOUND = "inbound"
     ALL = "*"
 

@@ -30,7 +30,7 @@ verdict_points = [
 comparison_sections = [
   { title = "ZUSTELLBARKEIT", rows = [
     { feature = "Zustellrate", apex = '<span class="text-brand-600 font-semibold">Hoch</span>', comp = '<span class="text-surface-600">Hoch</span>', winner = "none" },
-    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/Monat; dedizierte IPs auf Anfrage</span>', winner = "none" },
+    { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Pro: €82.75 (US$89.95)/Monat; dedizierte IPs auf Anfrage</span>', winner = "none" },
     { feature = "IP-Warm-up", apex = '<span class="text-brand-600 font-semibold">Automatisch</span>', comp = '<span class="text-surface-600">Automatisch</span>', winner = "tie" },
     { feature = "DKIM-Rotation", apex = '<span class="text-brand-600 font-semibold">Automatisch, konfigurierbar</span>', comp = '<span class="text-surface-600">Manuell</span>', winner = "none" },
     { feature = "Reputations-Circuit-Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -53,7 +53,7 @@ comparison_sections = [
   { title = "PREISE", rows = [
     { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">30.000 E-Mails/Monat</span>', comp = '<span class="text-surface-600">100 E-Mails/Tag</span>', winner = "none" },
     { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO inklusive", apex = '<span class="text-brand-600 font-semibold">Scale- und Enterprise-Tarife</span>', comp = '<span class="text-surface-600">Ab Pro enthalten</span>', winner = "none" },
+    { feature = "SSO inklusive", apex = '<span class="text-brand-600 font-semibold">Business- und Enterprise-Tarife</span>', comp = '<span class="text-surface-600">Ab Pro enthalten</span>', winner = "none" },
     { feature = "Prüfung individueller Bereitstellungen", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "EINBLICKE & INTELLIGENZ", rows = [

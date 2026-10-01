@@ -139,9 +139,13 @@ pub fn verify_api_key_hash(
 ) -> Result<bool, argon2::password_hash::Error> {
     if stored_hash.starts_with("$argon2") {
         let parsed = PasswordHash::new(stored_hash)?;
-        // RS-H-02: Validate Argon2id parameters meet minimum security requirements.
+        // RS-H-02: the ALGORITHM must be Argon2id. Parameter strength is no
+        // longer a hard gate (audit F11): a weak-param legacy hash used to
+        // brick every verification of that API key. Verification runs
+        // against the hash's own embedded params; callers can detect the
+        // weak case via argon2_params_below_owasp semantics and rotate.
         validate_argon2_params(&parsed)?;
-        Ok(argon2_default()
+        Ok(Argon2::default()
             .verify_password(key.as_bytes(), &parsed)
             .is_ok())
     } else if stored_hash.starts_with("$2") {
@@ -226,12 +230,17 @@ fn argon2_default() -> Argon2<'static> {
 }
 
 /// Validate that a parsed Argon2id [`PasswordHash`] uses at least the minimum
-/// acceptable parameters.  Called during [`verify_password`] to detect legacy
-/// hashes that were created with weak settings.
+/// acceptable parameters.
 ///
 /// RS-H-02: Validates algorithm, memory cost, time cost, and parallelism
-/// against minimum recommended values. Rejects hashes with weak parameters
-/// that could be brute-forced.
+/// against minimum recommended values.
+///
+/// NOTE (audit F11): this check is now used to CLASSIFY a hash, not to
+/// reject it at verification time. A weak-but-parseable Argon2id hash is
+/// still verified against its OWN embedded params and transparently
+/// migrated by [`verify_password_for_login`] / flagged by
+/// [`argon2_params_below_owasp`] — a hard failure here used to permanently
+/// lock out any pre-OWASP account.
 fn validate_argon2_params(hash: &PasswordHash) -> Result<(), argon2::password_hash::Error> {
     // Verify the algorithm is Argon2id
     let alg = hash.algorithm.as_str();
@@ -239,54 +248,27 @@ fn validate_argon2_params(hash: &PasswordHash) -> Result<(), argon2::password_ha
         tracing::warn!(algorithm = %alg, "rejected non-argon2id password hash");
         return Err(argon2::password_hash::Error::Algorithm);
     }
-
-    // Validate parameters from the PHC string
-    {
-        let params = &hash.params;
-        // Check memory cost (m=) — minimum 19456 KiB (19 MiB, OWASP recommendation)
-        if let Some(m_val) = params.get("m") {
-            if let Ok(m_cost) = m_val.as_str().parse::<u32>() {
-                if m_cost < OWASP_M_COST {
-                    tracing::warn!(
-                        m_cost = m_cost,
-                        minimum = OWASP_M_COST,
-                        "rejected argon2id hash with insufficient memory cost"
-                    );
-                    return Err(argon2::password_hash::Error::Crypto);
-                }
-            }
-        }
-
-        // Check time cost (t=) — minimum 2 iterations
-        if let Some(t_val) = params.get("t") {
-            if let Ok(t_cost) = t_val.as_str().parse::<u32>() {
-                if t_cost < OWASP_T_COST {
-                    tracing::warn!(
-                        t_cost = t_cost,
-                        minimum = OWASP_T_COST,
-                        "rejected argon2id hash with insufficient time cost"
-                    );
-                    return Err(argon2::password_hash::Error::Crypto);
-                }
-            }
-        }
-
-        // Check parallelism (p=) — minimum 1
-        if let Some(p_val) = params.get("p") {
-            if let Ok(p_cost) = p_val.as_str().parse::<u32>() {
-                if p_cost < OWASP_P_COST {
-                    tracing::warn!(
-                        p_cost = p_cost,
-                        minimum = OWASP_P_COST,
-                        "rejected argon2id hash with insufficient parallelism"
-                    );
-                    return Err(argon2::password_hash::Error::Crypto);
-                }
-            }
-        }
-    }
-
     Ok(())
+}
+
+/// True when a parsed (already algorithm-validated) Argon2id hash carries
+/// parameters below the OWASP recommendations — i.e. it should be re-hashed
+/// with [`hash_password`] after the next successful login.
+fn argon2_params_below_owasp(hash: &PasswordHash) -> bool {
+    let params = &hash.params;
+    let m_cost = params
+        .get("m")
+        .and_then(|v| v.as_str().parse::<u32>().ok())
+        .unwrap_or(0);
+    let t_cost = params
+        .get("t")
+        .and_then(|v| v.as_str().parse::<u32>().ok())
+        .unwrap_or(0);
+    let p_cost = params
+        .get("p")
+        .and_then(|v| v.as_str().parse::<u32>().ok())
+        .unwrap_or(0);
+    m_cost < OWASP_M_COST || t_cost < OWASP_T_COST || p_cost < OWASP_P_COST
 }
 
 /// Hash a password using Argon2id with OWASP-recommended parameters.
@@ -312,27 +294,47 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
 ///
 /// ## Parameter validation
 /// Verifies that the stored hash uses the Argon2id algorithm (not argon2i or
-/// argon2d).  Parameter-level checking is enforced at hash-creation time via
-/// [`hash_password`] which uses the OWASP-recommended constants.
+/// argon2d). A hash with WEAK but valid parameters (audit F11: e.g. a
+/// pre-OWASP `m<19456` / `t<2` row) is still verified against its own
+/// embedded parameters — the previous hard failure turned a weak hash into
+/// a permanent login lockout with no migration path. Use
+/// [`verify_password_for_login`] to obtain an upgraded hash.
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {
     let parsed = PasswordHash::new(hash)?;
     // RS-H-02: Validate algorithm is Argon2id.
     validate_argon2_params(&parsed)?;
-    Ok(argon2_default()
+    // Verification uses the params embedded in the PHC string, so a legacy
+    // weak hash authenticates against its own (weak) parameters here; the
+    // caller migrates it forward (see verify_password_for_login).
+    Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
 }
 
 /// Verify a password for login and return an Argon2id replacement hash when
-/// a legacy bcrypt hash authenticates successfully.
+/// a legacy bcrypt hash OR a weak-parameter Argon2id hash (audit F11)
+/// authenticates successfully.
 pub fn verify_password_for_login(
     password: &str,
     hash: &str,
 ) -> Result<PasswordVerification, PasswordVerificationError> {
     if hash.starts_with("$argon2") {
+        let parsed = PasswordHash::new(hash)?;
+        validate_argon2_params(&parsed)?;
+        let valid = Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok();
+        // Weak-but-valid Argon2 params get the same transparent upgrade the
+        // bcrypt path already had: verify against the stored params, then
+        // re-hash with the OWASP defaults so the row converges on login.
+        let migrated_hash = if valid && argon2_params_below_owasp(&parsed) {
+            Some(hash_password(password)?)
+        } else {
+            None
+        };
         return Ok(PasswordVerification {
-            valid: verify_password(password, hash)?,
-            migrated_hash: None,
+            valid,
+            migrated_hash,
         });
     }
 
@@ -503,5 +505,85 @@ mod tests {
 
         assert!(!result.valid);
         assert!(result.migrated_hash.is_none());
+    }
+
+    // ── Audit F11: weak-parameter Argon2id hashes verify and migrate ──
+
+    /// Build a hash with BELOW-OWASP Argon2id params (m=8192, t=1, p=1),
+    /// like a pre-OWASP database row.
+    fn weak_argon2_hash(password: &str) -> String {
+        let params = Params::new(8192, 1, 1, None).expect("weak params must be constructible");
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        argon2
+            .hash_password(password.as_bytes(), &salt)
+            .expect("weak hash must encode")
+            .to_string()
+    }
+
+    #[test]
+    fn weak_param_hash_parses_and_is_detected() {
+        let hash = weak_argon2_hash("legacy-user-password");
+        assert!(hash.starts_with("$argon2id$v=19$m=8192,t=1,p=1$"), "{hash}");
+        let parsed = PasswordHash::new(&hash).unwrap();
+        assert!(
+            validate_argon2_params(&parsed).is_ok(),
+            "argon2id algorithm"
+        );
+        assert!(argon2_params_below_owasp(&parsed));
+        // The OWASP-hash path must NOT be flagged.
+        let strong = hash_password("legacy-user-password").unwrap();
+        assert!(!argon2_params_below_owasp(
+            &PasswordHash::new(&strong).unwrap()
+        ));
+    }
+
+    #[test]
+    fn verify_password_accepts_weak_param_hash_instead_of_locking_out() {
+        // Pre-fix behavior: verify_password returned Err for weak params —
+        // a permanent login lockout with no migration path.
+        let hash = weak_argon2_hash("legacy-user-password");
+        assert_eq!(verify_password("legacy-user-password", &hash), Ok(true));
+        assert_eq!(verify_password("wrong-password", &hash), Ok(false));
+        // Non-argon2id algorithms still fail closed.
+        let argon2i = hash.replacen("argon2id", "argon2i", 1);
+        assert!(verify_password("legacy-user-password", &argon2i).is_err());
+    }
+
+    #[test]
+    fn login_verification_migrates_weak_param_hash_to_owasp_params() {
+        let hash = weak_argon2_hash("legacy-user-password");
+        let result = verify_password_for_login("legacy-user-password", &hash).unwrap();
+        assert!(result.valid, "weak-param hash must still authenticate");
+        let migrated = result.migrated_hash.expect("weak hash must migrate");
+        assert!(
+            migrated.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "replacement must use OWASP params: {migrated}"
+        );
+        assert!(verify_password("legacy-user-password", &migrated).unwrap());
+        assert!(!argon2_params_below_owasp(
+            &PasswordHash::new(&migrated).unwrap()
+        ));
+
+        // A WRONG password on a weak hash must not mint a migration hash.
+        let result = verify_password_for_login("wrong-password", &hash).unwrap();
+        assert!(!result.valid);
+        assert!(result.migrated_hash.is_none());
+
+        // An OWASP-param hash verifies with no migration.
+        let strong = hash_password("legacy-user-password").unwrap();
+        let result = verify_password_for_login("legacy-user-password", &strong).unwrap();
+        assert!(result.valid);
+        assert!(result.migrated_hash.is_none());
+    }
+
+    #[test]
+    fn api_key_verification_accepts_weak_param_hash() {
+        // Pre-fix: verify_api_key_hash propagated the param-validation error
+        // and bricked every legacy API key.
+        let key = "am_live_legacy_key";
+        let hash = weak_argon2_hash(key);
+        assert_eq!(verify_api_key_hash(key, &hash), Ok(true));
+        assert_eq!(verify_api_key_hash("am_live_other", &hash), Ok(false));
     }
 }

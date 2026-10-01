@@ -692,6 +692,7 @@ mod cost_attacks {
         let config = CostLimiterConfig {
             default_tenant_budget: 100,
             system_capacity: 1000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -712,6 +713,7 @@ mod cost_attacks {
         let config = CostLimiterConfig {
             default_tenant_budget: 100_000_000,
             system_capacity: 100,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -744,6 +746,7 @@ mod cost_attacks {
         let config = CostLimiterConfig {
             default_tenant_budget: 1_000,
             system_capacity: 100_000_000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -773,6 +776,7 @@ mod cost_attacks {
         let config = CostLimiterConfig {
             default_tenant_budget: 200_000,
             system_capacity: 100_000_000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 
@@ -808,6 +812,7 @@ mod cost_attacks {
         let config = CostLimiterConfig {
             default_tenant_budget: 100,
             system_capacity: 100_000_000,
+            ..Default::default()
         };
         let limiter = CostBasedLimiter::new(config);
 

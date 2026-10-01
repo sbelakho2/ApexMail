@@ -15,7 +15,7 @@ export default defineConfig({
     { name: 'chrome', use: { browserName: 'chromium', channel: 'chrome' } },
   ],
   webServer: {
-    command: 'php -d opcache.jit=off -S 127.0.0.1:8088 router.php',
+    command: 'KIWI_FIXTURE_RUN_ID="run-$(date +%s)-$$" php -d opcache.jit=off -S 127.0.0.1:8088 router.php',
     url: 'http://127.0.0.1:8088/',
     reuseExistingServer: false,
     timeout: 30_000,

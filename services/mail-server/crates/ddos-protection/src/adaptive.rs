@@ -6,10 +6,38 @@
 //! exponential moving average (EMA) for smooth threshold adjustments.
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
+
+/// Monotonic-safe `now - window` (audit SM5 F4).
+///
+/// Plain `Instant::now() - window` PANICS when the result precedes the
+/// monotonic epoch — i.e. on any host whose current uptime is shorter
+/// than `window` (fresh boot, VM reprovision, container start). One such
+/// site sat on the request path (`AdaptiveRateLimiter::update`, 300 s
+/// window) and more in background loops whose panic silently kills the
+/// task and stops all cleanup. Every duration subtraction in this crate
+/// goes through this helper: until the clock has been up for a full
+/// window, the cutoff degenerates to `now` (nothing expires yet).
+pub(crate) fn monotonic_cutoff(now: Instant, window: Duration) -> Instant {
+    now.checked_sub(window).unwrap_or(now)
+}
+
+/// Hard cap on the per-limiter baseline observation deque.
+///
+/// `update` evicts observations older than `baseline_window`, but a single
+/// client flooding at thousands of requests/second pushes one observation
+/// per request — the deque would grow to `rate × window` entries
+/// (hundreds of MB for a sustained flood) before any of them expire.
+/// Statistics only need the most recent samples, so beyond the cap the
+/// oldest observations are dropped (ring behaviour), mirroring the hard
+/// capacity caps the other tracking tables carry.
+const MAX_BASELINE_OBSERVATIONS: usize = 8192;
 
 /// Traffic observation sample
 #[derive(Debug, Clone)]
@@ -142,8 +170,10 @@ impl AdaptiveRateLimiter {
     pub fn update(&self, observation: TrafficObservation) {
         let mut observations = self.observations.write();
 
-        // Remove old observations outside the baseline window
-        let cutoff = Instant::now() - self.config.baseline_window;
+        // Remove old observations outside the baseline window.
+        // Audit SM5 F4: monotonic-safe — see `monotonic_cutoff`.
+        let now = Instant::now();
+        let cutoff = monotonic_cutoff(now, self.config.baseline_window);
         while observations.front().is_some_and(|o| o.timestamp < cutoff) {
             observations.pop_front();
         }
@@ -168,6 +198,7 @@ impl AdaptiveRateLimiter {
             }
 
             observations.push_back(observation);
+            enforce_observation_cap(&mut observations);
             return;
         }
 
@@ -280,6 +311,7 @@ impl AdaptiveRateLimiter {
         }
 
         observations.push_back(observation);
+        enforce_observation_cap(&mut observations);
     }
 
     /// Get baseline statistics from the observation window
@@ -333,6 +365,97 @@ impl AdaptiveRateLimiter {
         *self.attack_state.write() = AttackDetection::default();
         self.under_attack_flag.store(false, Ordering::SeqCst);
     }
+}
+
+/// Bounded per-canonical-IP table of adaptive limiters (audit SM5 F2).
+///
+/// The adaptive limiter was previously ONE process-wide instance fed by
+/// every client's observed rate: a single attacking IP dragged the pooled
+/// baseline down and tightened the SHARED threshold, 429ing every
+/// legitimate client for the whole cooldown (cross-tenant denial of
+/// service), while a large attacker fleet could steer the pooled threshold
+/// upward for itself. Each canonical client key now owns an independent
+/// [`AdaptiveRateLimiter`] whose baseline and threshold only that client's
+/// traffic can move.
+///
+/// The table is hard-capped like the session tracker: when full, a 10%
+/// batch of the least-recently-seen limiters is evicted before a new key
+/// is inserted, so the cap holds even under IPv6-/64 rotation floods.
+pub struct PerIpAdaptiveLimiters {
+    /// Per-IP limiter + last-access timestamp (unix millis, for eviction).
+    limiters: DashMap<IpAddr, (Arc<AdaptiveRateLimiter>, AtomicU64)>,
+    /// Configuration cloned into every per-IP limiter.
+    config: AdaptiveConfig,
+    /// Hard cap on tracked limiters (0 = uncapped, not recommended).
+    cap: usize,
+}
+
+impl PerIpAdaptiveLimiters {
+    /// Create an empty table with the given per-IP limiter config and cap.
+    pub fn new(config: AdaptiveConfig, cap: usize) -> Self {
+        Self {
+            limiters: DashMap::new(),
+            config,
+            cap,
+        }
+    }
+
+    /// Get (or create) the limiter for one canonical client key. The
+    /// returned limiter is shared: subsequent requests from the same key
+    /// feed and consult the same baseline.
+    pub fn limiter_for(&self, ip: &IpAddr) -> Arc<AdaptiveRateLimiter> {
+        if let Some(existing) = self.limiters.get(ip) {
+            existing.1.store(unix_millis_now(), Ordering::Relaxed);
+            return existing.0.clone();
+        }
+        self.enforce_capacity();
+        let limiter = Arc::new(AdaptiveRateLimiter::new(self.config.clone()));
+        self.limiters
+            .insert(*ip, (limiter.clone(), AtomicU64::new(unix_millis_now())));
+        limiter
+    }
+
+    /// Number of tracked per-IP limiters (observability / tests).
+    pub fn tracked_ips(&self) -> usize {
+        self.limiters.len()
+    }
+
+    /// Enforce the hard cap by evicting a 10% batch of the
+    /// least-recently-seen limiters (mirrors `SessionTracker::enforce_capacity`).
+    fn enforce_capacity(&self) {
+        if self.cap == 0 || self.limiters.len() < self.cap {
+            return;
+        }
+        let target = self.cap.saturating_sub(self.cap / 10).max(1);
+        let mut candidates: Vec<(IpAddr, u64)> = self
+            .limiters
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().1.load(Ordering::Relaxed)))
+            .collect();
+        candidates.sort_by_key(|(_, last_seen)| *last_seen);
+        let excess = self.limiters.len().saturating_sub(target);
+        for (ip, _) in candidates.into_iter().take(excess) {
+            self.limiters.remove(&ip);
+        }
+    }
+}
+
+/// Keep the baseline deque bounded under floods (see
+/// [`MAX_BASELINE_OBSERVATIONS`]): drop the OLDEST observations first, so
+/// the statistics always describe the most recent traffic.
+fn enforce_observation_cap(observations: &mut VecDeque<TrafficObservation>) {
+    while observations.len() > MAX_BASELINE_OBSERVATIONS {
+        observations.pop_front();
+    }
+}
+
+/// Current unix time in milliseconds (0 if the clock is before the epoch —
+/// only usable for relative recency ordering).
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Baseline traffic statistics
@@ -607,5 +730,138 @@ mod tests {
             "Threshold should not go below min: {}",
             threshold
         );
+    }
+
+    // ── Audit SM5 F4: monotonic-safe cutoffs ──────────────────────────
+
+    #[test]
+    fn test_monotonic_cutoff_survives_window_longer_than_uptime() {
+        // `Instant::now() - window` PANICS whenever the host has been up
+        // for less than `window` — deterministically reproducible here by
+        // using a window (10 years) longer than any plausible monotonic
+        // epoch. The old code panicked on this call; the helper must fall
+        // back to `now` instead.
+        let now = Instant::now();
+        let ten_years = Duration::from_secs(60 * 60 * 24 * 365 * 10);
+        let cutoff = monotonic_cutoff(now, ten_years);
+        assert!(
+            cutoff <= now,
+            "fallback cutoff must degenerate to now on low-uptime hosts"
+        );
+
+        // A small window still subtracts normally.
+        let cutoff = monotonic_cutoff(now, Duration::from_secs(1));
+        assert!(cutoff < now);
+    }
+
+    // ── Audit SM5 F2: per-IP adaptive limiter sharding ────────────────
+
+    #[test]
+    fn test_one_attacker_ip_does_not_tighten_a_victim_ip_threshold() {
+        // THE finding scenario: an attacker blasting one IP must declare
+        // "attack" and tighten THEIR limiter only. Previously one global
+        // instance tightened the limit for every legitimate client.
+        let table = PerIpAdaptiveLimiters::new(
+            AdaptiveConfig {
+                consecutive_alert_trigger: 2,
+                cooldown: Duration::from_millis(100),
+                ..default_config()
+            },
+            10_000,
+        );
+
+        let attacker: std::net::IpAddr = "198.51.100.7".parse().expect("valid IP");
+        let victim: std::net::IpAddr = "203.0.113.9".parse().expect("valid IP");
+
+        let attacker_limiter = table.limiter_for(&attacker);
+        // Baseline ~100 rps with a little variance so std > 0…
+        for i in 0..20 {
+            attacker_limiter.update(make_observation(100.0 + (i as f64 % 5.0)));
+        }
+        // …then a spike declares attack mode and tightens the threshold.
+        attacker_limiter.update(make_observation(2000.0));
+        attacker_limiter.update(make_observation(2000.0));
+        assert!(
+            attacker_limiter.is_under_attack(),
+            "attacker must trip attack mode"
+        );
+        assert!(
+            attacker_limiter.current_threshold() < 5000,
+            "attacker threshold must tighten: {}",
+            attacker_limiter.current_threshold()
+        );
+
+        // The victim's limiter is a DIFFERENT instance that never saw the
+        // attacker's traffic: not under attack, threshold untouched.
+        let victim_limiter = table.limiter_for(&victim);
+        assert!(
+            !Arc::ptr_eq(&attacker_limiter, &victim_limiter),
+            "distinct IPs must own distinct limiters"
+        );
+        assert!(
+            !victim_limiter.is_under_attack(),
+            "one attacker IP must not declare attack for a victim IP"
+        );
+        assert_eq!(
+            victim_limiter.current_threshold(),
+            5000,
+            "victim's threshold must stay at the initial max/2 value"
+        );
+
+        assert_eq!(table.tracked_ips(), 2);
+    }
+
+    #[test]
+    fn test_per_ip_limiter_table_is_bounded() {
+        let cap = 100;
+        let table = PerIpAdaptiveLimiters::new(default_config(), cap);
+        for i in 0..(cap * 2) {
+            let ip: std::net::IpAddr =
+                format!("10.{}.{}.{}", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF)
+                    .parse()
+                    .expect("valid IPv4");
+            let _ = table.limiter_for(&ip);
+            assert!(
+                table.tracked_ips() <= cap,
+                "adaptive limiter table exceeded cap at iteration {i}: {}",
+                table.tracked_ips()
+            );
+        }
+        assert!(table.tracked_ips() <= cap);
+    }
+
+    #[test]
+    fn test_limiter_for_returns_same_instance_per_ip() {
+        let table = PerIpAdaptiveLimiters::new(default_config(), 100);
+        let ip: std::net::IpAddr = "192.0.2.1".parse().expect("valid IP");
+        let a = table.limiter_for(&ip);
+        let b = table.limiter_for(&ip);
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "repeated lookups must return the same per-IP limiter"
+        );
+        assert_eq!(table.tracked_ips(), 1);
+    }
+
+    #[test]
+    fn test_baseline_observations_bounded_under_flood() {
+        // A single IP flooding pushes one observation per request; without
+        // the cap the per-IP deque grows to rate × baseline_window entries
+        // (hundreds of MB) before the window can expire any of them.
+        let limiter = AdaptiveRateLimiter::new(default_config());
+        for _ in 0..(MAX_BASELINE_OBSERVATIONS * 3) {
+            limiter.update(make_observation(100.0));
+        }
+        let stats = limiter
+            .baseline_stats()
+            .expect("baseline stats must stay available under the cap");
+        assert!(
+            stats.sample_count <= MAX_BASELINE_OBSERVATIONS,
+            "observation deque must stay bounded: {}",
+            stats.sample_count
+        );
+        // The retained samples must be the RECENT ones (ring behaviour),
+        // not a frozen prefix.
+        assert_eq!(stats.sample_count, MAX_BASELINE_OBSERVATIONS);
     }
 }

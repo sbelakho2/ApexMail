@@ -600,8 +600,10 @@ impl SmtpConnectionTracker {
         self.active_connections
             .retain(|_, v| v.load(Ordering::Relaxed) > 0);
 
-        // Remove old history
-        let cutoff = Instant::now() - Duration::from_secs(120);
+        // Remove old history. Audit SM5 F4: monotonic-safe subtraction —
+        // this runs in a background loop whose panic would silently stop
+        // all SMTP protection cleanup on a low-uptime host.
+        let cutoff = crate::adaptive::monotonic_cutoff(Instant::now(), Duration::from_secs(120));
         self.connection_history.retain(|_, v| {
             let times = v.read();
             times.iter().any(|t| *t > cutoff)

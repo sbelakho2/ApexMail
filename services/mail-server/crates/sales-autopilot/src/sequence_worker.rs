@@ -1187,9 +1187,9 @@ impl SequenceStepHandler {
         step_execution_id: Uuid,
         reason: &str,
     ) -> Result<ActionOutcome, SalesError> {
-        sqlx::query(
+        let skipped = sqlx::query(
             "UPDATE sales_step_executions \
-             SET state = 'skipped', skip_reason = $2, updated_at = NOW() \
+             SET state = 'skipped', skip_reason = $2, claimed_at = NULL, updated_at = NOW() \
              WHERE id = $1 AND state IN ('scheduled', 'queued')",
         )
         .bind(step_execution_id)
@@ -1197,6 +1197,17 @@ impl SequenceStepHandler {
         .execute(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
+        if skipped.rows_affected() == 0 {
+            // The row moved (another worker claimed it, or a replay hit an
+            // already-stranded state): the refusal must still be VISIBLE, not
+            // silently dropped (audit SM7 F2 family — no lost state transitions).
+            tracing::warn!(
+                step_execution_id = %step_execution_id,
+                reason,
+                "sequence step skip refused by the claim guard — the row is no longer in a \
+                 claimable state; the skip is logged, not applied"
+            );
+        }
         Ok(ActionOutcome::Succeeded)
     }
 }
@@ -1852,6 +1863,97 @@ impl ActionHandler for SequenceStepHandler {
     }
 }
 
+/// How long an `executing` claim is held before the reaper requeues the step
+/// (audit SM7 F2). The executing window is one enqueue insert plus two
+/// updates — sub-second normally — so five minutes is orders of magnitude
+/// above any legitimate hold while staying short enough that a retry backoff
+/// meets a requeued step.
+pub const STEP_EXECUTION_LEASE_SECS: i64 = 300;
+
+/// Reaper (audit SM7 F2): return step executions whose `executing` lease
+/// expired to the queue, so a transient failure — or a crash — between the
+/// claim and the terminal write is RECOVERED instead of stranding the step
+/// (and the whole enrollment) in `executing` forever. Wired into the action
+/// worker's tick (`actions::tick`), next to the sales-queue lease reaper.
+///
+/// Duplicate-send safety is why this is sound: the send identity is the step
+/// execution's idempotency key, so a requeued step whose message actually
+/// went out resolves to `DuplicateIdempotency` on the retry and is marked
+/// sent WITHOUT a second email.
+///
+/// Legacy rows that went `executing` before migration 233 (no `claimed_at`)
+/// are recovered by their `updated_at` age.
+pub async fn requeue_stale_executing_steps(db: &sqlx::PgPool) -> Result<u64, SalesError> {
+    requeue_stale_executing_steps_scoped(db, None).await
+}
+
+/// [`requeue_stale_executing_steps`], optionally scoped to ONE tenant. The
+/// worker tick recovers across all tenants; the tenant scope exists so the
+/// reaper's contract can be pinned deterministically against the SHARED
+/// canonical test database, where abandoned `executing` rows from other
+/// runs (and other suites) would otherwise inflate the count.
+pub async fn requeue_stale_executing_steps_scoped(
+    db: &sqlx::PgPool,
+    tenant_id: Option<&str>,
+) -> Result<u64, SalesError> {
+    let affected = sqlx::query(
+        "UPDATE sales_step_executions \
+         SET state = 'queued', claimed_at = NULL, \
+             last_error = COALESCE(last_error, 'executing lease expired — requeued for delivery'), \
+             updated_at = NOW() \
+         WHERE state = 'executing' \
+           AND COALESCE(claimed_at, updated_at) < NOW() - make_interval(secs => $1::double precision) \
+           AND ($2::text IS NULL OR tenant_id = $2)",
+    )
+    .bind(STEP_EXECUTION_LEASE_SECS as f64)
+    .bind(tenant_id)
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?
+    .rows_affected();
+    if affected > 0 {
+        tracing::warn!(
+            requeued = affected,
+            "sequence step executions requeued from expired executing leases (audit SM7 F2)"
+        );
+        metrics::counter!("sales_sequence_step_lease_recovered_total").increment(affected);
+    }
+    Ok(affected)
+}
+
+/// The outcome for a lost claim, decided by the row's CURRENT state (pure —
+/// audit SM7 F2, pinned by unit tests). Only a TERMINAL state lets another
+/// worker's win stand as success:
+///
+/// * `sent`/`skipped`/`cancelled` → `Succeeded` (the replay no-op);
+/// * `failed` → `DeadLetter` (terminal failure; the action cannot deliver);
+/// * any other non-terminal state (`executing`, `scheduled`, `queued`) →
+///   `Retry` — another worker owns it, or its expired `executing` lease is
+///   awaiting the reaper;
+/// * missing row → `DeadLetter` (the entity vanished under us).
+fn claim_miss_outcome(state: Option<&str>, step_execution_id: Uuid) -> ActionOutcome {
+    match state {
+        Some("sent") | Some("skipped") | Some("cancelled") => {
+            tracing::info!(
+                step_execution_id = %step_execution_id,
+                "sequence step already terminal — the other worker's claim stands"
+            );
+            ActionOutcome::Succeeded
+        }
+        Some("failed") => ActionOutcome::DeadLetter(format!(
+            "step execution {step_execution_id} is terminal-failed — the action cannot deliver it"
+        )),
+        Some(other) => ActionOutcome::Retry(format!(
+            "step execution {step_execution_id} claim lost while state is '{other}' — another \
+             worker owns it or its executing lease is awaiting the reaper; retrying after the \
+             backoff, never reporting an unsent touch as success (audit SM7 F2)"
+        )),
+        None => ActionOutcome::DeadLetter(format!(
+            "step execution {step_execution_id} vanished between context load and claim"
+        )),
+    }
+}
+
 impl SequenceStepHandler {
     async fn handle_inner(&self, action: &LeasedAction) -> Result<ActionOutcome, SalesError> {
         let step_execution_id = action.action.entity_id;
@@ -2368,10 +2470,14 @@ impl SequenceStepHandler {
 
         // Claim the execution before sending: `state = 'executing'` is the
         // mutation that makes a concurrent replay of this action see it as
-        // in-flight and stop.
+        // in-flight and stop. The claim is LEASE-BASED (audit SM7 F2):
+        // `claimed_at` is the lease, and `requeue_stale_executing_steps`
+        // (wired into the worker tick next to the action-queue reaper)
+        // requeues steps whose lease expired — a transient failure after the
+        // claim is recovered, never a silently dropped touch.
         let claimed: Option<Uuid> = sqlx::query_scalar(
             "UPDATE sales_step_executions \
-             SET state = 'executing', attempt = attempt + 1, updated_at = NOW() \
+             SET state = 'executing', attempt = attempt + 1, claimed_at = NOW(), updated_at = NOW() \
              WHERE id = $1 AND state IN ('scheduled', 'queued') \
              RETURNING id",
         )
@@ -2381,11 +2487,17 @@ impl SequenceStepHandler {
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
         if claimed.is_none() {
-            tracing::info!(
-                step_execution_id = %ctx.step_execution_id,
-                "sequence step was claimed by another worker — skipping"
-            );
-            return Ok(ActionOutcome::Succeeded);
+            // Audit SM7 F2: a claim miss is a success ONLY when the row
+            // reached a terminal state. A non-terminal state under a lost
+            // claim used to return `Succeeded` here — permanently cancelling
+            // the touch and freezing the enrollment mid-sequence.
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM sales_step_executions WHERE id = $1")
+                    .bind(ctx.step_execution_id)
+                    .fetch_optional(&self.db)
+                    .await
+                    .map_err(|e| SalesError::Database(e.to_string()))?;
+            return Ok(claim_miss_outcome(state.as_deref(), ctx.step_execution_id));
         }
 
         // The send identity is the logical step execution, so a later
@@ -2463,7 +2575,7 @@ impl SequenceStepHandler {
 
         sqlx::query(
             "UPDATE sales_step_executions \
-             SET state = $2, executed_at = NOW(), updated_at = NOW() \
+             SET state = $2, executed_at = NOW(), claimed_at = NULL, updated_at = NOW() \
              WHERE id = $1",
         )
         .bind(ctx.step_execution_id)
@@ -3445,6 +3557,217 @@ mod tests {
         .fetch_one(db)
         .await
         .expect("count email_queue")
+    }
+
+    // ── 0. Audit SM7 F2 — the executing dead-end ─────────────────────────
+
+    #[test]
+    fn claim_miss_only_succeeds_on_terminal_states() {
+        let id = Uuid::new_v4();
+        // Terminal states: the other worker's win stands as success.
+        for terminal in ["sent", "skipped", "cancelled"] {
+            assert!(
+                matches!(
+                    claim_miss_outcome(Some(terminal), id),
+                    ActionOutcome::Succeeded
+                ),
+                "{terminal} must short-circuit success"
+            );
+        }
+        // Terminal failure: dead letter, never success.
+        assert!(matches!(
+            claim_miss_outcome(Some("failed"), id),
+            ActionOutcome::DeadLetter(_)
+        ));
+        // EVERY non-terminal state — including a stale 'executing' claim from
+        // a failed first attempt — is RETRYABLE, never a bogus success (the
+        // pre-fix bug: 'executing' returned Succeeded without sending and
+        // without advancing).
+        for non_terminal in ["executing", "scheduled", "queued"] {
+            assert!(
+                matches!(
+                    claim_miss_outcome(Some(non_terminal), id),
+                    ActionOutcome::Retry(_)
+                ),
+                "{non_terminal} claim miss must be retryable"
+            );
+        }
+        // Vanished row: dead letter.
+        assert!(matches!(
+            claim_miss_outcome(None, id),
+            ActionOutcome::DeadLetter(_)
+        ));
+    }
+
+    #[test]
+    fn executing_lease_is_bounded_and_the_reaper_requeues_only_expired_claims() {
+        // The lease must be positive and short enough to recover within a
+        // few worker ticks — the constant IS the liveness contract.
+        assert!(STEP_EXECUTION_LEASE_SECS > 0);
+        assert!(STEP_EXECUTION_LEASE_SECS <= 3600);
+    }
+
+    /// A transient failure AFTER the claim (the step is stranded in
+    /// 'executing' with an expired lease) is RECOVERED by the reaper and the
+    /// retried action actually delivers the message (audit SM7 F2).
+    #[tokio::test]
+    async fn stale_executing_step_is_reaped_and_then_sent() {
+        let Some(fx) = fixture("lib_sm7_f2_reap", "allowed", "ZR").await else {
+            return;
+        };
+        // Offline planning (static-template fallback) so the attempt runs the
+        // real gates and reaches the claim deterministically.
+        for index in 0..3 {
+            insert_evidence(
+                &fx.db,
+                &fx.tenant,
+                fx.account,
+                &format!("Grounded observation {index}: the account runs a live email stack."),
+                0.9,
+                false,
+            )
+            .await;
+        }
+        // Pin the §28 economic gate AND the enrichment gate deterministically:
+        // three live evidence rows satisfy the NBA's evidence bar for a send,
+        // and REAL open pipeline gives every fresh score the same economic
+        // basis on every execution (the fresh score is re-persisted on each
+        // run; without pipeline the EV is the shared database's calibration
+        // drift, and the reaped retry can be skipped as "below the outreach
+        // minimum" or "needs enrichment" instead of delivered).
+        sqlx::query(
+            "INSERT INTO sales_opportunities (id, tenant_id, account_id, contact_id, stage, amount_eur) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'open', 120000)",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .bind(fx.contact)
+        .execute(&fx.db)
+        .await
+        .expect("insert open pipeline");
+        let handler = fx.handler_with(Arc::new(FailingIntelligence));
+
+        // Simulate the crash window: claimed, then the process died before
+        // the terminal write. The lease is already expired.
+        sqlx::query(
+            "UPDATE sales_step_executions \
+             SET state = 'executing', claimed_at = NOW() - make_interval(secs => $2), \
+                 updated_at = NOW() - make_interval(secs => $2) \
+             WHERE id = $1",
+        )
+        .bind(fx.step_execution)
+        .bind((STEP_EXECUTION_LEASE_SECS + 60) as f64)
+        .execute(&fx.db)
+        .await
+        .expect("strand the step in executing");
+
+        // The handler replay must NOT report success for the unsent touch.
+        // run_handler also finishes the action (Retry → requeued), so the
+        // same logical action can be claimed again below.
+        let outcome = run_handler(&fx, &handler).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Retry(_)),
+            "a claim miss on the stale executing state is retryable: {outcome:?}"
+        );
+        assert_eq!(
+            outbound_count(&fx.db, fx.step_execution).await,
+            0,
+            "no message was produced by the dead-ended attempt"
+        );
+
+        // The reaper recovers the step... (scoped to THIS test's tenant: the
+        // shared canonical database carries abandoned 'executing' rows from
+        // other runs, which the unscoped count would sweep up)
+        let requeued = requeue_stale_executing_steps_scoped(&fx.db, Some(&fx.tenant))
+            .await
+            .expect("reaper run");
+        assert_eq!(requeued, 1, "the stranded step is requeued");
+        let (state, _) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "queued", "{state}");
+        // ...and a fresh execution delivers the message. (Drop the retry
+        // backoff so the re-claim is due immediately.)
+        sqlx::query("UPDATE sales_actions SET due_at = NOW() - interval '1 second'")
+            .execute(&fx.db)
+            .await
+            .expect("drop retry backoff");
+        let delivered = run_handler(&fx, &handler).await;
+        assert!(
+            matches!(delivered, ActionOutcome::Succeeded),
+            "{delivered:?}"
+        );
+        let (state, _) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "sent", "the touch was delivered, not dropped");
+        assert_eq!(
+            outbound_count(&fx.db, fx.step_execution).await,
+            1,
+            "exactly one email for one logical touch"
+        );
+    }
+
+    /// A claim lost to a CONCURRENT worker (the row is already 'executing')
+    /// stays safe: the loser retries instead of reporting success, and the
+    /// winner's send is the only one (audit SM7 F2).
+    #[tokio::test]
+    async fn concurrent_claim_miss_stays_safe_and_retries() {
+        let Some(fx) = fixture("lib_sm7_f2_concurrent", "allowed", "ZR").await else {
+            return;
+        };
+        // Same determinism pins as the reaper test above: three live evidence
+        // rows (the NBA's evidence bar for a send) plus REAL open pipeline
+        // (a deterministic §28 EV on every execution) — so the replay outcome
+        // cannot drift with the SHARED canonical database's calibration and
+        // outcome data.
+        for index in 0..3 {
+            insert_evidence(
+                &fx.db,
+                &fx.tenant,
+                fx.account,
+                &format!("Grounded observation {index}: the account runs a live email stack."),
+                0.9,
+                false,
+            )
+            .await;
+        }
+        sqlx::query(
+            "INSERT INTO sales_opportunities (id, tenant_id, account_id, contact_id, stage, amount_eur) \
+             VALUES (gen_random_uuid(), $1, $2, $3, 'open', 120000)",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.account)
+        .bind(fx.contact)
+        .execute(&fx.db)
+        .await
+        .expect("insert open pipeline");
+        let handler = fx.handler_with(Arc::new(FailingIntelligence));
+
+        // The "other worker" holds a LIVE lease (claimed seconds ago).
+        sqlx::query(
+            "UPDATE sales_step_executions \
+             SET state = 'executing', claimed_at = NOW() WHERE id = $1",
+        )
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .expect("simulate the concurrent winner");
+
+        let outcome = run_handler(&fx, &handler).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Retry(_)),
+            "the loser retries, never succeeds on an unsent touch: {outcome:?}"
+        );
+        assert_eq!(
+            outbound_count(&fx.db, fx.step_execution).await,
+            0,
+            "the loser produced no external effect"
+        );
+
+        // The live lease is NOT reapable — the winner keeps its exclusivity.
+        // (Scoped to THIS test's tenant: the shared canonical database
+        // carries abandoned 'executing' rows from other runs.)
+        let requeued = requeue_stale_executing_steps_scoped(&fx.db, Some(&fx.tenant))
+            .await
+            .expect("reaper run");
+        assert_eq!(requeued, 0, "a live lease is never stolen");
     }
 
     // ── 1. Offline intelligence still plans, validates and sends ──────────

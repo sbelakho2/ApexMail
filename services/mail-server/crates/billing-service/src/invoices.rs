@@ -1307,8 +1307,9 @@ mod tests {
     #[test]
     fn corrupt_line_items_fail_with_typed_error_naming_the_invoice() {
         let invoice_id = Uuid::new_v4();
-        let error = decode_invoice_line_items(invoice_id, serde_json::json!({"items": "not-an-array"}))
-            .expect_err("corrupt line items must fail the decode");
+        let error =
+            decode_invoice_line_items(invoice_id, serde_json::json!({"items": "not-an-array"}))
+                .expect_err("corrupt line items must fail the decode");
         match &error {
             InvoiceError::CorruptLineItems {
                 invoice_id: failed_id,
@@ -1529,11 +1530,9 @@ mod tests {
 
         // Fix #10 sweep: decode now returns Result — the legacy unversioned
         // array shape still decodes when valid.
-        let decoded = decode_invoice_line_items(
-            Uuid::new_v4(),
-            serde_json::to_value(&line_items).unwrap(),
-        )
-        .expect("legacy line items decode (Fix #10)");
+        let decoded =
+            decode_invoice_line_items(Uuid::new_v4(), serde_json::to_value(&line_items).unwrap())
+                .expect("legacy line items decode (Fix #10)");
 
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].description, "Monthly plan");

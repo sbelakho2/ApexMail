@@ -957,6 +957,108 @@ pub mod test_support {
         fresh_canonical_db(&format!("{server_part}/{db_only}"), &db_name).await
     }
 
+    // ───────────────────────────────────────────────────────────────────────
+    // Shared harness building blocks (audit F20).
+    //
+    // Four test crates (`functional-tests`, `integration-tests` ×3 suites)
+    // used to carry copy-pasted `optional_pg_pool`/`test_database_url`/
+    // `database_url_for`/OnceCell-INIT harness blocks. The primitives below
+    // are the single source of that behavior: the soft-skip contract, the
+    // URL rewrite, the bounded per-runtime pool connect, and the two
+    // provisioning shapes (per-call isolated clone / process-once shared
+    // database). New suites must compose these instead of re-typing them.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// `TEST_DATABASE_URL` with the soft-skip contract already applied (see
+    /// [`assert_soft_skip_allowed`]): unset/blank yields `None` AFTER the
+    /// release-mode guard has had its say, so a configured release run can
+    /// never silently skip. This replaces the per-suite copies of the same
+    /// three-line filter.
+    pub fn test_database_url() -> Option<String> {
+        assert_soft_skip_allowed("TEST_DATABASE_URL");
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Rewrite the database segment of a `postgresql://…/<db>` URL, preserving
+    /// any query string (e.g. `?sslmode=disable`). A URL without a `/` is
+    /// returned unchanged (the caller's connect will fail with a clear
+    /// message rather than this helper guessing).
+    pub fn database_url_for(base_url: &str, db_name: &str) -> String {
+        match base_url.rsplit_once('/') {
+            Some((server, rest)) => {
+                let query = rest
+                    .split_once('?')
+                    .map(|(_, query)| format!("?{query}"))
+                    .unwrap_or_default();
+                format!("{server}/{db_name}{query}")
+            }
+            None => base_url.to_string(),
+        }
+    }
+
+    /// A FRESH pool for THIS `#[tokio::test]` runtime, connected with a
+    /// bounded timeout. A sqlx pool is bound to the runtime that created it;
+    /// sharing one pool across test runtimes deadlocks with `PoolTimedOut`,
+    /// so suites hand out one of these per test over a shared database.
+    ///
+    /// Panics (with the URL in the message) on connect failure or timeout:
+    /// a configured database that refuses connections is an infrastructure
+    /// failure and must fail the test (audit F01).
+    pub async fn connect_pool(url: &str) -> PgPool {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            PgPoolOptions::new().max_connections(10).connect(url),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("timed out connecting to canonical test database {url}"))
+        .unwrap_or_else(|error| panic!("could not connect to canonical test database {url}: {error}"))
+    }
+
+    /// One-call provisioning core for a suite-level OnceCell-INIT block: the
+    /// SHARED canonical database named `db_name` is created/reused via
+    /// [`shared_canonical_db`], with the audit-F01 contract already applied —
+    ///
+    /// * `None` — `TEST_DATABASE_URL` is unset/blank (the suite is explicitly
+    ///   unconfigured; the caller soft-skips),
+    /// * `Some(pool)` — the shared database is ready (the pool is a
+    ///   short-lived administrative pool for a verification pass; close it
+    ///   and hand out per-test pools via [`database_url_for`] +
+    ///   [`connect_pool`]),
+    /// * a configured provisioning failure PANICS with the F01 message — it
+    ///   must fail the suite, never read as a green skip.
+    ///
+    /// The caller owns the process-local `tokio::sync::OnceCell` gating (see
+    /// `functional-tests/tests/functional_sales.rs` for the canonical
+    /// composition); provisioning therefore runs exactly once per test
+    /// PROCESS even though every test calls through here.
+    pub async fn provision_shared_canonical_db(db_name: &str) -> Option<PgPool> {
+        let base_url = test_database_url()?;
+        match shared_canonical_db(&base_url, db_name).await {
+            Ok(Some(pool)) => Some(pool),
+            Ok(None) => None,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    /// Per-call ISOLATED canonical test database, template-cloned via
+    /// [`fresh_canonical_pool`] with a bounded (63-byte-safe) name derived
+    /// from the test name. Every call owns its database, so provisioning can
+    /// run per CALL under both `cargo test` (parallel threads) and nextest
+    /// (one process per test).
+    ///
+    /// `None` only when `TEST_DATABASE_URL` is unset/blank (soft-skip); a
+    /// configured provisioning failure PANICS with the F01 message. This is
+    /// the drop-in replacement for the copy-pasted `optional_pg_pool` blocks
+    /// (audit F20).
+    pub async fn optional_pg_pool(test_name: &str, db_suffix: &str) -> Option<PgPool> {
+        match fresh_canonical_pool(test_name, db_suffix).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
     /// A **shared** canonical database: create-if-absent, reuse-if-present.
     ///
     /// Suites whose tests intentionally share ONE database (sales-autopilot's

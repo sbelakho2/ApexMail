@@ -2813,7 +2813,17 @@ mod pg_store_tests {
         .expect("insert inbound_recipients row");
     }
 
-    async fn row(pool: &PgPool, message_id: &str, recipient: &str) -> (String, i32, Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<String>) {
+    async fn row(
+        pool: &PgPool,
+        message_id: &str,
+        recipient: &str,
+    ) -> (
+        String,
+        i32,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<String>,
+    ) {
         sqlx::query_as(
             "SELECT status, attempt, next_attempt_at, dsn_generated_at, last_error
              FROM inbound_recipients WHERE message_id = $1 AND recipient = $2",
@@ -2830,12 +2840,50 @@ mod pg_store_tests {
         let Some(pool) = pool("ipg_claim_order").await else {
             return;
         };
-        seed_message(&pool, "ipgmsg0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        seed_message(
+            &pool,
+            "ipgmsg0000000000000001",
+            Some("s@remote.test"),
+            b"Subject: t\r\n\r\n",
+        )
+        .await;
         // due oldest, due newer, not due, and a due-but-terminal row.
-        seed_job(&pool, "ipgmsg0000000000000001", "old@managed.test", "pending", 0, -600).await;
-        seed_job(&pool, "ipgmsg0000000000000001", "new@managed.test", "deferred", 2, -10).await;
-        seed_job(&pool, "ipgmsg0000000000000001", "future@managed.test", "pending", 0, 900).await;
-        seed_job(&pool, "ipgmsg0000000000000001", "done@managed.test", "delivered", 1, -900).await;
+        seed_job(
+            &pool,
+            "ipgmsg0000000000000001",
+            "old@managed.test",
+            "pending",
+            0,
+            -600,
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipgmsg0000000000000001",
+            "new@managed.test",
+            "deferred",
+            2,
+            -10,
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipgmsg0000000000000001",
+            "future@managed.test",
+            "pending",
+            0,
+            900,
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipgmsg0000000000000001",
+            "done@managed.test",
+            "delivered",
+            1,
+            -900,
+        )
+        .await;
 
         let store = PgInboundDeliveryStore::new(pool.clone());
         let before = Utc::now();
@@ -2854,7 +2902,10 @@ mod pg_store_tests {
         );
         assert_eq!(claimed[0].prior_status, "pending");
         assert_eq!(claimed[1].prior_status, "deferred");
-        assert_eq!(claimed[1].attempt, 2, "the stored attempt travels with the job");
+        assert_eq!(
+            claimed[1].attempt, 2,
+            "the stored attempt travels with the job"
+        );
 
         for job in &claimed {
             let (status, _attempt, next_attempt_at, _dsn, _err) =
@@ -2874,7 +2925,13 @@ mod pg_store_tests {
         let Some(pool) = pool("ipg_claim_race").await else {
             return;
         };
-        seed_message(&pool, "ipgrace0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
+        seed_message(
+            &pool,
+            "ipgrace0000000000000001",
+            Some("s@remote.test"),
+            b"Subject: t\r\n\r\n",
+        )
+        .await;
         for i in 0..6i32 {
             seed_job(
                 &pool,
@@ -2894,10 +2951,8 @@ mod pg_store_tests {
         // be lost. (The second statement can legitimately observe zero rows
         // when it runs after the first committed its leases — that is the
         // lease doing its job, not a lost row.)
-        let (left, right) = tokio::join!(
-            store.claim_due(now, 10, 120),
-            store.claim_due(now, 10, 120),
-        );
+        let (left, right) =
+            tokio::join!(store.claim_due(now, 10, 120), store.claim_due(now, 10, 120),);
         let left = left.expect("left claim");
         let right = right.expect("right claim");
         let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -2927,15 +2982,33 @@ mod pg_store_tests {
         let Some(pool) = pool("ipg_lease_recover").await else {
             return;
         };
-        seed_message(&pool, "ipglease0000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
-        seed_job(&pool, "ipglease0000000000000001", "lost@managed.test", "delivering", 1, -500).await;
+        seed_message(
+            &pool,
+            "ipglease0000000000000001",
+            Some("s@remote.test"),
+            b"Subject: t\r\n\r\n",
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipglease0000000000000001",
+            "lost@managed.test",
+            "delivering",
+            1,
+            -500,
+        )
+        .await;
 
         let store = PgInboundDeliveryStore::new(pool.clone());
         let claimed = store
             .claim_due(Utc::now(), 10, 120)
             .await
             .expect("claim succeeds");
-        assert_eq!(claimed.len(), 1, "an expired 'delivering' lease is reclaimable");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "an expired 'delivering' lease is reclaimable"
+        );
         assert_eq!(claimed[0].prior_status, "delivering");
         pool.close().await;
     }
@@ -2960,17 +3033,18 @@ mod pg_store_tests {
             .await
             .expect("load succeeds");
         let message = message.expect("row exists");
-        assert_eq!(message.mail_from, "", "NULL mail_from is the null return path");
+        assert_eq!(
+            message.mail_from, "",
+            "NULL mail_from is the null return path"
+        );
         assert_eq!(message.disposition, "accept");
         assert!(message.raw_message.is_none());
 
-        assert!(
-            store
-                .load_message("does-not-exist")
-                .await
-                .expect("a missing row is None, not an error")
-                .is_none()
-        );
+        assert!(store
+            .load_message("does-not-exist")
+            .await
+            .expect("a missing row is None, not an error")
+            .is_none());
         pool.close().await;
     }
 
@@ -2979,12 +3053,31 @@ mod pg_store_tests {
         let Some(pool) = pool("ipg_transitions").await else {
             return;
         };
-        seed_message(&pool, "ipgtrans000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
-        for (i, recipient) in ["defer@managed.test", "deliver@managed.test", "fail@managed.test", "undeliv@managed.test"]
-            .iter()
-            .enumerate()
+        seed_message(
+            &pool,
+            "ipgtrans000000000000001",
+            Some("s@remote.test"),
+            b"Subject: t\r\n\r\n",
+        )
+        .await;
+        for (i, recipient) in [
+            "defer@managed.test",
+            "deliver@managed.test",
+            "fail@managed.test",
+            "undeliv@managed.test",
+        ]
+        .iter()
+        .enumerate()
         {
-            seed_job(&pool, "ipgtrans000000000000001", recipient, "delivering", i as i32, -10).await;
+            seed_job(
+                &pool,
+                "ipgtrans000000000000001",
+                recipient,
+                "delivering",
+                i as i32,
+                -10,
+            )
+            .await;
         }
         let store = PgInboundDeliveryStore::new(pool.clone());
         let make_job = |recipient: &str| RecipientJob {
@@ -3006,7 +3099,10 @@ mod pg_store_tests {
             row(&pool, "ipgtrans000000000000001", "defer@managed.test").await;
         assert_eq!((status.as_str(), attempt), (STATUS_DEFERRED, 2));
         assert!(
-            (next_at.expect("deferred sets a retry deadline") - next).num_milliseconds().abs() < 1000
+            (next_at.expect("deferred sets a retry deadline") - next)
+                .num_milliseconds()
+                .abs()
+                < 1000
         );
         assert_eq!(err.as_deref(), Some("mailstore 503"));
 
@@ -3069,7 +3165,10 @@ mod pg_store_tests {
         .fetch_one(&pool)
         .await
         .expect("attempt row");
-        assert_eq!((stage.as_str(), outcome.as_str()), ("delivery", "transient"));
+        assert_eq!(
+            (stage.as_str(), outcome.as_str()),
+            ("delivery", "transient")
+        );
         assert_eq!(error.as_deref(), Some("mailstore 503"));
         pool.close().await;
     }
@@ -3079,9 +3178,31 @@ mod pg_store_tests {
         let Some(pool) = pool("ipg_dsn_guard").await else {
             return;
         };
-        seed_message(&pool, "ipgdsng000000000000001", Some("s@remote.test"), b"Subject: t\r\n\r\n").await;
-        seed_job(&pool, "ipgdsng000000000000001", "a@managed.test", "failed", 3, -10).await;
-        seed_job(&pool, "ipgdsng000000000000001", "b@managed.test", "failed", 3, -10).await;
+        seed_message(
+            &pool,
+            "ipgdsng000000000000001",
+            Some("s@remote.test"),
+            b"Subject: t\r\n\r\n",
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipgdsng000000000000001",
+            "a@managed.test",
+            "failed",
+            3,
+            -10,
+        )
+        .await;
+        seed_job(
+            &pool,
+            "ipgdsng000000000000001",
+            "b@managed.test",
+            "failed",
+            3,
+            -10,
+        )
+        .await;
         let store = PgInboundDeliveryStore::new(pool.clone());
         let job = |r: &str| RecipientJob {
             message_id: "ipgdsng000000000000001".into(),
@@ -3093,7 +3214,10 @@ mod pg_store_tests {
         };
 
         // Guard open: claim succeeds and stamps the guard.
-        assert!(store.claim_dsn(&job("a@managed.test")).await.expect("claim a"));
+        assert!(store
+            .claim_dsn(&job("a@managed.test"))
+            .await
+            .expect("claim a"));
         let (_s, _a, _n, dsn, _e) = row(&pool, "ipgdsng000000000000001", "a@managed.test").await;
         assert!(dsn.is_some(), "claiming stamps dsn_generated_at");
 
@@ -3111,7 +3235,10 @@ mod pg_store_tests {
             .await
             .expect("finalize");
         assert!(
-            !store.claim_dsn(&job("a@managed.test")).await.expect("claim after sent"),
+            !store
+                .claim_dsn(&job("a@managed.test"))
+                .await
+                .expect("claim after sent"),
             "a dsn_sent row can never be claimed again"
         );
         let claimable = store.claim_due(Utc::now(), 10, 120).await.expect("claim");
@@ -3124,15 +3251,25 @@ mod pg_store_tests {
         // guard cleared so a later sweep can retry the dispatch.
         let next = Utc::now() + chrono::Duration::seconds(300);
         store
-            .release_dsn_claim(&job("b@managed.test"), next, "DSN dispatch failed: queue down")
+            .release_dsn_claim(
+                &job("b@managed.test"),
+                next,
+                "DSN dispatch failed: queue down",
+            )
             .await
             .expect("release");
         let (status, _a, next_at, dsn, err) =
             row(&pool, "ipgdsng000000000000001", "b@managed.test").await;
-        assert_eq!(status, STATUS_FAILED, "released back to the retryable state");
+        assert_eq!(
+            status, STATUS_FAILED,
+            "released back to the retryable state"
+        );
         assert!(dsn.is_none(), "the guard is cleared for retry");
         assert!(
-            (next_at.expect("release reschedules") - next).num_milliseconds().abs() < 1000
+            (next_at.expect("release reschedules") - next)
+                .num_milliseconds()
+                .abs()
+                < 1000
         );
         assert!(
             err.unwrap_or_default().contains("queue down"),
@@ -3284,11 +3421,15 @@ mod pg_store_tests {
             );
         }
         assert_eq!(
-            headers.get("X-ApexMail-DSN-Status").and_then(|v| v.as_str()),
+            headers
+                .get("X-ApexMail-DSN-Status")
+                .and_then(|v| v.as_str()),
             Some("5.1.1")
         );
         assert_eq!(
-            headers.get("X-ApexMail-DSN-Recipient").and_then(|v| v.as_str()),
+            headers
+                .get("X-ApexMail-DSN-Recipient")
+                .and_then(|v| v.as_str()),
             Some("gone@ready.test")
         );
         let dsn_meta = metadata
@@ -3307,14 +3448,12 @@ mod pg_store_tests {
         };
         // An unparseable gRPC endpoint must fail construction (never a
         // worker that cannot even dial).
-        let error = match InboundDeliveryWorker::new(
-            pool.clone(),
-            "::: not a uri :::",
-            "mail.test".into(),
-        ) {
-            Ok(_) => panic!("an invalid MAILSTORE_GRPC_ADDR must fail construction"),
-            Err(error) => error,
-        };
+        let error =
+            match InboundDeliveryWorker::new(pool.clone(), "::: not a uri :::", "mail.test".into())
+            {
+                Ok(_) => panic!("an invalid MAILSTORE_GRPC_ADDR must fail construction"),
+                Err(error) => error,
+            };
         assert!(
             error.to_string().contains("invalid MAILSTORE_GRPC_ADDR"),
             "{error}"

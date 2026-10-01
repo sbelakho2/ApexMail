@@ -451,20 +451,33 @@ impl ClickHouseEngine {
             .fetch_all::<AggregationRow>()
             .await?;
 
-        let total: u64 = rows.iter().map(|r| r.count).sum();
+        // SM10 F14: the denominator must be the TRUE event total for the
+        // same WHERE, not the top-100 subtotal. With more distinct values
+        // than the LIMIT, a subtotal denominator inflated every percentage
+        // (they summed to 100% over the top 100 alone).
+        #[derive(Debug, Row, Deserialize)]
+        struct CountRow {
+            count: u64,
+        }
+        let total = self
+            .client
+            .query(
+                r#"
+                SELECT count() AS count
+                FROM events
+                WHERE tenant_id = ?
+                  AND timestamp >= toDateTime64(?, 3)
+                  AND timestamp < toDateTime64(?, 3)
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(start.timestamp_millis() as f64 / 1000.0)
+            .bind(end.timestamp_millis() as f64 / 1000.0)
+            .fetch_one::<CountRow>()
+            .await?
+            .count;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| AggregationResult {
-                dimension: r.dimension,
-                count: r.count as i64,
-                percentage: if total > 0 {
-                    Some(r.count as f64 / total as f64 * 100.0)
-                } else {
-                    None
-                },
-            })
-            .collect())
+        Ok(dimension_results(rows, total))
     }
 
     /// Funnel analysis:conversion through event stages.
@@ -845,6 +858,29 @@ fn compute_funnel_percentages(ordered_counts: &[u64]) -> Vec<f64> {
         .collect()
 }
 
+/// Map the top-N dimension rows to results with percentages against the
+/// TRUE total for the query's WHERE clause (SM10 F14).
+///
+/// The old code summed the fetched rows for the denominator, so once a
+/// dimension had more distinct values than the query's LIMIT the top-100
+/// subtotal stood in for the whole population and every percentage was
+/// inflated (they summed to 100% over a partial slice). `total` comes from
+/// a separate `count()` over the identical WHERE. Zero total (no events at
+/// all) yields `None` percentages — nothing to be a percentage of.
+fn dimension_results(rows: Vec<AggregationRow>, total: u64) -> Vec<AggregationResult> {
+    rows.into_iter()
+        .map(|r| AggregationResult {
+            dimension: r.dimension,
+            count: r.count as i64,
+            percentage: if total > 0 {
+                Some(r.count as f64 / total as f64 * 100.0)
+            } else {
+                None
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,6 +912,78 @@ mod tests {
 
     // Integration tests require a running ClickHouse instance
     // Run with:docker run -d -p 8123:8123 clickhouse/clickhouse-server
+
+    // ── dimension_results: the SM10 F14 true-denominator contract ─────────
+
+    /// THE F14 regression shape: more distinct dimension values than the
+    /// query LIMIT (100). The rows are only the top-100 slice; `total` is
+    /// the full population from the separate count() query. Percentages
+    /// must reflect the true share (they sum to far less than 100%) — the
+    /// old subtotal denominator reported exactly 100% over the slice.
+    #[test]
+    fn dimension_percentages_use_the_true_total_not_the_top_slice() {
+        // Top-2 slice of a dimension with 150 distinct values.
+        let rows = vec![
+            AggregationRow {
+                dimension: "sent".to_string(),
+                count: 600,
+            },
+            AggregationRow {
+                dimension: "failed".to_string(),
+                count: 400,
+            },
+        ];
+        let results = dimension_results(rows, 100_000);
+
+        assert_eq!(results.len(), 2);
+        let sum: f64 = results.iter().map(|r| r.percentage.unwrap()).sum();
+        assert!(
+            sum < 1.5,
+            "percentages over a thin top slice of a large population must be tiny, got {sum}"
+        );
+        assert_eq!(results[0].percentage, Some(0.6)); // 600 / 100_000
+        assert_eq!(results[1].percentage, Some(0.4)); // 400 / 100_000
+
+        // The old denominator (slice subtotal = 1_000) would have produced
+        // 60% + 40% = 100% — pinned here as the behavior that must NOT
+        // return.
+        assert!(
+            (sum - 100.0).abs() > 90.0,
+            "subtotal denominators are banned"
+        );
+    }
+
+    /// When the slice IS the whole population (fewer distinct values than
+    /// the LIMIT), percentages still sum to 100%.
+    #[test]
+    fn dimension_percentages_sum_to_100_when_slice_is_the_population() {
+        let rows = vec![
+            AggregationRow {
+                dimension: "sent".to_string(),
+                count: 75,
+            },
+            AggregationRow {
+                dimension: "bounced".to_string(),
+                count: 25,
+            },
+        ];
+        let results = dimension_results(rows, 100);
+        let sum: f64 = results.iter().map(|r| r.percentage.unwrap()).sum();
+        assert!((sum - 100.0).abs() < 1e-9);
+    }
+
+    /// A zero total (no events in range) yields `None` percentages instead
+    /// of NaN or fabricated zeros.
+    #[test]
+    fn dimension_percentages_are_none_for_an_empty_population() {
+        let rows = vec![AggregationRow {
+            dimension: "ghost".to_string(),
+            count: 5,
+        }];
+        let results = dimension_results(rows, 0);
+        assert_eq!(results[0].percentage, None);
+        assert_eq!(results[0].count, 5, "counts survive even without a base");
+    }
 
     /// F7:normal funnel — stage 0 is the base, each stage is its share.
     #[test]

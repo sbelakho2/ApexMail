@@ -14,6 +14,7 @@
 use crate::engine::{DynamicAnalysisFinding, DynamicAnalyzer, DynamicDecision};
 use aho_corasick::AhoCorasick;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::sync::OnceLock;
 
@@ -458,9 +459,10 @@ impl ClamAvSocketAnalyzer {
 /// 2. Uses a single `symlink_metadata` call (atomic) to check the path exists
 ///    and is a Unix socket. This eliminates the TOCTOU race between checking
 ///    existence and reading metadata (previously a `.exists()` check followed
-///    by `.metadata()` call).
+///    by a `.metadata()` call).
 /// 3. If it is a symlink, a warning is logged so operators can audit the
 ///    symlink target.
+#[cfg(unix)]
 fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
 
@@ -522,6 +524,9 @@ fn validate_clamav_socket_path(path: &str) -> Result<(), String> {
 
 impl DynamicAnalyzer for ClamAvSocketAnalyzer {
     fn analyze(&self, data: &[u8], filename: Option<&str>) -> Option<DynamicAnalysisFinding> {
+        // The stream I/O imports are only used by the `#[cfg(unix)]` arm;
+        // gating them keeps non-Unix builds warning-free.
+        #[cfg(unix)]
         use std::io::{Read, Write};
 
         if data.len() > self.max_scan_size {
@@ -537,23 +542,26 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
             });
         }
 
-        // Fail-closed finding:if the scanner is unavailable, malformed, or
-        // times out, the file must NOT be treated as clean. It is rejected
-        // with a clear reason so operators can see the scanner outage.
-        let scanner_unavailable = |reason: String| DynamicAnalysisFinding {
-            id: "CLAMAV_UNAVAILABLE".into(),
-            description: format!(
-                "ClamAV scanner unavailable ({}): verdict cannot be verified for {}",
-                reason,
-                filename.unwrap_or("<unnamed>")
-            ),
-            risk: 8.0,
-            decision: DynamicDecision::Reject,
-        };
-
-        // Attempt connection to ClamAV socket
+        // Attempt connection to ClamAV socket. On non-Unix targets the
+        // `#[cfg(not(unix))]` tail arm below fails closed instead — the
+        // function previously ended without any arm there (compile failure,
+        // not silent fail-open, but the port was blocked).
         #[cfg(unix)]
         {
+            // Fail-closed finding:if the scanner is unavailable, malformed, or
+            // times out, the file must NOT be treated as clean. It is rejected
+            // with a clear reason so operators can see the scanner outage.
+            let scanner_unavailable = |reason: String| DynamicAnalysisFinding {
+                id: "CLAMAV_UNAVAILABLE".into(),
+                description: format!(
+                    "ClamAV scanner unavailable ({}): verdict cannot be verified for {}",
+                    reason,
+                    filename.unwrap_or("<unnamed>")
+                ),
+                risk: 8.0,
+                decision: DynamicDecision::Reject,
+            };
+
             // ---- Socket path validation (O-15.1) --------------------------
             if let Err(msg) = validate_clamav_socket_path(&self.socket_path) {
                 tracing::error!(
@@ -649,6 +657,27 @@ impl DynamicAnalyzer for ClamAvSocketAnalyzer {
                     Some(scanner_unavailable("unexpected response".into()))
                 }
             }
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Audit finding: the function's only arm was `#[cfg(unix)]`, so
+            // a non-Unix build had no tail expression and did not compile.
+            // ClamAV INSTREAM requires a Unix domain socket; on other
+            // platforms the verdict cannot be verified, so fail CLOSED with
+            // an explicit unsupported finding — never a silent clean. The
+            // byte count is reported so it is explicit that NONE of the
+            // content was scanned.
+            Some(DynamicAnalysisFinding {
+                id: "CLAMAV_UNSUPPORTED_PLATFORM".into(),
+                description: format!(
+                    "ClamAV Unix-socket analyzer is unsupported on this platform; {} bytes of {} were NOT scanned and the verdict cannot be verified",
+                    data.len(),
+                    filename.unwrap_or("<unnamed>")
+                ),
+                risk: 8.0,
+                decision: DynamicDecision::Reject,
+            })
         }
     }
 }
@@ -1203,5 +1232,21 @@ mod tests {
 
         // The default analyzer exists and is reusable.
         assert!(default_dynamic_analyzer().rule_count() >= 1);
+    }
+
+    // ── Audit:non-Unix arm must compile and fail closed ──
+
+    #[cfg(not(unix))]
+    #[test]
+    fn clamav_analyzer_fails_closed_on_unsupported_platform() {
+        // Compile-gated: on non-Unix targets the analyze body previously
+        // had no tail expression at all. It must produce an explicit
+        // unsupported verdict (Reject), never a silent clean.
+        let analyzer = ClamAvSocketAnalyzer::new("/tmp/apexmail-clamav.ctl".into());
+        let finding = analyzer
+            .analyze(b"innocuous", Some("doc.pdf"))
+            .expect("unsupported platform must produce a fail-closed finding");
+        assert_eq!(finding.id, "CLAMAV_UNSUPPORTED_PLATFORM");
+        assert_eq!(finding.decision, DynamicDecision::Reject);
     }
 }

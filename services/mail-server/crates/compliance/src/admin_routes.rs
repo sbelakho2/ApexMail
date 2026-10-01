@@ -833,8 +833,32 @@ async fn public_trust_incidents(
 
 async fn public_trust_access_request(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(input): Json<AccessRequestInput>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Audit F12: the endpoint is intentionally public, so its unbounded
+    // INSERT is bounded the way the DSAR endpoints are — a two-level
+    // (per-IP + global) limiter, checked-and-consumed per attempt (an
+    // anonymous caller gets no free probes). No ConnectInfo on this
+    // deployment: the front-of-list X-Forwarded-For entry is the client key,
+    // falling back to one shared bucket (never "no limit").
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|list| list.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unattributed")
+        .to_string();
+    if !state.trust_access_limiter.check_attempt(&client_ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "rate_limited",
+                "message": "Too many access requests. Please try again later.",
+            })),
+        ));
+    }
     let req = state
         .trust
         .submit_access_request(input)
@@ -1596,10 +1620,13 @@ mod db_tests {
         );
 
         // Anonymous access requests: malformed email refused, valid one stored.
+        // (Audit F12: the empty HeaderMap lands in the shared "unattributed"
+        // limiter bucket — far below its per-IP cap.)
         assert_eq!(
             status(
                 public_trust_access_request(
                     State(state.clone()),
+                    HeaderMap::new(),
                     Json(AccessRequestInput {
                         document_slug: slug.clone(),
                         requester_name: "Mallory".into(),
@@ -1617,6 +1644,7 @@ mod db_tests {
             status(
                 public_trust_access_request(
                     State(state.clone()),
+                    HeaderMap::new(),
                     Json(AccessRequestInput {
                         document_slug: slug.clone(),
                         requester_name: "Alice".into(),
@@ -2072,8 +2100,8 @@ mod db_tests {
     /// this test's private database clone.
     #[tokio::test]
     async fn questionnaire_context_maps_partial_store_outages_to_5xx() {
-        let Some(pool) = test_support::canonical_pool("admin_qctx_outage", "admin_qctx_outage")
-            .await
+        let Some(pool) =
+            test_support::canonical_pool("admin_qctx_outage", "admin_qctx_outage").await
         else {
             return;
         };

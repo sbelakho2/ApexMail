@@ -9,6 +9,7 @@ competitor = "Amazon SES"
 competitor_slug = "amazon-ses"
 competitor_name = "Amazon SES"
 competitor_description = "Amazon Simple Email Service (SES) es un servicio de envío de email en la nube construido sobre la infraestructura de AWS, con precios de capacidad bajo demanda."
+pricing_as_of = "2026-08-19"
 last_verified = "2026-07-29"
 methodology = "Documentación pública de AWS SES en docs.aws.amazon.com/ses revisada en la fecha de verificación. Precios comparados en modalidad de pago por uso para 100.000 emails/mes. Facturación mensual. ApexMail es infraestructura gestionada; SES es capacidad en bruto. Las funciones, los límites y los precios pueden cambiar."
 volume_assumption = "100.000 emails/mes"
@@ -39,7 +40,7 @@ comparison_sections = [
   ]},
   { title = "MODELOS DE DESPLIEGUE", rows = [
     { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant gestionado, alojado en la UE', comp = 'Sí (todas las cuentas) — pool de IP compartido por defecto<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
-    { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale', comp = 'Sí — €22.95 (US$24.95)/mes por IP dedicada; gestión de pools de IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business', comp = 'Sí — €22.95 (US$24.95)/mes por IP dedicada; gestión de pools de IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Inquilino dedicado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Autogestionado — el cliente diseña su inquilino dedicado en AWS usando SES como componente de servicio<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / despliegue privado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Inherente — el cliente opera en su propia cuenta de AWS; SES es un servicio de AWS<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
@@ -56,7 +57,7 @@ comparison_sections = [
   { title = "ÁREAS DONDE AMAZON SES ES MÁS FUERTE", rows = [
     { feature = "Coste en bruto por email", apex = 'Consulte el catálogo público actual y el proceso de contratación para las condiciones de uso aplicables', comp = '€0.09 (US$0.10)/1.000 emails — el menor coste por mensaje entre los principales proveedores<sup><a href="#src-ses10">10</a></sup>', winner = "competitor" },
     { feature = "Integración con el ecosistema AWS", apex = 'Plataforma independiente con integración mediante API', comp = 'Integración profunda con los servicios de AWS: Lambda, S3, CloudWatch, SNS, SQS, IAM, KMS, Organizations<sup><a href="#src-ses3">3</a></sup>', winner = "competitor" },
-    { feature = "Volumen máximo de envío", apex = 'Scale admite hasta 2 millones de emails/mes; las condiciones Enterprise se definen contractualmente', comp = 'Prácticamente ilimitado — limitado por los límites de envío de la cuenta, que escalan automáticamente con la reputación<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Volumen máximo de envío", apex = 'Business admite hasta 2 millones de emails/mes; las condiciones Enterprise se definen contractualmente', comp = 'Prácticamente ilimitado — limitado por los límites de envío de la cuenta, que escalan automáticamente con la reputación<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Regiones globales", apex = 'Alemania y Finlandia (foco en el EEE)', comp = 'Más de 22 regiones de AWS en todo el mundo: EE. UU., UE, APAC, Sudamérica y más<sup><a href="#src-ses1">1</a></sup>', winner = "competitor" }
   ]}
 ]

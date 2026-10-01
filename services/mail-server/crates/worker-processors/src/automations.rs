@@ -826,6 +826,12 @@ pub struct AutomationExecutor {
     admission: SendAdmissionService,
     worker_id: Arc<str>,
     batch_size: i64,
+    /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
+    /// the tick refuses to claim automation events (and to execute the
+    /// action ladder — including real sends — that follows them) while this
+    /// node's `ha:fenced:{node}` key stands, or while the fence authority
+    /// cannot be read (fail closed). Default off: zero behavior change.
+    fence_gate: Arc<crate::fence::FenceGate>,
 }
 
 impl AutomationExecutor {
@@ -835,12 +841,20 @@ impl AutomationExecutor {
             admission,
             worker_id: Arc::from(worker_id.into().as_str()),
             batch_size: DEFAULT_BATCH_SIZE,
+            fence_gate: Arc::new(crate::fence::FenceGate::from_env()),
         }
     }
 
     /// Bound the events claimed per tick (clamped to `1..=1000`).
     pub fn with_batch_size(mut self, batch_size: i64) -> Self {
         self.batch_size = batch_size.clamp(1, 1000);
+        self
+    }
+
+    /// Swap the fence gate (chainable like [`Self::with_batch_size`]).
+    /// Production keeps the env-built gate; tests inject mock-backed gates.
+    pub fn with_fence_gate(mut self, gate: Arc<crate::fence::FenceGate>) -> Self {
+        self.fence_gate = gate;
         self
     }
 
@@ -886,6 +900,17 @@ impl AutomationExecutor {
     /// matching rules of each event's tenant, settle the events, prune a
     /// bounded slice of settled inbox rows.
     pub async fn tick(&self) -> Result<TickReport, AutomationError> {
+        // SM10 F4: a fenced node must not claim automation events nor run
+        // the action ladder behind them; an unreadable fence authority fails
+        // closed. The empty report hands the tick back to the worker loop's
+        // normal cadence (leases make an interrupted schedule recoverable).
+        if let Err(refusal) = self.fence_gate.ensure_can_claim().await {
+            tracing::error!(
+                error = %refusal,
+                "node is fenced; automation tick skipped (SM10 F4)"
+            );
+            return Ok(TickReport::default());
+        }
         let due = self.claim_due_events().await?;
         let mut report = TickReport {
             events_claimed: due.len() as u64,
@@ -1661,7 +1686,9 @@ impl AutomationExecutor {
 
         let template = match fetch_template(&self.db, &event.tenant_id, template_id).await {
             Ok(template) => template,
-            Err(AutomationError::InvalidInput(_)) => return ActionRecord::skipped("template_not_found"),
+            Err(AutomationError::InvalidInput(_)) => {
+                return ActionRecord::skipped("template_not_found")
+            }
             Err(error) => return ActionRecord::failed_retryable(error.to_string()),
         };
         let rendered = render_template(&template, ctx);
@@ -2097,7 +2124,11 @@ impl AutomationExecutor {
         Ok(())
     }
 
-    async fn settle_event(&self, event: &DueEvent, outcome: &TickReport) -> Result<(), AutomationError> {
+    async fn settle_event(
+        &self,
+        event: &DueEvent,
+        outcome: &TickReport,
+    ) -> Result<(), AutomationError> {
         if outcome.events_deferred > 0 {
             // defer_event already rescheduled (or failed) the row.
             return Ok(());
@@ -4905,5 +4936,93 @@ mod tests {
             queued, 1,
             "the real webhook enqueued; the missing one did not"
         );
+    }
+
+    // ── SM10 F4: the automation tick is a fenced claim loop ────────────────
+
+    /// In-memory fence authority: missing node = not fenced.
+    #[derive(Clone, Default)]
+    struct FenceMock(Arc<Mutex<HashMap<&'static str, Result<bool, String>>>>);
+
+    impl ha::fence::FenceStore for FenceMock {
+        fn is_fenced<'a>(
+            &'a self,
+            node: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(node)
+                    .cloned()
+                    .unwrap_or(Ok(false))
+            })
+        }
+    }
+
+    /// A pool that fails every acquire fast: the hermetic fence tests only
+    /// need to prove whether the tick REACHED the claim query.
+    fn dead_pool() -> sqlx::PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/automation_fence_hermetic")
+            .expect("lazy pool construction")
+    }
+
+    /// A FENCED node's tick must return an EMPTY report without touching the
+    /// database — against the dead pool any DB reach would error, so an
+    /// `Ok` empty report proves the gate refused before the claim.
+    #[tokio::test]
+    async fn fenced_node_skips_the_tick_without_claiming() {
+        crate::test_support::install_test_tracing();
+        let store = FenceMock::default();
+        store.0.lock().unwrap().insert("node-a", Ok(true));
+        let executor = executor(&dead_pool(), Arc::new(FakeAdmission::new())).with_fence_gate(
+            Arc::new(crate::fence::FenceGate::enabled(Arc::new(store), "node-a")),
+        );
+
+        let report = executor
+            .tick()
+            .await
+            .expect("a fenced tick is not an error — it claims nothing");
+        assert_eq!(
+            report.events_claimed, 0,
+            "a fenced node must not claim automation events"
+        );
+    }
+
+    /// The control: the SAME dead pool under the default (disabled) gate
+    /// fails at the claim — proving the empty report above came from the
+    /// fence gate, not from the executor suddenly succeeding.
+    #[tokio::test]
+    async fn unfenced_node_attempts_the_claim_against_the_database() {
+        crate::test_support::install_test_tracing();
+        let executor = executor(&dead_pool(), Arc::new(FakeAdmission::new()));
+        assert!(
+            executor.tick().await.is_err(),
+            "with fencing disabled the tick must reach the (dead) database"
+        );
+    }
+
+    /// An UNREADABLE fence authority fails closed: no claim, empty report.
+    #[tokio::test]
+    async fn unreadable_fence_authority_skips_the_tick() {
+        crate::test_support::install_test_tracing();
+        let store = FenceMock::default();
+        store
+            .0
+            .lock()
+            .unwrap()
+            .insert("node-a", Err("redis down".to_string()));
+        let executor = executor(&dead_pool(), Arc::new(FakeAdmission::new())).with_fence_gate(
+            Arc::new(crate::fence::FenceGate::enabled(Arc::new(store), "node-a")),
+        );
+
+        let report = executor
+            .tick()
+            .await
+            .expect("fail-closed is a refusal, not an error report");
+        assert_eq!(report.events_claimed, 0);
     }
 }

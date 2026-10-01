@@ -484,6 +484,31 @@ async fn invalid_pixel_token_warns_with_a_truncated_prefix_and_still_serves() {
     assert_eq!(body, TRANSPARENT_GIF, "still the exact GIF");
 }
 
+/// SM2-F4: 19 ASCII bytes + a two-byte `é` places byte 20 INSIDE the
+/// character — the exact input that panicked the invalid-token `warn!`'s
+/// `id_prefix = &id[..id.len().min(20)]` field ("byte index 20 is not a
+/// char boundary"), killing the connection task per request. With a
+/// subscriber installed the field actually evaluates; the handler must
+/// survive it and still serve the exact GIF.
+#[tokio::test]
+async fn multibyte_pixel_token_at_slice_boundary_never_panics_and_still_serves() {
+    test_log_subscriber();
+    let state = test_support::offline_state(&[]);
+    // 51 bytes: passes the 10..=4096 length gate, splits `é` at byte 20.
+    let hostile = format!("{}é{}", "a".repeat(19), "x".repeat(30));
+    assert_eq!(hostile.len(), 51);
+    let resp = handle_pixel(
+        State(state),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(hostile),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let body = body_bytes(resp).await;
+    assert_eq!(body, TRANSPARENT_GIF, "still the exact GIF");
+}
+
 /// A recorder that cannot enqueue (dead Redis) logs the failure and never
 /// breaks the pixel response.
 #[tokio::test]

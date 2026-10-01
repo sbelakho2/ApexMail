@@ -111,32 +111,7 @@ impl EmbeddingService {
 
         let inference_resp: InferenceResponse = response.json().await?;
 
-        let mut embeddings: Vec<(usize, Vec<f32>)> = inference_resp
-            .data
-            .into_iter()
-            .map(|e| (e.index, e.embedding))
-            .collect();
-
-        // Sort by index to maintain order
-        embeddings.sort_by_key(|(idx, _)| *idx);
-
-        let vectors: Vec<Vec<f32>> = embeddings
-            .into_iter()
-            .map(|(_, v)| {
-                // Apply L2 normalization
-                l2_normalize(v)
-            })
-            .collect();
-
-        // Validate dimensions
-        for v in &vectors {
-            if v.len() != self.config.dimension {
-                return Err(EmbeddingError::DimensionMismatch {
-                    got: v.len(),
-                    expected: self.config.dimension,
-                });
-            }
-        }
+        let vectors = finalize_batch(texts.len(), inference_resp.data, self.config.dimension)?;
 
         info!(
             count = vectors.len(),
@@ -149,6 +124,86 @@ impl EmbeddingService {
     pub fn dimension(&self) -> usize {
         self.config.dimension
     }
+}
+
+/// SM9 #4/#5: validate the sidecar response CONTRACT and L2-normalize.
+///
+/// A sidecar that returns fewer embeddings than inputs, duplicates an index,
+/// or drops one would otherwise produce a silently MISALIGNED batch —
+/// callers zipping texts with embeddings (or storing chunk i's text with
+/// chunk i's vector) would corrupt tenant data with no error anywhere. A
+/// NaN/±Inf component makes the L2 norm NaN, so `l2_normalize` returns the
+/// vector with its NaNs intact (all comparisons against NaN are false) and
+/// downstream cosine/ranking math is poisoned — such a batch is rejected
+/// fail-closed. A norm that OVERFLOWS to ±Inf (finite-but-huge components)
+/// would instead silently normalize into the zero vector; it is rejected the
+/// same way.
+fn finalize_batch(
+    expected_len: usize,
+    data: Vec<crate::types::InferenceEmbedding>,
+    dimension: usize,
+) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+    let mut embeddings: Vec<(usize, Vec<f32>)> =
+        data.into_iter().map(|e| (e.index, e.embedding)).collect();
+
+    // Sort by index to maintain order
+    embeddings.sort_by_key(|(idx, _)| *idx);
+
+    if embeddings.len() != expected_len {
+        return Err(EmbeddingError::InferenceError(format!(
+            "inference server returned {} embeddings for {} inputs — \
+             refusing the misaligned batch",
+            embeddings.len(),
+            expected_len
+        )));
+    }
+    for (pos, (idx, _)) in embeddings.iter().enumerate() {
+        if *idx != pos {
+            return Err(EmbeddingError::InferenceError(format!(
+                "inference server returned non-contiguous embedding indices: \
+                 expected index {pos}, found {idx} (duplicated or dropped input)"
+            )));
+        }
+    }
+
+    let vectors: Vec<Vec<f32>> = embeddings
+        .into_iter()
+        .map(|(_, v)| {
+            // SM9 #5 (verifier-repair): reject a non-finite NORM, not only
+            // non-finite components. Finite-but-huge components (e.g. 1e20 —
+            // perfectly valid JSON) square to +Inf, so `l2_normalize` divides
+            // every component into 0.0: the embedding is silently replaced by
+            // the zero vector and passes every post-hoc finite check. The
+            // batch fails closed instead of laundering the overflow.
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if !norm.is_finite() {
+                return Err(EmbeddingError::InferenceError(
+                    "inference server returned a vector whose L2 norm is \
+                     non-finite (component overflow to NaN/Inf) — rejecting \
+                     the batch"
+                        .into(),
+                ));
+            }
+            Ok(l2_normalize(v))
+        })
+        .collect::<Result<Vec<_>, EmbeddingError>>()?;
+
+    for v in &vectors {
+        if v.len() != dimension {
+            return Err(EmbeddingError::DimensionMismatch {
+                got: v.len(),
+                expected: dimension,
+            });
+        }
+        if let Some(bad) = v.iter().position(|x| !x.is_finite()) {
+            return Err(EmbeddingError::InferenceError(format!(
+                "inference server returned a non-finite vector component \
+                 (NaN/Inf) at position {bad} — rejecting the batch"
+            )));
+        }
+    }
+
+    Ok(vectors)
 }
 
 /// L2 normalize a vector to unit length.
@@ -359,5 +414,250 @@ PmScTyfBMj4Ej4fcpQ==\n\
 
         let _ = std::fs::remove_file(ca_path);
         assert!(result.is_err(), "invalid CA must be rejected");
+    }
+
+    // ── SM9 #4/#5: sidecar response-contract validation ─────────────────────
+    // A mock sidecar binds 127.0.0.1:0 and serves a CANNED embeddings body,
+    // so the tests can mutate the response the way a misbehaving or hostile
+    // sidecar would (dropped entries, duplicated indices, NaN vectors).
+
+    /// Serve `body` verbatim from a localhost POST /v1/embeddings endpoint;
+    /// returns the base URL. No real network egress.
+    async fn spawn_mock_sidecar(body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock sidecar");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                // Drain the full request (headers + Content-Length body)
+                // before answering, so the client never sees an early close.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let header_end = loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break 0;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos;
+                    }
+                };
+                let content_length: usize = String::from_utf8_lossy(&buf[..header_end])
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                let mut body_bytes = buf[header_end + 4..].to_vec();
+                while body_bytes.len() < content_length {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body_bytes.extend_from_slice(&chunk[..n]);
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(body.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn batch_service_config(url: String) -> InferenceConfig {
+        InferenceConfig {
+            url,
+            model: "test".to_string(),
+            dimension: 4,
+            max_concurrency: 2,
+            timeout_ms: 5000,
+            pooling: PoolingStrategy::Mean,
+            sidecar_tls_enabled: false,
+            sidecar_tls_ca_path: String::new(),
+        }
+    }
+
+    fn unit_vector(index: f32, dim: usize) -> String {
+        let mut v: Vec<String> = Vec::with_capacity(dim);
+        for i in 0..dim {
+            let component = if i as u32 == index as u32 { 1.0 } else { 0.0 };
+            v.push(format!("{component}"));
+        }
+        format!("[{}]", v.join(","))
+    }
+
+    /// SM9 #4 (positive control): indices arriving OUT of order are sorted
+    /// back into request order, so vectors stay aligned with their texts.
+    #[tokio::test]
+    async fn embed_batch_restores_request_order_from_indices() {
+        // texts [a, b, c] answered with indices [2, 0, 1].
+        let body = format!(
+            r#"{{"data":[
+                {{"index":2,"embedding":{}}},
+                {{"index":0,"embedding":{}}},
+                {{"index":1,"embedding":{}}}
+            ]}}"#,
+            unit_vector(2.0, 4),
+            unit_vector(0.0, 4),
+            unit_vector(1.0, 4),
+        );
+        let url = spawn_mock_sidecar(Box::leak(body.into_boxed_str())).await;
+        let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+        let vectors = svc
+            .embed_batch(&["a".into(), "b".into(), "c".into()])
+            .await
+            .expect("well-formed sidecar response is accepted");
+        assert_eq!(vectors.len(), 3);
+        assert_eq!(vectors[0], vec![1.0, 0.0, 0.0, 0.0], "text a ↔ index 0");
+        assert_eq!(vectors[1], vec![0.0, 1.0, 0.0, 0.0], "text b ↔ index 1");
+        assert_eq!(vectors[2], vec![0.0, 0.0, 1.0, 0.0], "text c ↔ index 2");
+    }
+
+    /// SM9 #4: a sidecar that answers 2 embeddings for 3 inputs is refused —
+    /// the batch would be silently misaligned.
+    #[tokio::test]
+    async fn embed_batch_rejects_short_sidecar_response() {
+        let body = format!(
+            r#"{{"data":[
+                {{"index":0,"embedding":{}}},
+                {{"index":1,"embedding":{}}}
+            ]}}"#,
+            unit_vector(0.0, 4),
+            unit_vector(1.0, 4),
+        );
+        let url = spawn_mock_sidecar(Box::leak(body.into_boxed_str())).await;
+        let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+        let result = svc.embed_batch(&["a".into(), "b".into(), "c".into()]).await;
+        let err = result.expect_err("dropped input must fail the batch");
+        let msg = err.to_string();
+        assert!(msg.contains("2 embeddings for 3 inputs"), "{msg}");
+    }
+
+    /// SM9 #4: a duplicated index (same length, one input answered twice,
+    /// another dropped) is refused as non-contiguous.
+    #[tokio::test]
+    async fn embed_batch_rejects_duplicated_index() {
+        let body = format!(
+            r#"{{"data":[
+                {{"index":0,"embedding":{}}},
+                {{"index":1,"embedding":{}}},
+                {{"index":1,"embedding":{}}}
+            ]}}"#,
+            unit_vector(0.0, 4),
+            unit_vector(1.0, 4),
+            unit_vector(3.0, 4),
+        );
+        let url = spawn_mock_sidecar(Box::leak(body.into_boxed_str())).await;
+        let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+        let result = svc.embed_batch(&["a".into(), "b".into(), "c".into()]).await;
+        let err = result.expect_err("duplicate index must fail the batch");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-contiguous") && msg.contains("expected index 2"),
+            "{msg}"
+        );
+    }
+
+    /// SM9 #4: a single-text request whose sidecar response carries no data
+    /// errors instead of returning a fabricated empty vector.
+    #[tokio::test]
+    async fn embed_errors_when_response_lacks_the_requested_input() {
+        let url = spawn_mock_sidecar(r#"{"data":[]}"#).await;
+        let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+        let result = svc.embed("hello").await;
+        let err = result.expect_err("missing embedding must error");
+        assert!(
+            err.to_string().contains("0 embeddings for 1 inputs"),
+            "{err}"
+        );
+    }
+
+    /// SM9 #5: ±Inf components are rejected over the wire. (Valid JSON
+    /// cannot carry a `NaN` literal, but a float overflow such as 1e40
+    /// deserializes to an infinite f32 — the same failure a hostile or
+    /// misbehaving sidecar produces.)
+    #[tokio::test]
+    async fn embed_batch_rejects_non_finite_vectors_over_the_wire() {
+        for bad in ["1e40", "-1e40"] {
+            let body = format!(r#"{{"data":[{{"index":0,"embedding":[{bad},0.0,0.0,0.0]}}]}}"#);
+            let url = spawn_mock_sidecar(Box::leak(body.into_boxed_str())).await;
+            let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+            let result = svc.embed_batch(&["a".into()]).await;
+            let err = result.expect_err("non-finite components must be rejected");
+            assert!(err.to_string().contains("non-finite"), "{bad}: {err}");
+        }
+    }
+
+    /// SM9 #5: NaN components are rejected by the batch validator —
+    /// `l2_normalize` passes NaN through unnormalized (all comparisons
+    /// against NaN are false), and a NaN vector poisons every downstream
+    /// cosine/ranking computation. (Driven directly: valid JSON cannot
+    /// carry a NaN literal.)
+    #[test]
+    fn finalize_batch_rejects_nan_components() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let data = vec![crate::types::InferenceEmbedding {
+                index: 0,
+                embedding: vec![bad, 0.0, 0.0, 0.0],
+            }];
+            let err = finalize_batch(1, data, 4).expect_err("NaN/Inf must be rejected");
+            assert!(err.to_string().contains("non-finite"), "{bad}: {err}");
+        }
+        // A finite batch of the right shape is accepted and normalized.
+        let data = vec![crate::types::InferenceEmbedding {
+            index: 0,
+            embedding: vec![3.0, 0.0, 0.0, 0.0],
+        }];
+        let vectors = finalize_batch(1, data, 4).expect("finite batch accepted");
+        assert_eq!(vectors[0], vec![1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// SM9 #5 (verifier-repair): finite-but-huge components OVERFLOW the L2
+    /// norm to +Inf, and `l2_normalize` then divides every component into
+    /// 0.0 — without the norm gate the batch would be silently accepted as
+    /// an all-zero embedding and /embed would answer 200 with corrupt data.
+    #[test]
+    fn finalize_batch_rejects_a_norm_that_overflows() {
+        for hostile in [vec![1e20f32, 1e20, 0.0, 0.0], vec![3e38f32, 1.0, 0.0, 0.0]] {
+            let data = vec![crate::types::InferenceEmbedding {
+                index: 0,
+                embedding: hostile.clone(),
+            }];
+            let err = finalize_batch(1, data, 4)
+                .expect_err("an overflowing L2 norm must fail the batch");
+            assert!(
+                err.to_string().contains("non-finite"),
+                "{hostile:?}: {err}"
+            );
+        }
+    }
+
+    /// SM9 #5 (verifier-repair): the same overflow arriving over the wire
+    /// (valid JSON finite numbers) is an error, never a 200 with a zeroed
+    /// embedding.
+    #[tokio::test]
+    async fn embed_batch_rejects_overflowing_norm_over_the_wire() {
+        let body = r#"{"data":[{"index":0,"embedding":[1e20,1e20,0.0,0.0]}]}"#;
+        let url = spawn_mock_sidecar(body).await;
+        let svc = EmbeddingService::new(batch_service_config(url)).unwrap();
+
+        let result = svc.embed_batch(&["a".into()]).await;
+        let err = result.expect_err("overflowing norm must be rejected");
+        assert!(err.to_string().contains("non-finite"), "{err}");
     }
 }

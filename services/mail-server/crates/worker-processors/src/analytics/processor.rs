@@ -1,6 +1,6 @@
 //! Analytics processor implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +29,77 @@ const MIN_FLUSH_BATCH_SIZE: usize = 50;
 /// below MIN_FLUSH_BATCH_SIZE — low-volume tenants must not wait forever.
 const MAX_BUFFER_AGE: Duration = Duration::from_secs(30);
 
+/// Wall-clock hour bucket for an event — the single source of the
+/// `period_start` used to derive aggregation keys, shared by the increment
+/// (`update_aggregation`) and the shed-side decrement (`remove_aggregation`)
+/// paths so both always address the SAME buckets.
+fn period_start_for(event: &AnalyticsEvent) -> chrono::DateTime<Utc> {
+    match Utc.with_ymd_and_hms(
+        event.timestamp.year(),
+        event.timestamp.month(),
+        event.timestamp.day(),
+        event.timestamp.hour(),
+        0,
+        0,
+    ) {
+        chrono::LocalResult::Single(dt) => dt,
+        _ => {
+            warn!("Failed to construct period_start from event timestamp, using truncated");
+            event
+                .timestamp
+                .date_naive()
+                .and_hms_opt(event.timestamp.hour(), 0, 0)
+                .map(|dt| dt.and_utc())
+                .unwrap_or(event.timestamp)
+        }
+    }
+}
+
+/// The aggregation bucket keys one event feeds (tenant, domain, campaign,
+/// and domain-campaign shapes) plus each bucket's identity columns.
+fn aggregation_keys_for(
+    event: &AnalyticsEvent,
+    period_key: &str,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    let mut keys: Vec<(String, Option<String>, Option<String>)> =
+        vec![(format!("T:{}:{}", event.tenant_id, period_key), None, None)];
+
+    if let Some(domain_id) = &event.domain_id {
+        keys.push((
+            format!("D:{}:{}:{}", event.tenant_id, domain_id, period_key),
+            Some(domain_id.clone()),
+            None,
+        ));
+    }
+
+    if let Some(campaign_id) = &event.campaign_id {
+        keys.push((
+            format!("C:{}:{}:{}", event.tenant_id, campaign_id, period_key),
+            None,
+            Some(campaign_id.clone()),
+        ));
+    }
+
+    if let (Some(domain_id), Some(campaign_id)) = (&event.domain_id, &event.campaign_id) {
+        keys.push((
+            format!(
+                "DC:{}:{}:{}:{}",
+                event.tenant_id, domain_id, campaign_id, period_key
+            ),
+            Some(domain_id.clone()),
+            Some(campaign_id.clone()),
+        ));
+    }
+
+    keys
+}
+
+/// What the post-flush-failure load shed removed (for the warn log).
+#[derive(Debug, Default, Clone, Copy)]
+struct ShedStats {
+    events_shed: usize,
+}
+
 /// Analytics processor for event aggregation and real-time stats.
 pub struct AnalyticsProcessor {
     db: PgPool,
@@ -36,13 +107,18 @@ pub struct AnalyticsProcessor {
     config: AnalyticsConfig,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
-    event_buffer: Arc<RwLock<Vec<AnalyticsEvent>>>,
+    event_buffer: Arc<RwLock<VecDeque<AnalyticsEvent>>>,
     aggregation_buffer: Arc<RwLock<HashMap<String, AggregatedStats>>>,
     /// Wall-clock time when the event buffer last went from empty to
     /// non-empty — drives the age-based flush. `None` while the buffer is
     /// empty.
     oldest_buffered_at: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     is_flushing: AtomicBool,
+    /// SM10 F4: data-plane STONITH gate. With `APEXMAIL_HA_FENCING=true`
+    /// the claim loop refuses to fetch (and aggregate) queue rows while
+    /// this node's `ha:fenced:{node}` key stands — or while the fence
+    /// authority cannot be read (fail closed). Default off: zero change.
+    fence_gate: crate::fence::FenceGate,
     shutdown_notify: Arc<Notify>,
 }
 
@@ -55,10 +131,11 @@ impl AnalyticsProcessor {
             config,
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
-            event_buffer: Arc::new(RwLock::new(Vec::new())),
+            event_buffer: Arc::new(RwLock::new(VecDeque::new())),
             aggregation_buffer: Arc::new(RwLock::new(HashMap::new())),
             oldest_buffered_at: Arc::new(std::sync::Mutex::new(None)),
             is_flushing: AtomicBool::new(false),
+            fence_gate: crate::fence::FenceGate::from_env(),
             shutdown_notify: Arc::new(Notify::new()),
         }
     }
@@ -117,6 +194,16 @@ impl AnalyticsProcessor {
     /// Main poll loop.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
+            // SM10 F4: a fenced node must not claim or aggregate events; an
+            // unreadable fence authority fails closed. Disabled by default.
+            if let Err(refusal) = self.fence_gate.ensure_can_claim().await {
+                error!(
+                    error = %refusal,
+                    "node is fenced; analytics claim loop paused (SM10 F4)"
+                );
+                sleep(self.config.base.poll_interval).await;
+                continue;
+            }
             match self.poll_batch().await {
                 Ok(count) => {
                     if count == 0 {
@@ -231,6 +318,18 @@ impl AnalyticsProcessor {
     /// has written to the DB (see `flush_buffers_inner`) — never here. Until
     /// then they stay claimed in `analytics_queue` and owned by the in-memory
     /// buffer, so a write failure cannot lose or double-count them.
+    ///
+    /// SM10 F8: the buffer caps no longer evict inline. Hitting either cap
+    /// forces a SYNCHRONOUS flush first — the flush writes every counted
+    /// aggregation exactly once and marks its events processed exactly once,
+    /// so cap pressure is relieved without corrupting counts. Only when that
+    /// flush itself fails do we shed, and shedding removes an event from the
+    /// buffer TOGETHER WITH its aggregation contributions (the queue row
+    /// stays claimed, so the 10-minute reclaim re-processes the event from
+    /// scratch). The previous inline evictions corrupted counts in both
+    /// directions: dropped-but-aggregated events were reclaimed and
+    /// re-aggregated (double count), and evicted-aggregation events were
+    /// still marked processed (silent undercount).
     async fn process_events_inner(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
         // Add to event buffer (sync operation). Ids already present are
         // skipped — a restored flush buffer can overlap with re-claimed rows.
@@ -241,19 +340,8 @@ impl AnalyticsProcessor {
                 buffer.iter().map(|e| e.id.clone()).collect();
             for event in &events {
                 if !known.contains(&event.id) {
-                    buffer.push(event.clone());
+                    buffer.push_back(event.clone());
                 }
-            }
-
-            // Enforce buffer size cap
-            if buffer.len() > MAX_EVENT_BUFFER_SIZE {
-                let dropped = buffer.len() - MAX_EVENT_BUFFER_SIZE;
-                buffer.drain(0..dropped);
-                warn!(
-                    dropped = dropped,
-                    cap = MAX_EVENT_BUFFER_SIZE,
-                    "Event buffer exceeded cap, dropped oldest events"
-                );
             }
 
             if was_empty && !buffer.is_empty() {
@@ -267,7 +355,8 @@ impl AnalyticsProcessor {
             buffer.len() >= self.config.base.batch_size
         };
 
-        // Update aggregation counters (sync operation)
+        // Update aggregation counters (sync operation). No cap enforcement
+        // here — see the module doc on `process_events_inner` (SM10 F8).
         for event in &events {
             self.update_aggregation(event);
         }
@@ -283,65 +372,117 @@ impl AnalyticsProcessor {
             }
         }
 
+        // SM10 F8: cap pressure forces a synchronous flush FIRST; shedding
+        // happens only if that flush itself fails (a concurrent flush owns
+        // the buffers and will relieve the pressure or retry).
+        if self.buffers_over_cap() {
+            match self.flush_buffers_forced().await {
+                Ok(true) => {
+                    debug!(
+                        cap_events = MAX_EVENT_BUFFER_SIZE,
+                        cap_aggregations = MAX_AGGREGATION_BUFFER_SIZE,
+                        "buffer cap hit; synchronous flush drained the buffers"
+                    );
+                }
+                // Another flush is in flight: it either drains the buffers or
+                // restores them for its own retry; the next batch re-checks.
+                Ok(false) => {}
+                Err(e) => {
+                    error!(
+                        error = %e,
+                        "cap-forced flush failed; shedding oldest buffered events with their aggregation contributions"
+                    );
+                    let shed = self.shed_buffer_pressure();
+                    if shed.events_shed > 0 {
+                        warn!(
+                            events_shed = shed.events_shed,
+                            "shed oldest buffered events after a failed cap flush; their queue rows stay \
+                             claimed and the 10-minute reclaim re-processes them"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
-    /// Update aggregation buffer with an event.
-    fn update_aggregation(&self, event: &AnalyticsEvent) {
-        let period_start = match Utc.with_ymd_and_hms(
-            event.timestamp.year(),
-            event.timestamp.month(),
-            event.timestamp.day(),
-            event.timestamp.hour(),
-            0,
-            0,
-        ) {
-            chrono::LocalResult::Single(dt) => dt,
-            _ => {
-                warn!("Failed to construct period_start from event timestamp, using truncated");
-                event
-                    .timestamp
-                    .date_naive()
-                    .and_hms_opt(event.timestamp.hour(), 0, 0)
-                    .map(|dt| dt.and_utc())
-                    .unwrap_or(event.timestamp)
+    /// Whether either in-memory buffer is over its cap.
+    fn buffers_over_cap(&self) -> bool {
+        let events_over = self
+            .event_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            > MAX_EVENT_BUFFER_SIZE;
+        let aggregations_over = self
+            .aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+            > MAX_AGGREGATION_BUFFER_SIZE;
+        events_over || aggregations_over
+    }
+
+    /// In-memory load shed after a FAILED forced flush (SM10 F8).
+    ///
+    /// Removes the OLDEST buffered events one at a time until neither cap
+    /// holds, and for each removed event subtracts its aggregation
+    /// contributions (`AggregatedStats::decrement`; buckets that empty are
+    /// deleted). An event is therefore either fully in memory until a
+    /// successful flush marks it processed, or fully gone — never counted
+    /// while dropped.
+    ///
+    /// Dropped events' queue rows stay CLAIMED (only a flush that included
+    /// them marks them processed, and the failed flush marked nothing), so
+    /// the 10-minute stale-claim reclaim re-fetches and re-processes them:
+    /// no double count (their contributions were removed with them) and no
+    /// silent undercount (the reclaim rebuilds the counts).
+    fn shed_buffer_pressure(&self) -> ShedStats {
+        let mut shed = ShedStats::default();
+        loop {
+            if !self.buffers_over_cap() {
+                break;
             }
-        };
+            let oldest = {
+                let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
+                buffer.pop_front()
+            };
+            match oldest {
+                Some(event) => {
+                    self.remove_aggregation(&event);
+                    shed.events_shed += 1;
+                }
+                None => {
+                    warn!(
+                        aggregation_keys = self
+                            .aggregation_buffer
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .len(),
+                        "load shed drained the event buffer while the aggregation map is over cap; \
+                         leaving the map for the retrying flush"
+                    );
+                    break;
+                }
+            }
+        }
+        shed
+    }
+
+    /// Update aggregation buffer with an event.
+    ///
+    /// SM10 F8: this no longer evicts under cap pressure — an eviction here
+    /// silently destroyed counts whose events were still buffered and got
+    /// marked processed by the next flush. Cap pressure is handled by the
+    /// forced-flush + per-event shed in `process_events_inner`.
+    fn update_aggregation(&self, event: &AnalyticsEvent) {
+        let period_start = period_start_for(event);
         let period_end = period_start + TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
 
         // Use epoch milliseconds for period key (no ambiguous ':' characters)
         let period_key = period_start.timestamp_millis().to_string();
-
-        // Generate aggregation keys
-        let mut keys: Vec<(String, Option<String>, Option<String>)> =
-            vec![(format!("T:{}:{}", event.tenant_id, period_key), None, None)];
-
-        if let Some(domain_id) = &event.domain_id {
-            keys.push((
-                format!("D:{}:{}:{}", event.tenant_id, domain_id, period_key),
-                Some(domain_id.clone()),
-                None,
-            ));
-        }
-
-        if let Some(campaign_id) = &event.campaign_id {
-            keys.push((
-                format!("C:{}:{}:{}", event.tenant_id, campaign_id, period_key),
-                None,
-                Some(campaign_id.clone()),
-            ));
-        }
-
-        if let (Some(domain_id), Some(campaign_id)) = (&event.domain_id, &event.campaign_id) {
-            keys.push((
-                format!(
-                    "DC:{}:{}:{}:{}",
-                    event.tenant_id, domain_id, campaign_id, period_key
-                ),
-                Some(domain_id.clone()),
-                Some(campaign_id.clone()),
-            ));
-        }
+        let keys = aggregation_keys_for(event, &period_key);
 
         let mut buffer = self
             .aggregation_buffer
@@ -361,29 +502,28 @@ impl AnalyticsProcessor {
 
             stats.increment(&event.event_type);
         }
+    }
 
-        if buffer.len() > MAX_AGGREGATION_BUFFER_SIZE {
-            let excess = buffer.len() - MAX_AGGREGATION_BUFFER_SIZE;
-            let mut keys_by_age: Vec<(String, chrono::DateTime<Utc>)> = buffer
-                .iter()
-                .map(|(k, v)| (k.clone(), v.period_start))
-                .collect();
-            keys_by_age.sort_by_key(|(_, ts)| *ts);
-            let keys_to_remove: Vec<String> = keys_by_age
-                .into_iter()
-                .take(excess)
-                .map(|(k, _)| k)
-                .collect();
-            for key in &keys_to_remove {
-                buffer.remove(key);
+    /// Remove one event's aggregation contributions (SM10 F8 load shed):
+    /// decrement every bucket the event touched and delete buckets that
+    /// emptied. A bucket a concurrent flush already drained is simply absent
+    /// — `decrement` clamps, and a missing key is a no-op.
+    fn remove_aggregation(&self, event: &AnalyticsEvent) {
+        let period_start = period_start_for(event);
+        let period_key = period_start.timestamp_millis().to_string();
+        let keys = aggregation_keys_for(event, &period_key);
+
+        let mut buffer = self
+            .aggregation_buffer
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for (key, _, _) in keys {
+            if let Some(stats) = buffer.get_mut(&key) {
+                stats.decrement(&event.event_type);
+                if stats.is_empty() {
+                    buffer.remove(&key);
+                }
             }
-            let buffer_size = buffer.len();
-            warn!(
-                evicted = excess,
-                buffer_size,
-                cap = MAX_AGGREGATION_BUFFER_SIZE,
-                "Aggregation buffer exceeded cap, evicted oldest entries by period_start"
-            );
         }
     }
 
@@ -433,28 +573,42 @@ impl AnalyticsProcessor {
     }
 
     /// Flush event and aggregation buffers.
+    ///
+    /// Fire-and-forget variant: returns `Ok(())` even when another flush is
+    /// already in flight (that flush owns the buffers).
     async fn flush_buffers(&self) -> ProcessorResult<()> {
+        self.flush_buffers_forced().await.map(|_| ())
+    }
+
+    /// Flush event and aggregation buffers, reporting whether THIS call ran.
+    ///
+    /// SM10 F8: the cap-pressure path must distinguish "flushed" from
+    /// "skipped because a concurrent flush holds the mutex" — a skipped
+    /// caller must not conclude the buffers were drained (nor shed on their
+    /// behalf).
+    async fn flush_buffers_forced(&self) -> ProcessorResult<bool> {
         // Mutex to prevent concurrent flushes
         if self
             .is_flushing
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Ok(());
+            return Ok(false);
         }
 
         let result = self.flush_buffers_inner().await;
 
         self.is_flushing.store(false, Ordering::SeqCst);
 
-        result
+        result.map(|_| true)
     }
 
     async fn flush_buffers_inner(&self) -> ProcessorResult<()> {
         let (events, event_ids): (Vec<AnalyticsEvent>, Vec<String>) = {
             let mut buffer = self.event_buffer.write().unwrap_or_else(|e| e.into_inner());
             let ids: Vec<_> = buffer.iter().map(|e| e.id.clone()).collect();
-            let events = std::mem::take(&mut *buffer);
+            // The ring drains into the flat Vec the write/restore paths use.
+            let events: Vec<AnalyticsEvent> = std::mem::take(&mut *buffer).into();
             (events, ids)
         };
 
@@ -540,7 +694,7 @@ impl AnalyticsProcessor {
                 buffer.iter().map(|e| e.id.clone()).collect();
             for event in events {
                 if !known.contains(&event.id) {
-                    buffer.push(event);
+                    buffer.push_back(event);
                 }
             }
             if was_empty && !buffer.is_empty() {
@@ -905,6 +1059,230 @@ mod tests {
         assert!(
             !source.contains("GROUP BY tenant_id, domain_id\n"),
             "the campaign-less rollup grouping must not remain"
+        );
+    }
+
+    // ── SM10 F8: cap pressure must flush, never corrupt counts ─────────────
+
+    use crate::analytics::types::AnalyticsEvent;
+
+    /// A processor whose DB/Redis pools can only fail fast: the hermetic F8
+    /// tests exercise the in-memory cap/shed mechanics, so every I/O touch
+    /// errors immediately (lazy pools, port 1, 200 ms acquire timeout).
+    fn dead_pool_processor(config: AnalyticsConfig) -> AnalyticsProcessor {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/hermetic_f8")
+            .expect("lazy pg pool construction");
+        let mut redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.recycle = Some(Duration::from_millis(100));
+        redis_cfg.pool = Some(pool_cfg);
+        let redis = redis_cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction");
+        AnalyticsProcessor::new(db, redis, config)
+    }
+
+    fn shed_event(n: usize) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: format!("shed-{n}"),
+            tenant_id: format!("tenant-{n}"), // one bucket per event
+            event_type: "sent".to_string(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: None,
+            metadata: None,
+            // A FIXED instant: every fixture event shares one period bucket
+            // key, so the tests never flake across an hour boundary.
+            timestamp: Utc.with_ymd_and_hms(2026, 1, 15, 9, 30, 0).unwrap(),
+        }
+    }
+
+    /// Sum of a metric across every aggregation bucket — the count the DB
+    /// would receive if the buffer flushed right now.
+    fn total_sent(proc: &AnalyticsProcessor) -> i64 {
+        proc.aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .map(|s| s.sent)
+            .sum()
+    }
+
+    /// The old event-cap path DROPPED the oldest events after
+    /// `update_aggregation` had already counted them, and the 10-minute
+    /// reclaim re-aggregated them — a double count. The replacement
+    /// contract: a cap hit forces a flush and, when the flush fails, sheds
+    /// each event TOGETHER WITH its aggregation contributions, so the
+    /// buffered total always equals the counted total (no double count via
+    /// reclaim, no silent undercount).
+    #[tokio::test]
+    async fn cap_hit_with_failing_flush_sheds_events_and_their_counts_together() {
+        crate::test_support::install_test_tracing();
+        let config = AnalyticsConfig {
+            base: crate::common::ProcessorConfig {
+                name: "analytics-f8".to_string(),
+                batch_size: 10_000, // force the size-based flush trigger
+                poll_interval: Duration::from_millis(20),
+                flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            stats_ttl: Duration::from_secs(60),
+        };
+        let proc = dead_pool_processor(config);
+
+        let events: Vec<AnalyticsEvent> = (0..MAX_EVENT_BUFFER_SIZE + 1).map(shed_event).collect();
+        proc.process_events(events)
+            .await
+            .expect("process_events never fails the batch");
+
+        // The cap-forced flush failed (dead pool), so the shed path ran:
+        // both buffers must be back inside their caps.
+        let event_len = proc
+            .event_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        let agg_len = proc
+            .aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert!(
+            event_len <= MAX_EVENT_BUFFER_SIZE,
+            "event buffer must be shed back under its cap, got {event_len}"
+        );
+        assert!(
+            agg_len <= MAX_AGGREGATION_BUFFER_SIZE,
+            "aggregation map must be shed back under its cap, got {agg_len}"
+        );
+
+        // THE invariant: every counted unit belongs to a buffered event and
+        // every buffered event is counted exactly once. Shed events left
+        // WITH their counts (the reclaim re-processes them); survivors are
+        // intact.
+        assert_eq!(
+            total_sent(&proc) as usize,
+            event_len,
+            "counted totals must exactly match the buffered events after a shed"
+        );
+        let remaining: std::collections::HashSet<String> = proc
+            .event_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
+        let period_key = period_start_for(&shed_event(0)).timestamp_millis();
+        let buckets = proc
+            .aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in &remaining {
+            let tenant = id.trim_start_matches("shed-");
+            assert!(
+                buckets.contains_key(&format!("T:tenant-{tenant}:{period_key}")),
+                "every surviving event must still own its aggregation bucket ({id})"
+            );
+        }
+        // The OLDEST events were shed (FIFO).
+        for n in 0..40_000 {
+            assert!(
+                !remaining.contains(&format!("shed-{n}")),
+                "shed events must leave the buffer (shed-{n} survived)"
+            );
+        }
+    }
+
+    /// The old `update_aggregation` silently evicted the oldest buckets when
+    /// the map crossed its cap while the events stayed buffered — the flush
+    /// then marked those events processed with their counts never written
+    /// (the mirror-image silent undercount). Aggregation growth must now be
+    /// eviction-free: the cap decision belongs to the forced-flush path.
+    #[tokio::test] // pool construction needs a reactor, the assertions are sync
+    async fn update_aggregation_grows_without_inline_eviction() {
+        crate::test_support::install_test_tracing();
+        let config = AnalyticsConfig {
+            base: crate::common::ProcessorConfig {
+                name: "analytics-f8-noevict".to_string(),
+                ..Default::default()
+            },
+            stats_ttl: Duration::from_secs(60),
+        };
+        let proc = dead_pool_processor(config);
+
+        for n in 0..(MAX_AGGREGATION_BUFFER_SIZE + 10) {
+            proc.update_aggregation(&shed_event(n));
+        }
+        let agg_len = proc
+            .aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(
+            agg_len,
+            MAX_AGGREGATION_BUFFER_SIZE + 10,
+            "update_aggregation must never evict inline; the forced-flush path owns the cap"
+        );
+        assert_eq!(
+            total_sent(&proc) as usize,
+            MAX_AGGREGATION_BUFFER_SIZE + 10,
+            "no counted unit may be lost to an inline eviction"
+        );
+    }
+
+    /// Shedding an event whose bucket was already drained (a concurrent
+    /// flush) must be a clean no-op, per-event decrements must be exact
+    /// against shared buckets, and an emptied bucket must be deleted rather
+    /// than squatting on the cap as a zero-count husk.
+    #[tokio::test] // pool construction needs a reactor, the assertions are sync
+    async fn remove_aggregation_is_exact_and_tolerates_missing_buckets() {
+        crate::test_support::install_test_tracing();
+        let config = AnalyticsConfig {
+            base: crate::common::ProcessorConfig {
+                name: "analytics-f8-shed".to_string(),
+                ..Default::default()
+            },
+            stats_ttl: Duration::from_secs(60),
+        };
+        let proc = dead_pool_processor(config);
+
+        let shared = AnalyticsEvent {
+            id: "shared-1".into(),
+            tenant_id: "tenant-shared".into(),
+            event_type: "sent".into(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: None,
+            metadata: None,
+            timestamp: Utc::now(),
+        };
+        proc.update_aggregation(&shared);
+        proc.update_aggregation(&shared); // bucket now sent = 2
+        proc.remove_aggregation(&shared); // shed one -> sent = 1
+        assert_eq!(total_sent(&proc), 1, "exact per-event decrement");
+
+        // Shedding an event with NO bucket (already flushed concurrently):
+        // no panic, no count movement.
+        let ghost = shed_event(9_999_999);
+        proc.remove_aggregation(&ghost);
+        assert_eq!(total_sent(&proc), 1, "ghost shed must not move counts");
+
+        // Shedding the last contribution empties and deletes the bucket.
+        proc.remove_aggregation(&shared);
+        let period_key = period_start_for(&shared).timestamp_millis();
+        assert!(
+            !proc
+                .aggregation_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&format!("T:tenant-shared:{period_key}")),
+            "an emptied bucket must be deleted"
         );
     }
 }
@@ -1444,8 +1822,16 @@ mod adversarial_db_tests {
         assert_eq!(buffer[&tenant_key].sent, 0);
     }
 
+    /// SM10 F8: the aggregation map no longer evicts at the cap. Inline
+    /// eviction silently destroyed counts whose events were still buffered
+    /// and were then marked processed by the next flush (a mirror-image
+    /// undercount). Growth past the cap is now intentional: the
+    /// forced-flush path (flush first; shed events WITH their counts only
+    /// when the flush itself fails) owns cap pressure — see
+    /// `cap_hit_with_failing_flush_sheds_events_and_their_counts_together`
+    /// in the unit module for the full shed invariant.
     #[tokio::test]
-    async fn aggregation_buffer_evicts_oldest_periods_at_the_cap() {
+    async fn aggregation_buffer_growth_is_eviction_free_at_the_cap() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
@@ -1472,30 +1858,41 @@ mod adversarial_db_tests {
         proc.update_aggregation(&fresh);
 
         let buffer = proc.aggregation_buffer.read().unwrap();
-        assert!(
-            buffer.len() <= MAX_AGGREGATION_BUFFER_SIZE,
-            "the aggregation buffer must respect its cap, got {}",
-            buffer.len()
+        assert_eq!(
+            buffer.len(),
+            MAX_AGGREGATION_BUFFER_SIZE + 1,
+            "growth past the cap must be eviction-free — update_aggregation never sheds"
         );
-        // The eviction is by period age: the newest key (the fresh event) stays.
-        let fresh_key = buffer.keys().find(|k| {
-            k.starts_with("T:tenant-cap:")
-                && buffer[*k].period_start > old + TimeDelta::try_days(1).unwrap()
-        });
-        assert!(fresh_key.is_some(), "the fresh entry must survive eviction");
+        // The fresh entry survives (nothing was evicted)…
+        assert!(
+            buffer.keys().any(|k| k.starts_with("T:tenant-cap:")
+                && buffer[k].period_start > old + TimeDelta::try_days(1).unwrap()),
+            "the fresh entry must not be evicted inline"
+        );
+        // …and no counted unit was lost or duplicated by the growth.
+        let total_sent: i64 = buffer.values().map(|s| s.sent).sum();
+        assert_eq!(total_sent, 1, "counts must be untouched by cap growth");
     }
 
+    /// At the event cap the processor SHEDS the oldest buffered events —
+    /// together with their aggregation contributions — after the cap-forced
+    /// flush failed (SM10 F8; the pool here cannot flush). The newest event
+    /// survives, the oldest leave WITH their counts (their queue rows stay
+    /// claimed and the 10-minute reclaim re-processes them from scratch).
     #[tokio::test]
-    async fn event_buffer_cap_drops_oldest_without_losing_the_newest() {
+    async fn event_buffer_cap_sheds_oldest_after_a_failed_flush_without_losing_the_newest() {
+        // Port 1: the flush can never succeed, so the shed path runs
+        // deterministically regardless of what listens on the dev machine.
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/unused")
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://127.0.0.1:1/event_cap_shed")
             .unwrap();
-        let proc = AnalyticsProcessor::new(pool, redis_pool(), test_config());
+        let proc = AnalyticsProcessor::new(pool, dead_redis_pool(), test_config());
         let tenant = "tenant-event-cap";
         {
             let mut buffer = proc.event_buffer.write().unwrap();
             for i in 0..(MAX_EVENT_BUFFER_SIZE + 10) {
-                buffer.push(event(&format!("ev-{i}"), tenant, "sent"));
+                buffer.push_back(event(&format!("ev-{i}"), tenant, "sent"));
             }
         }
         let newest = event("ev-newest", tenant, "sent");
@@ -1505,16 +1902,16 @@ mod adversarial_db_tests {
         let buffer = proc.event_buffer.read().unwrap();
         assert!(
             buffer.len() <= MAX_EVENT_BUFFER_SIZE,
-            "the event buffer must respect its cap, got {}",
+            "the event buffer must be shed back under its cap, got {}",
             buffer.len()
         );
         assert!(
             buffer.iter().any(|e| e.id == "ev-newest"),
-            "the newest event must survive the drop-oldest policy"
+            "the newest event must survive the shed"
         );
         assert!(
             !buffer.iter().any(|e| e.id == "ev-0"),
-            "the oldest buffered events are the ones dropped"
+            "the oldest buffered events are the ones shed"
         );
     }
 
@@ -1684,7 +2081,7 @@ mod adversarial_db_tests {
                 .event_buffer
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(event(&format!("outage-{i}"), "t-outage", "sent"));
+                .push_back(event(&format!("outage-{i}"), "t-outage", "sent"));
         }
         *processor
             .oldest_buffered_at
@@ -1961,7 +2358,7 @@ mod residual_arms {
             .event_buffer
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .push(evt);
+            .push_back(evt);
 
         sqlx::query("ALTER TABLE analytics_hourly RENAME TO analytics_hourly_gone")
             .execute(&pool)
@@ -2007,8 +2404,8 @@ mod residual_arms {
     /// MIN_FLUSH_BATCH_SIZE) whose clock exceeds MAX_BUFFER_AGE is flushed
     /// on the next tick — low-volume tenants must not wait for a full batch.
     #[tokio::test] // real time: the loop parks on a real interval
-    async fn age_based_flush_pushes_sub_minimum_batches(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn age_based_flush_pushes_sub_minimum_batches() -> Result<(), Box<dyn std::error::Error>>
+    {
         #[rustfmt::skip]
         let Some(pool) = residual_pool("an_res_age_flush").await else { return Ok(()) };
         let mut config = test_config();
@@ -2024,7 +2421,7 @@ mod residual_arms {
             .event_buffer
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .push(evt);
+            .push_back(evt);
         // Backdate the flush clock past MAX_BUFFER_AGE.
         *processor
             .oldest_buffered_at
@@ -2100,7 +2497,7 @@ mod residual_arms {
             .event_buffer
             .write()
             .unwrap_or_else(|e| e.into_inner())
-            .push(evt);
+            .push_back(evt);
 
         sqlx::query("ALTER TABLE analytics_queue RENAME TO analytics_queue_gone")
             .execute(&pool)
@@ -2127,7 +2524,10 @@ mod residual_arms {
         .fetch_one(&pool)
         .await
         .expect("hourly totals");
-        assert_eq!(sent, 1, "the aggregation was persisted before the marking failure");
+        assert_eq!(
+            sent, 1,
+            "the aggregation was persisted before the marking failure"
+        );
 
         sqlx::query("ALTER TABLE analytics_queue_gone RENAME TO analytics_queue")
             .execute(&pool)

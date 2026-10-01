@@ -2092,7 +2092,8 @@ mod tests {
     /// router can be driven inside `#[tokio::test]` without nesting
     /// runtimes. Handlers that reach the database fail; the tests below
     /// assert on the pre-database behavior (auth, scoping, 501/503).
-    pub(super) fn lazy_test_app_with_config(config: crate::config::SalesConfig) -> Router {        let db = PgPoolOptions::new()
+    pub(super) fn lazy_test_app_with_config(config: crate::config::SalesConfig) -> Router {
+        let db = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
@@ -2365,9 +2366,10 @@ mod tests {
         // batch: scoped cleanup — the system tenant is SHARED by every test
         // in the suite, so cleanup must key on this test's unique email and
         // never on tenant_id.
-        if let Some(db) =
-            crate::test_db::canonical_test_pool("routes::tests::test_create_and_list_leads::cleanup")
-                .await
+        if let Some(db) = crate::test_db::canonical_test_pool(
+            "routes::tests::test_create_and_list_leads::cleanup",
+        )
+        .await
         {
             let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = $1 AND email = $2")
                 .bind(tenant)
@@ -2687,7 +2689,9 @@ mod tests {
         // with neither concurrent tests nor previous runs (the shared
         // database reuses the per-tenant unique email index).
         let tenant = config::SYSTEM_TENANT_ID;
-        let emails: Vec<String> = (0..3).map(|index| unique_email(&format!("lead{index}"))).collect();
+        let emails: Vec<String> = (0..3)
+            .map(|index| unique_email(&format!("lead{index}")))
+            .collect();
 
         for email in &emails {
             let body = serde_json::json!({
@@ -3040,10 +3044,7 @@ mod tests {
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(
-            pre_get_sup, 0,
-            "F39: a plain GET must not change consent"
-        );
+        assert_eq!(pre_get_sup, 0, "F39: a plain GET must not change consent");
 
         // The confirmed POST suppresses (both stores, canonical address).
         let resp = app
@@ -3598,12 +3599,13 @@ mod tests {
                     .execute(&db)
                     .await;
             }
-            let _ =
-                sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1 AND domain = ANY($2)")
-                    .bind(tenant)
-                    .bind(&domains)
-                    .execute(&db)
-                    .await;
+            let _ = sqlx::query(
+                "DELETE FROM enriched_companies WHERE tenant_id = $1 AND domain = ANY($2)",
+            )
+            .bind(tenant)
+            .bind(&domains)
+            .execute(&db)
+            .await;
         }
     }
 
@@ -3710,7 +3712,9 @@ mod tests {
         // the whole suite, so the unfiltered listing is only asserted to
         // CONTAIN this conversion (concurrent tests may own others); the
         // campaign/lead/limit-scoped listings stay exact.
-        let unfiltered_request = auth(Request::get("/conversions")).body(Body::empty()).unwrap();
+        let unfiltered_request = auth(Request::get("/conversions"))
+            .body(Body::empty())
+            .unwrap();
         let unfiltered = app.clone().oneshot(unfiltered_request).await.unwrap();
         assert_eq!(unfiltered.status(), StatusCode::OK);
         let unfiltered_rows = json_body(unfiltered).await;
@@ -3753,13 +3757,12 @@ mod tests {
         // batch: scoped cleanup — the system tenant is shared, so delete by
         // this test's ids/emails, never by tenant_id.
         if let Some(db) = crate::test_db::canonical_test_pool("routes_conversions_cleanup").await {
-            let _ = sqlx::query(
-                "DELETE FROM sales_conversions WHERE campaign_id = $1 OR lead_id = $2",
-            )
-            .bind(campaign_id)
-            .bind(lead_id)
-            .execute(&db)
-            .await;
+            let _ =
+                sqlx::query("DELETE FROM sales_conversions WHERE campaign_id = $1 OR lead_id = $2")
+                    .bind(campaign_id)
+                    .bind(lead_id)
+                    .execute(&db)
+                    .await;
             let _ = sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
                 .bind(campaign_id)
                 .execute(&db)
@@ -4313,9 +4316,10 @@ mod coverage_wave_routes {
             return;
         };
 
-        let token = crate::dispatcher::create_unsubscribe_token(&db, &tenant, "clicker@example.com")
-            .await
-            .expect("v2 token");
+        let token =
+            crate::dispatcher::create_unsubscribe_token(&db, &tenant, "clicker@example.com")
+                .await
+                .expect("v2 token");
 
         // GET: the confirmation form (200 HTML), never a redirect, never a
         // suppression.
@@ -4404,7 +4408,8 @@ mod coverage_wave_routes {
         const ISOLATED_REDIS_URL: &str = "redis://127.0.0.1:6379/1";
         let config = crate::config::SalesConfig::default();
         let Some(app) =
-            canonical_app_with_redis_url("routes_wave_rate_limit", config, ISOLATED_REDIS_URL).await
+            canonical_app_with_redis_url("routes_wave_rate_limit", config, ISOLATED_REDIS_URL)
+                .await
         else {
             return;
         };
@@ -4418,7 +4423,10 @@ mod coverage_wave_routes {
             .await
             .expect("connect to the isolated redis db");
         let _: i64 = deadpool_redis::redis::cmd("DEL")
-            .arg(format!("{RATE_LIMITER_REDIS_PREFIX}{}", config::SYSTEM_TENANT_ID))
+            .arg(format!(
+                "{RATE_LIMITER_REDIS_PREFIX}{}",
+                config::SYSTEM_TENANT_ID
+            ))
             .query_async(&mut purge_conn)
             .await
             .expect("purge the rate-limit window");
@@ -4581,20 +4589,21 @@ mod coverage_wave_routes {
         let nonsense_rows = nonsense.as_array().unwrap();
         assert!(!nonsense_rows.is_empty(), "{nonsense}");
         assert!(
-            nonsense_rows
-                .iter()
-                .all(|row| row["category"] == "other"),
+            nonsense_rows.iter().all(|row| row["category"] == "other"),
             "unknown categories land in `other`: {nonsense}"
         );
         assert!(
-            nonsense_rows.iter().any(|row| row["from"] == "misc1@example.com"),
+            nonsense_rows
+                .iter()
+                .any(|row| row["from"] == "misc1@example.com"),
             "{nonsense}"
         );
 
         // Hostile pagination clamps instead of erroring.
         let paged = json_body(get("/inbox?limit=2&offset=0", tenant.to_string()).await).await;
         assert_eq!(paged.as_array().unwrap().len(), 2, "{paged}");
-        let clamped = json_body(get("/inbox?limit=-5&offset=99999", tenant.to_string()).await).await;
+        let clamped =
+            json_body(get("/inbox?limit=-5&offset=99999", tenant.to_string()).await).await;
         assert!(clamped.as_array().unwrap().is_empty(), "{clamped}");
 
         // batch: system-tenant restriction — the gate refuses foreign tenants
@@ -4604,11 +4613,13 @@ mod coverage_wave_routes {
         let foreign = get("/inbox", other).await;
         assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
 
-        let _ = sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)")
-            .bind(tenant)
-            .bind(&senders)
-            .execute(&db)
-            .await;
+        let _ = sqlx::query(
+            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)",
+        )
+        .bind(tenant)
+        .bind(&senders)
+        .execute(&db)
+        .await;
     }
 
     // ── Inbox reply through the real dispatcher ──────────────────────────
@@ -4650,7 +4661,10 @@ mod coverage_wave_routes {
         .await
         .expect("seed verified sender domain");
         let inbox_id = Uuid::new_v4();
-        let sender = format!("prospect-{}@example.com", &inbox_id.simple().to_string()[..8]);
+        let sender = format!(
+            "prospect-{}@example.com",
+            &inbox_id.simple().to_string()[..8]
+        );
         // Fix #19: the fixture previously seeded the legacy category
         // 'positive' (which parses to the non-concrete `Other`) — the new
         // irreversible-action guard refuses replies to non-concrete rows,
@@ -4720,8 +4734,11 @@ mod coverage_wave_routes {
         assert_eq!(queued, 1);
 
         // A replay does NOT send a second reply.
-        let replay = post_reply(app.clone(), serde_json::json!({ "body": "duplicate attempt" }))
-            .await;
+        let replay = post_reply(
+            app.clone(),
+            serde_json::json!({ "body": "duplicate attempt" }),
+        )
+        .await;
         assert_eq!(replay.status(), StatusCode::ACCEPTED);
         let body = json_body(replay).await;
         assert_eq!(body["duplicate"], true, "{body}");
@@ -4746,7 +4763,10 @@ mod coverage_wave_routes {
             .oneshot(
                 Request::post(format!("/inbox/{inbox_id}/reply"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", crate::test_db::unique_test_tenant("routes-reply-o"))
+                    .header(
+                        "x-tenant-id",
+                        crate::test_db::unique_test_tenant("routes-reply-o"),
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::to_vec(&serde_json::json!({ "body": "steal" })).unwrap(),
@@ -4782,8 +4802,7 @@ mod coverage_wave_routes {
     /// refused before any enqueue work.
     #[tokio::test]
     async fn inbox_reply_refuses_suppressed_invalid_and_oversized_requests() {
-        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_reply_bad_db").await
-        else {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_reply_bad_db").await else {
             return;
         };
         let Some(app) = canonical_app_with_dispatcher("routes_wave_reply_bad").await else {
@@ -4802,7 +4821,10 @@ mod coverage_wave_routes {
         // replies to non-concrete rows BEFORE the suppression/sender checks
         // these cases exercise, so the fixtures use a concrete
         // classifier-emitted category (`support`). Assertions unchanged.
-        for (id, sender) in [(suppressed_inbox, "bounced@example.com"), (invalid_inbox, "no-at-sign")] {
+        for (id, sender) in [
+            (suppressed_inbox, "bounced@example.com"),
+            (invalid_inbox, "no-at-sign"),
+        ] {
             sqlx::query(
                 "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
                  VALUES ($1, $2, $3, 'hi', 'support')",
@@ -4865,7 +4887,10 @@ mod coverage_wave_routes {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = json_body(resp).await;
         assert!(
-            body["error"].as_str().unwrap_or_default().contains("suppressed"),
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("suppressed"),
             "{body}"
         );
         let replied: bool =
@@ -4955,7 +4980,10 @@ mod coverage_wave_routes {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert!(!replied, "a guard-refused reply leaves the message unanswered");
+        assert!(
+            !replied,
+            "a guard-refused reply leaves the message unanswered"
+        );
         let messages: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages WHERE metadata->>'inbox_message_id' = $1",
         )
@@ -4986,8 +5014,7 @@ mod coverage_wave_routes {
     /// and clamps hostile pagination; cancellation is tenant-scoped.
     #[tokio::test]
     async fn calendar_event_lifecycle_is_validated_tenant_scoped_and_cancellable() {
-        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_calendar_db").await
-        else {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_calendar_db").await else {
             return;
         };
         let Some(app) = test_app("routes_wave_calendar").await else {
@@ -5104,10 +5131,8 @@ mod coverage_wave_routes {
         // pagination clamps.
         let window = format!(
             "from={}&to={}",
-            (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339_opts(
-                chrono::SecondsFormat::Secs,
-                true
-            ),
+            (chrono::Utc::now() - chrono::Duration::days(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             (chrono::Utc::now() + chrono::Duration::days(60))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         );
@@ -5251,11 +5276,7 @@ mod coverage_wave_routes {
             .contains("RFC 3339"));
 
         // An unparseable IANA zone is a 400 naming the input.
-        let resp = get_slots(format!(
-            "date={}&timezone=Mars/Olympus",
-            query_ts(monday)
-        ))
-        .await;
+        let resp = get_slots(format!("date={}&timezone=Mars/Olympus", query_ts(monday))).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(json_body(resp).await["error"]
             .as_str()
@@ -5263,7 +5284,11 @@ mod coverage_wave_routes {
             .contains("IANA"));
 
         // Header/payload tenant mismatch is refused.
-        let resp = get_slots(format!("date={}&tenant_id=smuggled-tenant", query_ts(monday))).await;
+        let resp = get_slots(format!(
+            "date={}&tenant_id=smuggled-tenant",
+            query_ts(monday)
+        ))
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Legacy UTC mode: the 09:00–17:00 half-hour grid on a weekday.
@@ -5282,11 +5307,7 @@ mod coverage_wave_routes {
         // IANA mode: a Sunday is outside the Mon–Fri working week — empty,
         // not an error; a weekday yields DST-correct local slots labelled
         // with the requested zone.
-        let resp = get_slots(format!(
-            "date={}&timezone=Europe/Tallinn",
-            query_ts(sunday)
-        ))
-        .await;
+        let resp = get_slots(format!("date={}&timezone=Europe/Tallinn", query_ts(sunday))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let sunday_slots = json_body(resp).await;
         assert!(
@@ -5294,11 +5315,7 @@ mod coverage_wave_routes {
             "a Sunday has no slots: {sunday_slots}"
         );
 
-        let resp = get_slots(format!(
-            "date={}&timezone=Europe/Tallinn",
-            query_ts(monday)
-        ))
-        .await;
+        let resp = get_slots(format!("date={}&timezone=Europe/Tallinn", query_ts(monday))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let tallinn = json_body(resp).await;
         let tallinn = tallinn.as_array().expect("tallinn slots array");
@@ -5376,9 +5393,12 @@ mod coverage_wave_routes {
         let status = app
             .clone()
             .oneshot(
-                auth(Request::get(format!("/discovery/jobs/{job_id}")), tenant.to_string())
-                    .body(Body::empty())
-                    .unwrap(),
+                auth(
+                    Request::get(format!("/discovery/jobs/{job_id}")),
+                    tenant.to_string(),
+                )
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -5389,9 +5409,12 @@ mod coverage_wave_routes {
         let foreign = app
             .clone()
             .oneshot(
-                auth(Request::get(format!("/discovery/jobs/{job_id}")), other.clone())
-                    .body(Body::empty())
-                    .unwrap(),
+                auth(
+                    Request::get(format!("/discovery/jobs/{job_id}")),
+                    other.clone(),
+                )
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -5409,9 +5432,12 @@ mod coverage_wave_routes {
         let run = app
             .clone()
             .oneshot(
-                auth(Request::post(format!("/discovery/jobs/{job_id}/run")), tenant.to_string())
-                    .body(Body::empty())
-                    .unwrap(),
+                auth(
+                    Request::post(format!("/discovery/jobs/{job_id}/run")),
+                    tenant.to_string(),
+                )
+                .body(Body::empty())
+                .unwrap(),
             )
             .await
             .unwrap();
@@ -5518,8 +5544,7 @@ mod coverage_wave_routes {
     /// matches its literal self (nothing), not every company.
     #[tokio::test]
     async fn companies_industry_filter_escapes_like_wildcards() {
-        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_companies_db").await
-        else {
+        let Some(db) = crate::test_db::canonical_test_pool("routes_wave_companies_db").await else {
             return;
         };
         let Some(app) = test_app("routes_wave_companies").await else {
@@ -5867,10 +5892,7 @@ mod coverage_wave_routes {
             "must start with an HTML5 doctype, got: {html}"
         );
         assert!(html.contains("lang=\"en\""), "must declare lang=\"en\"");
-        let title_start = html
-            .find("<title>")
-            .expect("must carry a <title>")
-            + "<title>".len();
+        let title_start = html.find("<title>").expect("must carry a <title>") + "<title>".len();
         let title_end = html[title_start..].find("</title>").expect("closed title");
         assert!(
             !html[title_start..title_start + title_end].trim().is_empty(),
@@ -5942,7 +5964,9 @@ mod coverage_wave_routes {
             "BATCH-2 FIX TARGET: a browser unsubscribe FAILURE rendered content-type \
              {content_type:?} — it must render the HTML error page (text/html), not raw JSON"
         );
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(
             body.starts_with(b"<!DOCTYPE html>") || body.starts_with(b"<!doctype html>"),
             "the failure page must be an HTML document, got: {}",
@@ -5957,8 +5981,7 @@ mod coverage_wave_routes {
     /// POST performs the suppression. RED until batch 2.
     #[tokio::test]
     async fn contract_sales_unsubscribe_get_is_side_effect_free_and_offers_confirmation() {
-        let Some(db) = crate::test_db::canonical_test_pool("contract_sales_unsub_get").await
-        else {
+        let Some(db) = crate::test_db::canonical_test_pool("contract_sales_unsub_get").await else {
             return;
         };
         let app = contract_app(db.clone()).await;
@@ -5998,7 +6021,9 @@ mod coverage_wave_routes {
             content_type.starts_with("text/html"),
             "GET must render HTML, got content-type {content_type:?}"
         );
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body = String::from_utf8_lossy(&body).to_string();
         assert!(
             body.contains("form method=\"POST\"") && body.contains("/confirm"),
@@ -6010,13 +6035,14 @@ mod coverage_wave_routes {
         let suppression_count = |db: &sqlx::PgPool| {
             let db = db.clone();
             async move {
-                let (count,): (i64,) =
-                    sqlx::query_as("SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2")
-                        .bind(tenant)
-                        .bind(email)
-                        .fetch_one(&db)
-                        .await
-                        .expect("suppression lookup");
+                let (count,): (i64,) = sqlx::query_as(
+                    "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+                )
+                .bind(tenant)
+                .bind(email)
+                .fetch_one(&db)
+                .await
+                .expect("suppression lookup");
                 count
             }
         };

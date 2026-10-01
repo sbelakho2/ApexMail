@@ -1034,7 +1034,10 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(json["reason"], "greylist");
-            assert_eq!(json["delay_secs"], 300);
+            // SM10 F16: the unified schedule matches the email processor's
+            // soft-bounce base (30 * 2^0 at attempt 0), not the retired
+            // fixed 300 s greylist promise.
+            assert_eq!(json["delay_secs"], 30);
 
             let (status, json) = call(
                 state.clone(),

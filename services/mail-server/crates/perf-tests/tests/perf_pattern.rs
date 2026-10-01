@@ -1,5 +1,6 @@
-//! Pattern matching performance tests.
+//! Pattern matching performance tests (SM12 F9: black-boxed real matches).
 
+use std::hint::black_box;
 use std::time::Instant;
 
 use pattern_matcher::bot_patterns::build_bot_detector;
@@ -23,21 +24,26 @@ fn test_pattern_match_throughput() {
 
     let start = Instant::now();
     for i in 0..iterations {
-        let ua = user_agents[i % user_agents.len()];
-        let _ = matcher.is_match(ua);
+        let verdict = black_box(matcher.is_match(black_box(user_agents[i % user_agents.len()])));
+        black_box(verdict);
     }
     let elapsed = start.elapsed();
+    let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
 
     println!(
         "Pattern match throughput: {} ops in {:?} ({:.0} ops/sec)",
-        iterations,
-        elapsed,
-        iterations as f64 / elapsed.as_secs_f64()
+        iterations, elapsed, ops_per_sec
     );
+    budget::emit_baseline_metric("pattern_matching", "throughput_ops_per_sec", ops_per_sec);
     assert!(
         elapsed < budget::from_secs(2),
         "100,000 pattern matches took {:?}, expected < 2s",
         elapsed
+    );
+    budget::assert_release_throughput(
+        ops_per_sec,
+        budget::baseline_ops_per_sec::PATTERN_MATCHING,
+        "pattern_matching",
     );
 }
 
@@ -51,20 +57,20 @@ fn test_regex_compilation_reuse() {
 
     // Warm up
     for _ in 0..1_000 {
-        let _ = matcher.is_match(ua);
+        black_box(matcher.is_match(black_box(ua)));
     }
 
     let batch = 50_000;
 
     let start1 = Instant::now();
     for _ in 0..batch {
-        let _ = matcher.is_match(ua);
+        black_box(matcher.is_match(black_box(ua)));
     }
     let elapsed1 = start1.elapsed();
 
     let start2 = Instant::now();
     for _ in 0..batch {
-        let _ = matcher.is_match(ua);
+        black_box(matcher.is_match(black_box(ua)));
     }
     let elapsed2 = start2.elapsed();
 
@@ -101,16 +107,15 @@ fn test_multiple_rules_throughput() {
 
     let start = Instant::now();
     for i in 0..iterations {
-        let text = texts[i % texts.len()];
-        let _ = rules.evaluate(text);
+        let matches = black_box(rules.evaluate(black_box(texts[i % texts.len()])));
+        black_box(matches);
     }
     let elapsed = start.elapsed();
+    let ops_per_sec = iterations as f64 / elapsed.as_secs_f64();
 
     println!(
         "Multi-rule match throughput: {} ops in {:?} ({:.0} ops/sec)",
-        iterations,
-        elapsed,
-        iterations as f64 / elapsed.as_secs_f64()
+        iterations, elapsed, ops_per_sec
     );
     assert!(
         elapsed < budget::from_secs(2),

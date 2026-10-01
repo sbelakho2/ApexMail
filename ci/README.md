@@ -685,9 +685,12 @@ actually arrives** — so the pipeline posts it explicitly:
   required context is ever renamed, change it in ONE place (the step env or
   the script default). Any `ci/woodpecker` built-in status is a bonus, never
   the gate.
-* **Description**: summarised from this run's stage logs in the shared
-  workspace (`ci/runs/*/stages/*.log`) — "…N checks passed, M failed" — plus
-  the short gate verdict, capped at GitHub's 140 chars.
+* **Description**: summarised from THIS pipeline's run dir only
+  (`ci/runs/wp<pipeline-number>/stages/*.log`, resolved by
+  ci/woodpecker/run-dir.sh so every step of a pipeline agrees — audit SM14
+  F14: grepping the whole `ci/runs/` tree let stale logs from earlier
+  pipelines on a reused workspace inflate the counts) — "…N checks passed,
+  M failed" — plus the short gate verdict, capped at GitHub's 140 chars.
 * **target_url**: `CI_PIPELINE_URL` (legacy `CI_PIPELINE_LINK` /
   `CI_BUILD_LINK` fallbacks) — the Woodpecker run that produced the verdict.
 * **Commit SHA / owner/repo**: `CI_COMMIT_SHA` / `CI_REPO_OWNER` +

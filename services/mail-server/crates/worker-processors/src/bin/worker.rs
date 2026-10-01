@@ -1,8 +1,9 @@
 //! Worker entry point — runs all processors.
 
+use std::collections::HashSet;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,35 +25,117 @@ use worker_processors::{
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
 
+/// Registry of which supervised processors are currently alive.
+///
+/// The heartbeat consults it on every beat so a processor that panicked (or
+/// is sitting in its restart backoff) stops being advertised to the control
+/// plane until it lives again. SM10 F1: the heartbeat used to advertise a
+/// static capability list, so a worker whose email processor had panicked
+/// kept reporting a healthy, email-capable worker while delivering nothing.
+#[derive(Clone, Default)]
+struct ProcessorLiveness {
+    alive: Arc<Mutex<HashSet<&'static str>>>,
+}
+
+impl ProcessorLiveness {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_alive(&self, name: &'static str, alive: bool) {
+        let mut guard = self.alive.lock().unwrap_or_else(|e| e.into_inner());
+        if alive {
+            guard.insert(name);
+        } else {
+            guard.remove(name);
+        }
+    }
+
+    fn is_alive(&self, name: &str) -> bool {
+        self.alive
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+    }
+}
+
 /// Supervise a processor: restart it with capped exponential backoff whenever
-/// `start()` returns an error. A transient failure at startup (transport
-/// down, DB/Redis hiccup) previously disabled the processor — and with it,
-/// email delivery — until the container was manually restarted. `Ok(())` is
-/// a clean shutdown (Ctrl+C path) and ends supervision.
-async fn supervise<F, Fut>(name: &'static str, mut start: F)
+/// the attempt exits, either through an `Err` return or through a PANIC.
+/// `Ok(())` is a clean shutdown (Ctrl+C path) and ends supervision.
+///
+/// Each attempt runs in its own tokio task and supervision awaits that task's
+/// `JoinHandle` for the entire attempt lifetime, so a panic surfaces as
+/// `JoinError::is_panic` instead of unwinding through (and killing) the
+/// supervisor itself. SM10 F1: the previous supervision only matched
+/// `Err` — a panic permanently killed the processor while the heartbeat,
+/// `/health`, and `/metrics` all stayed green, so Kubernetes saw a healthy
+/// worker delivering nothing. On panic the processor is logged dead, the
+/// `apexmail_processor_alive` gauge drops to 0, and the heartbeat capability
+/// entry is withheld until the restarted attempt is running again.
+async fn supervise<F, Fut>(name: &'static str, liveness: ProcessorLiveness, mut start: F)
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = worker_processors::ProcessorResult<()>>,
+    Fut: std::future::Future<Output = worker_processors::ProcessorResult<()>> + Send + 'static,
 {
     let mut backoff_secs: u64 = 5;
     loop {
-        match start().await {
-            Ok(()) => {
+        liveness.set_alive(name, true);
+        metrics::gauge!("apexmail_processor_alive", "processor" => name).set(1.0);
+
+        let attempt = tokio::spawn(start());
+        match attempt.await {
+            Ok(Ok(())) => {
+                mark_dead(&liveness, name);
                 info!(processor = name, "processor shut down cleanly");
                 return;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 error!(
                     processor = name,
                     error = %e,
                     backoff_secs,
                     "processor failed; restarting under supervision"
                 );
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(60);
+            }
+            Err(join_error) if join_error.is_panic() => {
+                metrics::counter!("apexmail_processor_panics_total", "processor" => name)
+                    .increment(1);
+                let payload = join_error.into_panic();
+                let message = payload
+                    .downcast_ref::<&'static str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "<opaque panic payload>".to_string());
+                error!(
+                    processor = name,
+                    panic = %message,
+                    backoff_secs,
+                    "processor PANICKED; restarting under supervision"
+                );
+            }
+            Err(join_error) => {
+                error!(
+                    processor = name,
+                    error = %join_error,
+                    backoff_secs,
+                    "processor task was cancelled; restarting under supervision"
+                );
             }
         }
+
+        // Dead between attempts: drop the liveness registration and gauge for
+        // the backoff window — both are restored when the attempt respawns.
+        mark_dead(&liveness, name);
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(60);
     }
+}
+
+/// Record a processor as not-running: clear the heartbeat liveness entry and
+/// drop the per-processor gauge so scrapes see the outage.
+fn mark_dead(liveness: &ProcessorLiveness, name: &'static str) {
+    liveness.set_alive(name, false);
+    metrics::gauge!("apexmail_processor_alive", "processor" => name).set(0.0);
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -139,25 +222,64 @@ fn automation_tick_secs() -> u64 {
 }
 
 /// Capabilities advertised on the worker heartbeat: the infrastructure
-/// always present plus one entry per enabled processor.
-fn capability_list(settings: &WorkerSettings) -> Vec<String> {
+/// always present, each enabled SUPERVISED processor only while supervision
+/// has it alive (SM10 F1 — a panicked/dead processor must stop being
+/// advertised), and the automation tick whenever enabled (its self-contained
+/// loop handles its own errors and is not supervised).
+fn heartbeat_capabilities(settings: &WorkerSettings, liveness: &ProcessorLiveness) -> Vec<String> {
     let mut capabilities = vec!["postgres".to_string(), "redis".to_string()];
-    if settings.run_analytics {
-        capabilities.push("analytics".to_string());
-    }
-    if settings.run_email {
-        capabilities.push("email".to_string());
-    }
-    if settings.run_reply_handler {
-        capabilities.push("reply-handler".to_string());
-    }
-    if settings.run_webhook {
-        capabilities.push("webhook".to_string());
+    let supervised: &[(&'static str, bool)] = &[
+        ("analytics", settings.run_analytics),
+        ("email", settings.run_email),
+        ("reply-handler", settings.run_reply_handler),
+        ("webhook", settings.run_webhook),
+    ];
+    for (name, enabled) in supervised {
+        if *enabled && liveness.is_alive(name) {
+            capabilities.push((*name).to_string());
+        }
     }
     if settings.run_automations {
         capabilities.push("automations".to_string());
     }
     capabilities
+}
+
+/// Spawn the worker heartbeat emitter.
+///
+/// Unlike the library's `spawn_service_heartbeat` (which beats a STATIC
+/// capability list), the capability list is recomputed from the liveness
+/// registry on EVERY beat, so a processor that panicked or is in its restart
+/// backoff disappears from the control plane until it lives again. The beat
+/// contract is otherwise identical: first beat immediately, failures are
+/// logged and never fatal.
+fn spawn_liveness_heartbeat(
+    db: sqlx::PgPool,
+    settings: WorkerSettings,
+    liveness: ProcessorLiveness,
+    mut config: apexmail_lib::heartbeat::HeartbeatConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(config.interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            config.capabilities = heartbeat_capabilities(&settings, &liveness);
+            match apexmail_lib::heartbeat::record_heartbeat(&db, &config).await {
+                Ok(()) => tracing::trace!(
+                    service = %config.service,
+                    instance_id = %config.instance_id,
+                    "worker heartbeat recorded"
+                ),
+                Err(error) => tracing::warn!(
+                    service = %config.service,
+                    instance_id = %config.instance_id,
+                    error = %error,
+                    "worker heartbeat failed (will retry on the next beat)"
+                ),
+            }
+        }
+    })
 }
 
 /// VERP v2 secret requirement (mirrors the MTA's production gate): outbound
@@ -347,18 +469,21 @@ async fn run_worker(
 ) -> Result<WorkerProcesses> {
     // ── Process heartbeat (real liveness for the control plane) ──
     // system_health reads service_heartbeats; queue activity is NOT a
-    // liveness signal. Capabilities list the processors this process runs.
-    // Beats start immediately; failures are logged, never fatal.
+    // liveness signal. Capabilities list the processors this process runs —
+    // filtered per beat by SUPERVISION LIVENESS so a panicked processor
+    // stops being advertised (SM10 F1). Beats start immediately; failures
+    // are logged, never fatal.
+    let liveness = ProcessorLiveness::new();
     let heartbeat_config =
         apexmail_lib::heartbeat::HeartbeatConfig::new("worker", env!("CARGO_PKG_VERSION"))
-            .with_capabilities(capability_list(settings))
             .with_interval_from_env()
             .with_region_from_env();
     info!(
         instance_id = %heartbeat_config.instance_id,
         "worker heartbeat emitter started"
     );
-    let heartbeat = apexmail_lib::heartbeat::spawn_service_heartbeat(db.clone(), heartbeat_config);
+    let heartbeat =
+        spawn_liveness_heartbeat(db.clone(), *settings, liveness.clone(), heartbeat_config);
 
     // ── Automatic warmup graduation (P1) ──
     // Idempotent reconciler: warming → active at the canonical 60-day term.
@@ -401,8 +526,9 @@ async fn run_worker(
 
         let processor = Arc::new(AnalyticsProcessor::new(db.clone(), redis.clone(), config));
         let p = Arc::clone(&processor);
+        let liveness = liveness.clone();
         handles.push(tokio::spawn(async move {
-            supervise("analytics", move || {
+            supervise("analytics", liveness, move || {
                 let p = Arc::clone(&p);
                 async move { p.start().await }
             })
@@ -421,8 +547,9 @@ async fn run_worker(
             Ok(processor) => {
                 let processor = Arc::new(processor);
                 let p = Arc::clone(&processor);
+                let liveness = liveness.clone();
                 handles.push(tokio::spawn(async move {
-                    supervise("email", move || {
+                    supervise("email", liveness, move || {
                         let p = Arc::clone(&p);
                         async move { p.start().await }
                     })
@@ -446,8 +573,9 @@ async fn run_worker(
 
         let processor = Arc::new(ReplyHandler::new(db.clone(), config));
         let p = Arc::clone(&processor);
+        let liveness = liveness.clone();
         handles.push(tokio::spawn(async move {
-            supervise("reply-handler", move || {
+            supervise("reply-handler", liveness, move || {
                 let p = Arc::clone(&p);
                 async move { p.start().await }
             })
@@ -468,8 +596,9 @@ async fn run_worker(
             Ok(processor) => {
                 let processor = Arc::new(processor);
                 let p = Arc::clone(&processor);
+                let liveness = liveness.clone();
                 handles.push(tokio::spawn(async move {
-                    supervise("webhook", move || {
+                    supervise("webhook", liveness, move || {
                         let p = Arc::clone(&p);
                         async move { p.start().await }
                     })
@@ -790,18 +919,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn supervise_returns_on_a_clean_shutdown_without_restarting() {
         let calls = AtomicUsize::new(0);
-        supervise("clean", || {
+        let liveness = ProcessorLiveness::new();
+        supervise("clean", liveness.clone(), || {
             calls.fetch_add(1, Ordering::SeqCst);
             async { Ok(()) }
         })
         .await;
         assert_eq!(calls.load(Ordering::SeqCst), 1, "Ok(()) ends supervision");
+        assert!(
+            !liveness.is_alive("clean"),
+            "a cleanly shut down processor must not stay registered alive"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn supervise_restarts_a_failed_processor_with_backoff() {
         let calls = AtomicUsize::new(0);
-        supervise("flaky", || {
+        let liveness = ProcessorLiveness::new();
+        supervise("flaky", liveness.clone(), || {
             let attempt = calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 if attempt < 2 {
@@ -818,6 +953,72 @@ mod tests {
             calls.load(Ordering::SeqCst),
             3,
             "each failure must restart the processor until it shuts down cleanly"
+        );
+    }
+
+    /// SM10 F1: a processor that PANICS must not kill supervision. The panic
+    /// unwinds through the spawned attempt task; the supervisor observes it
+    /// on the `JoinHandle`, emits the processor-dead metric, clears the
+    /// heartbeat liveness entry for the backoff window, and restarts per the
+    /// existing policy. The replacement attempt shuts down cleanly so the
+    /// test terminates.
+    #[tokio::test(start_paused = true)]
+    async fn supervise_catches_a_panicking_processor_and_restarts_it() {
+        // Silence the default hook for the deliberate test panic.
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&calls);
+        let liveness = ProcessorLiveness::new();
+        let supervisor = tokio::spawn(supervise("panicky", liveness.clone(), move || {
+            let attempt = attempt_counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    panic!("boom: processor exploded");
+                }
+                // The replacement attempt STAYS ALIVE until the test
+                // ends it — this is the window in which the heartbeat
+                // must advertise the processor again. (A clean `Ok(())`
+                // would legitimately clear the registration on return.)
+                std::future::pending::<worker_processors::ProcessorResult<()>>().await
+            }
+        }));
+        // Two attempts: the first panics, the supervisor sleeps out the
+        // backoff (auto-advanced on the paused clock) and respawns.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while calls.load(Ordering::SeqCst) < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the supervisor never restarted the panicked processor"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            liveness.is_alive("panicky"),
+            "the replacement attempt must be registered alive while it runs"
+        );
+        supervisor.abort();
+        std::panic::set_hook(default_hook);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the panic must be caught and the processor restarted exactly once"
+        );
+    }
+
+    /// The registry the heartbeat reads: the alive transition registers a
+    /// running attempt, the dead transition clears it (a dead processor's
+    /// capability entry must vanish from the next beat).
+    #[test]
+    fn processor_liveness_registry_tracks_running_attempts() {
+        let liveness = ProcessorLiveness::new();
+        assert!(!liveness.is_alive("email"), "nothing registered yet");
+        liveness.set_alive("email", true);
+        assert!(liveness.is_alive("email"));
+        liveness.set_alive("email", false);
+        assert!(
+            !liveness.is_alive("email"),
+            "the dead transition must clear the registry entry"
         );
     }
 
@@ -916,7 +1117,11 @@ mod tests {
             run_webhook: false,
             run_automations: false,
         };
-        assert_eq!(capability_list(&base), ["postgres", "redis"]);
+        let liveness = ProcessorLiveness::new();
+        assert_eq!(
+            heartbeat_capabilities(&base, &liveness),
+            ["postgres", "redis"]
+        );
         let all = WorkerSettings {
             run_analytics: true,
             run_email: true,
@@ -925,8 +1130,21 @@ mod tests {
             run_automations: true,
             ..base
         };
+        // Nothing registered alive yet: enabled-but-dead processors must NOT
+        // be advertised (SM10 F1 — the heartbeat previously advertised every
+        // enabled processor unconditionally, even one that had panicked).
         assert_eq!(
-            capability_list(&all),
+            heartbeat_capabilities(&all, &liveness),
+            ["postgres", "redis", "automations"]
+        );
+        // Once supervision registers the attempts alive, the capabilities
+        // reappear.
+        liveness.set_alive("analytics", true);
+        liveness.set_alive("email", true);
+        liveness.set_alive("reply-handler", true);
+        liveness.set_alive("webhook", true);
+        assert_eq!(
+            heartbeat_capabilities(&all, &liveness),
             [
                 "postgres",
                 "redis",
@@ -936,6 +1154,27 @@ mod tests {
                 "webhook",
                 "automations"
             ]
+        );
+        // A processor dying between beats loses ONLY its own entry.
+        liveness.set_alive("email", false);
+        assert_eq!(
+            heartbeat_capabilities(&all, &liveness),
+            [
+                "postgres",
+                "redis",
+                "analytics",
+                "reply-handler",
+                "webhook",
+                "automations"
+            ]
+        );
+        // And a disabled processor is never advertised even if a stale entry
+        // lingered.
+        let stale_liveness = ProcessorLiveness::new();
+        stale_liveness.set_alive("webhook", true);
+        assert!(
+            !heartbeat_capabilities(&base, &stale_liveness).contains(&"webhook".to_string()),
+            "disabled processors stay out of the heartbeat regardless of liveness"
         );
     }
 

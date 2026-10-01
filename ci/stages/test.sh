@@ -714,6 +714,47 @@ exit $_pc_rc') \
     return "$CI_EXIT_OK"
 }
 
+# --- 11. pre-commit parity lane (audit SM14 F12) --------------------------------------
+# .pre-commit-config.yaml used to be entirely OPT-IN: nothing in CI ran it,
+# and its gitleaks pin had drifted from the CI image's gitleaks. The lane
+# runs the exact developer-side config over ALL files, so the two can no
+# longer drift (the image carries pre-commit since audit SM14 F12; the
+# gitleaks hook rev now matches GITLEAKS_VERSION).
+#
+# NOTE on fixer hooks: end-of-file-fixer/trailing-whitespace/mixed-line-
+# ending REWRITE files on violation, and pre-commit exits non-zero when it
+# does — so a red lane can leave a mutated working tree behind. On a CI
+# executor the workspace is ephemeral; on a (previously clean) deploy host
+# the mutations are restored below so the pipeline never dirties the
+# checkout it may later bless. A tree that was already dirty is left exactly
+# as it was found.
+run_pre_commit_lane() {
+    _pc_st=$(lane_tool_status pre-commit pre-commit-lane "${CI_PRE_COMMIT_CHECK:-required}")
+    case $_pc_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    if ci_dry; then
+        ci_info "check (dry-run): pre-commit run --all-files"
+        return "$CI_EXIT_OK"
+    fi
+    _pc_tree_clean=0
+    [ -z "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | head -1)" ] && _pc_tree_clean=1
+    ci_info "pre-commit run --all-files (developer-side config, CI-enforced since audit SM14 F12)"
+    _pc_rc=0
+    (cd "$REPO_ROOT" && ci_check "pre-commit (all files, committed config)" \
+        pre-commit run --all-files) || _pc_rc=$?
+    if [ "$_pc_rc" -ne 0 ] && [ "$_pc_tree_clean" = 1 ]; then
+        # Restore fixer-hook mutations of a previously clean tree (tracked
+        # files only — untracked artifacts the earlier lanes created, e.g.
+        # vendor/ or public/, are untouched by git checkout).
+        git -C "$REPO_ROOT" checkout -- . 2>/dev/null || true
+        ci_info "fixer-hook mutations to the working tree were reverted (the failure above stands)"
+    fi
+    [ "$_pc_rc" -eq 0 ] || return "$CI_EXIT_FAIL"
+    return "$CI_EXIT_OK"
+}
+
 # --- 8. WCAG AA contrast gate -----------------------------------------------------------
 # Pixel-confirmed contrast gate (tools/contrast-audit/gate.sh → audit.mjs
 # --gate): console + control-plane fixtures in all three themes plus the
@@ -744,14 +785,62 @@ _contrast_gate_record() {
         >"$_cgr_dir/gate-execution.json" 2>/dev/null || true
 }
 
+# provision_contrast_node_modules — audit SM14 F2. The REQUIRED WCAG
+# contrast and layout-spill gates below check
+# tools/contrast-audit/node_modules/playwright and hard-fail when absent —
+# but NOTHING provisioned that directory: it is gitignored
+# (.gitignore: node_modules), no ci/ script ran `npm install`, and the CI
+# image's browser layer does not create the WORKSPACE tree. Every "green"
+# run therefore implied an undeclared, hand-bootstrapped persistent
+# workspace; on a fresh clone both required gates failed. This provisioner
+# runs BEFORE the gates: `npm ci` from the COMMITTED package-lock.json
+# (deterministic — never `npm install`), idempotent (skips when playwright
+# is already present, e.g. a warm executor workspace), dry-run safe. The
+# playwright version the lockfile resolves MUST equal the image's
+# PLAYWRIGHT_VERSION pin (the browsers are baked in at image build time;
+# see ci/ci-image/toolchain-versions.env).
+provision_contrast_node_modules() {
+    _pn_dir=$REPO_ROOT/tools/contrast-audit
+    [ -d "$_pn_dir/node_modules/playwright" ] && return "$CI_EXIT_OK"
+    if ci_dry; then
+        ci_info "dry-run: npm ci in tools/contrast-audit (node_modules from the committed lockfile)"
+        return "$CI_EXIT_OK"
+    fi
+    if [ ! -f "$_pn_dir/package-lock.json" ]; then
+        ci_err "tools/contrast-audit/package-lock.json missing — the WCAG/layout \
+gates cannot be provisioned deterministically (commit the lockfile)"
+        return "$CI_EXIT_FAIL"
+    fi
+    _pn_st=$(lane_tool_status npm contrast-layout-node_modules "${CI_CONTRAST_GATE_CHECK:-required}")
+    case $_pn_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    ci_info "tools/contrast-audit: node_modules absent — npm ci from the committed lockfile (audit SM14 F2)"
+    (cd "$_pn_dir" && npm ci --no-audit --no-fund) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "npm ci failed in tools/contrast-audit — the REQUIRED WCAG/layout \
+gates cannot run (network? lockfile drift?)"; return "$CI_EXIT_FAIL"; }
+    if [ ! -d "$_pn_dir/node_modules/playwright" ]; then
+        ci_err "npm ci did not provision tools/contrast-audit/node_modules/playwright"
+        return "$CI_EXIT_FAIL"
+    fi
+    ci_info "PASS: contrast-audit node_modules provisioned (playwright per package-lock.json)"
+    return "$CI_EXIT_OK"
+}
+
 run_contrast_gate() {
+    if ci_dry; then
+        ci_info "check (dry-run): WCAG AA contrast gate (tools/contrast-audit/gate.sh)"
+        return "$CI_EXIT_OK"
+    fi
     _cg_missing=''
     command -v node >/dev/null 2>&1 || _cg_missing='node missing'
     if [ -z "$_cg_missing" ] && [ ! -x "$REPO_ROOT/tools/contrast-audit/gate.sh" ]; then
         _cg_missing='tools/contrast-audit/gate.sh missing'
     fi
     if [ -z "$_cg_missing" ] && [ ! -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ]; then
-        _cg_missing="tools/contrast-audit/node_modules (playwright) missing — run '(cd tools/contrast-audit && npm install)'"
+        _cg_missing="tools/contrast-audit/node_modules (playwright) missing — provision_contrast_node_modules \
+(npm ci from the committed lockfile) should have run first (audit SM14 F2)"
     fi
     if [ -n "$_cg_missing" ]; then
         if [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ]; then
@@ -803,10 +892,17 @@ run_layout_gates() {
         ci_warn "ADVISORY: python3 missing — tag-balance gate skipped (CI_LAYOUT_GATE_CHECK=advisory)"
     fi
     # layout-spill gate: node + playwright required — absent toolchain fails.
+    # (node_modules is provisioned deterministically BEFORE this gate — see
+    # provision_contrast_node_modules, audit SM14 F2.)
+    if ci_dry; then
+        ci_info "check (dry-run): layout-spill gate (tools/contrast-audit/layout-gate.sh)"
+        return "$CI_EXIT_OK"
+    fi
     _lg_missing=''
     command -v node >/dev/null 2>&1 || _lg_missing='node missing'
     if [ -z "$_lg_missing" ] && [ ! -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ]; then
-        _lg_missing="tools/contrast-audit/node_modules (playwright) missing — run '(cd tools/contrast-audit && npm install)'"
+        _lg_missing="tools/contrast-audit/node_modules (playwright) missing — provision_contrast_node_modules \
+(npm ci from the committed lockfile) should have run first (audit SM14 F2)"
     fi
     if [ -z "$_lg_missing" ]; then
         (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
@@ -839,11 +935,10 @@ run_i18n_gate() {
 }
 
 # --- formatting gate ------------------------------------------------------------
-# cargo fmt --check is NEW compared to rust-check.yml (GitHub never ran it).
-# The tree currently carries committed fmt drift (README §9 F7), so the gate
-# defaults to ADVISORY — it records the full diff in the run dir and the first
-# 300 lines in the stage log without failing the run. Set CI_FMT_CHECK=required
-# (pipeline.conf) once `cargo fmt` has landed on main.
+# cargo fmt --check (NEW compared to rust-check.yml, which never ran it).
+# REQUIRED by default: CI_FMT_CHECK:=required in ci/pipeline.conf since the
+# committed fmt drift (README §9 F7) landed. A regression fails the run;
+# `advisory` is a bounded triage-window override only.
 fmt_gate() {
     if ci_dry; then
         ci_info "check (dry-run): cargo fmt --check"
@@ -857,20 +952,20 @@ fmt_gate() {
     fi
     head -n 300 "$RUN_DIR/fmt-check.diff" >>"$CI_STAGE_LOG" 2>/dev/null || true
     _fmt_files=$(grep -c '^Diff in' "$RUN_DIR/fmt-check.diff" 2>/dev/null || printf '?')
-    if [ "${CI_FMT_CHECK:-advisory}" = required ]; then
+    if [ "${CI_FMT_CHECK:-required}" = required ]; then
         ci_err "FAIL: cargo fmt --check ($_fmt_files files need formatting; full diff: $RUN_DIR/fmt-check.diff)"
         return "$CI_EXIT_FAIL"
     fi
     ci_warn "ADVISORY: cargo fmt --check reports drift in $_fmt_files files \
-(full diff: $RUN_DIR/fmt-check.diff) — set CI_FMT_CHECK=required after running cargo fmt"
+(full diff: $RUN_DIR/fmt-check.diff) — CI_FMT_CHECK=advisory is a triage-window override only"
     return "$CI_EXIT_OK"
 }
 
 # --- clippy gate -------------------------------------------------------------------
-# Same lane as rust-check.yml (`--workspace --all-targets -D warnings`). The
-# tree currently carries drift against a current toolchain (README §9 F8),
-# so like fmt the gate records the full log and defaults to ADVISORY; set
-# CI_CLIPPY_CHECK=required once the tree is clippy-clean.
+# Same lane as rust-check.yml (`--workspace --all-targets -D warnings`).
+# REQUIRED by default: CI_CLIPPY_CHECK:=required in ci/pipeline.conf since
+# the committed clippy drift (README §9 F8) landed. A regression fails the
+# run; `advisory` is a bounded triage-window override only.
 clippy_gate() {
     if ci_dry; then
         ci_info "check (dry-run): cargo clippy -D warnings"
@@ -885,12 +980,12 @@ clippy_gate() {
     fi
     _cl_n=$(grep -c '^error' "$RUN_DIR/clippy-check.log" 2>/dev/null || printf '?')
     tail -n 120 "$RUN_DIR/clippy-check.log" >>"$CI_STAGE_LOG" 2>/dev/null || true
-    if [ "${CI_CLIPPY_CHECK:-advisory}" = required ]; then
+    if [ "${CI_CLIPPY_CHECK:-required}" = required ]; then
         ci_err "FAIL: cargo clippy -D warnings ($_cl_n errors; full log: $RUN_DIR/clippy-check.log)"
         return "$CI_EXIT_FAIL"
     fi
     ci_warn "ADVISORY: cargo clippy -D warnings reports $_cl_n errors \
-(full log: $RUN_DIR/clippy-check.log) — set CI_CLIPPY_CHECK=required once clean"
+(full log: $RUN_DIR/clippy-check.log) — CI_CLIPPY_CHECK=advisory is a triage-window override only"
     return "$CI_EXIT_OK"
 }
 
@@ -908,9 +1003,10 @@ stage_main() {
         # marked RuntimeEnforced must be referenced by a real api-server
         # handler). Fails on a NEW field without a classification.
         (cd "$REPO_ROOT" && ci_check "feature entitlement classification" python3 tools/check_feature_entitlements.py)
-        # WS-ALL audit-coverage ledger: currently lists removed crates
-        # (bounce-analytics — README §9 F9), so it reports rather than
-        # blocks until the ledger is fixed.
+        # WS-ALL audit-coverage ledger: REQUIRED by default
+        # (CI_AUDIT_COVERAGE_CHECK:=required in ci/pipeline.conf — the listed
+        # drift was fixed). A regression fails the run; `advisory` is a
+        # bounded triage-window override.
         if ci_dry; then
             ci_info "check (dry-run): WS-ALL audit coverage ledger"
         else
@@ -919,7 +1015,7 @@ stage_main() {
                 >"$RUN_DIR/audit-coverage.log" 2>&1) || _ac_rc=$?
             if [ "$_ac_rc" -eq 0 ]; then
                 ci_info "PASS: WS-ALL audit coverage ledger"
-            elif [ "${CI_AUDIT_COVERAGE_CHECK:-advisory}" = required ]; then
+            elif [ "${CI_AUDIT_COVERAGE_CHECK:-required}" = required ]; then
                 cat "$RUN_DIR/audit-coverage.log" >>"$CI_STAGE_LOG" 2>/dev/null || true
                 ci_err "FAIL: WS-ALL audit coverage ledger (see $RUN_DIR/audit-coverage.log)"
                 return "$CI_EXIT_FAIL"
@@ -937,8 +1033,13 @@ stage_main() {
     run_coverage_gate
     run_php_tests
     run_static_lint_gates
+    run_pre_commit_lane
     run_sdk_tests
     run_satellite_crates
+    # The WCAG/layout gates need tools/contrast-audit/node_modules: provision
+    # it from the committed lockfile BEFORE the gates need it (audit SM14 F2
+    # — a fresh clone used to hard-fail both REQUIRED gates).
+    provision_contrast_node_modules || return "$CI_EXIT_FAIL"
     run_contrast_gate
     run_layout_gates
     run_i18n_gate

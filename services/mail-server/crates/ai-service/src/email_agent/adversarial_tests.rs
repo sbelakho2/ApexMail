@@ -229,8 +229,17 @@ impl Drop for EnvGuard {
 /// Serializes env-var mutation across tests sharing one process (plain
 /// `cargo test`). A tokio mutex is held across the whole async test body by
 /// design; the one sync test takes it via blocking_lock.
-static ENV_SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+///
+/// SM9 #7 verifier-repair: this module used to hold a PRIVATE mutex of the
+/// same name, so its `AI_MODEL_*` guards (set `AI_MODEL_ENABLED=true` for a
+/// whole poll/retry ladder) never excluded the crate-wide env readers —
+/// `inference::tests::disabled_runtime_fails_closed` and
+/// `accessors_report_configuration` assert `InferenceConfig::default()` is
+/// DISABLED under [`crate::test_support::ENV_SERIAL`]. With every DB-gated
+/// test actually running, a full-parallel suite could observe the leaked
+/// `AI_MODEL_ENABLED=true` and fail those asserts. Sharing the crate-wide
+/// lock makes the exclusion real.
+use crate::test_support::ENV_SERIAL;
 
 fn agent_config(db_url: &str) -> EmailAnsweringConfig {
     EmailAnsweringConfig {
@@ -809,7 +818,7 @@ async fn fetch_raw_headers_returns_none_without_a_raw_copy() {
 }
 
 #[tokio::test]
-async fn manual_reply_generation_sanitizes_and_degrades_honestly() {
+async fn manual_reply_generation_sanitizes_and_fails_closed() {
     let _serial = ENV_SERIAL.lock().await;
     let port = spawn_mock_llm(GOOD_REPLY).await;
     let _env = EnvGuard::with_mock_llm(port);
@@ -825,18 +834,65 @@ async fn manual_reply_generation_sanitizes_and_degrades_honestly() {
         "How do I check my SPF record?",
         512,
     )
-    .await;
+    .await
+    .expect("successful generation");
     assert!(result.tokens_used.unwrap_or(0) > 0);
     assert!(result.response.contains("SPF record should include"));
 
-    // The failed-generation path answers with the retry message, not an
-    // error. The dead endpoint is EXPLICIT: `InferenceConfig::default()`
-    // reads the env, which still points at this test's live mock.
+    // SM9 #7d: a failed generation is an ERROR, never a 200-shaped canned
+    // response a consumer could mistake for a real (fabricated) answer.
+    // The dead endpoint is EXPLICIT: `InferenceConfig::default()` reads the
+    // env, which still points at this test's live mock — so point it away.
     let _dead_env = EnvGuard::with(&[("AI_MODEL_ENDPOINT", Some("http://127.0.0.1:1/v1"))]);
     let dead = LlmClient::new(crate::inference::InferenceConfig::default());
     let result = generate_email_reply(&dead, "s", "a@b.com", "s", "b", 16).await;
-    assert_eq!(result.tokens_used, None);
-    assert!(result.response.contains("Failed to generate response"));
+    assert!(result.is_err(), "LLM failure must propagate as an error");
+}
+
+/// SM9 #7c: the quoted `From`/`Subject` header lines are ATTACKER-controlled;
+/// they are escaped/sanitized before they are embedded into the stored draft
+/// that the approval control plane later releases.
+#[test]
+fn format_reply_sanitizes_quoted_from_and_subject() {
+    let reply = format_reply(
+        "Eve <script>alert('xss')</script>",
+        "Win! \r\nBCC: victim@example.com<img src=x onerror=steal()><b>5 < 10</b>",
+        "original body",
+        "A safe reply.",
+    );
+    let lower = reply.to_ascii_lowercase();
+    assert!(
+        !lower.contains("<script"),
+        "script tag must not survive: {reply}"
+    );
+    assert!(
+        !lower.contains("onerror"),
+        "event handler must not survive: {reply}"
+    );
+    assert!(
+        !reply.contains('\r'),
+        "CR from the injected header must be removed: {reply:?}"
+    );
+    // The injected CR/LF was REMOVED from the header value, so the forged
+    // "BCC:" line is flattened onto the single quoted Subject line instead
+    // of forging draft structure.
+    assert!(
+        reply.contains("> Subject: Win! BCC: victim@example.com"),
+        "header injection must not forge a separate quoted line: {reply:?}"
+    );
+    assert!(
+        !reply.contains("\n> BCC"),
+        "no forged quoted line: {reply:?}"
+    );
+    // A stray angle bracket is escaped, not forwarded as potential markup.
+    assert!(reply.contains("&lt; 10"), "stray < is escaped: {reply}");
+    // Legitimate content survives and stays attributed.
+    assert!(reply.contains("Eve"), "display name survives: {reply}");
+    assert!(
+        reply.contains("> original body"),
+        "the quoted body survives"
+    );
+    assert!(reply.contains("A safe reply."), "the AI reply survives");
 }
 
 #[test]

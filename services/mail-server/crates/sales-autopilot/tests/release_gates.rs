@@ -2004,7 +2004,9 @@ fn perf_24_no_bare_unbounded_client_construction_in_non_test_src() {
 
     let mut offenders = Vec::new();
     collect_offenders(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .as_path(),
         &mut offenders,
     );
     assert!(

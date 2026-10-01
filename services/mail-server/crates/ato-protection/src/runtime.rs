@@ -461,7 +461,11 @@ mod tests {
         ]);
 
         // Baseline: nothing set → honest single-node development config.
-        for var in ["ATO_REDIS_LOCKOUT_URL", "ATO_MFA_THRESHOLD", "ATO_BLOCK_THRESHOLD"] {
+        for var in [
+            "ATO_REDIS_LOCKOUT_URL",
+            "ATO_MFA_THRESHOLD",
+            "ATO_BLOCK_THRESHOLD",
+        ] {
             std::env::remove_var(var);
         }
         let cfg = runtime_config_from_env();
@@ -473,7 +477,10 @@ mod tests {
         // A real URL upgrades the deployment.
         std::env::set_var("ATO_REDIS_LOCKOUT_URL", "  redis://lockout:6379  ");
         let cfg = runtime_config_from_env();
-        assert_eq!(cfg.redis_lockout_url.as_deref(), Some("redis://lockout:6379"));
+        assert_eq!(
+            cfg.redis_lockout_url.as_deref(),
+            Some("redis://lockout:6379")
+        );
         assert_eq!(cfg.deployment_mode, DeploymentMode::Production);
         assert!(!cfg.allow_single_node_mode);
 

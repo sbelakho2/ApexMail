@@ -213,12 +213,41 @@ install_semgrep() {
     log "semgrep installed: $(semgrep --version | head -1)"
 }
 
+# pre-commit — REQUIRED test-stage lane (audit SM14 F12: the developer-side
+# .pre-commit-config.yaml is no longer opt-in; the test stage runs it over
+# all files, so the deploy host must carry the tool). Own venv, same pattern
+# as semgrep.
+install_pre_commit() {
+    have pre-commit && { log "pre-commit present: $(pre-commit --version | head -1)"; return 0; }
+    _pc_venv=/opt/pre-commit-venv
+    if [ ! -x "$_pc_venv/bin/pre-commit" ]; then
+        log "creating pre-commit venv at $_pc_venv (needs python3-venv — see install_apt_deps)"
+        python3 -m venv "$_pc_venv"
+        "$_pc_venv/bin/pip" install --upgrade pip >/dev/null
+        "$_pc_venv/bin/pip" install pre-commit
+    fi
+    ln -sf "$_pc_venv/bin/pre-commit" /usr/local/bin/pre-commit
+    log "pre-commit installed: $(pre-commit --version | head -1)"
+}
+
 # Pinned single-file release binaries. gitleaks/trivy publish tarballs; these
 # installs untar into /usr/local/bin. Versions are pinned on purpose — bump
 # them consciously.
 install_gitleaks() {
-    have gitleaks && { log "gitleaks present: $(gitleaks version)"; return 0; }
-    _v=8.18.2
+    # Audit SM14 F12: this pin MUST equal GITLEAKS_VERSION in
+    # ci/ci-image/Dockerfile + ci/ci-image/toolchain-versions.env AND the
+    # gitleaks hook rev in .pre-commit-config.yaml — rule sets drift between
+    # releases, and one gitleaks version must scan everywhere (the old pin
+    # here, 8.18.2, let the deploy host's REQUIRED secret gate run ~12
+    # releases of rule drift behind the CI image). Like install_zola: a
+    # mismatched existing install is REPLACED, not kept.
+    _v=8.30.1
+    if [ "$(gitleaks version 2>/dev/null)" = "$_v" ]; then
+        log "gitleaks present: $_v"
+        return 0
+    fi
+    [ -n "$(gitleaks version 2>/dev/null)" ] \
+        && log "gitleaks $(gitleaks version 2>/dev/null) != pinned $_v — replacing"
     _tmp=$(mktemp -d)
     log "installing gitleaks v$_v"
     curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v$_v/gitleaks_${_v}_linux_x64.tar.gz" \
@@ -370,7 +399,7 @@ do_check() {
     done
     # SDK-lane / static-lint toolchains (test stage; REQUIRED lanes, so a
     # gap on the deploy host fails closed — list it loudly here).
-    for c in go mvn ruby php composer shellcheck hadolint; do
+    for c in go mvn ruby php composer shellcheck hadolint pre-commit; do
         if have "$c"; then
             log "ok: $c"
         else
@@ -397,6 +426,7 @@ case "${1:-all}" in
         install_gitleaks
         install_trivy
         install_semgrep
+        install_pre_commit
         install_zola
         install_hadolint
         install_etc_conf

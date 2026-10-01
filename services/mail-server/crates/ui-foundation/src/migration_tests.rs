@@ -319,7 +319,8 @@ fn migration_primitives_render_valid_html() {
     assert!(html.contains("<table"), "Table missing <table> tag");
     assert!(html.contains("Col"), "Table missing column label");
 
-    let input = primitives::Input { id: None,
+    let input = primitives::Input {
+        id: None,
         input_type: "text",
         variant: "default",
         size: "default",

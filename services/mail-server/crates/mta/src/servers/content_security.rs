@@ -37,7 +37,9 @@ use spam_filter::engine::SpamClass;
 use spam_filter::{SpamEngine, SpamVerdict};
 
 use crate::auth::AuthenticationResults;
-use crate::config::{AttachmentScanAction, AttachmentScanConfig, IdsIntegrationConfig, SpamFilterConfig};
+use crate::config::{
+    AttachmentScanAction, AttachmentScanConfig, IdsIntegrationConfig, SpamFilterConfig,
+};
 
 use super::submission::split_headers_body;
 
@@ -122,7 +124,10 @@ impl SpamAnalyzer for LiveSpamAnalyzer {
         // Tenant-scoped scoring (per-tenant Bayesian prior on top of the
         // global model). `_global` keeps unresolvable-tenant mail in one
         // shared namespace instead of allocating one per unknown domain.
-        Some(self.engine.analyze_for_tenant(body, headers, auth_results, tenant_id))
+        Some(
+            self.engine
+                .analyze_for_tenant(body, headers, auth_results, tenant_id),
+        )
     }
 }
 
@@ -372,7 +377,9 @@ pub(crate) fn run_attachment_scan(
             },
         };
 
-        outcome.headers.push(format_scan_header(&name_for_header, part, &scan));
+        outcome
+            .headers
+            .push(format_scan_header(&name_for_header, part, &scan));
 
         let flagged = scan.decision == "REJECT" || scan.decision == "QUARANTINE";
         if scan.decision == "REJECT" && config.action == AttachmentScanAction::Reject {
@@ -451,13 +458,19 @@ fn format_scan_header(name: &str, part: &AttachmentPart, scan: &ScanRecord) -> S
 }
 
 fn strip_note(name: &str, scan: &ScanRecord) -> String {
-    let risk = scan.risk.map(|r| format!("risk={r:.1}, ")).unwrap_or_default();
+    let risk = scan
+        .risk
+        .map(|r| format!("risk={r:.1}, "))
+        .unwrap_or_default();
     let findings = if scan.findings.is_empty() {
         String::new()
     } else {
         format!(", findings={}", scan.findings.join(","))
     };
-    format!("attachment \"{name}\" removed by attachment sandbox ({risk}decision={}{findings})", scan.decision)
+    format!(
+        "attachment \"{name}\" removed by attachment sandbox ({risk}decision={}{findings})",
+        scan.decision
+    )
 }
 
 /// The MIME part that replaces a stripped attachment: a neutral text part
@@ -553,7 +566,14 @@ fn collect_attachment_parts(
 
 fn is_multipart(part: &AttachmentPart) -> bool {
     part.header_value("content-type")
-        .map(|value| value.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
         .map(|media_type| media_type.starts_with("multipart/"))
         .unwrap_or(false)
 }
@@ -563,7 +583,12 @@ fn is_multipart(part: &AttachmentPart) -> bool {
 /// render a download button.
 fn is_attachment(part: &AttachmentPart) -> bool {
     if let Some(disposition) = part.header_value("content-disposition") {
-        let base = disposition.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        let base = disposition
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
         if base == "attachment" {
             return true;
         }
@@ -678,7 +703,11 @@ fn walk_multipart(body: &[u8], boundary: &str) -> Vec<AttachmentPart> {
             boundary_lines.push((position, true));
             break;
         }
-        position = if line_end + 2 <= body.len() { line_end + 2 } else { body.len() };
+        position = if line_end + 2 <= body.len() {
+            line_end + 2
+        } else {
+            body.len()
+        };
     }
 
     for window in boundary_lines.windows(2) {
@@ -703,7 +732,12 @@ fn walk_multipart(body: &[u8], boundary: &str) -> Vec<AttachmentPart> {
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                 .map(|(_, value)| value.clone())
                 .unwrap_or_else(|| "text/plain".to_string());
-            let base_type = content_type.split(';').next().unwrap_or("").trim().to_string();
+            let base_type = content_type
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             parts.push(AttachmentPart {
                 region: content_start..content_end,
                 payload_start: content_start + payload_offset.min(content.len()),
@@ -754,7 +788,9 @@ fn decode_part_payload(part: &AttachmentPart, raw: &[u8]) -> Option<Vec<u8>> {
                 .decode(&compact)
                 .ok()
                 .or_else(|| {
-                    base64::engine::general_purpose::STANDARD_NO_PAD.decode(&compact).ok()
+                    base64::engine::general_purpose::STANDARD_NO_PAD
+                        .decode(&compact)
+                        .ok()
                 })
         }
         // Identity transfer encodings: the payload bytes ARE the content.
@@ -768,10 +804,7 @@ fn decode_part_payload(part: &AttachmentPart, raw: &[u8]) -> Option<Vec<u8>> {
 /// The raw message is re-split exactly as the walk did (headers, separator,
 /// body); the replacements apply to the body region and the result is
 /// reassembled, so the client's header block is never rewritten.
-fn rebuild_without_parts(
-    raw: &[u8],
-    replacements: &[PartReplacement],
-) -> Result<Vec<u8>, String> {
+fn rebuild_without_parts(raw: &[u8], replacements: &[PartReplacement]) -> Result<Vec<u8>, String> {
     let (_, body) = split_headers_body(raw);
     let body_start = raw.len() - body.len();
 
@@ -934,7 +967,17 @@ pub(crate) fn ids_inspect_payload(
 ) -> IdsScanOutcome {
     // Fail-open boundary: an engine panic is contained and treated as Pass.
     let inspected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.engine.inspect(ip, port, "smtp", raw)
+        // Audit SM5 F6: this is the DATA-time scan — pass the DATA phase
+        // so the NUL-byte evasion rule (3000004) stays silent. Binary
+        // mail content (8BITMIME bodies, PDFs, images, zip archives)
+        // legitimately contains NUL bytes and must not be refused.
+        runtime.engine.inspect_with_phase(
+            ip,
+            port,
+            "smtp",
+            raw,
+            ids_engine::protocol_analyzer::SmtpPhase::Data,
+        )
     }));
     let (verdict, alerts) = match inspected {
         Ok(result) => result,
@@ -942,7 +985,9 @@ pub(crate) fn ids_inspect_payload(
             // coverage: justified — panic containment for the engine call;
             // IdsEngine::inspect has no injected failure seam and no known
             // panicking input, so the arm exists for the fail-open contract.
-            tracing::warn!("IDS engine PANICKED during payload scan; failing OPEN (verdict treated as pass)");
+            tracing::warn!(
+                "IDS engine PANICKED during payload scan; failing OPEN (verdict treated as pass)"
+            );
             (IdsVerdict::Pass, Vec::new())
         }
     };
@@ -960,7 +1005,11 @@ pub(crate) fn ids_inspect_payload(
         .take(MAX_ECHOED_ALERTS)
         .collect();
     let overflow = alerts.len().saturating_sub(MAX_ECHOED_ALERTS);
-    let mut header = format!("X-Apex-Ids-Verdict: {}; alerts={}", verdict_label(verdict), sids.join(","));
+    let mut header = format!(
+        "X-Apex-Ids-Verdict: {}; alerts={}",
+        verdict_label(verdict),
+        sids.join(",")
+    );
     if overflow > 0 {
         header.push_str(&format!(" (+{overflow} more)"));
     }
@@ -986,7 +1035,10 @@ pub(crate) fn ids_inspect_payload(
         );
     }
 
-    IdsScanOutcome { refuse, header: Some(header) }
+    IdsScanOutcome {
+        refuse,
+        header: Some(header),
+    }
 }
 
 fn verdict_label(verdict: IdsVerdict) -> &'static str {
@@ -1147,10 +1199,7 @@ mod tests {
     #[test]
     fn reject_classification_refuses_at_data_time_only_when_configured() {
         let analyzer = LiveSpamAnalyzer::new(2.0);
-        let raw = format!(
-            "From: scammer@evil.tk\r\n\r\n{SPAMMY_BODY}\r\n"
-        )
-        .into_bytes();
+        let raw = format!("From: scammer@evil.tk\r\n\r\n{SPAMMY_BODY}\r\n").into_bytes();
 
         // Tag-only (default): the same classification stays a tag.
         let outcome = run_spam_scan(
@@ -1298,10 +1347,8 @@ mod tests {
         assert!(text.contains("Decision: REJECT"), "{text}");
         // …and the note header is emitted for the stored message.
         assert!(
-            outcome
-                .headers
-                .iter()
-                .any(|header| header.starts_with("X-Apex-Attachment-Note: attachment \"payload.exe\" removed")),
+            outcome.headers.iter().any(|header| header
+                .starts_with("X-Apex-Attachment-Note: attachment \"payload.exe\" removed")),
             "{:?}",
             outcome.headers
         );
@@ -1355,7 +1402,10 @@ mod tests {
             &raw,
         );
         assert!(
-            strip.headers.iter().any(|header| header.contains("decision=QUARANTINE")),
+            strip
+                .headers
+                .iter()
+                .any(|header| header.contains("decision=QUARANTINE")),
             "{:?}",
             strip.headers
         );
@@ -1403,7 +1453,8 @@ mod tests {
             outcome
                 .headers
                 .iter()
-                .any(|header| header.contains("decision=ERROR") && header.contains("SCAN_IMPOSSIBLE")),
+                .any(|header| header.contains("decision=ERROR")
+                    && header.contains("SCAN_IMPOSSIBLE")),
             "{:?}",
             outcome.headers
         );
@@ -1433,7 +1484,8 @@ mod tests {
         );
         assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
         assert!(
-            outcome.headers[0].contains("decision=REJECT") && outcome.headers[0].contains("EXECUTABLE_PE"),
+            outcome.headers[0].contains("decision=REJECT")
+                && outcome.headers[0].contains("EXECUTABLE_PE"),
             "identity-encoded PE must be scanned: {:?}",
             outcome.headers
         );
@@ -1470,7 +1522,12 @@ mod tests {
             },
             &raw,
         );
-        assert_eq!(outcome.headers.len(), 2, "scan + note: {:?}", outcome.headers);
+        assert_eq!(
+            outcome.headers.len(),
+            2,
+            "scan + note: {:?}",
+            outcome.headers
+        );
         let stripped = outcome.stripped_raw.expect("nested attachment stripped");
         let text = String::from_utf8_lossy(&stripped);
         assert!(!text.contains("TVqQ"), "{text}");
@@ -1481,8 +1538,11 @@ mod tests {
     // ── ids wiring ──────────────────────────────────────────────────────────
 
     fn ids_runtime(refuse: bool) -> IdsRuntime {
-        IdsRuntime::new(IdsIntegrationConfig { enabled: true, refuse })
-            .expect("ids engine constructs with built-in signatures")
+        IdsRuntime::new(IdsIntegrationConfig {
+            enabled: true,
+            refuse,
+        })
+        .expect("ids engine constructs with built-in signatures")
     }
 
     #[test]
@@ -1519,17 +1579,18 @@ mod tests {
         // verdict and refuses at DATA time.
         let outcome = ids_inspect_payload(&ids_runtime(true), ip, 25, &payload);
         assert!(outcome.refuse);
-        assert!(outcome
-            .header
-            .as_deref()
-            .is_some_and(|header| header.starts_with("X-Apex-Ids-Verdict: drop; alerts=2000002")),
+        assert!(
+            outcome.header.as_deref().is_some_and(
+                |header| header.starts_with("X-Apex-Ids-Verdict: drop; alerts=2000002")
+            ),
             "{:?}",
             outcome.header
         );
     }
 
     #[test]
-    fn ids_session_admission_counts_half_open_connections_and_refuses_floods_only_when_configured() {
+    fn ids_session_admission_counts_half_open_connections_and_refuses_floods_only_when_configured()
+    {
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 7, 0, 3));
         // Detection-only: SYN flood anomalies never refuse admission.
         let detection = ids_runtime(false);
@@ -1602,7 +1663,10 @@ mod tests {
             .as_slice();
         let parsed = mail_parser::MessageParser::default().parse(raw);
         assert!(
-            parsed.as_ref().and_then(|message| message.body_text(0)).is_none(),
+            parsed
+                .as_ref()
+                .and_then(|message| message.body_text(0))
+                .is_none(),
             "test premise: an attachment-only message has no body_text"
         );
         let (body, _) = extract_scoring_input(raw);
@@ -1635,8 +1699,14 @@ mod tests {
             .expect("an engine failure must be recorded, never invented clean");
         assert!(header.contains("detail="), "{header}");
         assert!(header.contains("File too large"), "{header}");
-        assert!(!outcome.reject, "a sandbox ERROR must fail OPEN, never refuse");
-        assert!(outcome.stripped_raw.is_none(), "a sandbox ERROR must not strip");
+        assert!(
+            !outcome.reject,
+            "a sandbox ERROR must fail OPEN, never refuse"
+        );
+        assert!(
+            outcome.stripped_raw.is_none(),
+            "a sandbox ERROR must not strip"
+        );
     }
 
     #[test]
@@ -1816,7 +1886,11 @@ mod tests {
         .into_bytes();
         let outcome = run_attachment_scan(&engine, &config, &unterminated);
         assert_eq!(outcome.headers.len(), 1, "{:?}", outcome.headers);
-        assert!(outcome.headers[0].contains("decision=REJECT"), "{:?}", outcome.headers);
+        assert!(
+            outcome.headers[0].contains("decision=REJECT"),
+            "{:?}",
+            outcome.headers
+        );
 
         // (b) An empty part: a boundary line immediately followed by the
         // closing marker delimits no content at all — skipped, no panic.

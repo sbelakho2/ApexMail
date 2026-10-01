@@ -119,7 +119,7 @@ class BaseClient:
         self._base_headers = {
             "X-API-Key": self.api_key,
             "Content-Type": "application/json",
-            "User-Agent": "apexmail-python/1.0.0",
+            "User-Agent": "apexmail-python/1.0.1",
         }
 
     def close(self) -> None:

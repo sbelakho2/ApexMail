@@ -117,6 +117,12 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
   test('filling the decoy input then submitting sends the decoy markers', async ({ page }) => {
     const glue = fs.readFileSync(assetPath('kiwicaptcha-wasm.js'), 'utf8');
     const driver = fs.readFileSync(assetPath('widget-driver.js'), 'utf8');
+    // The lazy risk module (widget-risk.js) is embedded on every
+    // production inline page (the bundle's form_div_layout.html.twig
+    // embeds it after the driver: the adaptive-risk solve tier +
+    // armed-evidence machinery, a decoy can be armed per response); the
+    // fixture page mirrors that exact inline-tier shape.
+    const risk = fs.readFileSync(assetPath('widget-risk.js'), 'utf8');
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 <form id="f" action="/form-submit" method="post">
 <div class="kiwi-container" id="kiwicaptcha-root" data-kiwi-endpoint="/challenge?decoy=1&capture=d1" data-kiwi-scope="login">
@@ -131,7 +137,7 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
   </div>
 </div>
 </form>
-<script>${glue}</script><script>${driver}</script></body></html>`;
+<script>${glue}</script><script>${driver}</script><script>${risk}</script></body></html>`;
     await page.route('**/decoy-form', (route) =>
       route.fulfill({ contentType: 'text/html', body: html })
     );
@@ -172,9 +178,16 @@ test.describe('KiwiCaptcha risk-v2 driver evidence', () => {
     });
 
     const widgetId = await page.evaluate(() => document.querySelector('[data-kiwi-widget]').dataset.kiwiInstance);
-    await page.waitForTimeout(3500);
-    const expired = await page.evaluate((wid) => window.KiwiCaptcha.isExpired(wid), widgetId);
-    expect(expired).toBe(true);
+    // ttl=3 ⇒ the credential expires ~3s after the solve. Poll the ACTUAL
+    // condition — the driver's own expiry state — instead of sleeping past
+    // the TTL (audit F19): robust under load, and it cannot pass before the
+    // expiry has really flipped.
+    await expect
+      .poll(
+        async () => page.evaluate((wid) => window.KiwiCaptcha.isExpired(wid), widgetId),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
     // The fresh decoy name is captured from the re-solve's challenge
     // response (registered before the re-solve fetch fires).
     const freshNameP = challengeDecoyName(page);

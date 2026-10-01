@@ -42,24 +42,10 @@ use crate::templates::{
 
 // ── Token shape validation (F37) ──────────────────────────────────────────────
 
-/// Minimum/maximum accepted token length (bytes). Matches the codec bounds.
-const TOKEN_MIN_LEN: usize = 10;
-const TOKEN_MAX_LEN: usize = 4096;
-
-/// F37:a unsubscribe/preferences token is ALWAYS `base64url(IV||tag||ct)`
-/// produced by [`crate::codec::TrackingCodec`] — a strict ASCII alphabet of
-/// `[A-Za-z0-9_-]` with no padding. Anything else (multi-byte Unicode,
-/// `+`/`/` standard-base64, `=`, control bytes) can never verify, so it is
-/// rejected HERE, before any slicing or logging. This is what makes the
-/// handlers panic-free on hostile input: after this check every later
-/// `&token[..n]` slice is on an ASCII string where byte indices are char
-/// boundaries.
-fn is_valid_token_shape(token: &str) -> bool {
-    (TOKEN_MIN_LEN..=TOKEN_MAX_LEN).contains(&token.len())
-        && token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
+// SM2-F4: the F37 guard and its bounds now live in [`crate::token_shape`] so
+// every token-handling route (unsubscribe, click, pixel, WAL processor) shares
+// one implementation.
+use crate::token_shape::is_valid_token_shape;
 
 /// F37:log a rejected token WITHOUT any raw token material — length and
 /// charset classification only. (Slicing at a fixed byte offset is exactly
@@ -121,7 +107,10 @@ pub async fn handle_unsub_post(
             .unwrap_or_default();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
+    let data = match state
+        .codec
+        .verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days)
+    {
         Some(d) => d,
         None => {
             warn!("Unsubscribe POST: invalid or expired token");
@@ -227,7 +216,10 @@ pub async fn handle_unsub_get(
         return Html(render_error_page("Invalid or expired unsubscribe link")).into_response();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
+    let data = match state
+        .codec
+        .verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days)
+    {
         Some(d) => d,
         None => {
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
@@ -279,7 +271,10 @@ pub async fn handle_unsub_confirm_post(
         return Html(render_error_page("Invalid confirmation request.")).into_response();
     }
 
-    let data = match state.codec.verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days) {
+    let data = match state
+        .codec
+        .verify_unsubscribe_token(&token, state.config.tracking.token_max_age_days)
+    {
         Some(d) => d,
         None => {
             return Html(render_error_page("Invalid or expired unsubscribe link")).into_response()
@@ -465,7 +460,10 @@ pub async fn handle_prefs_post(
     if !is_valid_token_shape(&token) {
         log_invalid_token_shape("prefs_post", &token);
         // Batch-2:HTML error page (was raw JSON 400) — browser form surface.
-        return prefs_error_page(StatusCode::BAD_REQUEST, "Invalid or expired preferences link.");
+        return prefs_error_page(
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired preferences link.",
+        );
     }
 
     let data = match state.codec.verify_preferences_token(&token) {
@@ -475,7 +473,7 @@ pub async fn handle_prefs_post(
             return prefs_error_page(
                 StatusCode::BAD_REQUEST,
                 "Invalid or expired preferences link.",
-            )
+            );
         }
     };
 
@@ -983,6 +981,7 @@ mod tests {
     use crate::codec::TrackingCodec;
     use crate::processor::REDIS_WAL_KEY;
     use crate::routes::{build_router, test_support};
+    use crate::token_shape::{TOKEN_MAX_LEN, TOKEN_MIN_LEN};
 
     /// DEBUG-level subscriber so lazily-evaluated `warn!`/`error!` FIELD
     /// expressions execute in the fault-window tests below (see the
@@ -1087,7 +1086,6 @@ mod tests {
         // Give the spawned task its bounded moment to fail on the dead pool.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
-
 
     // ── F1:dedup key ──────────────────────────────────────────────────
 

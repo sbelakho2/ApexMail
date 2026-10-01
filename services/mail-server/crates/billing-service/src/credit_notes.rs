@@ -1137,6 +1137,85 @@ mod coverage_adversarial {
         assert_eq!(notes, 0, "the refused credit is not recorded");
     });
 
+    // ------------------------------------------------------------------
+    // Audit SM7 F4 — a SQL-level accounting-hook failure must NOT abort the
+    // billing write. The hook runs inside a SAVEPOINT, so a poisoned
+    // transaction is healed and the failure lands on the same logged-skip
+    // policy as typed errors.
+    // ------------------------------------------------------------------
+
+    env_test!(
+        sql_failure_in_the_posting_hook_does_not_rollback_the_credit_note,
+        |env| {
+            let tenant = "cncov_f4";
+            seed_tenant(env, tenant).await;
+            let invoice = seed_invoice(env, tenant, "paid", 1000, "EUR").await;
+            record_payment(env, tenant, invoice, 1000, "EUR").await;
+
+            // Force a SQL-level failure inside the posting adapter: the
+            // journal writer's source-document table is gone, so
+            // `post_credit_note_in` fails mid-statement (the exact
+            // poison-the-transaction class, in the test's PRIVATE clone).
+            sqlx::query(
+                "ALTER TABLE accounting_source_documents RENAME TO accounting_source_documents_f4",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("break source-document table");
+
+            // The billing write MUST survive: the savepoint fence heals the
+            // transaction and the posting lands on the logged-skip path.
+            let created = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-f4"))
+                .await
+                .expect("credit note must commit despite the ledger failure");
+            assert_eq!(created.amount, 400);
+
+            // Everything the same transaction minted is durably there.
+            let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_notes WHERE id = $1")
+                .bind(created.id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("notes");
+            assert_eq!(notes, 1, "the credit note committed");
+            let balance: i64 =
+                sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("wallet");
+            assert_eq!(balance, 400, "the wallet mint committed with it");
+            let source_docs_broken: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM accounting_source_documents_f4")
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("broken table");
+            assert_eq!(
+                source_docs_broken, 0,
+                "the posting's partial writes rolled back to the savepoint"
+            );
+
+            // Heal the schema: a retry now posts through the normal path
+            // (the posting is idempotent per credit-note part).
+            sqlx::query(
+                "ALTER TABLE accounting_source_documents_f4 RENAME TO accounting_source_documents",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("heal source-document table");
+            let replay = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-f4"))
+                .await
+                .expect("replay");
+            assert_eq!(replay.id, created.id, "idempotent replay returns the note");
+            let balance: i64 =
+                sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("wallet");
+            assert_eq!(balance, 400, "the replay never mints twice");
+        }
+    );
+
     #[test]
     fn credit_disposition_split_is_conservative() {
         // Nothing paid: the whole credit reduces debt.

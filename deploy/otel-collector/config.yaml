@@ -65,6 +65,14 @@ exporters:
     endpoint: http://loki:3100/loki/api/v1/push
     tls:
       insecure: true
+    # F3 (audit): Loki runs with auth_enabled: true, so EVERY push requires
+    # the X-Scope-OrgID tenant header. Without it all pushes 401'd — zero
+    # logs ever landed in Loki while the Grafana datasource (which sends
+    # httpHeaderValue1: "apexmail") queried a tenant that was always empty.
+    # The value MUST match the Grafana datasource header
+    # (deploy/grafana/provisioning/datasources/loki.yml).
+    headers:
+      X-Scope-OrgID: "apexmail"
     # Schema for the pinned collector: default_labels_enabled is a MAP of
     # label -> bool; per-attribute label hints live on the pipeline's
     # resource/log-to-attributes conversion, not an `attributes` list here.
@@ -75,6 +83,12 @@ exporters:
       service_name: true
       service_version: true
       environment: true
+    # FOLLOW-UP (audit F3): the loki exporter is DEPRECATED upstream
+    # (removal announced — open-telemetry/opentelemetry-collector-contrib
+    # #33916). Migrate to the otlphttp exporter against Loki 3.0's native
+    # OTLP ingest (/otlp), which carries the tenant via Loki's own
+    # X-Scope-OrgID pass-through configuration; this headers block and the
+    # default_labels_enabled schema go away with it.
 
 service:
   pipelines:

@@ -77,31 +77,45 @@ pub fn router() -> Router<AppState> {
         // handlers enforce with (`require_feature`/`require_capacity`), so
         // the console cannot advertise availability the API does not honour.
         .route("/entitlements", get(get_entitlements))
-        .route("/admin/tenants", get(admin_list_tenants))
-        .route("/admin/tenants/:tenantId", get(admin_get_tenant_details))
-        .route("/admin/tenants/:tenantId/credits", post(admin_apply_credit))
+}
+
+/// SM3 (audit F3): the platform billing-admin routes. These used to ride the
+/// plain `authenticated` router guarded only by `has_admin_access` — a JWT
+/// tenant-id + scope string check — so a stolen system-tenant session JWT
+/// (a sliding window: `refresh_token` mints a fresh `iat` that resets the
+/// 7-day absolute check) could mint wallet credits and override plans with
+/// none of the CP ceremony app.rs calls CRITICAL for read-only analytics.
+///
+/// Mounted from app.rs on the `/v1/admin` control-plane stack
+/// (`require_system_tenant_middleware` → `require_cp_auth`), giving billing
+/// admin the same MFA'd-session + idle/absolute-timeout + per-request-recheck
+/// + `cp_access_log` policy. The CP gate's explicit machine-credential
+/// carve-out (a system-tenant API key with no user identity — audited as
+/// `cp_machine_key`) keeps programmatic callers working.
+pub fn admin_router() -> Router<AppState> {
+    Router::new()
+        .route("/tenants", get(admin_list_tenants))
+        .route("/tenants/:tenantId", get(admin_get_tenant_details))
+        .route("/tenants/:tenantId/credits", post(admin_apply_credit))
         .route(
-            "/admin/tenants/:tenantId/plan-override",
+            "/tenants/:tenantId/plan-override",
             post(admin_apply_plan_override),
         )
         .route(
-            "/admin/tenants/:tenantId/subscription-status",
+            "/tenants/:tenantId/subscription-status",
             post(admin_force_subscription_status),
         )
         .route(
-            "/admin/tenants/:tenantId/dunning/reset",
+            "/tenants/:tenantId/dunning/reset",
             post(admin_reset_dunning),
         )
-        .route(
-            "/admin/tenants/:tenantId/invoices",
-            post(admin_create_invoice),
-        )
-        .route("/admin/reports/revenue", get(admin_get_revenue_report))
-        .route("/admin/reports/mrr", get(admin_get_mrr_report))
-        .route("/admin/reports/churn", get(admin_get_churn_report))
-        .route("/admin/reports/dunning", get(admin_get_dunning_report))
-        .route("/admin/reports/costs", get(admin_get_cost_report))
-        .route("/admin/export", get(admin_export_billing_data))
+        .route("/tenants/:tenantId/invoices", post(admin_create_invoice))
+        .route("/reports/revenue", get(admin_get_revenue_report))
+        .route("/reports/mrr", get(admin_get_mrr_report))
+        .route("/reports/churn", get(admin_get_churn_report))
+        .route("/reports/dunning", get(admin_get_dunning_report))
+        .route("/reports/costs", get(admin_get_cost_report))
+        .route("/export", get(admin_export_billing_data))
 }
 
 /// `GET /v1/billing/entitlements` — the caller tenant's resolved
@@ -780,7 +794,11 @@ struct AdminBillingAddressRow {
     state: Option<String>,
     postal_code: String,
     country: String,
-    email: String,
+    /// Nullable since migration 132 (`email IS NULL OR valid address`) —
+    /// decoding into `String` turned a schema-legal NULL into a 500 on
+    /// every admin invoice creation for that tenant (billing-service's
+    /// writer already treats the column as optional).
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -877,7 +895,7 @@ struct LegacyBillingAddressDto {
     #[serde(alias = "country")]
     country: String,
     #[serde(alias = "email")]
-    email: String,
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1355,13 +1373,19 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 /// (see `require_system_tenant_middleware`), so the caller must BOTH be a
 /// system-tenant user AND carry an admin scope.
 ///
-/// Slug-aware (same fix class as the control plane's): the literal `system`
-/// is carried only by static API keys — every human operator authenticates
-/// as the SEEDED system tenant (`system_internal_tenant01`, migration 072;
-/// see `routes::system_sender::SYSTEM_TENANT_ID`). Accepting only the
-/// literal 403'd every human platform operator from billing admin.
-fn has_admin_access(auth: &AuthUser) -> bool {
-    (auth.tenant_id == "system" || auth.tenant_id == crate::routes::system_sender::SYSTEM_TENANT_ID)
+/// SM3 (audit F9): system tenancy is resolved through the SAME slug-aware
+/// shared gate the control plane uses
+/// ([`crate::middleware::auth::require_system_tenant`], backed by
+/// `routes::web::is_system_tenant`'s `slug = 'system'` lookup). The previous
+/// check hardcoded the literal `system` plus the seeded id
+/// (`system_sender::SYSTEM_TENANT_ID`) — safe only while the seeded row kept
+/// that exact id; any re-seed/rename would have silently locked every human
+/// operator out of billing admin, the exact failure class the CP gate was
+/// already fixed for. A database error fails CLOSED.
+async fn has_admin_access(state: &AppState, auth: &AuthUser) -> bool {
+    crate::middleware::auth::require_system_tenant(state, auth)
+        .await
+        .is_ok()
         && auth
             .scopes
             .iter()
@@ -1375,8 +1399,8 @@ fn has_tenant_access(auth: &AuthUser, tenant_id: &str) -> bool {
     })
 }
 
-fn require_admin_access(auth: &AuthUser) -> Result<(), Response> {
-    if has_admin_access(auth) {
+async fn require_admin_access(state: &AppState, auth: &AuthUser) -> Result<(), Response> {
+    if has_admin_access(state, auth).await {
         Ok(())
     } else {
         Err((
@@ -1387,8 +1411,12 @@ fn require_admin_access(auth: &AuthUser) -> Result<(), Response> {
     }
 }
 
-fn require_admin_tenant_access(auth: &AuthUser, tenant_id: &str) -> Result<(), Response> {
-    require_admin_access(auth)?;
+async fn require_admin_tenant_access(
+    state: &AppState,
+    auth: &AuthUser,
+    tenant_id: &str,
+) -> Result<(), Response> {
+    require_admin_access(state, auth).await?;
     if has_tenant_access(auth, tenant_id) {
         Ok(())
     } else {
@@ -1594,7 +1622,7 @@ fn empty_billing_address() -> LegacyBillingAddressDto {
         state: None,
         postal_code: String::new(),
         country: String::new(),
-        email: String::new(),
+        email: None,
     }
 }
 
@@ -1929,7 +1957,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
         bill_to_state = state_prefix,
         bill_to_country = escape_html(&invoice.billing_address.country),
         vat_number = vat_number,
-        bill_to_email = escape_html(&invoice.billing_address.email),
+        bill_to_email = escape_html(invoice.billing_address.email.as_deref().unwrap_or("")),
         line_items_html = line_items_html,
         subtotal = format_invoice_currency_with(invoice.subtotal, &invoice.currency),
         vat_label = invoice_vat_label(invoice),
@@ -2104,7 +2132,7 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>
         buyer_city = escape_xml(&invoice.billing_address.city),
         buyer_postal_code = escape_xml(&invoice.billing_address.postal_code),
         buyer_country = escape_xml(&invoice.billing_address.country),
-        buyer_email = escape_xml(&invoice.billing_address.email),
+        buyer_email = escape_xml(invoice.billing_address.email.as_deref().unwrap_or("")),
         invoice_number = escape_xml(&invoice.invoice_number),
         due_at = format_invoice_date(invoice.due_at),
         reference_number = reference_number,
@@ -2740,6 +2768,14 @@ async fn get_usage(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    // SM3 (audit F2): billing reads carry the registered `billing:read`
+    // scope — the same least-privilege bar every other read surface
+    // (messages:read, webhooks:read, analytics:read) enforces. Fail-closed
+    // by design: read-side role grants (viewer/developer) and narrow API
+    // keys deliberately scoped away from finance data no longer reach
+    // spend/usage figures.
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     let now = Utc::now();
     let month_start_date = now.date_naive().with_day(1).unwrap_or(now.date_naive());
     let period_start = month_start_date.and_time(NaiveTime::MIN).and_utc();
@@ -2900,7 +2936,9 @@ async fn estimate_overage_cost(
     // data from an unauthenticated body field.
     let estimate_tenant = match body.tenant_id.as_deref() {
         Some(requested_tenant) if requested_tenant != auth.tenant_id => {
-            if let Err(response) = require_admin_tenant_access(&auth, requested_tenant) {
+            if let Err(response) =
+                require_admin_tenant_access(&state, &auth, requested_tenant).await
+            {
                 return Ok(response);
             }
             requested_tenant.to_string()
@@ -3330,6 +3368,10 @@ async fn get_subscription(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Response, ApiError> {
+    // SM3 (audit F2): billing reads require the registered `billing:read`
+    // scope (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     let query = sqlx::query_as::<_, LegacyStripeSubscriptionRow>(
         r#"
         SELECT
@@ -3377,6 +3419,10 @@ async fn list_invoices(
     auth: AuthUser,
     Query(query): Query<BillingListQuery>,
 ) -> Result<Response, ApiError> {
+    // SM3 (audit F2): invoice lists are finance data — `billing:read` is
+    // required (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     let limit = clamp_limit(query.limit.unwrap_or(50), 200);
     let offset = clamp_offset(query.offset.unwrap_or(0), 100_000);
 
@@ -3405,6 +3451,10 @@ async fn get_invoice(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    // SM3 (audit F2): invoice line items are finance data — `billing:read`
+    // is required (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
         Some(invoice) => Ok(billing_success_response(serde_json::to_value(invoice)?)),
         None => Ok((
@@ -3420,6 +3470,10 @@ async fn get_invoice_pdf_html(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    // SM3 (audit F2): the printable invoice export requires `billing:read`
+    // (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
         Some(invoice) => Ok(invoice_html_response(&invoice)),
         None => Ok((
@@ -3435,6 +3489,10 @@ async fn get_invoice_xml(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    // SM3 (audit F2): the e-invoice XML export requires `billing:read`
+    // (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
         Some(invoice) => {
             // Audit F35 — the e-invoice's paid/payable split derives from
@@ -3483,6 +3541,10 @@ async fn load_legacy_invoice_detail(
 }
 
 async fn check_quota(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
+    // SM3 (audit F2): quota status exposes plan headroom and consumption —
+    // `billing:read` is required (fail-closed — see get_usage).
+    crate::middleware::auth::require_scopes(&auth, &["billing:read"])?;
+
     let status = usage::check_quota(&state.db, &state.redis, &auth.tenant_id)
         .await
         .map_err(map_usage_error)?;
@@ -3495,7 +3557,7 @@ async fn admin_list_tenants(
     auth: AuthUser,
     Query(query): Query<AdminTenantListQuery>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -3587,7 +3649,7 @@ async fn admin_get_tenant_details(
     auth: AuthUser,
     Path(tenant_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
 
@@ -3660,7 +3722,7 @@ async fn admin_apply_credit(
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminCreditBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
     if body.amount <= 0 {
@@ -3871,10 +3933,15 @@ async fn admin_apply_credit(
     })?;
     credit_tx.commit().await?;
 
+    // SM3 (audit F5): the one endpoint that mints balance must attribute its
+    // operator like every sibling admin surface (plan override, dunning
+    // reset) does — `admin_actor_id` falls back to "system" for machine
+    // credentials, but the AUDIT row keeps the raw operator identity
+    // (`None` here used to leave the money-minting event unattributed).
     crate::audit_log::insert_audit_log(
         &state.db,
         Some(&tenant_id),
-        None,
+        auth.user_id.as_deref(),
         "wallet.credit",
         "wallet",
         Some(&transaction.id),
@@ -3906,7 +3973,7 @@ async fn admin_apply_plan_override(
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminPlanOverrideBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
     let plan_id = body.plan_id.trim();
@@ -4022,7 +4089,7 @@ async fn admin_force_subscription_status(
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminSubscriptionStatusBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
 
@@ -4093,7 +4160,7 @@ async fn admin_reset_dunning(
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminDunningResetBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
 
@@ -4148,7 +4215,7 @@ async fn admin_create_invoice(
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminCreateInvoiceBody>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_tenant_access(&auth, &tenant_id) {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
         return Ok(response);
     }
 
@@ -4438,7 +4505,7 @@ async fn admin_get_revenue_report(
     auth: AuthUser,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4487,7 +4554,7 @@ async fn admin_get_mrr_report(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4508,7 +4575,7 @@ async fn admin_get_churn_report(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4530,7 +4597,7 @@ async fn admin_get_dunning_report(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4567,7 +4634,7 @@ async fn admin_get_cost_report(
     auth: AuthUser,
     Query(query): Query<DateRangeQuery>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4625,7 +4692,7 @@ async fn admin_export_billing_data(
     auth: AuthUser,
     Query(query): Query<BillingExportQuery>,
 ) -> Result<Response, ApiError> {
-    if let Err(response) = require_admin_access(&auth) {
+    if let Err(response) = require_admin_access(&state, &auth).await {
         return Ok(response);
     }
 
@@ -4943,8 +5010,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn billing_routes_admin_access_rejects_tenant_only_scope() {
+    #[tokio::test]
+    async fn billing_routes_admin_access_rejects_tenant_only_scope() {
         // NOTE (audit A): this test previously asserted that a non-system
         // tenant holding "*" or "billing:admin" passes the billing-admin gate.
         // That was the vulnerability — every customer tenant owner is granted
@@ -4952,53 +5019,76 @@ mod tests {
         // /v1/billing/admin/* handlers (list tenants, apply credits, plan
         // overrides, revenue reports, exports). Platform billing admin now
         // requires the caller to belong to the `system` tenant.
+        // SM3 (audit F9): tenancy resolves through the slug-aware DB-backed
+        // shared gate, so the refusal cases need a real pool (soft-skip).
+        let Some(pool) = crate::test_db::canonical_pool("billing_admin_gate_refusals").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
         assert!(
-            !has_admin_access(&auth_user(&["*"], "tenant_1")),
+            !has_admin_access(&state, &auth_user(&["*"], "tenant_1")).await,
             "non-system tenant with wildcard scope must NOT pass the billing-admin gate"
         );
         assert!(
-            !has_admin_access(&auth_user(&["billing:admin"], "tenant_1")),
+            !has_admin_access(&state, &auth_user(&["billing:admin"], "tenant_1")).await,
             "non-system tenant with billing:admin scope must NOT pass the gate"
         );
-        assert!(!has_admin_access(&auth_user(&["tenant:*"], "tenant_1")));
-        assert!(!has_admin_access(&auth_user(
-            &["tenant:tenant_1"],
-            "tenant_1"
-        )));
+        assert!(!has_admin_access(&state, &auth_user(&["tenant:*"], "tenant_1")).await);
+        assert!(!has_admin_access(&state, &auth_user(&["tenant:tenant_1"], "tenant_1")).await);
     }
 
-    #[test]
-    fn billing_routes_admin_access_requires_system_tenant_with_admin_scope() {
-        // System-tenant admins (platform staff) still pass.
-        assert!(has_admin_access(&auth_user(&["*"], "system")));
-        assert!(has_admin_access(&auth_user(&["billing:admin"], "system")));
-        // Human operators authenticate as the SEEDED system tenant, not the
-        // literal sentinel — the gate must accept both.
-        assert!(has_admin_access(&auth_user(
-            &["*"],
-            "system_internal_tenant01"
-        )));
+    #[tokio::test]
+    async fn billing_routes_admin_access_requires_system_tenant_with_admin_scope() {
+        // System-tenant admins (platform staff) still pass. SM3 (audit F9):
+        // the slug-aware shared gate accepts BOTH the literal `system`
+        // sentinel and the SEEDED system tenant (`system_internal_tenant01`,
+        // migration 072, slug `system`) — the seeded row lives in the
+        // canonical migration set every fixture database applies.
+        let Some(pool) = crate::test_db::canonical_pool("billing_admin_gate_admits").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        assert!(has_admin_access(&state, &auth_user(&["*"], "system")).await);
+        assert!(has_admin_access(&state, &auth_user(&["billing:admin"], "system")).await);
+        assert!(
+            has_admin_access(&state, &auth_user(&["*"], "system_internal_tenant01")).await,
+            "the seeded system tenant must pass the slug-aware gate"
+        );
         // System tenant WITHOUT an admin scope is rejected.
-        assert!(!has_admin_access(&auth_user(&["tenant:*"], "system")));
-        assert!(!has_admin_access(&auth_user(&["messages:read"], "system")));
+        assert!(!has_admin_access(&state, &auth_user(&["tenant:*"], "system")).await);
+        assert!(!has_admin_access(&state, &auth_user(&["messages:read"], "system")).await);
         // Wildcard granted to a customer tenant owner is rejected (audit A).
-        assert!(!has_admin_access(&auth_user(&["*"], "ten_customer_001")));
+        assert!(!has_admin_access(&state, &auth_user(&["*"], "ten_customer_001")).await);
     }
 
-    #[test]
-    fn billing_routes_admin_guards_return_403_for_customer_tenant_owner() {
+    #[tokio::test]
+    async fn billing_routes_admin_guards_return_403_for_customer_tenant_owner() {
         // A customer tenant owner carries scopes ["*"] via scopes_for_role;
         // both guard helpers must produce a 403 Response, not Ok(()).
+        let Some(pool) = crate::test_db::canonical_pool("billing_admin_guard_403").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
         let customer_owner = auth_user(&["*"], "ten_customer_001");
-        assert!(require_admin_access(&customer_owner).is_err());
-        assert!(require_admin_tenant_access(&customer_owner, "ten_customer_001").is_err());
+        assert!(require_admin_access(&state, &customer_owner).await.is_err());
+        assert!(
+            require_admin_tenant_access(&state, &customer_owner, "ten_customer_001")
+                .await
+                .is_err()
+        );
 
         let platform_admin = auth_user(&["*"], "system");
-        assert!(require_admin_access(&platform_admin).is_ok());
-        assert!(require_admin_tenant_access(&platform_admin, "ten_customer_001").is_ok());
+        assert!(require_admin_access(&state, &platform_admin).await.is_ok());
+        assert!(
+            require_admin_tenant_access(&state, &platform_admin, "ten_customer_001")
+                .await
+                .is_ok()
+        );
 
         // The 403 must not leak tenant details.
-        let err = require_admin_access(&customer_owner).unwrap_err();
+        let err = require_admin_access(&state, &customer_owner)
+            .await
+            .unwrap_err();
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
@@ -5125,7 +5215,7 @@ mod tests {
                 state: Some("Harju".into()),
                 postal_code: "10111".into(),
                 country: "FI".into(),
-                email: "billing@example.com".into(),
+                email: Some("billing@example.com".into()),
             },
             issued_at,
             due_at,
@@ -9631,10 +9721,112 @@ mod adversarial_tests {
             session_id: None,
             scopes: vec!["billing:admin".into()],
         };
-        let refused = require_admin_tenant_access(&tenant_admin, "ten_customer");
+        let refused = require_admin_tenant_access(&state, &tenant_admin, "ten_customer").await;
         assert!(refused.is_err(), "tenant:scope gates the cross-tenant read");
-        let allowed = require_admin_tenant_access(&system_admin_tenant, "ten_customer");
+        let allowed =
+            require_admin_tenant_access(&state, &system_admin_tenant, "ten_customer").await;
         assert!(allowed.is_ok());
+    }
+
+    /// SM3 (audit F2): the seven billing read surfaces require the
+    /// registered `billing:read` scope. A deliberately narrow key (no
+    /// finance scopes) is refused with 403 BEFORE any data access on every
+    /// listed handler; a `billing:read` key — the mintable-but-never
+    /// role-granted scope — passes.
+    #[tokio::test]
+    async fn billing_reads_require_the_registered_billing_read_scope() {
+        let Some(pool) = pool_for("billing_reads_scope_gate").await else {
+            return;
+        };
+        let (tenant, narrow_key) = tenant_with_key(&pool, "advusage", &["messages:read"]).await;
+        let read_key = seed_key(&pool, &tenant, &["billing:read"]).await;
+        let env = env_for(pool.clone(), read_key).await;
+        seed_metering(&pool, &tenant, "emails_sent", 1).await;
+
+        for uri in [
+            "/v1/billing/subscription",
+            "/v1/billing/invoices",
+            "/v1/billing/usage",
+            "/v1/billing/quota",
+        ] {
+            let (status, body) = get_with_key(&env, uri, &narrow_key).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "narrow key must not read {uri}: {body}"
+            );
+            let (status, body) = get(&env, uri).await;
+            assert_eq!(status, StatusCode::OK, "billing:read key on {uri}: {body}");
+        }
+
+        // Invoice detail + both exports 403 for the narrow key before the
+        // 404/200 paths can touch invoice data; a well-formed billing:read
+        // key gets an honest (empty) answer instead.
+        for uri in [
+            "/v1/billing/invoices/00000000-0000-0000-0000-000000000000",
+            "/v1/billing/invoices/00000000-0000-0000-0000-000000000000/pdf",
+            "/v1/billing/invoices/00000000-0000-0000-0000-000000000000/xml",
+        ] {
+            let (status, body) = get_with_key(&env, uri, &narrow_key).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "narrow key must not read {uri}: {body}"
+            );
+            let (status, _) = get(&env, uri).await;
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::OK,
+                "billing:read key on {uri} got {status}"
+            );
+        }
+    }
+
+    /// SM3 (audit F3): `/v1/billing/admin/*` rides the SAME control-plane
+    /// stack as `/v1/admin/*`. A customer-tenant wildcard key is rejected by
+    /// the system-tenant middleware BEFORE any billing handler runs; a
+    /// system-tenant machine key survives via the CP gate's audited
+    /// machine-credential carve-out.
+    #[tokio::test]
+    async fn billing_admin_routes_ride_the_control_plane_stack() {
+        let Some(pool) = pool_for("billing_admin_cp_stack").await else {
+            return;
+        };
+        let (_customer, customer_key) = tenant_with_key(&pool, "advpro", &["*"]).await;
+        let machine_key = admin_key(&pool).await;
+        let env = env_for(pool, machine_key).await;
+
+        // Customer tenant + wildcard: refused by the system-tenant gate that
+        // wraps the nested router (not merely the in-handler check).
+        let (status, body) = get_with_key(&env, "/v1/billing/admin/tenants", &customer_key).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // The destructive write surfaces are behind the same fence.
+        for (method_uri, method) in [
+            (
+                "/v1/billing/admin/tenants/ten_x/credits",
+                axum::http::Method::POST.as_str(),
+            ),
+            (
+                "/v1/billing/admin/tenants/ten_x/plan-override",
+                axum::http::Method::POST.as_str(),
+            ),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(method_uri)
+                .header("x-api-key", &customer_key)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"amount":1}"#))
+                .unwrap();
+            let (status, body) = send(&env, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method_uri}: {body}");
+        }
+
+        // System-tenant machine credential (user_id-less API key on the
+        // `system` sentinel tenant): the CP carve-out + system-tenant gate
+        // both admit it, and the handler-level scope check passes on "*".
+        let (status, body) = get(&env, "/v1/billing/admin/tenants").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// The portal's Stripe failure arms: a tenant with no Stripe customer,
@@ -9781,6 +9973,63 @@ mod adversarial_tests {
 
         let unknown_plan = get_plan(State(state.clone()), Path("no-such-plan".into())).await;
         assert!(matches!(unknown_plan, Err(ApiError::NotFound(_))));
+    }
+
+    /// SM3 (audit F5): the wallet-credit audit row names the OPERATOR.
+    /// The row's existence is pinned by the idempotency suite; this test
+    /// pins the ATTRIBUTION — reverting the audit call to an unattributed
+    /// `None` actor must fail here.
+    #[tokio::test]
+    async fn wallet_credit_audit_row_names_the_operator() {
+        let Some(pool) = pool_for("credit_audit_actor").await else {
+            return;
+        };
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "free").await;
+        // A human operator identity (a CP session user), not a machine key:
+        // machine credentials legitimately audit as NULL, which is exactly
+        // the ambiguity the pre-fix call hid behind.
+        let mut operator = auth_user(&["*"], "system");
+        operator.user_id = Some("operator-user-17".into());
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let mut key_headers = HeaderMap::new();
+        key_headers.insert(
+            "idempotency-key",
+            format!("audit-actor-{}", uuid::Uuid::new_v4().simple())
+                .parse()
+                .unwrap(),
+        );
+        let response = admin_apply_credit(
+            State(state),
+            operator,
+            key_headers,
+            Path(tenant.clone()),
+            Json(AdminCreditBody {
+                amount: 25,
+                reason: "audit attribution probe".into(),
+                expires_at: None,
+                idempotency_key: None,
+            }),
+        )
+        .await
+        .expect("the credit succeeds");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let (action, actor): (String, Option<String>) = sqlx::query_as(
+            "SELECT action, user_id FROM audit_logs
+             WHERE tenant_id = $1 AND action = 'wallet.credit'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("the credited audit row");
+        assert_eq!(action, "wallet.credit");
+        assert_eq!(
+            actor.as_deref(),
+            Some("operator-user-17"),
+            "the money-minting audit row must carry the operator's id (SM3 F5)"
+        );
     }
 
     /// The admin credit idempotency chain: a dead Redis fails closed, a

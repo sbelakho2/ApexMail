@@ -2203,7 +2203,11 @@ fn isolation_migration_route_reports_unsupported_paths_as_4xx() {
         assert_eq!(level, "shared");
 
         // Migration against the canonical schema's non-tenanted public tables
-        // fails honestly (400), and the workspace row is left untouched.
+        // fails honestly, and the workspace row is left untouched. The
+        // refusal status is 409 CONFLICT (audit SM5 F8 fix): the request is
+        // well-formed — the SHARED SCHEMA cannot support the copy — which is
+        // a conflict with server state, not a malformed request. Either way
+        // it is an honest 4xx: nothing is copied, nothing half-applies.
         let ws = create_workspace(&app, &org, &unique("ws")).await;
         let (status, json) = call(
             &app,
@@ -2215,7 +2219,7 @@ fn isolation_migration_route_reports_unsupported_paths_as_4xx() {
             Some(serde_json::json!({"target_level": "dedicated_schema"})),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
         // The 4xx body must be DIAGNOSABLE: it names every missing
         // table/column and the migration each one would need.
         // This harness creates its own tenanted `public.emails`, so the four

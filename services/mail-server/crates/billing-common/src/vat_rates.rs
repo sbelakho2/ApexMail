@@ -140,12 +140,26 @@ pub fn get_eu_vat_rate(country: &str) -> Option<f64> {
 /// Round-half-up VAT in integer cents for a rate in percent (possibly
 /// fractional, e.g. Finland's 25.5 %). All VAT money math goes through here —
 /// never floating point.
+///
+/// Half-up means half-away-from-zero on the amount's MAGNITUDE, symmetric in
+/// the sign: a negative base (credit-side VAT, one refactor away) must round
+/// to -34 for a 33.5-cent tax exactly as a positive base rounds to +34, not
+/// round toward +infinity. The intermediate product uses i128 so the multiply
+/// and the ±500 bias cannot wrap.
 pub fn vat_amount_half_up(amount_cents: i64, rate_percent: f64) -> i64 {
     // Scale the rate to tenths of a percent (255 for 25.5 %) so the entire
     // computation stays in integers: VAT cents = amount × rate_tenths / 1000,
-    // rounded half-up.
+    // rounded half-up (away from zero).
     let rate_tenths = (rate_percent * 10.0).round() as i64;
-    ((amount_cents * rate_tenths) + 500) / 1000
+    let product = i128::from(amount_cents) * i128::from(rate_tenths);
+    let vat = if product < 0 {
+        -((-product + 500) / 1000)
+    } else {
+        (product + 500) / 1000
+    };
+    // Only a nonsense rate × near-i64-bound amount can leave the i64 range;
+    // clamp instead of wrapping the tax.
+    i64::try_from(vat).unwrap_or_else(|_| if vat < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// Format a VAT rate for display: `24` renders as "24", `25.5` as "25.5".
@@ -692,6 +706,44 @@ mod tests {
         for &code in DEFAULT_EU_COUNTRIES {
             assert!(EU_COUNTRIES.contains(code), "missing EU member: {code}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // vat_amount_half_up — rounding must be half-AWAY-FROM-ZERO, symmetric
+    // in the sign of the base (audit SM7 F8). All current callers pass
+    // non-negative bases, but this is the platform's single VAT helper and
+    // credit-side VAT bases are one refactor away.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn vat_amount_half_up_is_symmetric_for_negative_bases() {
+        // Positive base: half-up on magnitude.
+        assert_eq!(vat_amount_half_up(1_500, 22.0), 330); // exact
+        assert_eq!(vat_amount_half_up(1_525, 22.0), 336); // 335.5 → 336 (half away from zero)
+        assert_eq!(vat_amount_half_up(1_501, 22.0), 330); // 330.22 → 330
+                                                          // Negative base: the MAGNITUDE rounds identically, sign preserved —
+                                                          // never rounds toward +infinity (the pre-fix behaviour, which shrank
+                                                          // the tax on credit notes).
+        assert_eq!(vat_amount_half_up(-1_500, 22.0), -330);
+        assert_eq!(vat_amount_half_up(-1_525, 22.0), -336); // -335.5 → -336, not -335
+        assert_eq!(vat_amount_half_up(-1_501, 22.0), -330);
+        // Fractional statutory rate (Finland 25.5 %) on a negative base.
+        assert_eq!(vat_amount_half_up(1_000, 25.5), 255);
+        assert_eq!(vat_amount_half_up(-1_000, 25.5), -255);
+        // Zero base and zero rate stay zero in both directions.
+        assert_eq!(vat_amount_half_up(0, 22.0), 0);
+        assert_eq!(vat_amount_half_up(-4_321, 0.0), 0);
+    }
+
+    #[test]
+    fn vat_amount_half_up_never_wraps_on_extreme_bases() {
+        // A base × rate product that overflows i64 (the pre-fix `amount_cents
+        // * rate_tenths` multiply would wrap) stays exact through the i128
+        // intermediate, symmetrically for both signs.
+        let big = i64::MAX / 2;
+        let expected = (i128::from(big) * 240 + 500) / 1000; // 24.0 % = 240 tenths
+        assert_eq!(i128::from(vat_amount_half_up(big, 24.0)), expected);
+        assert_eq!(i128::from(vat_amount_half_up(-big, 24.0)), -expected);
     }
 
     #[test]

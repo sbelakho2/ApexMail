@@ -121,4 +121,4 @@ If issues persist after following provider-specific guidance:
 - [DKIM](dkim.md)
 - [DMARC](dmarc.md)
 - [Rotation](rotation.md)
-- [Email Authentication Guide](../../security/email-authentication.md)
+- [Email Authentication Guide](../security/email-authentication.md)

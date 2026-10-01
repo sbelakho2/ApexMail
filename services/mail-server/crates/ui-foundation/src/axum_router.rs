@@ -676,26 +676,22 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 /// Bounded memo for `normalize_marketing_static_document`: the documents are
 /// static (Zola build output), so the same normalization is recomputed on
 /// every request otherwise (trim + 8 whole-document replaces + two
-/// case-insensitive scans). Keyed by (len, first 64 bytes) which uniquely
-/// identifies every document in the static set; capped at 32 entries to stay
+/// case-insensitive scans). Keyed by a SHA-256 hash of the FULL document —
+/// every built page shares the same minified prefix, so a (len, prefix)
+/// key would degenerate to document length alone and cross-serve
+/// equal-length documents' normalized HTML. Capped at 32 entries to stay
 /// small even if the caller ever passes dynamic content.
 fn marketing_normalize_cache(
-) -> &'static std::sync::Mutex<std::collections::HashMap<(usize, String), String>> {
+) -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], String>> {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<(usize, String), String>>,
+        std::sync::Mutex<std::collections::HashMap<[u8; 32], String>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 fn normalize_marketing_static_document(document: &str) -> String {
-    let cache_key = (
-        document.len(),
-        document.as_bytes()[..document.len().min(64)].to_vec(),
-    );
-    let cache_key = (
-        cache_key.0,
-        String::from_utf8_lossy(&cache_key.1).into_owned(),
-    );
+    use sha2::{Digest, Sha256};
+    let cache_key: [u8; 32] = Sha256::digest(document.as_bytes()).into();
     if let Ok(cache) = marketing_normalize_cache().lock() {
         if let Some(cached) = cache.get(&cache_key) {
             return cached.clone();
@@ -902,49 +898,46 @@ pub fn render_route_with_form_fields_and_csrf(
         .filter(|token| !token.is_empty() && csrf_secret.is_some())
         .map(str::to_string)
         .unwrap_or_else(|| csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token));
-    let html =
-        match surface {
-            "web" => {
-                let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
-                let title = route_document_title(surface, path);
+    let html = match surface {
+        "web" => {
+            let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
+            let title = route_document_title(surface, path);
 
-                match path {
-                    "/login" | "/signup" | "/forgot-password" | "/reset-password"
-                    | "/verify-email" | "/" | "/not-found" => {
-                        leptos_views::web_root_layout(&inner, &title)
-                    }
-                    _ => leptos_views::web_root_layout(
-                        &leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf_token),
-                        &title,
-                    ),
+            match path {
+                "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
+                | "/" | "/not-found" => leptos_views::web_root_layout(&inner, &title),
+                _ => leptos_views::web_root_layout(
+                    &leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf_token),
+                    &title,
+                ),
+            }
+        }
+        "control-plane" => {
+            let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
+            let title = route_document_title(surface, path);
+            let page = match path {
+                "/login" => inner,
+                _ => {
+                    let (title, description) = control_plane_route_context(path);
+                    leptos_views::control_plane_app_layout_with_title(
+                        &inner,
+                        title,
+                        description,
+                        path,
+                        &csrf_token,
+                    )
                 }
-            }
-            "control-plane" => {
+            };
+            leptos_views::control_plane_root_layout_with_title(&page, &title)
+        }
+        "marketing" | "marketing-zola" => marketing_static_document(surface, path)
+            .map(normalize_marketing_static_document)
+            .or_else(|| {
                 let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
-                let title = route_document_title(surface, path);
-                let page = match path {
-                    "/login" => inner,
-                    _ => {
-                        let (title, description) = control_plane_route_context(path);
-                        leptos_views::control_plane_app_layout_with_title(
-                            &inner,
-                            title,
-                            description,
-                            path,
-                            &csrf_token,
-                        )
-                    }
-                };
-                leptos_views::control_plane_root_layout_with_title(&page, &title)
-            }
-            "marketing" | "marketing-zola" => marketing_static_document(surface, path)
-                .map(normalize_marketing_static_document)
-                .or_else(|| {
-                    let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
-                    Some(leptos_views::marketing_page(&inner))
-                })?,
-            _ => return None,
-        };
+                Some(leptos_views::marketing_page(&inner))
+            })?,
+        _ => return None,
+    };
     let html = render_flash_banners(html, flash);
     let html = inject_form_field_state(html, fields);
     let html = inject_csrf_and_sign_confirms(html, csrf_secret, &csrf_token);
@@ -2963,8 +2956,8 @@ mod tests {
                 html_body: "<p>Hello</p>".into(),
                 scheduled_at: "2026-09-01T09:00".into(),
             }),
-                        list_edit: None,
-mfa_setup: None,
+            list_edit: None,
+            mfa_setup: None,
         };
         let html =
             render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
@@ -3051,6 +3044,47 @@ mfa_setup: None,
         assert!(!stripped.contains("var x"));
         assert!(!stripped.contains("apexmail-site.js"));
         assert!(stripped.contains("<p>hi</p>"));
+    }
+
+    /// Regression (audit SM11 F2): the normalize memo must be keyed on the
+    /// FULL document (every built page shares the same minified prefix, so a
+    /// (len, first-64-bytes) key degenerates to length alone). Two
+    /// equal-length documents that normalize differently must never
+    /// cross-serve each other's content.
+    #[test]
+    fn normalize_cache_does_not_cross_serve_equal_length_documents() {
+        // Same 64+ byte prefix (mirrors every built page) and equal length,
+        // differing only in a later asset URL (asset names are both 12
+        // bytes so the whole documents stay equal-length).
+        let head = "<!doctype html><html class=scroll-smooth data-theme=apex dir=ltr><head>";
+        let tail_a = "<link href=\"https://apexmail.ee/css/styles-a.css\"></head></html>";
+        let tail_b = "<link href=\"https://apexmail.ee/css/no-cache.css\"></head></html>";
+        let doc_a = format!("{head}{tail_a}");
+        let doc_b = format!("{head}{tail_b}");
+        assert_eq!(doc_a.len(), doc_b.len(), "fixtures must be equal-length");
+        assert_eq!(
+            doc_a.as_bytes()[..64],
+            doc_b.as_bytes()[..64],
+            "fixtures must share the first 64 bytes (the old buggy key)"
+        );
+
+        // Warm the memo with A, then serve B through the same cache.
+        let normalized_a = normalize_marketing_static_document(&doc_a);
+        let normalized_b = normalize_marketing_static_document(&doc_b);
+
+        assert!(
+            normalized_a.contains("/css/styles-a.css") && !normalized_a.contains("no-cache.css"),
+            "document A must normalize to its own asset URL"
+        );
+        assert!(
+            normalized_b.contains("/css/no-cache.css") && !normalized_b.contains("styles-a.css"),
+            "equal-length document B must NOT be served document A's cached normalization"
+        );
+        assert_eq!(
+            normalized_b,
+            normalize_marketing_static_document_uncached(&doc_b)
+        );
+        assert_eq!(normalized_a, normalize_marketing_static_document(&doc_a));
     }
 
     // ─── Design-report implementation guards ──────────────────────
@@ -3182,7 +3216,7 @@ mfa_setup: None,
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
-            list_edit: None,
+                list_edit: None,
                 mfa_setup: None,
             }),
         )
@@ -3242,7 +3276,7 @@ mfa_setup: None,
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
-            list_edit: None,
+                list_edit: None,
                 mfa_setup: None,
             }),
         )

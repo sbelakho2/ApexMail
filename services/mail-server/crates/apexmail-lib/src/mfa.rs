@@ -48,17 +48,54 @@ const LOCKOUT_DURATION: Duration = Duration::from_secs(300); // 5 minutes
 /// Prevents brute-force attacks against TOTP codes by rate-limiting
 /// verification attempts per secret. After `MAX_FAILED_ATTEMPTS` consecutive
 /// failures, the secret is locked for `LOCKOUT_DURATION`.
+///
+/// # SCOPE: single process (audit F9)
+///
+/// This lockout store is **per-process memory**. With N replicas an attacker
+/// gets `MAX_FAILED_ATTEMPTS` guesses per window *per pod*, and a restart
+/// wipes all lockouts. Production login flows MUST therefore layer this
+/// primitive behind a shared (Redis) guard — the api-server does exactly that
+/// (`verify_totp_code_guarded`), and that path is the primary enforcement.
+/// Do not expose `TOTPVerifier::verify` as the ONLY brake on a multi-replica
+/// route.
+///
+/// # Replay protection (audit F10, RFC 6238 §5.2)
+///
+/// Successful verifications record the matched time-step counter per secret;
+/// a code whose counter is `<=` the last used counter is rejected (counted as
+/// a failed attempt), so a phished or logged code cannot be replayed within
+/// its validity window on this process.
 #[derive(Debug, Default)]
 pub struct TOTPVerifier {
-    /// Map from `secret_base32` to (consecutive failures, locked_until_instant)
-    attempts: parking_lot::Mutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// Map from `secret_base32` to (consecutive failures, locked_until_instant,
+    /// last_failure_instant). The last field bounds the map: stale
+    /// failed-then-abandoned secrets are pruned instead of accumulating.
+    attempts: parking_lot::Mutex<HashMap<String, AttemptState>>,
+    /// Map from `secret_base32` to the last successfully used time-step
+    /// counter (replay protection; RFC 6238 §5.2).
+    last_used_counter: parking_lot::Mutex<HashMap<String, u64>>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct AttemptState {
+    failures: u32,
+    locked_until: Option<Instant>,
+    last_failure: Instant,
+}
+
+/// How long a failed-then-abandoned entry is kept before opportunistic
+/// pruning makes room (the map must not grow without bound).
+const ATTEMPT_RETENTION: Duration = Duration::from_secs(3600);
+
+/// Upper bound on tracked entries before stale ones are pruned on insert.
+const ATTEMPT_MAP_PRUNE_THRESHOLD: usize = 1024;
 
 impl TOTPVerifier {
     /// Create a new verifier with an empty attempt-tracking store.
     pub fn new() -> Self {
         Self {
             attempts: parking_lot::Mutex::new(HashMap::new()),
+            last_used_counter: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -71,9 +108,11 @@ impl TOTPVerifier {
     /// expiry; not part of the public API).
     fn is_locked_at(&self, secret_base32: &str, now: Instant) -> bool {
         let map = self.attempts.lock();
-        if let Some((_, Some(locked_until))) = map.get(secret_base32) {
-            if now < *locked_until {
-                return true;
+        if let Some(state) = map.get(secret_base32) {
+            if let Some(locked_until) = state.locked_until {
+                if now < locked_until {
+                    return true;
+                }
             }
         }
         false
@@ -96,19 +135,27 @@ impl TOTPVerifier {
     /// triggers a fresh lockout.
     fn record_failure_at(&self, secret_base32: &str, now: Instant) -> bool {
         let mut map = self.attempts.lock();
-        let (failures, locked_until) = map.entry(secret_base32.to_string()).or_insert((0, None));
+        prune_stale_attempts(&mut map, now);
+        let state = map
+            .entry(secret_base32.to_string())
+            .or_insert(AttemptState {
+                failures: 0,
+                locked_until: None,
+                last_failure: now,
+            });
 
-        if matches!(locked_until, Some(until) if now >= *until) {
-            *failures = 0;
-            *locked_until = None;
+        if matches!(state.locked_until, Some(until) if now >= until) {
+            state.failures = 0;
+            state.locked_until = None;
         }
 
-        *failures += 1;
-        if *failures >= MAX_FAILED_ATTEMPTS && locked_until.is_none() {
-            *locked_until = Some(now + LOCKOUT_DURATION);
+        state.failures += 1;
+        state.last_failure = now;
+        if state.failures >= MAX_FAILED_ATTEMPTS && state.locked_until.is_none() {
+            state.locked_until = Some(now + LOCKOUT_DURATION);
             warn!(
                 "TOTP secret locked out after {} consecutive failures for {:?}",
-                *failures, LOCKOUT_DURATION
+                state.failures, LOCKOUT_DURATION
             );
             return true;
         }
@@ -116,12 +163,19 @@ impl TOTPVerifier {
     }
 
     /// Reset the failure count on successful verification.
+    ///
+    /// This intentionally does NOT clear `last_used_counter`: the replay
+    /// guard must survive a success, otherwise the just-used code could be
+    /// replayed immediately.
     pub fn reset(&self, secret_base32: &str) {
         self.attempts.lock().remove(secret_base32);
     }
 
-    /// Verify a TOTP code with rate-limiting.
-    /// Returns `true` only if the code is valid and the secret is not locked out.
+    /// Verify a TOTP code with rate-limiting and replay protection.
+    ///
+    /// Returns `true` only if the code is valid, the secret is not locked
+    /// out, and the code's time-step has not been used before (per this
+    /// process — see the type-level SCOPE note).
     pub fn verify(&self, secret_base32: &str, code: &str) -> bool {
         // Reject if locked
         if self.is_locked(secret_base32) {
@@ -129,35 +183,73 @@ impl TOTPVerifier {
             return false;
         }
 
-        if verify_totp_code_inner(secret_base32, code) {
-            self.reset(secret_base32);
-            true
-        } else {
-            self.record_failure(secret_base32);
-            false
+        match match_totp_counter(secret_base32, code) {
+            Some(counter) => {
+                // RFC 6238 §5.2: a verifier MUST NOT accept the second
+                // submission of the same time-step's code.
+                {
+                    let mut used = self.last_used_counter.lock();
+                    if used.get(secret_base32).is_some_and(|&last| counter <= last) {
+                        warn!("TOTP verification rejected — replayed time-step {counter}");
+                        drop(used);
+                        self.record_failure(secret_base32);
+                        return false;
+                    }
+                    prune_stale_counters(&mut used, counter);
+                    used.insert(secret_base32.to_string(), counter);
+                }
+                self.reset(secret_base32);
+                true
+            }
+            None => {
+                self.record_failure(secret_base32);
+                false
+            }
         }
     }
 }
 
-/// Legacy stateless TOTP verification (no rate-limiting).
+/// Drop failed-then-abandoned entries older than [`ATTEMPT_RETENTION`] so
+/// the lockout map cannot grow without bound (audit F9). Only runs once the
+/// map exceeds the threshold, keeping the hot path cheap.
+fn prune_stale_attempts(map: &mut HashMap<String, AttemptState>, now: Instant) {
+    if map.len() < ATTEMPT_MAP_PRUNE_THRESHOLD {
+        return;
+    }
+    map.retain(|_, state| now.duration_since(state.last_failure) < ATTEMPT_RETENTION);
+}
+
+/// Drop `last_used_counter` entries that can no longer influence any
+/// decision: a recorded counter more than two windows in the past can never
+/// satisfy `counter <= last` for a currently-valid code (offsets checked are
+/// 0/±1), so it is pure memory hygiene.
+fn prune_stale_counters(used: &mut HashMap<String, u64>, current_counter: u64) {
+    if used.len() < ATTEMPT_MAP_PRUNE_THRESHOLD {
+        return;
+    }
+    let horizon = current_counter.saturating_sub(2);
+    used.retain(|_, &mut last| last >= horizon);
+}
+
+/// Legacy stateless TOTP verification (no rate-limiting, no lockout, no
+/// replay protection).
 ///
 /// Prefer [`TOTPVerifier::verify`] in production code.
 /// Kept for backward compatibility.
 pub fn verify_totp_code(secret_base32: &str, code: &str) -> bool {
-    verify_totp_code_inner(secret_base32, code)
+    match_totp_counter(secret_base32, code).is_some()
 }
 
-/// Core TOTP verification logic (no rate-limiting, no lockout check).
-fn verify_totp_code_inner(secret_base32: &str, code: &str) -> bool {
+/// Core TOTP verification: returns the MATCHED time-step counter (checking
+/// current window and ±1 for clock drift), or `None` when the code is
+/// invalid for every accepted window.
+fn match_totp_counter(secret_base32: &str, code: &str) -> Option<u64> {
     // Reject obviously invalid codes early.
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-        return false;
+        return None;
     }
 
-    let secret = match base32_decode(secret_base32) {
-        Some(s) => s,
-        None => return false,
-    };
+    let secret = base32_decode(secret_base32)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -170,11 +262,11 @@ fn verify_totp_code_inner(secret_base32: &str, code: &str) -> bool {
         let counter = (time_step as i64 + offset) as u64;
         let expected = generate_totp(&secret, counter);
         if constant_time_eq(code.as_bytes(), expected.as_bytes()) {
-            return true;
+            return Some(counter);
         }
     }
 
-    false
+    None
 }
 
 /// Generate a 6-digit TOTP code for the given counter value.
@@ -736,5 +828,148 @@ mod tests {
             let locked = verifier.record_failure_at(secret, t0);
             assert_eq!(locked, i == MAX_FAILED_ATTEMPTS - 1);
         }
+    }
+
+    // ── Audit F10: TOTP codes must not be replayable (RFC 6238 §5.2) ──
+
+    /// The 6-digit code for the CURRENT window (offset 0), matching what a
+    /// legitimate authenticator app would display right now.
+    fn current_window_code(secret_base32: &str) -> String {
+        let secret = base32_decode(secret_base32).unwrap();
+        let step = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            / TIME_STEP;
+        generate_totp(&secret, step)
+    }
+
+    #[test]
+    fn totp_verifier_rejects_replayed_code() {
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let code = current_window_code(secret);
+
+        // First use succeeds (nothing else has been used for this secret).
+        assert!(
+            verifier.verify(secret, &code),
+            "first use of the current window's code must succeed"
+        );
+        // Immediate replay of the SAME code must be rejected even though the
+        // code is still cryptographically valid for up to 90s.
+        assert!(
+            !verifier.verify(secret, &code),
+            "replaying the just-used code must fail"
+        );
+        // And a second replay too.
+        assert!(!verifier.verify(secret, &code));
+    }
+
+    #[test]
+    fn totp_replay_is_tracked_per_secret() {
+        let verifier = TOTPVerifier::new();
+        let secret_a = "AAAAAAAAAAAAAAAAAAAAAAAA";
+        let secret_b = "BBBBBBBBBBBBBBBBBBBBBBBB";
+        let code_a = current_window_code(secret_a);
+
+        assert!(verifier.verify(secret_a, &code_a));
+        // A different secret may still use its own code for the same window.
+        let code_b = current_window_code(secret_b);
+        assert!(
+            verifier.verify(secret_b, &code_b),
+            "replay tracking must be per-secret, not global"
+        );
+        // …but secret_a's code stays consumed.
+        assert!(!verifier.verify(secret_a, &code_a));
+    }
+
+    #[test]
+    fn totp_replay_counts_toward_lockout() {
+        // A replay is a failed verification: it must feed the O-19.2 lockout
+        // so replay hammering cannot proceed unthrottled.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let code = current_window_code(secret);
+        assert!(verifier.verify(secret, &code));
+
+        // 1 success + MAX_FAILED_ATTEMPTS replays ⇒ locked.
+        for i in 0..MAX_FAILED_ATTEMPTS {
+            let was_replay_accepted = verifier.verify(secret, &code);
+            assert!(!was_replay_accepted, "replay {i} must be rejected");
+        }
+        assert!(
+            verifier.is_locked(secret),
+            "MAX_FAILED_ATTEMPTS replays must lock the secret"
+        );
+    }
+
+    #[test]
+    fn totp_replay_guard_survives_reset() {
+        // reset() (called internally on every success) must not wipe the
+        // replay guard — otherwise the just-used code would verify again.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let code = current_window_code(secret);
+        assert!(verifier.verify(secret, &code));
+        verifier.reset(secret); // e.g. a concurrent successful path
+        assert!(!verifier.verify(secret, &code), "guard must survive reset");
+    }
+
+    #[test]
+    fn stale_counter_entries_are_pruned_but_fresh_ones_kept() {
+        // Pruning hygiene (audit F9: the maps must never grow unbounded):
+        // once the map exceeds the threshold, entries whose counter is more
+        // than two windows old are dropped — they can never satisfy
+        // `counter <= last` for a currently-valid code (offsets 0/±1) —
+        // while recent entries survive.
+        let mut used: HashMap<String, u64> = (0..ATTEMPT_MAP_PRUNE_THRESHOLD)
+            .map(|i| (format!("stale-{i}"), 999_996u64))
+            .collect();
+        used.insert("fresh".to_string(), 1_000_001u64);
+
+        // current counter 1_000_001 → horizon 999_999: the 999_996 entries
+        // are more than two windows old and can never block a valid code.
+        prune_stale_counters(&mut used, 1_000_001);
+
+        assert!(
+            !used.contains_key("stale-0"),
+            "stale entries must be pruned"
+        );
+        assert!(
+            used.contains_key("fresh"),
+            "the most recent counter must survive pruning"
+        );
+    }
+
+    #[test]
+    fn stale_attempt_entries_are_pruned() {
+        let mut map: HashMap<String, AttemptState> = (0..ATTEMPT_MAP_PRUNE_THRESHOLD)
+            .map(|i| {
+                (
+                    format!("abandoned-{i}"),
+                    AttemptState {
+                        failures: 1,
+                        locked_until: None,
+                        last_failure: Instant::now() - ATTEMPT_RETENTION - Duration::from_secs(1),
+                    },
+                )
+            })
+            .collect();
+        map.insert(
+            "recent".to_string(),
+            AttemptState {
+                failures: 1,
+                locked_until: None,
+                last_failure: Instant::now(),
+            },
+        );
+
+        prune_stale_attempts(&mut map, Instant::now());
+
+        assert!(
+            !map.contains_key("abandoned-0"),
+            "abandoned entries must be pruned once the map grows past the threshold"
+        );
+        assert!(map.contains_key("recent"), "recent entries must survive");
     }
 }

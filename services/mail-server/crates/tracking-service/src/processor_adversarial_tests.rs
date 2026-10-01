@@ -1045,7 +1045,11 @@ async fn flush_success_persists_updates_stats_and_ingests_clickhouse() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    assert_eq!(by_type.get("opened"), Some(&2), "ingest visibility: {by_type:?}");
+    assert_eq!(
+        by_type.get("opened"),
+        Some(&2),
+        "ingest visibility: {by_type:?}"
+    );
     assert_eq!(by_type.get("clicked"), Some(&1));
     assert_eq!(by_type.get("unsubscribed"), Some(&1));
     live_clickhouse()
@@ -1183,8 +1187,7 @@ async fn requeue_after_failure_error_arms_are_swallowed_and_dead_letters_poison(
     // (three bumps left it under the ceiling, and re-queueing it is correct).
     let mut poison = envelope.clone();
     for _ in 0..=MAX_EVENT_RETRIES {
-        poison = bump_envelope_retries(&poison)
-            .unwrap_or_else(|| poison.clone());
+        poison = bump_envelope_retries(&poison).unwrap_or_else(|| poison.clone());
     }
     proc.requeue_after_failure(&[poison]).await;
     assert_eq!(wal_len(&redis).await, 0, "poison is NOT re-queued");
@@ -1619,7 +1622,11 @@ async fn wal_parser_rejects_unknown_versions_and_corrupt_legacy_entries() {
         .await
         .expect("poison is dead-lettered, flush succeeds");
     assert_eq!(wal_len(&redis).await, 0, "both poison entries drained");
-    assert_eq!(dlq_len(&redis).await, 2, "both poison entries durable in the DLQ");
+    assert_eq!(
+        dlq_len(&redis).await,
+        2,
+        "both poison entries durable in the DLQ"
+    );
     for entry in dlq_entries(&redis).await {
         let parsed: serde_json::Value = serde_json::from_str(&entry).expect("DLQ JSON");
         assert_eq!(
@@ -1727,21 +1734,26 @@ async fn crash_window_w2_orphaned_lease_is_reclaimed_before_new_work() {
     assert_eq!(processing_len(&redis).await, 2, "…durable in processing");
 
     // Fresh traffic arrives BEHIND the crash.
-    proc.record_open(open_data(&tenant, &format!("{message}-new"), "w2new@example.com"))
-        .await
-        .expect("fresh event enqueued");
+    proc.record_open(open_data(
+        &tenant,
+        &format!("{message}-new"),
+        "w2new@example.com",
+    ))
+    .await
+    .expect("fresh event enqueued");
 
     // "Restart": the reclaim runs FIRST — the orphaned batch is drained
     // before (in front of) the fresh event.
     proc.flush().await.expect("flush reclaims and commits");
 
-    let persisted: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
-            .bind(&tenant)
-            .bind(&message)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'",
+    )
+    .bind(&tenant)
+    .bind(&message)
+    .fetch_one(&db)
+    .await
+    .unwrap();
     assert_eq!(
         persisted, 3,
         "orphaned leases AND fresh traffic all committed"
@@ -1805,7 +1817,11 @@ async fn crash_window_w3_committed_but_not_acked_replays_idempotently() {
             .fetch_all(&db)
             .await
             .unwrap();
-    assert_eq!(ids.len(), 1, "exactly-once rows despite the replay (ON CONFLICT DO NOTHING)");
+    assert_eq!(
+        ids.len(),
+        1,
+        "exactly-once rows despite the replay (ON CONFLICT DO NOTHING)"
+    );
     assert_eq!(wal_len(&redis).await, 0);
     assert_eq!(processing_len(&redis).await, 0, "the replay ACKed");
     clear_wal(&redis).await;
@@ -1902,12 +1918,14 @@ async fn crash_window_w5_flush_batch_cap_bounds_one_claim() {
     let total = cap + 3;
     let envelopes: Vec<String> = (0..total)
         .map(|i| {
-            build_wal_envelope(&serde_json::to_string(&wal_event(
-                &tenant,
-                &format!("{message}-{i}"),
-                EventType::Opened,
-            ))
-            .unwrap())
+            build_wal_envelope(
+                &serde_json::to_string(&wal_event(
+                    &tenant,
+                    &format!("{message}-{i}"),
+                    EventType::Opened,
+                ))
+                .unwrap(),
+            )
         })
         .collect();
     seed_wal(&redis, &envelopes).await;
@@ -1918,25 +1936,34 @@ async fn crash_window_w5_flush_batch_cap_bounds_one_claim() {
         3,
         "one flush drained exactly the cap; the tail stayed durable in pending"
     );
-    assert_eq!(processing_len(&redis).await, 0, "cap batch committed + ACKed");
-    let after_one: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
-            .bind(&tenant)
-            .bind(&message)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+    assert_eq!(
+        processing_len(&redis).await,
+        0,
+        "cap batch committed + ACKed"
+    );
+    let after_one: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'",
+    )
+    .bind(&tenant)
+    .bind(&message)
+    .fetch_one(&db)
+    .await
+    .unwrap();
     assert_eq!(after_one, cap as i64);
 
     proc.flush().await.expect("second flush drains the tail");
-    let after_two: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'")
-            .bind(&tenant)
-            .bind(&message)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-    assert_eq!(after_two, total as i64, "nothing lost across the cap boundary");
+    let after_two: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id LIKE $2 || '%'",
+    )
+    .bind(&tenant)
+    .bind(&message)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        after_two, total as i64,
+        "nothing lost across the cap boundary"
+    );
     assert_eq!(wal_len(&redis).await, 0);
     assert_eq!(processing_len(&redis).await, 0);
     clear_wal(&redis).await;
@@ -1971,8 +1998,7 @@ async fn permanently_failing_batch_dead_letters_exactly_once_without_wedging() {
     let envelope = build_wal_envelope(&serde_json::to_string(&event).unwrap());
     let mut poisoned = envelope.clone();
     for _ in 0..MAX_EVENT_RETRIES {
-        poisoned = bump_envelope_retries(&poisoned)
-            .unwrap_or_else(|| poisoned.clone());
+        poisoned = bump_envelope_retries(&poisoned).unwrap_or_else(|| poisoned.clone());
     }
     assert!(bump_envelope_retries(&poisoned).is_none(), "at the budget");
 
@@ -2021,14 +2047,13 @@ async fn permanently_failing_batch_dead_letters_exactly_once_without_wedging() {
     assert_eq!(wal_len(&redis).await, 1, "only the good event remains");
     let healthy = processor(db.clone(), redis.clone());
     healthy.flush().await.expect("the queue still drains");
-    let good_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2",
-    )
-    .bind(&tenant)
-    .bind(&format!("{message}-good"))
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let good_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2")
+            .bind(&tenant)
+            .bind(&format!("{message}-good"))
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(good_rows, 1, "the event behind the poison was processed");
     assert_eq!(wal_len(&redis).await, 0);
     assert_eq!(processing_len(&redis).await, 0);
@@ -2228,10 +2253,7 @@ async fn drain_all_llen_arms_and_round_bound() {
             REDIS_WAL_PROCESSING_KEY,
             REDIS_WAL_KEY,
         ] {
-            let _: Result<(), _> = redis::cmd("DEL")
-                .arg(key)
-                .query_async(&mut *conn)
-                .await;
+            let _: Result<(), _> = redis::cmd("DEL").arg(key).query_async(&mut *conn).await;
         }
     }
 }
@@ -2276,8 +2298,7 @@ async fn pubsub_fanout_survives_a_dead_redis() {
 async fn categorized_unsubscribe_persists_subscription_preference() {
     let _guard = SERIAL.lock().await;
     let _cross = crate::routes::test_support::redis_wal_serial().await;
-    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_pref_cat").await)
-    else {
+    let (Some(redis), Some(db)) = (live_redis(), canonical_pool("tracking_pref_cat").await) else {
         eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
         return;
     };
@@ -2298,7 +2319,9 @@ async fn categorized_unsubscribe_persists_subscription_preference() {
             ip_address: None,
         })
         .await
-        .unwrap_or_else(|e| panic!("categorized unsubscribe must land (subscribed={subscribed}): {e}"));
+        .unwrap_or_else(|e| {
+            panic!("categorized unsubscribe must land (subscribed={subscribed}): {e}")
+        });
         // record_unsubscribe always unsubscribes (subscribed=false row).
         let row: (bool, String) = sqlx::query_as(
             "SELECT subscribed, category FROM subscription_preferences \
@@ -2346,8 +2369,8 @@ async fn suppression_retry_drain_pipeline_error_arms() {
     let good = build_suppression_retry_entry("tn_drain_arms", "drainarms@example.com", None);
     // Poison MUST use the wire (camelCase) field names — a snake_case record
     // is an UNPARSEABLE entry, a different arm entirely.
-    let poison = r#"{"tenantId":"tn_drain_arms","email":"poisonarms@example.com","retries":10}"#
-        .to_string();
+    let poison =
+        r#"{"tenantId":"tn_drain_arms","email":"poisonarms@example.com","retries":10}"#.to_string();
 
     // (1) Reclaim fails: the processing key holds a STRING, so the reclaim
     //     script's RPOPLPUSH errors.
@@ -2406,7 +2429,10 @@ async fn suppression_retry_drain_pipeline_error_arms() {
     // (5) Unparseable entries (incl. wrong-case field names) are skipped.
     {
         let mut conn = redis.get().await.unwrap();
-        for junk in ["totally-not-json", r#"{"tenant_id":"t","email":"e","retries":0}"#] {
+        for junk in [
+            "totally-not-json",
+            r#"{"tenant_id":"t","email":"e","retries":0}"#,
+        ] {
             let _: Result<(), _> = redis::cmd("RPUSH")
                 .arg(REDIS_SUPPRESSION_RETRY_KEY)
                 .arg(junk)
@@ -2596,7 +2622,10 @@ fn dedup_key_with_link_id_is_distinct_and_deterministic() {
     let without = dedup_key("click", "msg", "r@x.com", None);
     assert_eq!(with_a, with_a_again, "deterministic for the same link");
     assert_ne!(with_a, with_b, "distinct link ids are distinct keys");
-    assert_ne!(with_a, without, "a link-scoped key differs from the bare key");
+    assert_ne!(
+        with_a, without,
+        "a link-scoped key differs from the bare key"
+    );
 }
 
 /// The DLQ envelope builder:field-for-field shape contract.

@@ -20,8 +20,7 @@ pub fn escape_html(s: &str) -> String {
 /// The terminal error/success pages are served from the configured
 /// `base_url` origin, so a plain `href="/"` IS the base_url home — the
 /// "safe path back" every browser-facing terminal page must offer (batch 2).
-const BACK_LINK_HTML: &str =
-    r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
+const BACK_LINK_HTML: &str = r#"<p class="back-link"><a href="/">Return to ApexMail</a></p>"#;
 
 pub fn render_error_page(message: &str) -> String {
     let msg = escape_html(message);
@@ -155,7 +154,14 @@ pub fn render_preferences_page(
     categories: &[Category<'_>],
     globally_unsubscribed: bool,
 ) -> String {
-    render_preferences_page_with_saved(token, email, prefs_path, categories, globally_unsubscribed, false)
+    render_preferences_page_with_saved(
+        token,
+        email,
+        prefs_path,
+        categories,
+        globally_unsubscribed,
+        false,
+    )
 }
 
 /// Batch-2: `just_saved` renders the visible `.alert-success` confirmation
@@ -353,8 +359,9 @@ mod tests {
         let saved =
             render_preferences_page_with_saved("tok", "user@example.com", "/p", &cats, false, true);
         assert!(
-            saved
-                .contains(r#"<div class="alert alert-success">Your preferences have been saved.</div>"#),
+            saved.contains(
+                r#"<div class="alert alert-success">Your preferences have been saved.</div>"#
+            ),
             "{saved}"
         );
 
@@ -366,7 +373,10 @@ mod tests {
             saved_suppressed.contains(r#"alert-success">Your preferences have been saved."#),
             "{saved_suppressed}"
         );
-        assert!(saved_suppressed.contains("alert-warning"), "{saved_suppressed}");
+        assert!(
+            saved_suppressed.contains("alert-warning"),
+            "{saved_suppressed}"
+        );
     }
 }
 

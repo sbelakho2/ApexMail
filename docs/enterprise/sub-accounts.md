@@ -1,16 +1,22 @@
 # Sub-Accounts & Multi-Tenant Management
 
-ApexMail provides comprehensive sub-account management for agencies, resellers, and enterprise organizations managing multiple brands or clients.
+ApexMail provides sub-account management for agencies, resellers, and enterprise organizations managing multiple brands or clients.
+
+> **Endpoint reference:** every example below targets the shipped enterprise
+> router (`services/mail-server/crates/enterprise/src/routes.rs`, mounted at
+> `https://enterprise.apexmail.ee`). All routes require an authenticated
+> tenant (`Authorization: Bearer <token>`) and the caller must have access to
+> the parent tenant. Request bodies use `deny_unknown_fields` — unknown
+> properties are rejected with `422`.
 
 ## Overview
 
 Sub-accounts enable:
 
 - **Hierarchical Account Structure** - Create isolated environments for each client/brand
-- **Granular Permissions** - Control access at the sub-account level
-- **Resource Isolation** - Separate quotas, sending domains, and data
-- **Consolidated Billing** - Single invoice with per-sub-account breakdown
-- **White-Label Ready** - Each sub-account can have custom branding
+- **Resource Isolation** - Separate volume limits, sending domains, and data
+- **Consolidated Billing** - Single parent relationship with per-sub-account volume tracking
+- **Scoped API Keys** - Issue and revoke keys per sub-account
 
 ## Account Hierarchy
 
@@ -18,15 +24,12 @@ Sub-accounts enable:
 Parent Account (Agency/Enterprise)
 ├── Sub-Account A (Client 1)
 │   ├── Sending Domain: client1.com
-│   ├── Users: 5
 │   └── API Keys: 3
 ├── Sub-Account B (Client 2)
 │   ├── Sending Domain: client2.com
-│   ├── Users: 10
 │   └── API Keys: 5
 └── Sub-Account C (Client 3)
     ├── Sending Domain: client3.com
-    ├── Users: 3
     └── API Keys: 2
 ```
 
@@ -36,185 +39,98 @@ Parent Account (Agency/Enterprise)
 
 ```bash
 curl -X POST https://enterprise.apexmail.ee/sub-accounts \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "parentAccountId": "acc_parent",
+    "parent_id": "acc_parent",
     "name": "Client ABC",
-    "metadata": {
-      "industry": "e-commerce",
-      "region": "US-West"
-    },
-    "settings": {
-      "maxMonthlyEmails": 1000000,
-      "maxDomains": 5,
-      "maxApiKeys": 10,
-      "maxUsers": 25
-    },
-    "inheritParentSettings": false
+    "email": "billing@clientabc.com",
+    "domain": "clientabc.com",
+    "plan": "starter",
+    "volume_limit": 1000000,
+    "inherit_parent_settings": false
   }'
 ```
+
+Only `parent_id` and `name` are required; `email`, `domain`, `plan`,
+`volume_limit`, and `inherit_parent_settings` (default `true`) are optional.
 
 ### Response
 
+Responses use the enterprise envelope `{success, data?, error?, code?}`:
+
 ```json
 {
-  "subAccount": {
-    "id": "sub_abc123",
-    "parentAccountId": "acc_parent",
+  "success": true,
+  "data": {
+    "id": "7f9c24e5-1b3d-4a2f-9c8e-6d5f0a1b2c3d",
+    "parent_id": "acc_parent",
     "name": "Client ABC",
     "status": "active",
-    "settings": {
-      "maxMonthlyEmails": 1000000,
-      "maxDomains": 5,
-      "maxApiKeys": 10,
-      "maxUsers": 25
-    },
-    "usage": {
-      "currentMonthEmails": 0,
-      "domains": 0,
-      "apiKeys": 0,
-      "users": 0
-    },
-    "createdAt": "2024-01-15T10:30:00Z"
+    "email": "billing@clientabc.com",
+    "domain": "clientabc.com",
+    "plan": "starter",
+    "volume_limit": 1000000,
+    "volume_used": 0,
+    "inherit_parent_settings": false,
+    "settings": null,
+    "metadata": null,
+    "created_at": "2026-01-15T10:30:00Z",
+    "updated_at": "2026-01-15T10:30:00Z"
   }
 }
 ```
 
-## Resource Quotas
+`status` is one of `active`, `suspended`, `pending`, `deactivated`.
 
-### Setting Quotas
+## Volume Limits
 
-Configure limits per sub-account:
+The per-sub-account quota is the `volume_limit` field (emails per month). It
+is set at creation and changed through the update endpoint — there is no
+separate quotas endpoint:
 
 ```bash
-curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/quotas \
-  -H "X-API-Key: YOUR_API_KEY" \
+curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
-    "quotas": {
-      "maxMonthlyEmails": 500000,
-      "maxDomains": 3,
-      "maxApiKeys": 5,
-      "maxUsers": 10,
-      "maxStorageGB": 50,
-      "maxTemplates": 100,
-      "maxSuppressionListSize": 100000
-    }
+    "volume_limit": 500000
   }'
 ```
 
-### Quota Enforcement
-
-When quotas are exceeded:
-
-| Resource | Behavior | Action |
-|----------|----------|--------|
-| Monthly Emails | Hard limit | Emails rejected with `QUOTA_EXCEEDED` |
-| Domains | Hard limit | Domain addition blocked |
-| API Keys | Hard limit | Key creation blocked |
-| Users | Hard limit | User invitation blocked |
-| Storage | Soft limit | Warning at 80%, hard limit at 100% |
-
-### Quota Alerts
-
-Configure alerts when approaching limits:
-
-```json
-{
-  "alerts": {
-    "emailQuotaWarning": 80,
-    "emailQuotaCritical": 95,
-    "storageWarning": 75,
-    "webhookUrl": "https://your-system.com/alerts"
-  }
-}
-```
-
-## Permissions & Access Control
-
-### Role Hierarchy
-
-```
-Super Admin (Parent Account)
-├── Full access to all sub-accounts
-├── Can create/delete sub-accounts
-└── Can modify quotas and billing
-
-Sub-Account Admin
-├── Full access to assigned sub-account
-├── Can manage users within sub-account
-└── Cannot modify quotas
-
-Sub-Account User
-├── Limited access based on role
-├── Cannot manage other users
-└── Operates within assigned permissions
-```
-
-### Permission Scopes
-
-```json
-{
-  "permissions": {
-    "emails": ["read", "send"],
-    "templates": ["read", "write", "delete"],
-    "domains": ["read"],
-    "analytics": ["read"],
-    "users": [],
-    "apiKeys": ["read", "create"],
-    "webhooks": ["read", "write"],
-    "suppressions": ["read", "write"]
-  }
-}
-```
+The update body accepts exactly `{name?, email?, volume_limit?, settings?}`;
+any other property (for example `status` or `metadata`) is rejected.
 
 ## Managing Sub-Accounts
 
-### List Sub-Accounts
+### List Sub-Accounts of a Parent
+
+Listing is scoped to a parent tenant — there is no bare `GET /sub-accounts`:
 
 ```bash
-curl https://enterprise.apexmail.ee/sub-accounts \
-  -H "X-API-Key: YOUR_API_KEY"
+curl "https://enterprise.apexmail.ee/sub-accounts/parent/acc_parent?status=active&limit=50&offset=0" \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-Response:
-```json
-{
-  "subAccounts": [
-    {
-      "id": "sub_abc123",
-      "name": "Client ABC",
-      "status": "active",
-      "usage": {
-        "currentMonthEmails": 45230,
-        "percentOfQuota": 45.2
-      }
-    },
-    {
-      "id": "sub_def456",
-      "name": "Client DEF",
-      "status": "active",
-      "usage": {
-        "currentMonthEmails": 128500,
-        "percentOfQuota": 12.8
-      }
-    }
-  ],
-  "total": 2
-}
+Query parameters: `status` (optional filter), `limit` (default 50, capped at
+200), `offset`. Response: `{"success": true, "data": [ SubAccount, ... ]}`.
+
+### Get Sub-Account
+
+```bash
+curl https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 ### Update Sub-Account
 
 ```bash
 curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
     "name": "Client ABC - Premium",
-    "status": "active",
-    "metadata": {
-      "tier": "premium"
-    }
+    "settings": {"tier": "premium"}
   }'
 ```
 
@@ -222,131 +138,115 @@ curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
 
 ```bash
 curl -X POST https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/suspend \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -d '{
-    "reason": "billing_issue",
-    "notifyUsers": true
-  }'
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "billing_issue"}'
 ```
+
+Suspension sets `status` to `suspended`; the response returns the updated
+sub-account. There is no dedicated reactivate endpoint — update the
+sub-account's `settings`/plan via `PUT /sub-accounts/{id}` or contact
+support to restore service.
 
 ### Delete Sub-Account
 
 ```bash
 curl -X DELETE https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
-  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Response: `{"success": true, "data": {"deleted": true}}`.
+
+## Usage Statistics
+
+Aggregated volume statistics are available per parent tenant — there is no
+per-sub-account analytics endpoint (per-sub-account send activity is
+available through the main API's analytics surface):
+
+```bash
+curl https://enterprise.apexmail.ee/sub-accounts/stats/acc_parent \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "total": 3,
+    "active": 2,
+    "total_volume_used": 173730,
+    "total_volume_limit": 3000000
+  }
+}
+```
+
+## Sub-Account API Keys
+
+Each sub-account gets its own API keys, managed on the parent's
+authentication.
+
+### Create a Key
+
+```bash
+curl -X POST https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/api-keys \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
-    "confirmDeletion": true,
-    "exportData": true,
-    "retentionDays": 30
+    "name": "Client ABC production",
+    "permissions": ["emails:send", "templates:read"],
+    "rate_limit": 100
   }'
 ```
 
-## Usage Analytics
+The raw key is returned **only once** at creation — it cannot be retrieved
+later:
 
-### Sub-Account Analytics
-
-```bash
-curl https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/analytics \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -G -d "startDate=2024-01-01" -d "endDate=2024-01-31"
-```
-
-Response:
 ```json
 {
-  "subAccountId": "sub_abc123",
-  "period": {
-    "start": "2024-01-01",
-    "end": "2024-01-31"
-  },
-  "metrics": {
-    "emailsSent": 45230,
-    "delivered": 44850,
-    "bounced": 380,
-    "opened": 12450,
-    "clicked": 3240,
-    "deliveryRate": 99.16,
-    "openRate": 27.76,
-    "clickRate": 7.23
-  },
-  "quotaUsage": {
-    "emails": {
-      "used": 45230,
-      "limit": 100000,
-      "percentage": 45.2
-    }
+  "success": true,
+  "data": {
+    "id": "2c5b9e8a-4d7f-4c1b-a0d3-9e2f1b4c5a6b",
+    "key": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "key_prefix": "9f86d081",
+    "name": "Client ABC production"
   }
 }
 ```
 
-### Aggregate Analytics
+The key is a 64-character hex token (32 random bytes); `key_prefix` is its
+first 8 characters, kept for identification.
 
-Get analytics across all sub-accounts:
-
-```bash
-curl https://enterprise.apexmail.ee/sub-accounts/analytics/aggregate \
-  -H "X-API-Key: YOUR_API_KEY"
-```
-
-## Billing
-
-### Per-Sub-Account Billing
+### List Keys
 
 ```bash
-curl https://enterprise.apexmail.ee/sub-accounts/billing \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -G -d "month=2024-01"
+curl https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/api-keys \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-Response:
-```json
-{
-  "month": "2024-01",
-  "total": 2450.00,
-  "currency": "USD",
-  "breakdown": [
-    {
-      "subAccountId": "sub_abc123",
-      "name": "Client ABC",
-      "emailsSent": 45230,
-      "cost": 452.30
-    },
-    {
-      "subAccountId": "sub_def456",
-      "name": "Client DEF",
-      "emailsSent": 128500,
-      "cost": 1285.00
-    }
-  ]
-}
+Listings expose key metadata only (id, prefix, name, permissions, status) —
+never the raw key material.
+
+### Revoke a Key
+
+```bash
+curl -X POST https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/api-keys/{key_id}/revoke \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Cost Allocation Tags
-
-Tag sub-accounts for cost allocation:
-
-```json
-{
-  "metadata": {
-    "costCenter": "CC-1234",
-    "department": "Marketing",
-    "project": "Q1-Campaign"
-  }
-}
-```
+Revoked keys immediately fail authentication.
 
 ## Data Isolation
 
-Sub-accounts provide complete data isolation:
+Sub-accounts provide data isolation:
 
 | Resource | Isolation Level |
 |----------|-----------------|
 | Emails | Fully isolated |
 | Templates | Fully isolated |
-| Contacts | Fully isolated |
 | Analytics | Fully isolated |
 | API Keys | Scoped to sub-account |
-| Webhooks | Scoped to sub-account |
 | Domains | Dedicated per sub-account |
 
 ## API Reference
@@ -354,20 +254,20 @@ Sub-accounts provide complete data isolation:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/sub-accounts` | POST | Create sub-account |
-| `/sub-accounts` | GET | List sub-accounts |
 | `/sub-accounts/{id}` | GET | Get sub-account details |
-| `/sub-accounts/{id}` | PUT | Update sub-account |
+| `/sub-accounts/{id}` | PUT | Update sub-account (`name`/`email`/`volume_limit`/`settings`) |
 | `/sub-accounts/{id}` | DELETE | Delete sub-account |
-| `/sub-accounts/{id}/quotas` | PUT | Update quotas |
+| `/sub-accounts/parent/{parent_id}` | GET | List sub-accounts of a parent |
 | `/sub-accounts/{id}/suspend` | POST | Suspend sub-account |
-| `/sub-accounts/{id}/reactivate` | POST | Reactivate sub-account |
-| `/sub-accounts/{id}/analytics` | GET | Get analytics |
-| `/sub-accounts/billing` | GET | Get billing breakdown |
+| `/sub-accounts/stats/{parent_id}` | GET | Aggregated usage stats for a parent |
+| `/sub-accounts/{id}/api-keys` | POST | Create sub-account API key |
+| `/sub-accounts/{id}/api-keys` | GET | List sub-account API keys |
+| `/sub-accounts/{id}/api-keys/{key_id}/revoke` | POST | Revoke an API key |
 
 ## Best Practices
 
-1. **Start with Conservative Quotas** - Increase as needed based on usage patterns
-2. **Use Metadata** - Tag sub-accounts for better organization and reporting
-3. **Monitor Usage** - Set up alerts before quotas are reached
-4. **Regular Audits** - Review inactive sub-accounts periodically
+1. **Start with Conservative Volume Limits** - Increase `volume_limit` as usage patterns justify it
+2. **Use `settings`** - Store tiering/organizational data on the sub-account for reporting
+3. **Monitor Usage** - Watch `volume_used` (and the parent-level stats endpoint) before limits are reached
+4. **Regular Audits** - Review inactive sub-account API keys and revoke unused ones
 5. **Document Naming Conventions** - Use consistent naming for easier management

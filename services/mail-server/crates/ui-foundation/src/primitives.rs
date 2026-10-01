@@ -896,6 +896,11 @@ impl<'a> Badge<'a> {
             .icon
             .map(|markup| format!("<span class=\"mr-1\">{markup}</span>"))
             .unwrap_or_default();
+        // `text` is escaped HERE at the primitive boundary: unknown status
+        // strings fall through `status_indicator_config` as the raw input
+        // (DB-sourced VARCHARs like event_type / suppression reason), so the
+        // badge label must never be interpolated verbatim.
+        let text = html_escape(self.text);
         format!(
             "<div class=\"inline-flex items-center rounded-full border font-semibold uppercase tracking-wide transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 max-w-full min-w-0 truncate {} {}\" data-variant=\"{}\" data-size=\"{}\">{}{}</div>",
             badge_variant_class(self.variant),
@@ -903,7 +908,7 @@ impl<'a> Badge<'a> {
             self.variant,
             self.size,
             icon,
-            self.text,
+            text,
         )
     }
 }
@@ -1109,9 +1114,18 @@ impl<'a> Dialog<'a> {
         // Unique per render: two dialogs on one page must not share the same
         // id (aria-labelledby would point at the first one for both).
         let dialog_id = dialog_id_for(self.title);
+        // `title`/`description` are text slots — escaped at the primitive
+        // boundary (`body` stays a trusted-markup slot, like `icon` on
+        // `Badge`).
+        let title = html_escape(self.title);
         let description = self
             .description
-            .map(|value| format!("<p class=\"text-sm text-muted-foreground\">{}</p>", value))
+            .map(|value| {
+                format!(
+                    "<p class=\"text-sm text-muted-foreground\">{}</p>",
+                    html_escape(value)
+                )
+            })
             .unwrap_or_default();
         let close = if self.hide_close_button {
             String::new()
@@ -1122,7 +1136,7 @@ impl<'a> Dialog<'a> {
             "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-[16px_16px_9px_9px] {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"{dialog_id}\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
-            self.title,
+            title,
             description,
             self.body,
             close,
@@ -1148,10 +1162,13 @@ impl<'a> AlertDialog<'a> {
         } else {
             "[data-alert-dialog-confirm]"
         };
+        // Text slots are escaped at the primitive boundary.
+        let title = html_escape(self.title);
+        let message = html_escape(self.message);
         let cancel = if self.dialog_type == "confirm" {
             format!(
                 "<button data-alert-dialog-cancel class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
-                self.cancel_label.unwrap_or("Cancel")
+                html_escape(self.cancel_label.unwrap_or("Cancel"))
             )
         } else {
             String::new()
@@ -1159,11 +1176,11 @@ impl<'a> AlertDialog<'a> {
         format!(
             "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-[16px_16px_9px_9px] p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"{alert_id}-title\" aria-describedby=\"{alert_id}-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"{alert_id}-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"{alert_id}-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
             initial_focus,
-            self.title,
-            self.message,
+            title,
+            message,
             cancel,
             alert_dialog_confirm_class(self.variant),
-            self.confirm_label,
+            html_escape(self.confirm_label),
         )
     }
 }
@@ -1182,16 +1199,18 @@ pub struct Popover<'a> {
 
 impl<'a> Popover<'a> {
     pub fn render_html(&self) -> String {
+        // Every text slot is escaped at the primitive boundary (`score_value`
+        // goes through `Badge`, which escapes its own label).
         format!(
             "<div class=\"relative min-h-[180px] rounded-[16px_16px_9px_9px] border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-semibold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-surface-200 bg-background text-foreground hover:border-surface-300 h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-[16px_16px_9px_9px] border border-border bg-popover p-4 text-popover-foreground\"><p class=\"text-sm font-semibold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-[8px_8px_7px_7px] border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-surface-50 h-10 px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-white hover:bg-primary/90 h-10 px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
-            self.preview_title,
-            self.preview_description,
-            self.title,
-            self.description,
-            self.score_label,
+            html_escape(self.preview_title),
+            html_escape(self.preview_description),
+            html_escape(self.title),
+            html_escape(self.description),
+            html_escape(self.score_label),
             Badge { text: self.score_value, variant: "outline", size: "default", icon: None }.render_html(),
-            self.dismiss_label,
-            self.action_label,
+            html_escape(self.dismiss_label),
+            html_escape(self.action_label),
         )
     }
 }
@@ -2792,7 +2811,8 @@ mod tests {
             right_icon: None,
             submit: true,
         };
-        let input = Input { id: None,
+        let input = Input {
+            id: None,
             input_type: "email",
             value: "",
             placeholder: "you@example.com",
@@ -2902,7 +2922,8 @@ mod tests {
 
     #[test]
     fn input_supports_icons_and_error_state() {
-        let html = Input { id: None,
+        let html = Input {
+            id: None,
             input_type: "text",
             value: "bad",
             placeholder: "email",
@@ -2929,7 +2950,8 @@ mod tests {
 
     #[test]
     fn input_supports_disabled_size_and_default_states() {
-        let html = Input { id: None,
+        let html = Input {
+            id: None,
             input_type: "email",
             value: "owner@apexmail.ee",
             placeholder: "you@example.com",
@@ -2952,7 +2974,8 @@ mod tests {
 
     #[test]
     fn textarea_supports_resize_and_counter() {
-        let html = Textarea { id: None,
+        let html = Textarea {
+            id: None,
             value: "abc",
             placeholder: "Write",
             variant: "default",
@@ -2973,7 +2996,8 @@ mod tests {
     /// receive an empty `{}` payload.
     #[test]
     fn named_fields_render_name_attributes() {
-        let input = Input { id: None,
+        let input = Input {
+            id: None,
             input_type: "email",
             value: "",
             placeholder: "contact@example.com",
@@ -2990,7 +3014,8 @@ mod tests {
         .render_html();
         assert!(input.contains("name=\"email\""));
 
-        let textarea = Textarea { id: None,
+        let textarea = Textarea {
+            id: None,
             value: "",
             placeholder: "Paste HTML",
             variant: "default",
@@ -3002,7 +3027,8 @@ mod tests {
         .render_html();
         assert!(textarea.contains("<textarea name=\"html_body\""));
 
-        let select = Select { id: None,
+        let select = Select {
+            id: None,
             placeholder: "Select audience",
             value_label: Some("VIP Customers"),
             variant: "default",
@@ -3025,7 +3051,8 @@ mod tests {
         assert!(select.contains("data-value=\"vip\""));
 
         // Unnamed fields must not render a stale/empty name attribute.
-        let unnamed = Input { id: None,
+        let unnamed = Input {
+            id: None,
             input_type: "text",
             value: "",
             placeholder: "filter",
@@ -3063,7 +3090,8 @@ mod tests {
 
     #[test]
     fn label_supports_required_optional_and_variants() {
-        let html = Label { html_for: None,
+        let html = Label {
+            html_for: None,
             text: "Email",
             required: true,
             optional: false,
@@ -3124,7 +3152,8 @@ mod tests {
 
     #[test]
     fn closed_select_still_ships_option_dom_with_values() {
-        let html = Select { id: None,
+        let html = Select {
+            id: None,
             placeholder: "Select plan",
             value_label: Some("Starter"),
             variant: "default",
@@ -3230,7 +3259,8 @@ mod tests {
 
     #[test]
     fn select_supports_trigger_and_open_menu() {
-        let html = Select { id: None,
+        let html = Select {
+            id: None,
             placeholder: "Select plan",
             value_label: Some("Enterprise"),
             variant: "success",
@@ -3399,6 +3429,80 @@ mod tests {
         .render_html();
         assert!(html.contains("Delivered"));
         assert!(html.contains("success"));
+    }
+
+    /// Regression (audit SM11 F1): unknown status strings fall through
+    /// `status_indicator_config` as the RAW input (DB-sourced event types /
+    /// suppression reasons are not a fixed enum), so the badge label — and
+    /// every other primitive text slot — must be escaped at the render
+    /// boundary. Markup in an unrecognized status value must render as text,
+    /// never as elements or attributes.
+    #[test]
+    fn unknown_status_renders_escaped_not_as_markup() {
+        let payload = "<img src=x onerror=alert(1)>";
+        let badge = Badge {
+            text: payload,
+            variant: "secondary",
+            size: "default",
+            icon: None,
+        }
+        .render_html();
+        assert!(
+            !badge.contains("<img"),
+            "raw markup must not reach the badge label"
+        );
+        assert!(badge.contains("&lt;img src=x onerror=alert(1)&gt;"));
+
+        let status = StatusIndicator { status: payload }.render_html();
+        assert!(
+            !status.contains("<img"),
+            "unknown status must render escaped"
+        );
+        assert!(status.contains("&lt;img"));
+
+        let dialog = Dialog {
+            title: payload,
+            description: Some(payload),
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: true,
+        }
+        .render_html();
+        assert!(
+            !dialog.contains("<img"),
+            "Dialog text slots must be escaped"
+        );
+
+        let alert = AlertDialog {
+            title: payload,
+            message: payload,
+            confirm_label: payload,
+            cancel_label: Some(payload),
+            variant: "destructive",
+            dialog_type: "confirm",
+        }
+        .render_html();
+        assert!(
+            !alert.contains("<img"),
+            "AlertDialog text slots must be escaped"
+        );
+
+        let popover = Popover {
+            preview_title: payload,
+            preview_description: payload,
+            title: payload,
+            description: payload,
+            score_label: payload,
+            score_value: payload,
+            dismiss_label: payload,
+            action_label: payload,
+        }
+        .render_html();
+        assert!(
+            !popover.contains("<img"),
+            "Popover text slots must be escaped"
+        );
     }
 
     #[test]

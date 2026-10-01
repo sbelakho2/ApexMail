@@ -30,7 +30,7 @@ verdict_points = [
 comparison_sections = [
   { title = "DÉLIVRABILITÉ", rows = [
     { feature = "Taux de livraison", apex = '<span class="text-brand-600 font-semibold">Élevé</span>', comp = '<span class="text-surface-600">Élevé</span>', winner = "none" },
-    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Scale</span>', comp = '<span class="text-surface-600">Pro : €82.75 (US$89.95)/mois ; IP dédiées sur demande</span>', winner = "none" },
+    { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business</span>', comp = '<span class="text-surface-600">Pro : €82.75 (US$89.95)/mois ; IP dédiées sur demande</span>', winner = "none" },
     { feature = "Réchauffement IP", apex = '<span class="text-brand-600 font-semibold">Automatique</span>', comp = '<span class="text-surface-600">Automatique</span>', winner = "tie" },
     { feature = "Rotation DKIM", apex = '<span class="text-brand-600 font-semibold">Automatique configurable</span>', comp = '<span class="text-surface-600">Manuelle</span>', winner = "none" },
     { feature = "Disjoncteur de réputation", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },

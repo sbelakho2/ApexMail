@@ -21,7 +21,7 @@
             "options": {
                 "symlink": true,
                 "versions": {
-                    "kiwicaptcha/kiwicaptcha-php": "1.0.0"
+                    "kiwicaptcha/kiwicaptcha-php": "1.7.0"
                 }
             }
         }
@@ -44,7 +44,7 @@
     },
     "extra": {
         "branch-alias": {
-            "dev-main": "1.0.x-dev"
+            "dev-main": "1.7.x-dev"
         }
     },
     "minimum-stability": "dev"

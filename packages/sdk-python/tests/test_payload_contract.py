@@ -201,7 +201,7 @@ class WebhookPayloadContract(unittest.TestCase):
         webhook = self.resource.create(
             name="legacy name",
             url="https://example.com/hook",
-            events=["message.delivered", "email.bounced", "*"],
+            events=["message.delivered", "message.bounced", "*"],
             description="legacy",
             secret="whsec_legacy",
             enabled=True,
@@ -210,7 +210,7 @@ class WebhookPayloadContract(unittest.TestCase):
         self.assertEqual("POST", call["method"])
         self.assertEqual("/v1/webhooks", call["path"])
         self.assertEqual(
-            {"url": "https://example.com/hook", "events": ["message.delivered", "email.bounced", "*"]},
+            {"url": "https://example.com/hook", "events": ["message.delivered", "message.bounced", "*"]},
             call["json"],
         )
         # Flat response parse, secret only at creation.
@@ -232,19 +232,31 @@ class WebhookPayloadContract(unittest.TestCase):
             self.resource.update("wh_1", status="enabled")
 
     def test_known_events_match_server_list(self) -> None:
-        # webhooks.rs KNOWN_WEBHOOK_EVENTS
+        # webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary)
         self.assertEqual(
             (
-                "email.delivered", "email.bounced", "email.complained",
-                "message.sent", "message.delivered", "message.bounced",
-                "message.complained", "message.opened", "message.clicked",
+                "message.accepted", "message.queued", "message.attempted",
+                "message.deferred", "message.delivered", "message.bounced",
+                "message.complained", "message.suppressed", "message.opened",
+                "message.clicked", "message.cancelled",
                 "recipient.unsubscribed", "placement_test.completed",
-                "bounce", "complaint", "inbound", "*",
+                "inbound", "*",
             ),
             tuple(webhooks_module.KNOWN_WEBHOOK_EVENTS),
         )
-        with self.assertRaises(_ValidationError):
-            self.resource.create(url="https://example.com/hook", events=["delivered"])
+
+    def test_unknown_event_warns_but_is_not_blocked(self) -> None:
+        # SM15 F1: the client-side gate is advisory (warning) — the server
+        # stays the authority so new server events never brick the SDK.
+        with self.assertWarns(UserWarning):
+            self.resource.create(url="https://example.com/hook", events=["message.accepted", "delivered"])
+
+    def test_server_valid_events_pass_without_warning(self) -> None:
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            self.resource.create(url="https://example.com/hook", events=["message.accepted", "message.cancelled"])
 
 
 class AnalyticsEndpointContract(unittest.TestCase):

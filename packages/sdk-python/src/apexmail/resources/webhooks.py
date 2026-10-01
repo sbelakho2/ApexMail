@@ -12,6 +12,7 @@ The server's CreateWebhookRequest accepts exactly {url, events}
 from __future__ import annotations
 
 import re
+import warnings
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import urlparse
 
@@ -24,22 +25,23 @@ if TYPE_CHECKING:
 # FIX-500-291: ID format validation
 _ID_REGEX = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 
-# Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS). Any
-# other name is rejected with 422.
+# Event names the server accepts (api-server/src/routes/webhooks.rs
+# KNOWN_WEBHOOK_EVENTS, canonicalized 2026-09-08). Any other name is
+# rejected with 422 server-side.
 KNOWN_WEBHOOK_EVENTS: tuple[str, ...] = (
-    "email.delivered",
-    "email.bounced",
-    "email.complained",
-    "message.sent",
+    "message.accepted",
+    "message.queued",
+    "message.attempted",
+    "message.deferred",
     "message.delivered",
     "message.bounced",
     "message.complained",
+    "message.suppressed",
     "message.opened",
     "message.clicked",
+    "message.cancelled",
     "recipient.unsubscribed",
     "placement_test.completed",
-    "bounce",
-    "complaint",
     "inbound",
     "*",
 )
@@ -67,12 +69,19 @@ def _validate_webhook_url(url: str) -> None:
 
 
 def _validate_events(events: list[str]) -> None:
-    """Reject unknown event names client-side — the server would 422."""
+    """Warn on unknown event names — the server 422s them.
+
+    Deliberately a warning, not a hard error (audit SM15 F1): the server
+    owns the vocabulary, and a client-side gate would brick the SDK every
+    time the server adds a new event type. This is a convenience
+    diagnostic only.
+    """
     invalid = [event for event in events if event.strip() not in KNOWN_WEBHOOK_EVENTS]
     if invalid:
-        raise ValidationError(
+        warnings.warn(
             f"Unknown webhook event type(s): {', '.join(invalid)}. "
-            f"Valid events: {', '.join(KNOWN_WEBHOOK_EVENTS)}"
+            f"Known events: {', '.join(KNOWN_WEBHOOK_EVENTS)}",
+            stacklevel=3,
         )
 
 
@@ -113,7 +122,7 @@ class WebhooksResource:
             name: Unused by the API (ignored).
             url: Webhook URL (must be HTTPS in production)
             events: Event names (KNOWN_WEBHOOK_EVENTS), e.g.
-                ["message.delivered", "email.bounced", "*"]
+                ["message.delivered", "message.bounced", "*"]
             description: Unused by the API (ignored).
             secret: Unused by the API (server-generated; ignored).
             headers: Unused by the API (ignored).

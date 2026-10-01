@@ -163,17 +163,23 @@ impl SignatureSet {
         // match notification — LeftmostFirst + find_iter would suppress the
         // second hit, causing the later sig to never fire.
         let mut ac_matched_sigs = std::collections::HashSet::new();
-        // Per-signature hit specificity:(number of distinct content patterns
-        // that matched, length of the longest matched pattern).
-        let mut sig_hit_details: std::collections::HashMap<usize, (u32, usize)> =
-            std::collections::HashMap::new();
+        // Per-signature hit specificity:(number of DISTINCT content
+        // patterns that matched, length of the longest matched pattern).
+        // Audit SM5 F11: occurrences are not distinctness — `cmd=` twice
+        // in one payload must not satisfy the "≥2 distinct matched
+        // tokens" guard, so per-signature pattern indices are tracked in
+        // a set and counted by size.
+        let mut sig_hit_details: std::collections::HashMap<
+            usize,
+            (std::collections::HashSet<usize>, usize),
+        > = std::collections::HashMap::new();
         if let Some(automaton) = &self.automaton {
             for mat in automaton.find_overlapping_iter(payload) {
                 let pat_idx = mat.pattern().as_usize();
                 let sig_idx = self.pattern_to_sig[pat_idx];
                 ac_matched_sigs.insert(sig_idx);
-                let e = sig_hit_details.entry(sig_idx).or_insert((0, 0));
-                e.0 += 1;
+                let e = sig_hit_details.entry(sig_idx).or_default();
+                e.0.insert(pat_idx);
                 e.1 = e.1.max(self.pattern_lens[pat_idx]);
             }
         }
@@ -200,13 +206,16 @@ impl SignatureSet {
             // Specificity guard for hard-block actions:a content-only
             // Drop/Reject signature must not fire on a single short token —
             // that would drop legitimate traffic containing a ubiquitous
-            // word. Require either ≥2 distinct matched tokens or one
+            // word. Require either ≥2 DISTINCT matched tokens (repeated
+            // occurrences of one token do not count, audit SM5 F11) or one
             // sufficiently long (≥ MIN_DROP_SINGLE_TOKEN_LEN bytes) token.
             let destructive = matches!(sig.action, SignatureAction::Drop | SignatureAction::Reject);
             let specificity_ok = if destructive && has_content && !has_regex {
                 sig_hit_details
                     .get(&sig_idx)
-                    .map(|(count, max_len)| *count >= 2 || *max_len >= MIN_DROP_SINGLE_TOKEN_LEN)
+                    .map(|(distinct, max_len)| {
+                        distinct.len() >= 2 || *max_len >= MIN_DROP_SINGLE_TOKEN_LEN
+                    })
                     .unwrap_or(false)
             } else {
                 true
@@ -336,8 +345,43 @@ fn structural_signature_fires(sig: &Signature, payload: &[u8], proto_filter: &st
         // TLS: handshake advertising a protocol below TLS 1.2
         // (SSLv2/SSLv3/early-TLS ClientHello).
         2000030 => proto_filter == "tls" && tls_handshake_below_tls12(payload),
+        // HTTP/2 Rapid Reset (CVE-2023-44487, audit SM5 F12): parse the
+        // binary frame stream and look for RST_STREAM frames (type 0x03).
+        2000051 => proto_filter == "http" && http2_rst_stream_frames(payload),
         _ => false,
     }
+}
+
+/// The mandatory HTTP/2 client connection preface (RFC 9113 §3.4): every
+/// HTTP/2 connection starts with these exact 24 bytes, which anchors the
+/// frame parse that follows.
+const HTTP2_CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Whether the payload is an HTTP/2 frame stream (anchored by the client
+/// connection preface) containing at least one RST_STREAM frame
+/// (frame type 0x03) — the Rapid Reset attack pattern.
+///
+/// Frames are `length:u24 | type:u8 | flags:u8 | stream_id:u32` (RFC 9113
+/// §4.1). The walk stops at the first impossible header: a TCP segment
+/// boundary can truncate a frame, and a payload that does not parse as a
+/// frame chain is simply not flagged (no coverage is claimed where the
+/// sensor cannot see the binary frames).
+fn http2_rst_stream_frames(payload: &[u8]) -> bool {
+    let Some(rest) = payload.strip_prefix(HTTP2_CLIENT_PREFACE) else {
+        return false;
+    };
+    let mut i = 0usize;
+    while i + 9 <= rest.len() {
+        let length =
+            ((rest[i] as usize) << 16) | ((rest[i + 1] as usize) << 8) | rest[i + 2] as usize;
+        let frame_type = rest[i + 3];
+        if frame_type == 0x03 {
+            return true;
+        }
+        // Move past this frame's header + payload.
+        i += 9 + length;
+    }
+    false
 }
 
 /// Whether the payload is a TLS handshake advertising a version below
@@ -575,11 +619,14 @@ pub fn builtin_mail_signatures() -> Vec<Signature> {
         },
         Signature {
             sid: 2000051,
-            rev: 1,
-            message: "HTTP: HTTP/2 SETTINGS flood (Rapid Reset pattern, CVE-2023-44487)".into(),
-            content_patterns: vec![
-                b"RST_STREAM".to_vec(),
-            ],
+            rev: 2,
+            message: "HTTP: HTTP/2 RST_STREAM flood (Rapid Reset pattern, CVE-2023-44487)".into(),
+            // Audit SM5 F12: HTTP/2 is binary-framed — the frame type is
+            // the single byte 0x03 and the ASCII string "RST_STREAM" never
+            // appears on the wire, so the old content pattern could never
+            // match real traffic (dead coverage). Detection is now a
+            // STRUCTURAL frame parse: see `structural_signature_fires`.
+            content_patterns: vec![],
             action: SignatureAction::Alert,
             severity: SigSeverity::High,
             category: "dos".into(),
@@ -1543,5 +1590,144 @@ mod tests {
             result.is_err(),
             "Invalid regex should cause compilation error"
         );
+    }
+
+    // ── Audit SM5 F11:occurrences are not distinct patterns ──────────
+
+    /// A content-only Drop signature matching a single short token.
+    fn single_short_token_drop_sig() -> Signature {
+        Signature {
+            sid: 7770001,
+            rev: 1,
+            message: "Drop-specificity test".into(),
+            content_patterns: vec![b"cmd=".to_vec()],
+            regex_patterns: vec![],
+            action: SignatureAction::Drop,
+            severity: SigSeverity::Critical,
+            category: "test".into(),
+            protocol: "any".into(),
+            references: vec![],
+        }
+    }
+
+    #[test]
+    fn test_repeated_occurrences_of_one_token_do_not_satisfy_drop_guard() {
+        // THE finding vector: two occurrences of the SAME 4-byte token
+        // must not satisfy the ">= 2 DISTINCT matched tokens" guard.
+        let set = SignatureSet::new(vec![single_short_token_drop_sig()]).expect("compile sig");
+        let matches = set.scan_with_protocol(b"?a=cmd=1&b=cmd=2", "");
+        assert!(
+            !matches.iter().any(|m| m.sid == 7770001),
+            "repeated occurrences of one short token must not fire a content-only Drop signature"
+        );
+        // A single occurrence obviously must not either.
+        assert!(!set
+            .scan_with_protocol(b"?a=cmd=1", "")
+            .iter()
+            .any(|m| m.sid == 7770001));
+    }
+
+    #[test]
+    fn test_two_distinct_tokens_still_satisfy_drop_guard() {
+        let mut sig = single_short_token_drop_sig();
+        sig.content_patterns = vec![b"cmd=".to_vec(), b"exec=".to_vec()];
+        let set = SignatureSet::new(vec![sig]).expect("compile sig");
+        let matches = set.scan_with_protocol(b"?a=cmd=1&b=exec=2", "");
+        assert!(
+            matches.iter().any(|m| m.sid == 7770001),
+            "two DISTINCT tokens must still satisfy the specificity guard"
+        );
+    }
+
+    // ── Audit SM5 F12:2000051 detects binary RST_STREAM frames ───────
+
+    /// Build an HTTP/2 frame with the given type and payload length.
+    fn h2_frame(frame_type: u8, payload_len: usize) -> Vec<u8> {
+        let mut f = vec![
+            (payload_len >> 16) as u8,
+            (payload_len >> 8) as u8,
+            payload_len as u8,
+            frame_type,
+            0x00, // flags
+        ];
+        f.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // stream id 1
+        f.extend(vec![0xABu8; payload_len]);
+        f
+    }
+
+    fn h2_preface() -> Vec<u8> {
+        HTTP2_CLIENT_PREFACE.to_vec()
+    }
+
+    #[test]
+    fn test_http2_rapid_reset_frames_fire_2000051() {
+        let set = SignatureSet::new(builtin_mail_signatures()).expect("compile sigs");
+
+        // Realistic Rapid Reset burst: preface + SETTINGS + SETTINGS-ACK +
+        // a stream of RST_STREAM (0x03) frames.
+        let mut stream = h2_preface();
+        stream.extend(h2_frame(0x04, 36)); // SETTINGS
+        stream.extend(h2_frame(0x04, 0)); // empty SETTINGS frame
+        stream.extend(h2_frame(0x03, 8)); // RST_STREAM
+        stream.extend(h2_frame(0x03, 8));
+        let matches = set.scan_with_protocol(&stream, "http");
+        assert!(
+            matches.iter().any(|m| m.sid == 2000051),
+            "binary RST_STREAM frames must fire 2000051, got {:?}",
+            matches.iter().map(|m| m.sid).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_http2_stream_without_rst_stream_does_not_fire() {
+        let set = SignatureSet::new(builtin_mail_signatures()).expect("compile sigs");
+        let mut stream = h2_preface();
+        stream.extend(h2_frame(0x04, 36)); // SETTINGS
+        stream.extend(h2_frame(0x01, 0)); // HEADERS
+        assert!(!set
+            .scan_with_protocol(&stream, "http")
+            .iter()
+            .any(|m| m.sid == 2000051));
+    }
+
+    #[test]
+    fn test_ascii_rst_stream_text_no_longer_fires_2000051() {
+        // The honest-coverage half of F12: the ASCII string never appears
+        // on an HTTP/2 wire; an HTTP/1.1 body merely mentioning it is NOT
+        // Rapid Reset traffic and must not fire the signature.
+        let set = SignatureSet::new(builtin_mail_signatures()).expect("compile sigs");
+        for payload in [
+            &b"GET /path RST_STREAM HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+            &b"POST /submit HTTP/1.1\r\nUser-Agent: RST_STREAM-fan\r\n\r\n"[..],
+        ] {
+            assert!(
+                !set.scan_with_protocol(payload, "http")
+                    .iter()
+                    .any(|m| m.sid == 2000051),
+                "ASCII 'RST_STREAM' in HTTP/1.1 traffic must not fire 2000051"
+            );
+        }
+    }
+
+    #[test]
+    fn test_truncated_h2_frame_tail_and_garbage_do_not_panic_or_misfire() {
+        // A frame header announcing more payload than the segment carries
+        // (TCP truncation) must not crash or misfire.
+        let set = SignatureSet::new(builtin_mail_signatures()).expect("compile sigs");
+        let mut stream = h2_preface();
+        stream.extend(h2_frame(0x03, 8));
+        stream.truncate(stream.len() - 4); // cut into the RST_STREAM payload
+        let matches = set.scan_with_protocol(&stream, "http");
+        assert!(
+            matches.iter().any(|m| m.sid == 2000051),
+            "a fully-received RST_STREAM frame header must still fire even if the tail is truncated"
+        );
+        // Completely garbled bytes after the preface must not fire.
+        let mut garbage = h2_preface();
+        garbage.extend_from_slice(&[0xFF; 3]);
+        assert!(!set
+            .scan_with_protocol(&garbage, "http")
+            .iter()
+            .any(|m| m.sid == 2000051));
     }
 }

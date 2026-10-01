@@ -96,7 +96,7 @@ $health = $client->domains->health('domain_id');
 // Create a webhook
 $webhook = $client->webhooks->create([
     'url'    => 'https://your-app.com/webhooks/apexmail',
-    'events' => ['email.delivered', 'email.bounced', 'email.opened'],
+    'events' => ['message.delivered', 'message.bounced', 'message.opened'],
 ]);
 
 // List webhooks

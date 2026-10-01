@@ -768,7 +768,9 @@ mod tests {
         let config = make_test_config();
 
         let result = add_tracking_pixel(html, &job, &config);
-        let real_close = result.find("</body><script>").expect("the real body close survives");
+        let real_close = result
+            .find("</body><script>")
+            .expect("the real body close survives");
         let pixel_pos = result.find("track.example.com").expect("pixel present");
         assert!(
             pixel_pos < real_close,
@@ -777,7 +779,8 @@ mod tests {
         // The injected pixel must not land inside the script's raw text.
         let script_open = result.find("<script>").expect("script preserved");
         assert!(
-            !(pixel_pos > script_open && pixel_pos < result.find("</script>").unwrap_or(usize::MAX)),
+            !(pixel_pos > script_open
+                && pixel_pos < result.find("</script>").unwrap_or(usize::MAX)),
             "pixel must never be injected into script content: {result}"
         );
         assert!(

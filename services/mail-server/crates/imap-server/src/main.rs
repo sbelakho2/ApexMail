@@ -126,19 +126,26 @@ impl ImapSession {
         }
     }
 
+    /// SM2-F2: `uid_map` is kept sorted (SELECT sorts it, APPEND re-sorts
+    /// after its push, refreshes re-list sorted), so UID→MSN lookup is a
+    /// binary search instead of a linear scan — STORE's per-message echo loop
+    /// on a 100k-message mailbox is O(m log n), not O(m·n).
     fn seq_for_uid(&self, uid: u64) -> Option<u32> {
-        self.uid_map
-            .iter()
-            .position(|&u| u == uid)
-            .map(|i| i as u32 + 1)
+        self.uid_map.binary_search(&uid).ok().map(|i| i as u32 + 1)
     }
 
     /// Current \Recent count for this session: recent UIDs that are still in
     /// the mailbox view (expunged messages stop being \Recent).
+    ///
+    /// SM2-F2: membership tests against the sorted `uid_map` are binary
+    /// searches. The previous `slice::contains` is a linear scan, which made
+    /// this O(|recent| × |view|) — on SELECT every unseen message joins
+    /// `recent_uids`, so a 100k-unseen mailbox paid ~5×10⁹ comparisons PER
+    /// CALL, and the call runs on SELECT, NOOP, EXPUNGE, MOVE and APPEND.
     fn recent_count(&self) -> u32 {
         self.recent_uids
             .iter()
-            .filter(|u| self.uid_map.contains(u))
+            .filter(|u| self.uid_map.binary_search(u).is_ok())
             .count()
             .min(u32::MAX as usize) as u32
     }
@@ -391,6 +398,13 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
                     .parse()
                     .with_context(|| format!("invalid sequence end: {}", end_str))?
             };
+            // SM2-F8 (RFC 3501 §9: seq-number = nz-number): 0 is not a valid
+            // sequence number anywhere in a sequence set. The old code
+            // silently skipped a bare `0` (and accepted it inside a range),
+            // masking client bugs.
+            if start == 0 || end == 0 {
+                bail!("Sequence numbers are 1-based: 0 is not valid");
+            }
             if start == u64::MAX && end == u64::MAX {
                 intervals.push((u64::MAX, u64::MAX));
             } else {
@@ -405,8 +419,10 @@ fn parse_sequence_set(input: &str) -> Result<Vec<(u64, u64)>> {
             let u: u64 = part
                 .parse()
                 .with_context(|| format!("invalid sequence number: {}", part))?;
+            // SM2-F8: reject `0` with a syntax error (RFC 3501 §9
+            // seq-number = nz-number) instead of silently ignoring it.
             if u == 0 {
-                continue;
+                bail!("Sequence numbers are 1-based: 0 is not valid");
             }
             intervals.push((u, u));
         }
@@ -1429,7 +1445,7 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         "NAMESPACE" => handle_namespace(session, tag, writer).await,
         "SELECT" => handle_select(session, tag, args, false, literals, writer).await,
         "EXAMINE" => handle_select(session, tag, args, true, literals, writer).await,
-        "FETCH" => handle_fetch(session, tag, args, false, writer).await,
+        "FETCH" => handle_fetch(session, tag, args, false, literals, writer).await,
         "UID" => handle_uid_command(session, tag, args, literals, writer).await,
         "STORE" => handle_store(session, tag, args, false, literals, writer).await,
         "SEARCH" => handle_search(session, tag, args, false, literals, writer).await,
@@ -1473,15 +1489,26 @@ async fn handle_uid_command<W: AsyncWrite + Unpin>(
     let space_pos = args.find(' ').unwrap_or(args.len());
     let sub_cmd = &args[..space_pos];
     let sub_args = args[space_pos..].trim();
-    let sub_args = resolve_token(sub_args, literals);
 
     match sub_cmd.to_uppercase().as_str() {
-        "FETCH" => handle_fetch(session, tag, &sub_args, true, writer).await,
-        "STORE" => handle_store(session, tag, &sub_args, true, literals, writer).await,
-        "SEARCH" => handle_search(session, tag, &sub_args, true, literals, writer).await,
-        "COPY" => handle_copy(session, tag, &sub_args, true, literals, writer).await,
-        "MOVE" => handle_move(session, tag, &sub_args, true, literals, writer).await,
-        "EXPUNGE" => handle_expunge(session, tag, Some(&sub_args), writer).await,
+        // SM2-F7: sub-args are passed through RAW; each sub-handler resolves
+        // its tokens against `literals` itself (as SEARCH/COPY already did).
+        // The previous whole-string resolve_token here only worked when the
+        // ENTIRE sub-args was a single literal marker — any literal embedded
+        // mid-args (e.g. `UID SEARCH HEADER {7}\r\nSubject x`, or `UID FETCH
+        // {3} FLAGS`) leaked the raw \x01LITk\x01 marker into item parsing
+        // and surfaced as a confusing BAD.
+        "FETCH" => handle_fetch(session, tag, sub_args, true, literals, writer).await,
+        "STORE" => handle_store(session, tag, sub_args, true, literals, writer).await,
+        "SEARCH" => handle_search(session, tag, sub_args, true, literals, writer).await,
+        "COPY" => handle_copy(session, tag, sub_args, true, literals, writer).await,
+        "MOVE" => handle_move(session, tag, sub_args, true, literals, writer).await,
+        "EXPUNGE" => {
+            // UID EXPUNGE takes a single sequence-set token; resolve that one
+            // token here (handle_expunge's resolver takes plain text).
+            let uid_set = resolve_token(sub_args, literals);
+            handle_expunge(session, tag, Some(&uid_set), writer).await
+        }
         _ => {
             write_line(
                 writer,
@@ -2275,23 +2302,63 @@ fn header_and_text(raw: &[u8]) -> (&[u8], &[u8]) {
     (raw, &[])
 }
 
+/// SM2-F6: trim ASCII spaces/tabs from both ends of a byte slice (the header
+/// field-name whitespace set; replacing `str::trim` keeps this byte-pure).
+fn trim_header_ws(bytes: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = bytes.len();
+    while start < end && (bytes[start] == b' ' || bytes[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+        end -= 1;
+    }
+    &bytes[start..end]
+}
+
 /// L2: filter a raw header block down to the named fields (BODY[HEADER.FIELDS
 /// (...)]); with `not`, everything EXCEPT the named fields. Folded
 /// continuation lines stay attached to their field. The result always ends
 /// with the terminating blank line (RFC 3501 §6.4.5).
+///
+/// SM2-F6: operates on raw octets — field-name matching is ASCII-case-
+/// insensitive byte comparison and the matched lines are copied verbatim, so
+/// 8-bit (ISO-8859-1, raw UTF-16, …) header bytes round-trip unchanged
+/// instead of being mangled through `from_utf8_lossy` into U+FFFD.
 fn filter_header_fields(header: &[u8], fields: &[String], not: bool) -> Vec<u8> {
-    let text = String::from_utf8_lossy(header);
-    let mut out = String::new();
+    let mut out = Vec::with_capacity(header.len() + 2);
     let mut current_matches = false;
-    for line in text.lines() {
-        let trimmed = line.trim_end_matches('\r');
+    let mut rest = header;
+    while !rest.is_empty() {
+        let nl = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(rest.len());
+        let line = &rest[..nl];
+        rest = &rest[nl..];
+        // Inspect the line without its terminator; emit it in canonical
+        // CRLF form (as the previous implementation did).
+        let mut trimmed: &[u8] = line;
+        if trimmed.ends_with(b"\n") {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        if trimmed.ends_with(b"\r") {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
         if trimmed.is_empty() {
             continue; // the terminating blank line is re-added below
         }
-        let is_continuation = trimmed.starts_with(' ') || trimmed.starts_with('\t');
+        let is_continuation = trimmed.starts_with(b" ") || trimmed.starts_with(b"\t");
         if !is_continuation {
-            let name = trimmed.split(':').next().unwrap_or("").trim();
-            current_matches = fields.iter().any(|f| f.eq_ignore_ascii_case(name));
+            let name_end = trimmed
+                .iter()
+                .position(|&b| b == b':')
+                .unwrap_or(trimmed.len());
+            let name = trim_header_ws(&trimmed[..name_end]);
+            current_matches = fields
+                .iter()
+                .any(|f| name.eq_ignore_ascii_case(f.as_bytes()));
         }
         let include = if not {
             !current_matches
@@ -2299,58 +2366,81 @@ fn filter_header_fields(header: &[u8], fields: &[String], not: bool) -> Vec<u8> 
             current_matches
         };
         if include {
-            out.push_str(trimmed);
-            out.push_str("\r\n");
+            out.extend_from_slice(trimmed);
+            out.extend_from_slice(b"\r\n");
         }
     }
     // The header block always ends with the terminating empty line
     // (RFC 3501 §6.4.5).
-    out.push_str("\r\n");
-    out.into_bytes()
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 /// Parse the boundary parameter of a multipart Content-Type header value.
-fn multipart_boundary(content_type: &str) -> Option<String> {
-    let lower = content_type.to_lowercase();
-    if !lower.trim_start().starts_with("multipart") {
+///
+/// SM2-F6: byte-based — the value may carry 8-bit octets and the boundary
+/// itself is ASCII (RFC 2046), so scanning happens on bytes and only the
+/// extracted boundary is materialized as a `String`.
+fn multipart_boundary(content_type: &[u8]) -> Option<String> {
+    let lower = content_type.to_ascii_lowercase();
+    let trimmed = trim_header_ws(&lower);
+    if !trimmed.starts_with(b"multipart") {
         return None;
     }
-    let idx = lower.find("boundary=")?;
+    let idx = find_subslice(&lower, b"boundary=")?;
     let after = &content_type[idx + "boundary=".len()..];
-    let after = after.trim();
-    let boundary = if let Some(stripped) = after.strip_prefix('"') {
-        let end = stripped.find('"')?;
+    let after = trim_header_ws(after);
+    let boundary = if let Some(stripped) = after.strip_prefix(b"\"") {
+        let end = stripped.iter().position(|&b| b == b'"')?;
         &stripped[..end]
     } else {
-        let end = after.find(';').unwrap_or(after.len());
+        let end = after.iter().position(|&b| b == b';').unwrap_or(after.len());
         &after[..end]
     };
-    let boundary = boundary.trim();
+    let boundary = trim_header_ws(boundary);
     if boundary.is_empty() {
         None
     } else {
-        Some(boundary.to_string())
+        Some(String::from_utf8_lossy(boundary).into_owned())
     }
 }
 
 /// Find a header field's value in a raw header block (first match,
 /// case-insensitive name), with lines joined by single spaces.
-fn raw_header_value(header: &[u8], name: &str) -> Option<String> {
-    let text = String::from_utf8_lossy(header);
-    let mut value: Option<String> = None;
-    for line in text.lines() {
-        let trimmed = line.trim_end_matches('\r');
-        if trimmed.starts_with(' ') || trimmed.starts_with('\t') {
+///
+/// SM2-F6: the name match and the value extraction are byte operations on
+/// the raw octets — no lossy re-encoding can shift bytes before matching.
+/// The returned octets are exact; callers that need `String` for rendering
+/// go through [`header_value_utf8`].
+fn raw_header_value(header: &[u8], name: &str) -> Option<Vec<u8>> {
+    let mut value: Option<Vec<u8>> = None;
+    let mut rest = header;
+    while !rest.is_empty() {
+        let nl = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(rest.len());
+        let line = &rest[..nl];
+        rest = &rest[nl..];
+        let mut trimmed: &[u8] = line;
+        if trimmed.ends_with(b"\n") {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        if trimmed.ends_with(b"\r") {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        if trimmed.starts_with(b" ") || trimmed.starts_with(b"\t") {
             if let Some(v) = value.as_mut() {
-                v.push(' ');
-                v.push_str(trimmed.trim());
+                v.push(b' ');
+                v.extend_from_slice(trim_header_ws(trimmed));
             }
             continue;
         }
-        let mut parts = trimmed.splitn(2, ':');
-        let key = parts.next().unwrap_or("").trim();
-        if key.eq_ignore_ascii_case(name) {
-            value = Some(parts.next().unwrap_or("").trim().to_string());
+        let mut parts = trimmed.splitn(2, |&b| b == b':');
+        let key = parts.next().unwrap_or(&[]);
+        if trim_header_ws(key).eq_ignore_ascii_case(name.as_bytes()) {
+            value = Some(trim_header_ws(parts.next().unwrap_or(&[])).to_vec());
         }
     }
     value
@@ -2383,8 +2473,9 @@ fn split_part_header(part: &[u8]) -> (&[u8], &[u8]) {
 /// to the delimiter, not to the part content (so BODY[n] round-trips what
 /// the sender wrote).
 fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<MimePart<'a>> {
-    let delim = format!("--{}", boundary);
-    let close = format!("{}--", delim);
+    let delim = format!("--{}", boundary).into_bytes();
+    let mut close = delim.clone();
+    close.extend_from_slice(b"--");
 
     // Collect (line_start, line_end_incl_newline) offsets.
     let mut lines: Vec<(usize, usize)> = Vec::new();
@@ -2399,13 +2490,26 @@ fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<MimePart<'a>> {
         i = nl;
     }
 
+    // SM2-F6: delimiter lines are compared as raw bytes (with the line's
+    // CRLF/LF stripped) — the previous from_utf8_lossy round-trip could
+    // theoretically diverge on parts whose content carries 8-bit octets.
+    fn line_content(line: &[u8]) -> &[u8] {
+        let mut l = line;
+        if l.ends_with(b"\n") {
+            l = &l[..l.len() - 1];
+        }
+        if l.ends_with(b"\r") {
+            l = &l[..l.len() - 1];
+        }
+        l
+    }
+
     let mut parts = Vec::new();
     let mut part_start: Option<usize> = None;
     for &(start, end) in &lines {
-        let line = String::from_utf8_lossy(&body[start..end]);
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        let is_delim = trimmed == delim;
-        let is_close = trimmed == close;
+        let line = line_content(&body[start..end]);
+        let is_delim = line == delim.as_slice();
+        let is_close = line == close.as_slice();
         if is_delim || is_close {
             if let Some(ps) = part_start.take() {
                 // Strip the CRLF that belongs to this delimiter line.
@@ -2439,6 +2543,14 @@ fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<MimePart<'a>> {
 /// headers included, per RFC 3501 §6.4.5).
 fn extract_body_part(raw: &[u8], number: &str, mime: bool) -> Vec<u8> {
     let components: Vec<&str> = number.split('.').collect();
+    // SM2-F1: a part path deeper than the maximum renderable MIME depth can
+    // never address an existing part (the structure renderer refuses to
+    // render deeper than MAX_MIME_DEPTH); refusing here also bounds the
+    // O(components × body) region-copying descent a hostile multi-hundred-
+    // thousand-component part number used to trigger.
+    if components.len() > MAX_MIME_DEPTH {
+        return Vec::new();
+    }
     let mut region: Vec<u8> = raw.to_vec();
     for (i, comp) in components.iter().enumerate() {
         let Ok(idx) = comp.parse::<usize>() else {
@@ -2491,6 +2603,35 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // persisted structure metadata), reusing the same header/multipart helpers
 // the BODY[n] section extraction uses.
 
+/// SM2-F1: maximum MIME nesting depth rendered by [`format_structure_region`]
+/// and descended by [`extract_body_part`]. Mirrors the cap already shipped in
+/// the vendored `imap-proto-patched` crate (`MAX_BODYSTRUCTURE_DEPTH = 64`,
+/// body_structure.rs). Every nesting level costs one recursion frame in the
+/// structure renderer and one O(part)-sized region copy in the section
+/// extractor, and the literal reader accepts 32 MiB APPENDs — so a single
+/// authenticated APPEND of a ~500k-deep `multipart/mixed` previously drove
+/// the FETCH to a stack-overflow SIGSEGV (whole-process crash) and the
+/// section extraction to unbounded O(depth × body) memcpy.
+const MAX_MIME_DEPTH: usize = 64;
+
+/// SM2-F1: typed depth-cap bail-out. It is carried through `anyhow` so
+/// `handle_fetch` can downcast it and answer a tagged BAD (RFC 3501) instead
+/// of tearing the connection down with a generic error.
+#[derive(Debug)]
+struct StructureDepthError(usize);
+
+impl std::fmt::Display for StructureDepthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MIME structure exceeds the maximum nesting depth of {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for StructureDepthError {}
+
 /// Split one `key=value` parameter token (`charset="utf-8"` → `("charset",
 /// "utf-8")`); surrounding double quotes on the value are stripped. RFC 2231
 /// extended/continued parameters are not reassembled (documented
@@ -2537,11 +2678,12 @@ fn format_body_params(params: &[(String, String)]) -> String {
     format!("({})", inner.join(" "))
 }
 
-/// Render an optional header value as an nstring (NIL when absent).
-fn opt_body_nstring(value: Option<&str>) -> String {
+/// Render an optional header value as an nstring (NIL when absent). The raw
+/// octets are rendered via [`header_value_utf8`] (SM2-F6).
+fn opt_body_nstring(value: Option<&[u8]>) -> String {
     match value {
         None => "NIL".to_string(),
-        Some(s) => encode_nstring(s),
+        Some(s) => encode_nstring(&header_value_utf8(s)),
     }
 }
 
@@ -2551,7 +2693,7 @@ fn format_disposition_field(header: &[u8]) -> String {
     match raw_header_value(header, "Content-Disposition") {
         None => "NIL".to_string(),
         Some(value) => {
-            let (dtype, _, params) = parse_type_params(&value);
+            let (dtype, _, params) = parse_type_params(&header_value_utf8(&value));
             let dtype = if dtype.is_empty() {
                 "INLINE".to_string()
             } else {
@@ -2592,7 +2734,7 @@ fn format_multipart_extension(params: &[(String, String)], header: &[u8]) -> Str
 /// documented approximation of real address parsing for structure rendering.
 fn embedded_envelope(content: &[u8]) -> mail_proto::EmailEnvelope {
     let (header, _) = split_part_header(content);
-    let get = |name: &str| raw_header_value(header, name);
+    let get = |name: &str| raw_header_value(header, name).map(|v| header_value_utf8(&v));
     let addr_list = |name: &str| -> Vec<String> {
         match get(name) {
             Some(v) if !v.trim().is_empty() => v
@@ -2623,12 +2765,20 @@ fn embedded_envelope(content: &[u8]) -> mail_proto::EmailEnvelope {
 /// Render the BODY/BODYSTRUCTURE of one MIME region (its header block plus
 /// content) per RFC 3501 §7.4.2. `region` for a part is header+content
 /// concatenated; for the top-level message it is the whole raw message.
-fn format_structure_region(region: &[u8], extended: bool) -> String {
+///
+/// SM2-F1: `depth` caps the recursion — nesting deeper than
+/// [`MAX_MIME_DEPTH`] fails with [`StructureDepthError`] (surfaced as a
+/// tagged BAD by FETCH) instead of recursing unbounded on a hostile
+/// deeply-nested APPEND and overflowing the stack.
+fn format_structure_region(region: &[u8], extended: bool, depth: usize) -> Result<String> {
+    if depth > MAX_MIME_DEPTH {
+        bail!(StructureDepthError(MAX_MIME_DEPTH));
+    }
     let (header, content) = split_part_header(region);
     let content_type = raw_header_value(header, "Content-Type");
     let (media_type, subtype, params) = match &content_type {
         Some(ct) => {
-            let (t, s, p) = parse_type_params(ct);
+            let (t, s, p) = parse_type_params(&header_value_utf8(ct));
             (t.to_uppercase(), s.to_uppercase(), p)
         }
         None => ("TEXT".to_string(), "PLAIN".to_string(), Vec::new()),
@@ -2636,23 +2786,27 @@ fn format_structure_region(region: &[u8], extended: bool) -> String {
 
     if media_type == "MULTIPART" {
         let boundary =
-            multipart_boundary(content_type.as_deref().unwrap_or("")).unwrap_or_default();
+            multipart_boundary(content_type.as_deref().unwrap_or(&[])).unwrap_or_default();
         let parts = split_multipart(content, &boundary);
-        let substructures: Vec<String> = parts
-            .iter()
-            .map(|p| format_structure_region(&[p.header, p.content].concat(), extended))
-            .collect();
+        let mut substructures = Vec::with_capacity(parts.len());
+        for p in &parts {
+            substructures.push(format_structure_region(
+                &[p.header, p.content].concat(),
+                extended,
+                depth + 1,
+            )?);
+        }
         let mut out = format!("(\"{}\" {}", subtype, substructures.join(" "));
         if extended {
             out.push(' ');
             out.push_str(&format_multipart_extension(&params, header));
         }
         out.push(')');
-        return out;
+        return Ok(out);
     }
 
     let encoding = raw_header_value(header, "Content-Transfer-Encoding")
-        .map(|e| e.to_uppercase())
+        .map(|e| String::from_utf8_lossy(&e.to_ascii_uppercase()).into_owned())
         .unwrap_or_else(|| "7BIT".to_string());
     let size = content.len();
     let lines = content.iter().filter(|&&b| b == b'\n').count();
@@ -2668,7 +2822,7 @@ fn format_structure_region(region: &[u8], extended: bool) -> String {
     ];
     if media_type == "MESSAGE" && subtype == "RFC822" {
         fields.push(format_envelope(&embedded_envelope(content)));
-        fields.push(format_structure_region(content, extended));
+        fields.push(format_structure_region(content, extended, depth + 1)?);
         fields.push(lines.to_string());
     } else if media_type == "TEXT" {
         fields.push(lines.to_string());
@@ -2676,13 +2830,26 @@ fn format_structure_region(region: &[u8], extended: bool) -> String {
     if extended {
         fields.push(format_extension_fields(header));
     }
-    format!("({})", fields.join(" "))
+    Ok(format!("({})", fields.join(" ")))
+}
+
+/// SM2-F6: convert a raw header value's octets into a `String` for the
+/// structure/envelope RENDERERS (BODYSTRUCTURE, ENVELOPE), which are
+/// string-typed by construction. Valid UTF-8 round-trips exactly; invalid
+/// octets fall back to lossy conversion only at this rendering boundary —
+/// never in the byte-exact section-fetch paths (see [`filter_header_fields`],
+/// [`raw_header_value`]).
+fn header_value_utf8(raw: &[u8]) -> String {
+    match std::str::from_utf8(raw) {
+        Ok(s) => s.to_string(),
+        Err(_) => String::from_utf8_lossy(raw).into_owned(),
+    }
 }
 
 /// F5: render the top-level BODY (`extended == false`) or BODYSTRUCTURE
 /// (`extended == true`) response data for a raw message.
-fn format_body_structure(raw: &[u8], extended: bool) -> String {
-    format_structure_region(raw, extended)
+fn format_body_structure(raw: &[u8], extended: bool) -> Result<String> {
+    format_structure_region(raw, extended, 0)
 }
 
 struct GetMessageBody {
@@ -2694,13 +2861,14 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     tag: &str,
     args: &str,
     is_uid: bool,
+    literals: &[Vec<u8>],
     writer: &mut W,
 ) -> Result<()> {
     if !mailbox_selected(session) {
         return write_line(writer, &tagged_bad(tag, "No mailbox selected")).await;
     }
 
-    let (seq_part, items_str) = match parse_fetch_args(args) {
+    let (seq_part, items_str) = match parse_fetch_args(args, literals) {
         Ok(v) => v,
         Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
     };
@@ -2714,23 +2882,22 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         Ok(v) => v,
         Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
     };
-    // Fetch the full mailbox listing so sequence numbers are correct and
-    // wildcards resolve against actual contents.
-    let mut client = session.client.clone();
-    let list_req = ListMessagesRequest {
-        account_id: session.account_id.clone(),
-        mailbox: session.mailbox.clone(),
-        uid_min: 1,
-        uid_max: u64::MAX,
-        limit: 100_000,
-    };
-    let list_resp = client
-        .list_messages(list_req)
-        .await
-        .with_context(|| "gRPC list_messages failed")?;
-    let mut all_msgs = list_resp.into_inner().messages;
-    all_msgs.sort_by_key(|m| m.uid);
-    let uid_map: Vec<u64> = all_msgs.iter().map(|m| m.uid).collect();
+    // SM2-F3: refresh the session view and write the untagged diff
+    // (EXPUNGEs + EXISTS) BEFORE any FETCH response, matching the
+    // STORE/COPY/MOVE/EXPUNGE ordering. The previous silent re-list resolved
+    // sequence numbers against a view the client had never been told about:
+    // after another session expunged message #3, `FETCH 5 FLAGS` returned
+    // what the client knows as message #6, numbered `* 5 FETCH`, with no
+    // EXPUNGE ever sent — silently addressing the wrong messages.
+    let view_diff = refresh_session_view(session).await;
+    if !view_diff.is_empty() {
+        writer.write_all(view_diff.as_bytes()).await?;
+        writer.flush().await?;
+    }
+    // SM2-F3: resolve against the SESSION's (just-refreshed) uid map — the
+    // exact view the client holds once the diff above has been applied —
+    // not against a separately re-listed mailbox.
+    let uid_map = session.uid_map.clone();
     let max_uid = uid_map.last().copied().unwrap_or(0);
 
     let uids = resolve_intervals(&intervals, is_uid, &uid_map, max_uid)?;
@@ -2738,6 +2905,25 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_ok(tag, "FETCH completed")).await;
     }
 
+    // Metadata for the resolved UIDs. The listing runs AFTER the view
+    // refresh; a message removed by another session in the (narrow) window
+    // between the two calls may have no meta — such a message is skipped
+    // with a warn rather than fabricating a response for it (the following
+    // NOOP reports the expunge normally).
+    let list_req = ListMessagesRequest {
+        account_id: session.account_id.clone(),
+        mailbox: session.mailbox.clone(),
+        uid_min: 1,
+        uid_max: u64::MAX,
+        limit: 100_000,
+    };
+    let mut client = session.client.clone();
+    let list_resp = client
+        .list_messages(list_req)
+        .await
+        .with_context(|| "gRPC list_messages failed")?;
+    let mut all_msgs = list_resp.into_inner().messages;
+    all_msgs.sort_by_key(|m| m.uid);
     let meta_map: HashMap<u64, mail_proto::MessageMeta> =
         all_msgs.into_iter().map(|m| (m.uid, m)).collect();
 
@@ -2771,9 +2957,10 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         let mut body_futures = Vec::new();
         if need_body {
             // Invariant: `uids` is a subset of `uid_map` (resolve_intervals
-            // only ever returns members of the map), and `uid_map` is exactly
-            // the key set of `meta_map` — so no membership re-check is needed
-            // (and no skip arm could ever run).
+            // only ever returns members of the map). `meta_map` normally has
+            // the exact same key set — EXCEPT in the race window below
+            // (message expunged between the view refresh and this listing),
+            // which is why the emit loop keeps a warn+skip arm.
             for &uid in chunk {
                 let req = GetMessageRequest {
                     account_id: session.account_id.clone(),
@@ -2820,14 +3007,31 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                     return write_line(writer, &fetch_body_failure_line(tag, status)).await;
                 }
             }
-            // Same invariant as above: `uid` is in `meta_map`, and (uid_map
-            // being sorted) its sequence number is its rank in that map —
-            // binary search asserts both in one step.
-            let meta = &meta_map[&uid];
-            let seq = uid_map.binary_search(&uid).expect("uid from the view map") as u32 + 1;
+            // SM2-F3: `uid` comes from the session's refreshed uid_map, so
+            // its sequence number is the client's corrected view; a meta can
+            // still be missing if the message was expunged in the window
+            // between the refresh and the metadata listing — skip it (warn)
+            // instead of fabricating a response for a message that no longer
+            // exists.
+            let meta = match meta_map.get(&uid) {
+                Some(meta) => meta,
+                None => {
+                    warn!(uid, mailbox = %session.mailbox, "FETCH: message left the view between refresh and listing; skipping");
+                    continue;
+                }
+            };
+            let seq = match uid_map.binary_search(&uid) {
+                Ok(i) => i as u32 + 1,
+                // Unreachable: `uids` is produced by resolve_intervals over
+                // this exact uid_map.
+                Err(_) => continue,
+            };
             // F6: \Recent is a per-session property of the message.
             let is_recent = session.recent_uids.contains(&uid);
-            emit_fetch_response(
+            // SM2-F1: a structure-rendering depth-cap failure surfaces here
+            // as a tagged BAD (downcast below); other errors tear the
+            // connection down as before.
+            if let Err(e) = emit_fetch_response(
                 writer,
                 uid,
                 seq,
@@ -2838,14 +3042,28 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                 sets_seen,
                 is_recent,
             )
-            .await?;
+            .await
+            {
+                if e.downcast_ref::<StructureDepthError>().is_some() {
+                    return write_line(writer, &tagged_bad(tag, &format!("FETCH failed: {}", e)))
+                        .await;
+                }
+                return Err(e);
+            }
         }
 
         // Fire \Seen flag updates for non-peek BODY fetches on unread
         // messages in this chunk.
         let mut seen_futures = Vec::new();
         for &uid in chunk {
-            let meta = &meta_map[&uid];
+            // SM2-F3 (repair): a uid can vanish between the view refresh and
+            // the metadata listing — the emit loop above skips it with a
+            // warn. This loop MUST skip it too: the previous `meta_map[&uid]`
+            // index panicked on the missing key, killing the connection task
+            // (the exact failure class the skip arm was written to avoid).
+            let Some(meta) = meta_map.get(&uid) else {
+                continue;
+            };
             let was_seen = meta.flags.clone().unwrap_or_default().seen;
             if sets_seen && !was_seen {
                 let req = SetFlagsRequest {
@@ -3006,6 +3224,8 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                     )));
                 }
                 // F5: BODY (bare) / BODYSTRUCTURE — the derived structure.
+                // SM2-F1: a nesting-depth failure propagates (as
+                // StructureDepthError) so the command answers BAD.
                 FetchLeaf::BodyStructure { extended } => {
                     let raw = match body {
                         Some(Ok(b)) => &b.body,
@@ -3015,10 +3235,11 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         }
                         None => continue,
                     };
+                    let rendered = format_body_structure(raw, extended)?;
                     segments.push(FetchSegment::Attr(format!(
                         "{} {}",
                         if extended { "BODYSTRUCTURE" } else { "BODY" },
-                        format_body_structure(raw, extended)
+                        rendered
                     )));
                 }
                 FetchLeaf::Body {
@@ -3086,15 +3307,19 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-fn parse_fetch_args(args: &str) -> Result<(String, String)> {
+fn parse_fetch_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)> {
     // The sequence set never contains whitespace, so tokenizing yields the
     // sequence set as the first token and the (possibly parenthesized) item
     // list as the remainder.
+    //
+    // SM2-F7: the sequence token resolves against the command's literals —
+    // the previous resolution against an empty list made the RFC-legal
+    // `UID FETCH {3}` (sequence set as a literal) surface as a confusing BAD.
     let tokens = tokenize_command_args(args.trim());
     if tokens.is_empty() {
         bail!("FETCH requires a sequence set");
     }
-    let seq_part = resolve_token(&tokens[0], &[]);
+    let seq_part = resolve_token(&tokens[0], literals);
     let items_str = tokens[1..].join(" ");
     Ok((seq_part, items_str))
 }
@@ -3415,18 +3640,52 @@ fn parse_store_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, StoreOp
         .map(|s| s.to_string())
         .collect();
 
-    let silent = op_prefix.to_uppercase().ends_with(".SILENT");
-    let op_base = op_prefix
-        .rfind(".SILENT")
-        .map(|p| &op_prefix[..p])
-        .unwrap_or(op_prefix);
-
-    let op = if op_base.starts_with('+') {
-        StoreOp::Add(flags, silent)
-    } else if op_base.starts_with('-') {
-        StoreOp::Remove(flags, silent)
+    // SM2-F8 (RFC 3501 §6.4.6): the operation word is exactly
+    // FLAGS / +FLAGS / -FLAGS, each optionally suffixed with .SILENT.
+    // The old code accepted ANY operation word as a silent FLAGS-set
+    // (typos like "FLAGGS" or "SILENT" silently mutated every flag).
+    //
+    // SM2-F8 (repair): RFC 3501 command atoms are ASCII, so any non-ASCII
+    // operation word is a syntax error outright. This also kills a panic the
+    // first version of this check introduced: `+flags.ſılent` ASCII-upcases
+    // to `+FLAGS.SILENT` while spanning 9 raw suffix bytes, and the previous
+    // `&op_prefix[..len - 7]` slice landed inside a multi-byte character
+    // ("byte index N is not a char boundary") instead of answering BAD.
+    if !op_prefix.is_ascii() {
+        bail!(
+            "Invalid STORE operation: {} (expected FLAGS, +FLAGS or -FLAGS)",
+            op_prefix
+        );
+    }
+    let folded = op_prefix.to_ascii_lowercase();
+    let silent = folded.ends_with(".silent");
+    let folded_base = if silent {
+        &folded[..folded.len() - ".silent".len()]
     } else {
-        StoreOp::Set(flags, silent)
+        &folded[..]
+    };
+    let op_kind = if folded_base.starts_with('+') {
+        1
+    } else if folded_base.starts_with('-') {
+        2
+    } else {
+        0
+    };
+    let base = folded_base
+        .strip_prefix('+')
+        .or_else(|| folded_base.strip_prefix('-'))
+        .unwrap_or(folded_base);
+    if base != "flags" {
+        bail!(
+            "Invalid STORE operation: {} (expected FLAGS, +FLAGS or -FLAGS)",
+            op_prefix
+        );
+    }
+
+    let op = match op_kind {
+        1 => StoreOp::Add(flags, silent),
+        2 => StoreOp::Remove(flags, silent),
+        _ => StoreOp::Set(flags, silent),
     };
 
     Ok((seq_part, op))
@@ -4364,6 +4623,13 @@ async fn handle_list<W: AsyncWrite + Unpin>(
         }
     };
 
+    // SM2-F10: snapshot the account's subscription set ONCE and test
+    // membership locally. The previous per-row `is_subscribed` cloned the
+    // whole HashSet under the process-global SUBSCRIPTIONS mutex once per
+    // listed mailbox — 10k lock acquisitions + clones per LIST, serialized
+    // across every connection sharing the table.
+    let subscribed = subscribed_mailboxes(&session.account_id).await;
+
     let mut responses = String::new();
     for mb in resp.mailboxes {
         if !imap_pattern_match(&mb.name, &pattern) {
@@ -4375,7 +4641,7 @@ async fn handle_list<W: AsyncWrite + Unpin>(
             mailbox_astring(&mb.delimiter)
         };
         let mut attrs = mb.attributes.clone();
-        if is_subscribed(&session.account_id, &mb.name).await {
+        if subscribed.iter().any(|s| s.eq_ignore_ascii_case(&mb.name)) {
             attrs.push("\\Subscribed".to_string());
         }
         // L7: the (client-controlled) name is escaped/stripped by
@@ -4460,12 +4726,9 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
     write_line(writer, &responses).await
 }
 
-async fn is_subscribed(account_id: &str, mailbox: &str) -> bool {
-    subscribed_mailboxes(account_id)
-        .await
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(mailbox))
-}
+// SM2-F10: the former `is_subscribed` helper (one SUBSCRIPTIONS lock + full
+// HashSet clone per call) was removed — LIST snapshots the set once per call
+// (see handle_list) and LSUB already iterated the snapshot it had taken.
 
 fn parse_list_args(args: &str, literals: &[Vec<u8>]) -> (String, String) {
     let tokens = tokenize_command_args(args.trim());
@@ -6211,7 +6474,10 @@ mod tests {
         // RFC 3501 §9: descending ranges are inclusive and normalized.
         assert_eq!(parse_sequence_set("5:2").unwrap(), vec![(2, 5)]);
         assert_eq!(parse_sequence_set("*:4").unwrap(), vec![(4, u64::MAX)]);
-        assert_eq!(parse_sequence_set("0").unwrap(), vec![]);
+        // SM2-F8: seq-number = nz-number — `0` is a syntax error now.
+        assert!(parse_sequence_set("0").is_err());
+        assert!(parse_sequence_set("1,0").is_err());
+        assert!(parse_sequence_set("0:2").is_err());
     }
 
     #[test]
@@ -7272,12 +7538,12 @@ mod tests {
         // Non-extended BODY: type, subtype, params, id, description,
         // encoding, size, lines.
         assert_eq!(
-            format_body_structure(raw, false),
+            format_body_structure(raw, false).unwrap(),
             "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2)"
         );
         // Extended adds the extension data (md5, disposition, language,
         // location); a part without Content-Disposition renders NIL.
-        let extended = format_body_structure(raw, true);
+        let extended = format_body_structure(raw, true).unwrap();
         assert!(
             extended.starts_with(
                 "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2 NIL NIL NIL NIL)"
@@ -7302,7 +7568,7 @@ mod tests {
             "--XX--\r\n",
             "epilogue\r\n"
         );
-        let structure = format_body_structure(multipart.as_bytes(), true);
+        let structure = format_body_structure(multipart.as_bytes(), true).unwrap();
         // Multipart: ("MIXED" part part ext...) — no size/lines fields for
         // the container; "part one" is 8 octets / 0 lines. The multipart's
         // extension data starts with ITS OWN Content-Type params (boundary).
@@ -8438,21 +8704,24 @@ mod unit_arms {
     #[test]
     fn multipart_boundary_extraction_arms() {
         assert_eq!(
-            multipart_boundary("multipart/mixed; boundary=\"b1\""),
+            multipart_boundary(b"multipart/mixed; boundary=\"b1\""),
             Some("b1".to_string())
         );
         assert_eq!(
-            multipart_boundary("multipart/mixed; boundary=b2; x=y"),
+            multipart_boundary(b"multipart/mixed; boundary=b2; x=y"),
             Some("b2".to_string())
         );
         // Not multipart.
-        assert_eq!(multipart_boundary("text/plain"), None);
+        assert_eq!(multipart_boundary(b"text/plain"), None);
         // Multipart without a boundary.
-        assert_eq!(multipart_boundary("multipart/mixed"), None);
+        assert_eq!(multipart_boundary(b"multipart/mixed"), None);
         // Unterminated quoted boundary.
-        assert_eq!(multipart_boundary("multipart/mixed; boundary=\"oops"), None);
+        assert_eq!(
+            multipart_boundary(b"multipart/mixed; boundary=\"oops"),
+            None
+        );
         // Empty boundary.
-        assert_eq!(multipart_boundary("multipart/mixed; boundary="), None);
+        assert_eq!(multipart_boundary(b"multipart/mixed; boundary="), None);
     }
 
     #[test]
@@ -8514,7 +8783,7 @@ mod unit_arms {
     #[test]
     fn format_structure_region_covers_disposition_and_params() {
         let region = b"Content-Type: text/plain; charset=us-ascii (comment)\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Disposition: attachment; filename=x.txt; size=12\r\nContent-ID: <cid1>\r\nContent-Description: desc here\r\n\r\nbody";
-        let out = format_structure_region(region, true);
+        let out = format_structure_region(region, true, 0).unwrap();
         assert!(
             out.contains("\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii (comment)\")"),
             "{out}"
@@ -8527,7 +8796,7 @@ mod unit_arms {
         assert!(out.contains("\"<cid1>\""), "content-id: {out}");
         assert!(out.contains("\"desc here\""), "content-description: {out}");
         // Bare (non-extended) form omits the extension fields.
-        let bare = format_structure_region(region, false);
+        let bare = format_structure_region(region, false, 0).unwrap();
         assert!(
             !bare.contains("ATTACHMENT"),
             "bare form has no disposition: {bare}"
@@ -8537,13 +8806,13 @@ mod unit_arms {
     #[test]
     fn format_body_structure_multipart_and_flat() {
         let raw = b"Content-Type: multipart/mixed; boundary=\"mx\"\r\n\r\n--mx\r\nContent-Type: text/plain\r\n\r\none\r\n--mx\r\nContent-Type: text/html\r\n\r\n<i>two</i>\r\n--mx--\r\n";
-        let out = format_body_structure(raw, false);
+        let out = format_body_structure(raw, false).unwrap();
         assert!(
             out.starts_with("(\"MIXED\""),
             "multipart wraps its parts: {out}"
         );
         assert!(out.contains("\"HTML\""), "{out}");
-        let _ = format_body_structure(raw, true); // extended multipart path
+        let _ = format_body_structure(raw, true).unwrap(); // extended multipart path
     }
 
     // ── process_mailbox_event guard arms ───────────────────────────────────
@@ -8789,7 +9058,7 @@ mod unit_arms {
     fn raw_header_value_folds_continuation_lines() {
         let raw = b"Subject: first\r\n\tcontinued and\r\n more\r\nFrom: a@b.test\r\n\r\n";
         let subject = raw_header_value(raw, "Subject").expect("subject present");
-        assert_eq!(subject, "first continued and more");
+        assert_eq!(subject, b"first continued and more".as_slice());
         // A continuation with no preceding header is ignored.
         let orphan = b"\r\n folded\r\n\r\n";
         assert_eq!(raw_header_value(orphan, "Subject"), None);
@@ -8848,7 +9117,7 @@ mod unit_arms {
     #[test]
     fn format_structure_region_defaults_to_text_plain_without_content_type() {
         let region = b"From: a@b.test\r\n\r\nbody";
-        let out = format_structure_region(region, true);
+        let out = format_structure_region(region, true, 0).unwrap();
         assert!(
             out.starts_with("(\"TEXT\" \"PLAIN\""),
             "missing Content-Type must default to TEXT PLAIN: {out}"
@@ -8858,7 +9127,7 @@ mod unit_arms {
     #[test]
     fn format_body_structure_inlines_embedded_message_envelope() {
         let raw = b"Content-Type: multipart/mixed; boundary=\"mm\"\r\n\r\n--mm\r\nContent-Type: message/rfc822\r\n\r\nFrom: inner@x.test\r\nSubject: inner\r\n\r\ninner body\r\n--mm--\r\n";
-        let out = format_body_structure(raw, true);
+        let out = format_body_structure(raw, true).unwrap();
         assert!(
             out.contains("\"MESSAGE\" \"RFC822\""),
             "embedded message part: {out}"
@@ -9356,5 +9625,186 @@ mod unit_arms {
             api.pages.load(Ordering::Relaxed) >= 1,
             "at least one page moved"
         );
+    }
+
+    // ── SM2-F1: MIME nesting depth cap ─────────────────────────────────────
+
+    /// Build a `levels`-deep nest of `multipart/mixed` programmatically —
+    /// the exact shape a hostile APPEND produces (each level's single part IS
+    /// the next level, so the renderer must recurse once per level). The
+    /// enclosure size is inherently quadratic in `levels` (each wrap copies
+    /// its child), so the hostile case uses 1 000 levels — already 936 past
+    /// the cap, where the old code burned 1 000 recursion frames.
+    fn nested_multipart(levels: usize) -> Vec<u8> {
+        let mut inner = b"Content-Type: text/plain\r\n\r\nleaf".to_vec();
+        // A UNIQUE boundary per level: a shared boundary would make each
+        // level's delimiters terminate its ancestors, flattening the nest
+        // into siblings.
+        for k in 0..levels {
+            let mut outer =
+                format!("Content-Type: multipart/mixed; boundary=\"b{k}\"\r\n\r\n--b{k}\r\n")
+                    .into_bytes();
+            outer.extend_from_slice(&inner);
+            outer.extend_from_slice(format!("\r\n--b{k}--\r\n").as_bytes());
+            inner = outer;
+        }
+        inner
+    }
+
+    /// SM2-F1: a deep nest must hit the typed depth cap (65 recursion frames,
+    /// then a `StructureDepthError`), NOT recurse unbounded and overflow the
+    /// stack (a whole-process abort before the fix).
+    #[test]
+    fn format_structure_region_depth_cap_bails_instead_of_recurring_unbounded() {
+        let hostile = nested_multipart(1_000);
+        let err = format_body_structure(&hostile, true).expect_err("depth cap must bail");
+        let depth_err = err
+            .downcast_ref::<StructureDepthError>()
+            .expect("the typed depth error");
+        assert_eq!(depth_err.0, MAX_MIME_DEPTH);
+
+        // Boundary: exactly MAX_MIME_DEPTH levels still renders (the leaf
+        // sits AT depth 64; the cap bails only past it).
+        let at_cap = nested_multipart(MAX_MIME_DEPTH);
+        let rendered = format_body_structure(&at_cap, true).expect("64 levels render");
+        assert!(rendered.starts_with("(\"MIXED\""), "{rendered:?}");
+
+        // One level past the cap fails.
+        let over = nested_multipart(MAX_MIME_DEPTH + 1);
+        assert!(format_body_structure(&over, true).is_err());
+    }
+
+    /// SM2-F1: `extract_body_part` refuses part paths deeper than the cap —
+    /// bounding the O(components × body) region-copy descent.
+    #[test]
+    fn extract_body_part_refuses_part_paths_deeper_than_the_cap() {
+        let raw = nested_multipart(80);
+        let deep: String = (1..=MAX_MIME_DEPTH + 1)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        assert!(
+            extract_body_part(&raw, &deep, false).is_empty(),
+            "a >cap part path can never address a part"
+        );
+        // Within the cap the descent still resolves: 1.1.1.1.1 walks five
+        // nested multiparts down to the leaf's content.
+        assert_eq!(
+            extract_body_part(&nested_multipart(5), "1.1.1.1.1", false),
+            b"leaf"
+        );
+    }
+
+    // ── SM2-F2: recent_count / seq_for_uid are logarithmic ─────────────────
+
+    /// SM2-F2: on a 50k-message view where every message is unseen (so
+    /// EVERY uid joins `recent_uids`), `recent_count` must be O(|recent|·
+    /// log|view|) binary searches — the old `slice::contains` paid
+    /// ~2.5×10⁹ comparisons here (seconds of CPU per SELECT/NOOP in debug).
+    #[tokio::test]
+    async fn recent_count_is_logarithmic_on_large_views_and_still_correct() {
+        use crate::adversarial_tests::{mock_connected_client, MockMailstore};
+        use std::time::{Duration, Instant};
+
+        let mut session = ImapSession::new(mock_connected_client(MockMailstore::new()));
+        let n: u64 = 50_000;
+        session.uid_map = (1..=n).collect();
+        session.recent_uids = (1..=n).collect();
+
+        let start = Instant::now();
+        let count = session.recent_count();
+        let elapsed = start.elapsed();
+        assert_eq!(count as u64, n, "every recent uid is still in the view");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "recent_count must not be quadratic on large views (took {elapsed:?})"
+        );
+
+        // Correctness arms on a small view: non-members stop counting and
+        // seq_for_uid binary-searches both hits and misses.
+        session.uid_map = vec![10, 20, 30];
+        session.recent_uids = [10u64, 25, 30].into_iter().collect();
+        assert_eq!(session.recent_count(), 2);
+        assert_eq!(session.seq_for_uid(20), Some(2));
+        assert_eq!(session.seq_for_uid(25), None);
+    }
+
+    // ── SM2-F6: byte-exact header/section handling ─────────────────────────
+
+    /// SM2-F6: 8-bit (ISO-8859-1) header octets round-trip UNCHANGED through
+    /// BODY[HEADER.FIELDS] filtering and `raw_header_value` — no
+    /// `from_utf8_lossy` may turn them into U+FFFD on the way through.
+    #[test]
+    fn header_filtering_round_trips_8bit_octets() {
+        // 0xE9 = é in latin-1; the byte sequence is NOT valid UTF-8.
+        let raw: &[u8] = b"Subject: caf\xe9 lunch\r\nFrom: a@b.test\r\n\r\nbody";
+        let filtered = filter_header_fields(raw, &["Subject".to_string()], false);
+        assert!(
+            find_subslice(&filtered, b"Subject: caf\xe9 lunch").is_some(),
+            "the raw octets must survive verbatim: {:?}",
+            String::from_utf8_lossy(&filtered)
+        );
+        assert!(
+            find_subslice(&filtered, b"\xef\xbf\xbd").is_none(),
+            "no U+FFFD replacement leakage"
+        );
+
+        let value = raw_header_value(raw, "Subject").expect("subject present");
+        assert_eq!(value, b"caf\xe9 lunch".as_slice());
+
+        // The RENDERING boundary (BODYSTRUCTURE/ENVELOPE strings) is the only
+        // place conversion happens — and only there.
+        assert_eq!(header_value_utf8(&value), "caf\u{FFFD} lunch");
+    }
+
+    /// SM2-F6: multipart boundary matching operates on raw bytes, so parts
+    /// carrying 8-bit content still split correctly and round-trip verbatim.
+    #[test]
+    fn split_multipart_matches_boundaries_on_raw_bytes() {
+        let body: &[u8] = b"--b\r\nContent-Type: text/plain\r\n\r\ncaf\xe9\r\n--b--\r\n";
+        let parts = split_multipart(body, "b");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content, b"caf\xe9".as_slice());
+    }
+
+    // ── SM2-F8: STORE operation word strictness ────────────────────────────
+
+    /// SM2-F8: the STORE op word is exactly FLAGS/+FLAGS/-FLAGS, optionally
+    /// suffixed with .SILENT (case-insensitively). Any other word is a BAD —
+    /// previously ANY garbage word was silently treated as a FLAGS-set.
+    #[test]
+    fn store_op_word_is_validated() {
+        let flags = "(\\Seen)";
+        for op in [
+            "FLAGS",
+            "flags",
+            "+FLAGS",
+            "-flags",
+            "FLAGS.SILENT",
+            "+flags.silent",
+            "-FLAGS.Silent",
+        ] {
+            let parsed = parse_store_args(&format!("1 {op} {flags}"), &[]);
+            assert!(parsed.is_ok(), "{op} must parse, got {parsed:?}");
+        }
+        for op in [
+            "FROBNICATE",
+            "SILENT",
+            "FLAG",
+            "+SILENT",
+            "FLAGS.SILENTX",
+            "FLAGS,silent",
+            // SM2-F8 (repair): these fold to an ASCII `.SILENT`-suffixed word
+            // (`ſ` → S, `ı` → I) while spanning more raw bytes than the
+            // suffix — the previous byte-arithmetic slice panicked on them
+            // instead of answering BAD.
+            "+flags.ſılent",
+            "flags.ſılent",
+            "-FLAGS.ſılent",
+            "+flags.ſilent",
+        ] {
+            let parsed = parse_store_args(&format!("1 {op} {flags}"), &[]);
+            assert!(parsed.is_err(), "{op} must be rejected, got {parsed:?}");
+        }
     }
 }

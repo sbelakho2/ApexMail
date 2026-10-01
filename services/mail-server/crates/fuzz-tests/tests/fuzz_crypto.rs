@@ -10,7 +10,7 @@ use rand::Rng;
 #[test]
 fn fuzz_hmac_deterministic() {
     // Same key + message must always produce the same signature.
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..1_000 {
         let key = random_bytes(rng.random::<u32>() as usize % 128 + 1);
         let msg = random_bytes(rng.random::<u32>() as usize % 512);
@@ -46,7 +46,7 @@ fn fuzz_hmac_different_keys() {
 #[test]
 fn fuzz_id_always_prefixed() {
     // 1,000 generated IDs must always start with the expected prefix.
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     let prefixes = ["msg", "ev", "usr", "org", "inv", "wh", "", "test_prefix"];
     for prefix in &prefixes {
         for _ in 0..125 {
@@ -90,7 +90,7 @@ fn fuzz_id_always_prefixed() {
 
 #[test]
 fn fuzz_id_never_empty() {
-    let mut rng = rand::rng();
+    let mut rng = fuzz_tests::fuzz_rng();
     for _ in 0..1_000 {
         let len = rng.random::<u32>() as usize % 64 + 1;
         let id = generate_id("x", len);

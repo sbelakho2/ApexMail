@@ -154,12 +154,25 @@ fn mint_token(tenant: &str, subject: &str, admin: bool) -> String {
         sub: &'a str,
         tenant_id: &'a str,
         admin: bool,
+        // Audit F8: the control-plane scopes the canonical JWT carries. This
+        // suite tests tenant isolation and input validation, not RBAC
+        // refusal, so its member tokens carry the control-plane scopes and
+        // the scope-gated happy paths stay exercisable. Scope-gate REFUSALS
+        // (member without the scope, wildcard semantics) are pinned by the
+        // `rbac_scope_guards` unit tests in `routes.rs`.
+        scopes: Vec<&'a str>,
         exp: usize,
     }
     let claims = Claims {
         sub: subject,
         tenant_id: tenant,
         admin,
+        scopes: vec![
+            "compliance:write",
+            "whitelabel:write",
+            "log-streams:write",
+            "dedicated-ips:write",
+        ],
         exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
     };
     let key = jsonwebtoken::EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM.as_bytes()).unwrap();
@@ -407,12 +420,19 @@ fn contract_lifecycle_enforces_admin_role_and_tenant_ownership() {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "bad payment terms");
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM enterprise_contracts WHERE tenant_id=$1")
-                .bind(&tenant)
-                .fetch_one(&h.db)
-                .await
-                .unwrap();
+        // Race-proof: this suite shares ONE database across parallel tests,
+        // so a concurrent test's VALID contract for this same harness tenant
+        // must not fail the "rejected creates did not persist" assertion —
+        // scope the count to the rejected shapes themselves (net45 never
+        // exists legitimately; base_price < 0 cannot pass the column CHECK,
+        // so only the payment-terms probe can ever be non-zero).
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM enterprise_contracts WHERE tenant_id=$1 AND payment_terms_days = 45",
+        )
+        .bind(&tenant)
+        .fetch_one(&h.db)
+        .await
+        .unwrap();
         assert_eq!(count, 0, "rejected contracts must not persist");
 
         // Create → list → get → usage → pdf.
@@ -1085,11 +1105,14 @@ fn compliance_audit_identity_baa_and_data_access_are_fail_closed() {
             "plaintext must not echo"
         );
 
+        // Audit F1: decrypt-field is admin-only now, so the round-trip runs
+        // under tenant A's ADMIN token; the member refusal for this oracle is
+        // pinned by `decrypt_field_keeps_admin_gate_and_audit` in routes.rs.
         let (status, json) = call(
             &app,
             "POST",
             "/compliance/encryption/decrypt-field",
-            Some(&h.token_a),
+            Some(&h.admin_token),
             Some(serde_json::json!({
                 "tenant_id": tenant, "field_name": "phone", "value": ciphertext
             })),
@@ -1098,11 +1121,14 @@ fn compliance_audit_identity_baa_and_data_access_are_fail_closed() {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["value"], "+1-555-0100");
 
+        // Cross-tenant AAD: a tenant-B ADMIN reaches the decryption (authz
+        // passes for their own tenant) and the tenant-bound AAD fails closed.
+        let admin_b = mint_token(&h.tenant_b, "admin-b-decrypt", true);
         let (status, _) = call(
             &app,
             "POST",
             "/compliance/encryption/decrypt-field",
-            Some(&h.token_b),
+            Some(&admin_b),
             Some(serde_json::json!({
                 "tenant_id": h.tenant_b, "field_name": "phone", "value": ciphertext
             })),
@@ -1952,12 +1978,39 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         let tenant = h.tenant_a.clone();
         let domain = format!("sso-{}.example.com", Uuid::new_v4().simple());
 
-        // Malformed SSO configuration is rejected honestly.
-        let (status, _) = call(
+        // Audit F8 (verifier repair): SSO configuration is an admin-only
+        // control-plane mutation — a plain tenant member is refused (403)
+        // even with a WELL-FORMED body (a malformed one never reaches the
+        // handler: axum's Json extractor answers 422 first).
+        let (status, body) = call(
             &app,
             "POST",
             "/sso/configure",
             Some(&h.token_a),
+            Some(serde_json::json!({
+                "tenant_id": tenant,
+                "provider_type": "saml",
+                "domain": domain,
+                "enabled": true,
+                "idp_entity_id": "urn:adv:idp",
+                "sso_url": "https://idp.example.com/sso",
+                "certificate": "not-a-certificate"
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "member sso/configure must 403: {body}"
+        );
+
+        // Malformed SSO configuration is rejected honestly (under the admin
+        // token, so the validation layer — not the RBAC gate — answers).
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/sso/configure",
+            Some(&h.admin_token),
             Some(serde_json::json!({"tenant_id": tenant, "provider_type": "saml"})),
         )
         .await;
@@ -1987,12 +2040,13 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         assert_eq!(status, StatusCode::NOT_FOUND);
 
         // Configuring with a certificate that is not a valid X.509 PEM must
-        // not silently enable signature-less validation.
+        // not silently enable signature-less validation (admin caller — the
+        // RBAC gate above already refused the member).
         let (status, json) = call(
             &app,
             "POST",
             "/sso/configure",
-            Some(&h.token_a),
+            Some(&h.admin_token),
             Some(serde_json::json!({
                 "tenant_id": tenant,
                 "provider_type": "saml",
@@ -2132,11 +2186,13 @@ fn sso_routes_and_saml_validation_reject_unsigned_and_mismatched_responses() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        sqlx::query("UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id=$1")
-            .bind(&tenant)
-            .execute(&h.db)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE ent_sso_sessions SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id=$1",
+        )
+        .bind(&tenant)
+        .execute(&h.db)
+        .await
+        .unwrap();
         let cleaned = sso.cleanup_expired_sessions().await.unwrap();
         assert!(cleaned >= 1);
         let (status, _) = call(

@@ -38,6 +38,32 @@ pub struct PolicyResult {
     pub risk_score: f64,
 }
 
+/// Canonical MIME for a magic-byte-detected file type (used to enforce the
+/// `blocked_mime_types` policy list). An unknown type maps to
+/// `application/octet-stream` only when an extension is present.
+pub(crate) fn mime_for_file_type(file_type: FileType, extension: Option<&str>) -> Option<String> {
+    let detected = match file_type {
+        FileType::PeExe => "application/x-msdownload",
+        FileType::Elf => "application/x-executable",
+        FileType::MachO => "application/x-mach-binary",
+        FileType::Pdf => "application/pdf",
+        FileType::Zip => "application/zip",
+        FileType::Gzip => "application/gzip",
+        FileType::Rar => "application/vnd.rar",
+        FileType::SevenZip => "application/x-7z-compressed",
+        FileType::Ole2 => "application/x-ole-storage",
+        FileType::Jpeg => "image/jpeg",
+        FileType::Png => "image/png",
+        FileType::Gif => "image/gif",
+        FileType::Html => "text/html",
+        FileType::Xml => "application/xml",
+        FileType::Rtf => "application/rtf",
+        FileType::PlainText => "text/plain",
+        FileType::Unknown => return extension.map(|_| "application/octet-stream".to_string()),
+    };
+    Some(detected.to_string())
+}
+
 /// Evaluate an attachment against the security policy
 pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> PolicyResult {
     let mut reasons = Vec::with_capacity(6);
@@ -53,6 +79,17 @@ pub fn evaluate_policy(inspection: &FileInspection, config: &SandboxConfig) -> P
             force_reject = true;
         } else if config.dangerous_extensions.contains(ext) {
             reasons.push(format!("Dangerous extension: .{}", ext));
+            force_reject = true;
+        }
+    }
+
+    // 1b. Blocked MIME types. The policy list is expressed in MIME terms,
+    //     so the magic-byte detection is mapped onto its canonical MIME.
+    //     (Previously this list was read nowhere — operators could believe
+    //     a protection was configured that nothing enforced.)
+    if let Some(mime) = mime_for_file_type(inspection.file_type, inspection.extension.as_deref()) {
+        if config.blocked_mime_types.contains(&mime) {
+            reasons.push(format!("Blocked MIME type: {mime}"));
             force_reject = true;
         }
     }

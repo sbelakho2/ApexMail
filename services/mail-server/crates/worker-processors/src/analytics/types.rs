@@ -75,6 +75,39 @@ impl AggregatedStats {
         }
     }
 
+    /// Inverse of [`Self::increment`] for the in-memory load-shed path
+    /// (SM10 F8): removing a shed event's contribution from its aggregation
+    /// buckets must not drive a counter negative (a shed event's bucket may
+    /// already be gone after a concurrent flush drained it), so the floor is
+    /// clamped at zero. Unknown event types are ignored, mirroring
+    /// `increment`.
+    pub fn decrement(&mut self, event_type: &str) {
+        match event_type.parse::<EventType>() {
+            Ok(EventType::Sent) => self.sent = (self.sent - 1).max(0),
+            Ok(EventType::Delivered) => self.delivered = (self.delivered - 1).max(0),
+            Ok(EventType::Opened) => self.opened = (self.opened - 1).max(0),
+            Ok(EventType::Clicked) => self.clicked = (self.clicked - 1).max(0),
+            Ok(EventType::Bounced) => self.bounced = (self.bounced - 1).max(0),
+            Ok(EventType::Unsubscribed) => self.unsubscribed = (self.unsubscribed - 1).max(0),
+            Ok(EventType::Complained) => self.complained = (self.complained - 1).max(0),
+            Ok(EventType::Failed) => self.failed = (self.failed - 1).max(0),
+            Err(_) => {}
+        }
+    }
+
+    /// Every counter is zero — the bucket carries no counts and can be
+    /// removed from the aggregation buffer.
+    pub fn is_empty(&self) -> bool {
+        self.sent == 0
+            && self.delivered == 0
+            && self.opened == 0
+            && self.clicked == 0
+            && self.bounced == 0
+            && self.unsubscribed == 0
+            && self.complained == 0
+            && self.failed == 0
+    }
+
     /// Merge another period-aligned stats entry into this one (counter-wise
     /// addition). Used when restoring an aggregation buffer after a failed
     /// flush that raced with new events landing under the same keys.
@@ -216,6 +249,59 @@ mod tests {
         stats.increment("Sent");
         assert_eq!(stats.sent, 1);
         assert_eq!(stats.failed, 1);
+    }
+
+    #[test]
+    fn decrement_inverts_increment_and_clamps_at_zero() {
+        let mut stats = AggregatedStats::default();
+        for event in [
+            "sent",
+            "delivered",
+            "opened",
+            "clicked",
+            "bounced",
+            "unsubscribed",
+            "complained",
+            "failed",
+        ] {
+            stats.increment(event);
+            stats.increment(event);
+        }
+        for event in [
+            "sent",
+            "delivered",
+            "opened",
+            "clicked",
+            "bounced",
+            "unsubscribed",
+            "complained",
+            "failed",
+        ] {
+            stats.decrement(event);
+        }
+        assert_eq!(stats.sent, 1, "one increment left after the pair minus one");
+        assert!(!stats.is_empty());
+        // Shedding more than was counted (a bucket a concurrent flush
+        // already drained) clamps at zero instead of going negative.
+        for event in ["sent", "delivered", "not-a-real-event"] {
+            stats.decrement(event);
+        }
+        assert_eq!(stats.sent, 0, "clamped, not negative");
+        assert_eq!(stats.failed, 1, "only the named counters move");
+        // Draining every counter makes the bucket removable.
+        for event in [
+            "sent",
+            "delivered",
+            "opened",
+            "clicked",
+            "bounced",
+            "unsubscribed",
+            "complained",
+            "failed",
+        ] {
+            stats.decrement(event);
+        }
+        assert!(stats.is_empty(), "a fully shed bucket must be removable");
     }
 
     #[test]

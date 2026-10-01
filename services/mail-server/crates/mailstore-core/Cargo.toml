@@ -57,6 +57,9 @@ base64.workspace = true
 # Crypto helpers
 rand.workspace = true
 sha2.workspace = true
+# Envelope v2 key derivation (audit finding 7): real HKDF-SHA256. The crate
+# is already in the dependency tree via other workspace members.
+hkdf = "0.12"
 
 [dev-dependencies]
 # Canonical test fixtures (audit F01): DB-gated tests provision a throwaway

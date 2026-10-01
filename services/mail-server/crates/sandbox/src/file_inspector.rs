@@ -415,14 +415,30 @@ pub fn inspect_file(data: &[u8], filename: Option<&str>) -> FileInspection {
         risk_score += 7.0;
     }
 
-    // 7-Zip:Check for encryption
-    if file_type == FileType::SevenZip && is_7z_encrypted(data) {
-        findings.push(InspectionFinding {
-            id: "ARCHIVE_ENCRYPTED",
-            description: "7-Zip archive is encrypted (contents cannot be inspected)".into(),
-            risk: 7.0,
-        });
-        risk_score += 7.0;
+    // 7-Zip:structured start-header classification for encryption
+    if file_type == FileType::SevenZip {
+        match classify_7z_encryption(data) {
+            SevenZEncryption::Encrypted => {
+                findings.push(InspectionFinding {
+                    id: "ARCHIVE_ENCRYPTED",
+                    description: "7-Zip archive is encrypted (contents cannot be inspected)".into(),
+                    risk: 7.0,
+                });
+                risk_score += 7.0;
+            }
+            SevenZEncryption::Indeterminate => {
+                // Malformed/opaque header: fail toward an honest risk floor
+                // instead of asserting an unverifiable "not encrypted".
+                findings.push(InspectionFinding {
+                    id: "ARCHIVE_HEADER_OPAQUE",
+                    description: "7-Zip start header is malformed or truncated — encryption status could not be determined (contents unverified)"
+                        .into(),
+                    risk: 3.0,
+                });
+                risk_score += 3.0;
+            }
+            SevenZEncryption::NotEncrypted => {}
+        }
     }
 
     // PDF:Check for suspicious elements
@@ -949,20 +965,78 @@ fn rar5_extra_has_crypt(data: &[u8], extra_start: usize, extra_size: usize) -> b
     false
 }
 
-/// Check if a 7-Zip file appears to be encrypted.
-/// 7z format is complex, but we can detect encryption by looking for
-/// specific codec IDs in the header.
-pub fn is_7z_encrypted(data: &[u8]) -> bool {
-    // 7z signature:7z\xBC\xAF\x27\x1C
-    if data.len() < 32 || data[0..6] != [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
-        return false;
-    }
+/// 7z encryption classification from the STRUCTURED start header
+/// (audit finding: the previous check scanned the AES codec marker
+/// `06 F1 07 01` anywhere in the WHOLE file — the same whole-file
+/// false-positive the ZIP path had already fixed; four random bytes occur
+/// by chance in compressed payloads and flagged clean archives
+/// `ARCHIVE_ENCRYPTED` at risk 7.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SevenZEncryption {
+    /// The declared header region declares the AES-256 codec — encrypted.
+    Encrypted,
+    /// Header parsed cleanly and no AES codec is declared.
+    NotEncrypted,
+    /// The start header is malformed/truncated — encryption status cannot
+    /// be determined (callers apply an honest risk floor).
+    Indeterminate,
+}
 
-    // Look for AES encryption codec ID in the stream
-    // 7z stores encryption method as a codec:0x06F10701 (AES-256)
-    // In the 7z format, this appears as bytes:06 F1 07 01
-    let aes_marker = [0x06, 0xF1, 0x07, 0x01];
-    data.windows(4).any(|w| w == aes_marker)
+/// Classify a 7z archive's encryption by parsing its start header.
+///
+/// Layout (7zFormat.txt): a 32-byte signature header — the 6-byte signature
+/// `37 7A BC AF 27 1C`, a 2-byte version, a 4-byte StartHeaderCRC, then the
+/// 20-byte start header holding `NextHeaderOffset(u64)`,
+/// `NextHeaderSize(u64)`, `NextHeaderCRC(u32)`. The next-header region
+/// (packed streams for encoded headers + the header metadata) lives at
+/// `32 + NextHeaderOffset`, spanning `NextHeaderSize` bytes. Only THOSE
+/// declared bytes are scanned for the AES codec id `06 F1 07 01` — codec
+/// ids appear there whenever content streams (or an encoded header) are
+/// AES-encrypted, and compressed payload bytes outside the region can no
+/// longer produce a false verdict.
+pub fn classify_7z_encryption(data: &[u8]) -> SevenZEncryption {
+    const SIGNATURE: [u8; 6] = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+    const AES_CODEC_ID: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
+
+    if data.len() < 32 || data[..6] != SIGNATURE {
+        return SevenZEncryption::Indeterminate;
+    }
+    let next_offset = u64::from_le_bytes([
+        data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
+    ]);
+    let next_size = u64::from_le_bytes([
+        data[20], data[21], data[22], data[23], data[24], data[25], data[26], data[27],
+    ]);
+    // Bounds- and overflow-checked: a hostile header must not panic or
+    // read out of range.
+    let Some(start) = 32usize.checked_add(next_offset as usize) else {
+        return SevenZEncryption::Indeterminate;
+    };
+    let Some(end) = start.checked_add(next_size as usize) else {
+        return SevenZEncryption::Indeterminate;
+    };
+    if end > data.len() {
+        return SevenZEncryption::Indeterminate;
+    }
+    // An empty archive declares no next header — nothing to encrypt.
+    if next_size == 0 {
+        return SevenZEncryption::NotEncrypted;
+    }
+    let declared = &data[start..end];
+    if declared
+        .windows(AES_CODEC_ID.len())
+        .any(|w| w == AES_CODEC_ID)
+    {
+        SevenZEncryption::Encrypted
+    } else {
+        SevenZEncryption::NotEncrypted
+    }
+}
+
+/// Check if a 7-Zip file is encrypted, via its structured start header
+/// (see [`classify_7z_encryption`]).
+pub fn is_7z_encrypted(data: &[u8]) -> bool {
+    classify_7z_encryption(data) == SevenZEncryption::Encrypted
 }
 
 /// Archived file encryption status
@@ -995,13 +1069,11 @@ pub fn check_archive_encryption(data: &[u8], file_type: FileType) -> ArchiveEncr
                 ArchiveEncryption::NotEncrypted
             }
         }
-        FileType::SevenZip => {
-            if is_7z_encrypted(data) {
-                ArchiveEncryption::FilesEncrypted
-            } else {
-                ArchiveEncryption::NotEncrypted
-            }
-        }
+        FileType::SevenZip => match classify_7z_encryption(data) {
+            SevenZEncryption::Encrypted => ArchiveEncryption::FilesEncrypted,
+            SevenZEncryption::NotEncrypted => ArchiveEncryption::NotEncrypted,
+            SevenZEncryption::Indeterminate => ArchiveEncryption::Unknown,
+        },
         _ => ArchiveEncryption::Unknown,
     }
 }
@@ -1731,5 +1803,113 @@ mod tests {
         let _ = is_zip_encrypted(&[0x50, 0x4B, 0x03, 0x04]);
         let _ = is_7z_encrypted(&[0x37, 0x7A, 0xBC, 0xAF]);
         let _ = has_external_ole_links(&[0xD0, 0xCF, 0x11, 0xE0]);
+    }
+
+    // ── Audit:structured 7z start-header classification ──
+
+    /// Build a minimal 7z file: 32-byte signature header declaring the
+    /// given next-header region, followed by those bytes.
+    fn make_7z(next_header: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]); // signature
+        out.extend_from_slice(&[0x00, 0x04]); // version 0.4
+        out.extend_from_slice(&[0u8; 4]); // StartHeaderCRC
+        out.extend_from_slice(&0u64.to_le_bytes()); // NextHeaderOffset
+        out.extend_from_slice(&(next_header.len() as u64).to_le_bytes()); // NextHeaderSize
+        out.extend_from_slice(&0u32.to_le_bytes()); // NextHeaderCRC
+        assert_eq!(out.len(), 32);
+        out.extend_from_slice(next_header);
+        out
+    }
+
+    #[test]
+    fn sevenz_encrypted_header_is_detected_structurally() {
+        // kEncodedHeader (0x17) whose coder info declares the AES-256
+        // codec id inside the DECLARED header region.
+        let encrypted = make_7z(&[0x17, 0x01, 0x04, 0x06, 0xF1, 0x07, 0x01, 0x00, 0x20]);
+        assert_eq!(
+            classify_7z_encryption(&encrypted),
+            SevenZEncryption::Encrypted
+        );
+        let inspection = inspect_file(&encrypted, Some("secret.7z"));
+        assert!(
+            inspection
+                .findings
+                .iter()
+                .any(|f| f.id == "ARCHIVE_ENCRYPTED"),
+            "encrypted 7z must be flagged: {:?}",
+            inspection.findings
+        );
+    }
+
+    #[test]
+    fn sevenz_plain_header_not_flagged() {
+        let plain = make_7z(&[0x01, 0x00]); // kHeader + kEnd
+        assert_eq!(
+            classify_7z_encryption(&plain),
+            SevenZEncryption::NotEncrypted
+        );
+        let inspection = inspect_file(&plain, Some("plain.7z"));
+        assert!(
+            !inspection
+                .findings
+                .iter()
+                .any(|f| f.id.starts_with("ARCHIVE_")),
+            "a plain 7z must carry no archive findings: {:?}",
+            inspection.findings
+        );
+    }
+
+    #[test]
+    fn sevenz_aes_marker_outside_declared_header_is_not_flagged() {
+        // Fail-first: the old whole-file windows(4) scan flagged ANY
+        // occurrence of the AES codec bytes — including inside compressed
+        // payload bytes that are NOT part of the declared header region.
+        // Four pseudo-random bytes occur by chance, so clean archives were
+        // quarantined as "encrypted".
+        let mut data = vec![0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04];
+        data.extend_from_slice(&[0u8; 4]); // StartHeaderCRC
+                                           // The declared next-header region sits FAR away and is plain.
+        data.extend_from_slice(&64u64.to_le_bytes()); // NextHeaderOffset
+        data.extend_from_slice(&2u64.to_le_bytes()); // NextHeaderSize
+        data.extend_from_slice(&0u32.to_le_bytes()); // NextHeaderCRC
+        assert_eq!(data.len(), 32);
+        // 64 bytes of "compressed payload" containing the AES marker.
+        let mut payload = vec![0x5Au8; 64];
+        payload[10..14].copy_from_slice(&[0x06, 0xF1, 0x07, 0x01]);
+        data.extend_from_slice(&payload);
+        // The plain declared next-header region at offset 96.
+        data.extend_from_slice(&[0x01, 0x00]);
+        assert!(
+            !is_7z_encrypted(&data),
+            "an AES marker outside the declared header region must not flag encryption"
+        );
+        assert_eq!(
+            classify_7z_encryption(&data),
+            SevenZEncryption::NotEncrypted
+        );
+    }
+
+    #[test]
+    fn sevenz_malformed_header_is_indeterminate_with_risk_floor() {
+        // Malformed/truncated headers must yield an explicit Indeterminate
+        // verdict and an honest risk floor — never a silent "not encrypted".
+        assert_eq!(
+            classify_7z_encryption(&[0x37, 0x7A, 0xBC, 0xAF]),
+            SevenZEncryption::Indeterminate
+        );
+        let mut bad = make_7z(&[0x01, 0x00]);
+        bad[20] = 0xFF; // NextHeaderSize LSB → far out of range
+        assert_eq!(
+            classify_7z_encryption(&bad),
+            SevenZEncryption::Indeterminate
+        );
+        let inspection = inspect_file(&bad, Some("weird.7z"));
+        let opaque = inspection
+            .findings
+            .iter()
+            .find(|f| f.id == "ARCHIVE_HEADER_OPAQUE")
+            .expect("malformed 7z header must carry the opaque-header floor");
+        assert!((opaque.risk - 3.0).abs() < f64::EPSILON);
     }
 }

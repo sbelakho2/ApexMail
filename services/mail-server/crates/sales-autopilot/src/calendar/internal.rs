@@ -1176,10 +1176,12 @@ mod tests {
 
         pub async fn disarm(pool: &PgPool, tag: &str) {
             let trigger = format!("_fi_{tag}");
-            sqlx::query(&format!("DROP TRIGGER IF EXISTS {trigger} ON sales_meetings"))
-                .execute(pool)
-                .await
-                .expect("disarm trigger");
+            sqlx::query(&format!(
+                "DROP TRIGGER IF EXISTS {trigger} ON sales_meetings"
+            ))
+            .execute(pool)
+            .await
+            .expect("disarm trigger");
         }
     }
 
@@ -1208,12 +1210,13 @@ mod tests {
 
         // NOTHING leaked: both rows were one transaction, and the abort
         // rolled it all back.
-        let events: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .expect("calendar events");
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("calendar events");
         let meetings: i64 =
             sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_meetings WHERE tenant_id = $1")
                 .bind(&tenant)
@@ -1221,7 +1224,10 @@ mod tests {
                 .await
                 .expect("meetings");
         assert_eq!(events, 0, "the availability row rolled back with the abort");
-        assert_eq!(meetings, 0, "the store-of-record row rolled back with the abort");
+        assert_eq!(
+            meetings, 0,
+            "the store-of-record row rolled back with the abort"
+        );
 
         // The slot is free: the SAME wall-clock slot books again through the
         // normal path, with no exclusion-constraint phantom.
@@ -1317,12 +1323,13 @@ mod tests {
             rolled_back,
             "the connection death must roll back the whole booking transaction"
         );
-        let events: i64 =
-            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1")
-                .bind(&tenant)
-                .fetch_one(&pool)
-                .await
-                .expect("calendar events");
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("calendar events");
         assert_eq!(events, 0, "the availability row rolled back too");
 
         // The slot is free: the provider books the same wall-clock window.

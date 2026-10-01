@@ -166,10 +166,57 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, (StatusCode, &'static 
 
 const ORG_CLAIM_HEADER: &str = "x-org-id";
 
+/// Audit SM5 F15: counters for org-claim enforcement outcomes. The crate
+/// has no prometheus facade; these atomics keep the security-relevant
+/// counts observable (exposed via [`org_claim_metrics`] for tests and any
+/// future metrics endpoint) instead of only living in log lines.
+static ORG_CLAIM_MISMATCH_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static ORG_CLAIM_MISSING_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Observed org-claim enforcement counters (mismatches, missing-required).
+pub fn org_claim_metrics() -> (u64, u64) {
+    (
+        ORG_CLAIM_MISMATCH_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+        ORG_CLAIM_MISSING_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Shared missing-claim policy (audit SM5 F15) for BOTH claim verifiers:
+/// when the deployment requires the edge-supplied claim, an ABSENT header
+/// is refused (401, counted); otherwise it is internal service-to-service
+/// traffic and allowed. `verify_workspace_org_claim` previously failed
+/// OPEN on a missing header even in require mode, so in production a
+/// client that simply omitted `x-org-id` bypassed the claim check on every
+/// workspace-scoped route.
+fn missing_claim_verdict(require_claim: bool) -> Result<(), (StatusCode, &'static str)> {
+    if require_claim {
+        ORG_CLAIM_MISSING_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            "SECURITY: required x-org-id claim header missing — refusing request (production mode)"
+        );
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "Missing x-org-id claim header (required in production mode)",
+        ))
+    } else {
+        tracing::debug!("No x-org-id claim header on internal call");
+        Ok(())
+    }
+}
+
 /// Verify the edge-supplied org claim matches the organization in the path.
+///
+/// Audit SM5 F15: the claim model previously failed OPEN on a missing
+/// header — any client whose `x-org-id` was not (yet) stripped by the edge
+/// could reach any org. In production mode (`Config::require_org_claim`,
+/// default ON in production, fail-closed) a MISSING claim is refused; a
+/// PRESENT mismatching claim is always refused (and counted) regardless
+/// of mode.
 fn verify_org_claim(
     headers: &HeaderMap,
     path_org_id: &str,
+    require_claim: bool,
 ) -> Result<(), (StatusCode, &'static str)> {
     match headers
         .get(ORG_CLAIM_HEADER)
@@ -178,6 +225,7 @@ fn verify_org_claim(
     {
         Some(claim) if claim.eq_ignore_ascii_case(path_org_id) => Ok(()),
         Some(claim) => {
+            ORG_CLAIM_MISMATCH_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 claimed_org = %claim,
                 path_org = %path_org_id,
@@ -188,10 +236,7 @@ fn verify_org_claim(
                 "Organization claim does not match requested resource",
             ))
         }
-        None => {
-            tracing::debug!("No x-org-id claim header on internal call");
-            Ok(())
-        }
+        None => missing_claim_verdict(require_claim),
     }
 }
 
@@ -206,7 +251,10 @@ async fn verify_workspace_org_claim(
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
     else {
-        return Ok(());
+        // Audit SM5 F15: honor the require mode here too — this verifier
+        // guards NINE workspace-scoped routes and previously allowed a
+        // missing header unconditionally.
+        return missing_claim_verdict(state.config.require_org_claim);
     };
     match state.tenant.get_workspace(workspace_id).await {
         Ok(ws) if ws.organization_id.eq_ignore_ascii_case(claim) => Ok(()),
@@ -345,7 +393,7 @@ async fn org_get(
         return (e.0, err_json(e.1));
     }
 
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     match state.tenant.get_organization(&org_id).await {
@@ -376,7 +424,7 @@ async fn org_update(
         return (e.0, err_json(e.1));
     }
 
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     match state
@@ -414,7 +462,7 @@ async fn org_suspend(
         return (e.0, err_json(e.1));
     }
 
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     let user_id = match extract_user_id(&headers) {
@@ -454,7 +502,7 @@ async fn workspace_create(
         return (e.0, err_json(e.1));
     }
 
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     let user_id = match extract_user_id(&headers) {
@@ -483,7 +531,7 @@ async fn workspace_list(
         return (e.0, err_json(e.1));
     }
 
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     match state.tenant.list_workspaces(&org_id).await {
@@ -801,7 +849,7 @@ async fn encryption_rotate(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     match state.encryption.rotate_key(&org_id).await {
@@ -830,7 +878,11 @@ async fn encryption_create_policy(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    if let Err(e) = verify_org_claim(&headers, &body.organization_id) {
+    if let Err(e) = verify_org_claim(
+        &headers,
+        &body.organization_id,
+        state.config.require_org_claim,
+    ) {
         return (e.0, err_json(e.1));
     }
     if let Err(e) = state.tenant.get_organization(&body.organization_id).await {
@@ -879,7 +931,11 @@ async fn isolation_check_access(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    if let Err(e) = verify_org_claim(&headers, &body.organization_id) {
+    if let Err(e) = verify_org_claim(
+        &headers,
+        &body.organization_id,
+        state.config.require_org_claim,
+    ) {
         return (e.0, err_json(e.1));
     }
     let org = match state.tenant.get_organization(&body.organization_id).await {
@@ -929,7 +985,7 @@ async fn isolation_migrate(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     let target =
@@ -940,13 +996,98 @@ async fn isolation_migrate(
         Ok(org) => org.isolation_level,
         Err(e) => return (StatusCode::NOT_FOUND, err_json(&e.to_string())),
     };
-    match state
-        .isolation
-        .migrate_isolation_level(&org_id, &current, &target)
-        .await
-    {
-        Ok(()) => ok_json(serde_json::json!({ "status": "migrated" })),
-        Err(e) => (StatusCode::BAD_REQUEST, err_json(&e.to_string())),
+
+    // Audit SM5 F8 repair (ordering): an unsupported transition is a client
+    // error (400) regardless of how many workspaces the org has. Checking
+    // this AFTER the zero-workspace resolution let the 404 mask the 400 on
+    // empty orgs, and let the per-workspace loop turn the same static bad
+    // request into a mid-loop 500 on non-empty ones.
+    if !matches!(
+        (&current, &target),
+        (IsolationLevel::Shared, IsolationLevel::DedicatedSchema)
+            | (IsolationLevel::DedicatedSchema, IsolationLevel::Shared)
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            err_json(&format!("Unsupported migration path: {current} -> {target}")),
+        );
+    }
+
+    // Audit SM5 F8: `migrate_isolation_level` takes a WORKSPACE id, but
+    // this route was passing the ORG id — every statement matched zero
+    // rows, an orphan `ws_{org_id}` schema was created, and the endpoint
+    // still reported `{"status":"migrated"}`. Resolve the org's actual
+    // workspaces and migrate EACH in its own transaction; an org with no
+    // workspaces is a 404, never a fake success.
+    let workspaces = match state.tenant.list_workspaces(&org_id).await {
+        Ok(ws) => ws,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
+    };
+    let workspace_ids: Vec<String> = workspaces.iter().map(|ws| ws.id.clone()).collect();
+    let workspace_ids = match plan_org_migration(&workspace_ids) {
+        Ok(ids) => ids,
+        Err(reason) => {
+            tracing::warn!(
+                org = %org_id,
+                "migration refused: {reason}"
+            );
+            return (StatusCode::NOT_FOUND, err_json(reason));
+        }
+    };
+
+    // The Shared→DedicatedSchema pre-flight is org-global (it inspects the
+    // shared schema, not any workspace); run it once up front so a missing
+    // capability refuses BEFORE any workspace is half-migrated.
+    if matches!(
+        (&current, &target),
+        (IsolationLevel::Shared, IsolationLevel::DedicatedSchema)
+    ) {
+        if let Err(e) = state.isolation.check_migration_capability("public").await {
+            return (StatusCode::CONFLICT, err_json(&e.to_string()));
+        }
+    }
+
+    let mut migrated: usize = 0;
+    for workspace_id in &workspace_ids {
+        match state
+            .isolation
+            .migrate_isolation_level(workspace_id, &current, &target)
+            .await
+        {
+            Ok(()) => migrated += 1,
+            Err(e) => {
+                tracing::error!(
+                    org = %org_id,
+                    workspace = %workspace_id,
+                    migrated,
+                    error = %e,
+                    "workspace isolation migration failed mid-org"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    err_json(&format!(
+                        "workspace {workspace_id} failed to migrate after {migrated} \
+                         workspace(s) succeeded: {e}"
+                    )),
+                );
+            }
+        }
+    }
+
+    ok_json(serde_json::json!({ "status": "migrated", "workspaces": migrated }))
+}
+
+/// Audit SM5 F8 (hermetic core of the org-scoped migrate route): an org
+/// that resolves to ZERO workspaces must be a 404 — the route must never
+/// report "migrated" for an empty workspace list (that was the bug's
+/// symptom: the ORG id was passed where a WORKSPACE id was required, all
+/// statements matched zero rows, and success was still returned). Pure so
+/// the contract is testable without a database.
+fn plan_org_migration(workspace_ids: &[String]) -> Result<Vec<String>, &'static str> {
+    if workspace_ids.is_empty() {
+        Err("organization has no workspaces to migrate")
+    } else {
+        Ok(workspace_ids.to_vec())
     }
 }
 
@@ -1003,7 +1144,11 @@ async fn audit_query(
     // Same tenant-claim check every sibling handler enforces:without it,
     // /audit/query was the one endpoint where a claimed org could read a
     // different organization's audit trail.
-    if let Err(e) = verify_org_claim(&headers, &params.organization_id) {
+    if let Err(e) = verify_org_claim(
+        &headers,
+        &params.organization_id,
+        state.config.require_org_claim,
+    ) {
         return (e.0, err_json(e.1));
     }
     let q = AuditQuery {
@@ -1044,7 +1189,7 @@ async fn audit_stats(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1));
     }
     let days = params.days.unwrap_or(30);
@@ -1074,7 +1219,7 @@ async fn audit_export(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1)).into_response();
     }
-    if let Err(e) = verify_org_claim(&headers, &org_id) {
+    if let Err(e) = verify_org_claim(&headers, &org_id, state.config.require_org_claim) {
         return (e.0, err_json(e.1)).into_response();
     }
     let q = AuditQuery {
@@ -1125,14 +1270,14 @@ mod tests {
 
     #[test]
     fn test_verify_org_claim_matching() {
-        assert!(verify_org_claim(&claim_headers(Some("org-1")), "org-1").is_ok());
+        assert!(verify_org_claim(&claim_headers(Some("org-1")), "org-1", false).is_ok());
         // Case-insensitive comparison.
-        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1").is_ok());
+        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1", false).is_ok());
     }
 
     #[test]
     fn test_verify_org_claim_mismatch_rejected() {
-        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim")
+        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim", false)
             .expect_err("claim mismatch must be rejected");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
@@ -1141,7 +1286,23 @@ mod tests {
     fn test_verify_org_claim_absent_allows_internal() {
         // No claim header → internal service-to-service traffic is allowed
         // (documented deployment requirement:edge must set/strip the header).
-        assert!(verify_org_claim(&claim_headers(None), "org-1").is_ok());
+        assert!(verify_org_claim(&claim_headers(None), "org-1", false).is_ok());
+    }
+
+    #[test]
+    fn test_missing_claim_is_refused_when_required() {
+        // Audit SM5 F15: in require (production) mode an ABSENT claim is a
+        // 401 for BOTH verifiers — the workspace-scoped verifier previously
+        // failed open on a missing header and let a header-less client past
+        // nine workspace routes.
+        let err = missing_claim_verdict(true).expect_err("required claim must be enforced");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        assert!(missing_claim_verdict(false).is_ok());
+
+        // And the org-claim verifier surfaces the same verdict.
+        let err = verify_org_claim(&claim_headers(None), "org-1", true)
+            .expect_err("missing claim must be refused in require mode");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
     }
 
     /// F14 regression:/audit/query takes the organization from QUERY
@@ -1153,7 +1314,7 @@ mod tests {
     fn test_audit_query_org_claim_enforced() {
         // A claimed org differing from the queried organization_id must be
         // refused exactly like the path-based sibling handlers.
-        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim")
+        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim", false)
             .expect_err("claim mismatch on /audit/query must be rejected");
         assert_eq!(
             err.0,
@@ -1162,7 +1323,7 @@ mod tests {
         );
 
         // Matching claim (case-insensitive, like everywhere else) passes.
-        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1").is_ok());
+        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1", false).is_ok());
     }
 
     #[test]
@@ -1295,5 +1456,67 @@ mod tests {
         let req: UpdateQuotaRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.emails_per_month, Some(100_000));
         assert!(req.storage_bytes.is_none());
+    }
+    // ── Audit SM5 F15:production-mode claim enforcement ──────────────
+
+    #[test]
+    fn test_verify_org_claim_required_mode_refuses_missing_header() {
+        // Fail-closed: with require_claim=true a MISSING claim header is a
+        // hard refusal — previously it always failed open.
+        let err = verify_org_claim(&claim_headers(None), "org-1", true)
+            .expect_err("missing required claim must be refused");
+        assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+        // The missing counter ticked (metric, not only a log line).
+        let (_, missing_before) = org_claim_metrics();
+        let _ = verify_org_claim(&claim_headers(None), "org-1", true);
+        let (_, missing_after) = org_claim_metrics();
+        assert_eq!(missing_after, missing_before + 1);
+    }
+
+    #[test]
+    fn test_verify_org_claim_required_mode_still_allows_valid_claim() {
+        assert!(verify_org_claim(&claim_headers(Some("org-1")), "org-1", true).is_ok());
+        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1", true).is_ok());
+    }
+
+    #[test]
+    fn test_verify_org_claim_mismatch_rejected_in_both_modes_and_counted() {
+        for require in [false, true] {
+            let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim", require)
+                .expect_err("claim mismatch must be rejected in every mode");
+            assert_eq!(err.0, StatusCode::FORBIDDEN);
+        }
+        let (mismatches_before, _) = org_claim_metrics();
+        let _ = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim", false);
+        let (mismatches_after, _) = org_claim_metrics();
+        assert_eq!(
+            mismatches_after,
+            mismatches_before + 1,
+            "mismatch must tick the metric counter"
+        );
+    }
+
+    // ── Audit SM5 F8:org-scoped migration planning ───────────────────
+
+    #[test]
+    fn test_plan_org_migration_refuses_zero_workspaces() {
+        // The bug's symptom: an org whose workspace list is empty must be
+        // a 404, never a fake "migrated" success.
+        let plan = plan_org_migration(&[]);
+        assert!(plan.is_err(), "zero workspaces must not plan any migration");
+        assert_eq!(
+            plan.unwrap_err(),
+            "organization has no workspaces to migrate"
+        );
+    }
+
+    #[test]
+    fn test_plan_org_migration_targets_workspace_ids_not_the_org_id() {
+        // Every migration unit is a WORKSPACE id resolved from the org —
+        // the org id itself must never appear as a migration target.
+        let workspaces = vec!["ws-a".to_string(), "ws-b".to_string()];
+        let plan = plan_org_migration(&workspaces).expect("non-empty list must plan");
+        assert_eq!(plan, vec!["ws-a".to_string(), "ws-b".to_string()]);
+        assert!(!plan.iter().any(|id| id == "org-42"));
     }
 }

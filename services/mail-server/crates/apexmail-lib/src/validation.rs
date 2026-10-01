@@ -42,9 +42,14 @@ static QUOTED_LOCAL_RE: LazyLock<Option<Regex>> =
 /// Domain part: standard RFC 5322 domain name or domain literal.
 /// - Domain names: letters, digits, hyphens, at least one dot, TLD ≥ 2 chars.
 /// - Domain literals: `[` ... `]` containing an IP address or other text.
+///
+/// # Security (CRLF injection)
+/// The bracket-literal alternative uses the SAME hardened class as
+/// [`DOMAIN_LITERAL_RE`]: controls and whitespace can never ride inside a
+/// "valid" domain via the `\[…\]` path either.
 static DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}|\[[^\]]+\])$"
+        r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}|\[[^\]\s\x00-\x1f\x7f-\x9f]+\])$"
     ).ok()
 });
 
@@ -54,8 +59,17 @@ static IDN_DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
 });
 
 /// Domain literal: `[` ... `]` containing IPv4, IPv6, or other text.
+///
+/// # Security (CRLF injection — SM12 escalation)
+/// The bracket-literal class excludes the `]` terminator AND every control
+/// character (`\x00-\x1f`, DEL, C1 `\x80-\x9f`) plus all whitespace. The
+/// former `[^]]+` accepted CR/LF inside a "valid" domain (`[a\nb]` passed),
+/// so an address that cleared validation could smuggle a header/SMTP
+/// separator into downstream use. `[\r\n…]`, `[\t…]`, `[… ]` are rejected;
+/// printable literal text (`[192.168.1.1]`, `[IPv6:…]`, `[a-b_c.d]`) still
+/// validates.
 static DOMAIN_LITERAL_RE: LazyLock<Option<Regex>> =
-    LazyLock::new(|| Regex::new(r"^\[[^\]]+\]$").ok());
+    LazyLock::new(|| Regex::new(r"^\[[^\]\s\x00-\x1f\x7f-\x9f]+\]$").ok());
 
 // #216: UUID regex must be case-insensitive to accept uppercase hex
 static UUID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -274,6 +288,43 @@ mod tests {
         // Domain literals
         assert!(is_valid_email("user@[192.168.1.1]"));
         assert!(is_valid_email("user@[IPv6:2001:db8::1]"));
+        assert!(is_valid_domain("[192.168.1.1]"));
+        assert!(is_valid_domain("[IPv6:2001:db8::1]"));
+        // Printable non-IP literal text stays valid.
+        assert!(is_valid_domain("[a-b_c.d]"));
+    }
+
+    /// SM12 escalation: the bracket-literal class used to be `[^]]+`, which
+    /// accepted CONTROL CHARACTERS and whitespace inside a "valid" domain —
+    /// `is_valid_domain("[a\nb]")` was true, so an address that cleared
+    /// validation could carry CR/LF into header/SMTP contexts. Controls,
+    /// DEL, C1, and whitespace must all be rejected; printable text must
+    /// still validate (pinned in `test_valid_domain_literals`).
+    #[test]
+    fn test_domain_literal_rejects_control_characters_and_whitespace() {
+        // CR/LF — the header/SMTP-injection payload.
+        assert!(!is_valid_domain("[a\nb]"), "LF inside a literal");
+        assert!(!is_valid_domain("[a\rb]"), "CR inside a literal");
+        assert!(!is_valid_domain("[a\r\nb]"), "CRLF inside a literal");
+        assert!(
+            !is_valid_email("user@[a\r\nBcc: x@y.z]"),
+            "injection-shaped literal must not validate as an email"
+        );
+        // Other C0 controls, DEL, and C1.
+        assert!(!is_valid_domain("[a\tb]"), "TAB inside a literal");
+        assert!(!is_valid_domain("[a\0b]"), "NUL inside a literal");
+        assert!(!is_valid_domain("[a\u{1}b]"), "SOH inside a literal");
+        assert!(!is_valid_domain("[a\u{7f}b]"), "DEL inside a literal");
+        assert!(!is_valid_domain("[a\u{85}b]"), "NEL (C1) inside a literal");
+        // Whitespace.
+        assert!(!is_valid_domain("[a b]"), "space inside a literal");
+        assert!(!is_valid_domain("[ leading]"), "leading space");
+        assert!(!is_valid_domain("[trailing ]"), "trailing space");
+        // Sanity: the same payloads are refused through the email path, and
+        // through DOMAIN_RE's literal alternative when reached with a
+        // dot-bearing body (the second unfixed sibling path).
+        assert!(!is_valid_email("user@[a\nb]"));
+        assert!(!is_valid_email("user@[a b]"));
     }
 
     #[test]

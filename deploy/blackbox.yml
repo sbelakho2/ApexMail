@@ -86,14 +86,49 @@ modules:
     timeout: 5s
     tcp:
       preferred_ip_protocol: "ip4"
-  # Full STARTTLS handshake against the MTA: validates the TLS certificate
-  # chain and feeds probe_ssl_earliest_cert_expiry, so the mail-port
-  # certificate (loaded once at MTA startup, renewed by certbot with a
-  # MANUAL container restart) gets the same expiry alerting as HTTPS.
+  # Mail-port TLS probes (audit F1): blackbox_exporter v0.25.0 ships only
+  # dns/grpc/http/icmp/tcp probers — the previous `prober: smtp` module made
+  # every /probe?module=smtp_starttls return "unknown prober"
+  # (probe_success==0 forever → permanent critical alert train, and the mail
+  # certificate expiry alerting was dead). The tcp prober replaces it:
+  #   * smtp_starttls (ports 25/587): read the server's 220 banner, EHLO,
+  #     require the STARTTLS advertisement, send STARTTLS, wait for the
+  #     220 ready reply, THEN upgrade — the full RFC 3207 negotiation, in the
+  #     same shape as the upstream blackbox_exporter example.yml. Two v0.25.0
+  #     sharp edges (both verified live against the real MTA):
+  #       1. `send` lines are terminated with a BARE LF by the exporter
+  #          (fmt.Fprintf "%s\n"), which the MTA rejects with
+  #          "500 5.5.2 Bare LF not allowed" — the trailing \r inside the
+  #          YAML string turns the wire bytes into proper CRLF.
+  #       2. a bare `starttls: true` item only marks the UPGRADE point — it
+  #          does NOT send the STARTTLS command.
+  #     The handshake still validates the certificate chain and populates
+  #     probe_ssl_earliest_cert_expiry, so the mail-port certificate (loaded
+  #     once at MTA startup, renewed by certbot with a MANUAL container
+  #     restart) gets the same expiry alerting as HTTPS.
+  #   * smtp_tls (ports 465/993): implicit TLS from the first byte (SMTPS /
+  #     IMAPS never send a plaintext banner — a STARTTLS module would hang).
+  # Module names stay stable so the job=blackbox-smtp alert selectors in
+  # deploy/monitoring/alerts/certificate-expiry.yml and
+  # deploy/alerting-rules.yml keep matching.
   smtp_starttls:
-    prober: smtp
+    prober: tcp
     timeout: 10s
-    smtp:
+    tcp:
+      preferred_ip_protocol: "ip4"
+      query_response:
+        - expect: "^220"
+        - send: "EHLO probe\r"
+        - expect: "^250-STARTTLS"
+        - send: "STARTTLS\r"
+        - expect: "^220"
+        - starttls: true
+      tls_config:
+        insecure_skip_verify: false
+  smtp_tls:
+    prober: tcp
+    timeout: 10s
+    tcp:
       preferred_ip_protocol: "ip4"
       tls: true
       tls_config:

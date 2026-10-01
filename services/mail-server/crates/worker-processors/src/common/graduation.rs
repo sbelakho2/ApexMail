@@ -208,7 +208,9 @@ mod db_tests {
     #[tokio::test]
     async fn graduation_is_the_genesis_link_of_an_empty_audit_chain(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(db) = genesis_db().await else { return Ok(()) };
+        let Some(db) = genesis_db().await else {
+            return Ok(());
+        };
         sqlx::query("DELETE FROM audit_logs")
             .execute(&db)
             .await

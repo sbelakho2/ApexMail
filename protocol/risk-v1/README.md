@@ -6,7 +6,9 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1) `RiskEventKind` — fixed enum, values 1..17:
+1) `RiskEventKind` — fixed enum, values 1..17 (the risk-v1 core; the
+   additive risk-v2 kinds 18..21 are documented in the "Risk Protocol v2
+   (additive)" section below):
 
    | value | name |
    |-------|------|
@@ -133,6 +135,8 @@ identical in:
 Files:
 - `fixtures.json` — golden scoring fixtures (authoritative).
 - `risk-v1.lua` — canonical Redis state script (authoritative, embedded).
+- `assess_v2.lua` — consolidated risk-v1+v2 assessment script
+  (authoritative, embedded; see the "Risk Protocol v2 (additive)" section).
 
 12. Request vs feedback: only `PreIssue` (1) counts as a request. It
    increments `rf`/`rs` and the scope-switch channel. Feedback events
@@ -227,3 +231,58 @@ Files:
     StepUp. Floors can never reintroduce Argon.
 
 20. Scope ids are u32 (1..=4294967295; 0 rejected) in both languages.
+
+## Risk Protocol v2 (additive)
+
+Risk-v2 extends the fixed enum additively — values 1..17 keep their
+risk-v1 meaning and are never renumbered. Both implementations
+(`packages/kiwicaptcha-risk/src/event.rs`,
+`packages/kiwicaptcha-risk-php/src/RiskEventKind.php`) ship 21 kinds;
+the PHP enum mirrors the Rust one kind-for-kind.
+
+| value | name | semantics |
+|-------|------|-----------|
+| 18 | HoneypotTriggered | A server-issued honeypot trap was filled by the client. |
+| 19 | DecoyEndpointTouched | A decoy (honeypot) endpoint was touched. |
+| 20 | DecoyFieldSubmitted | A server-issued decoy form field was submitted. |
+| 21 | ChallengeCancelled | A server-issued challenge was cancelled before any verification. |
+
+Semantics:
+
+- **18–20 (honeypot/decoy evidence)** ride the same observation path as
+  risk-v1 events (idempotency domain separation, dedupe receipt), but the
+  state script treats them as no-ops (like `RiskDenied`): the honeypot
+  signal itself is scored from the risk-v2 context, never from accumulated
+  state.
+- **21 (ChallengeCancelled)** is risk-neutral: the state script applies NO
+  change, so an issued-and-abandoned challenge keeps its issue-debt
+  contribution (`iss`), which decays naturally and is repaid only by an
+  actual `SolveSuccess`. The cancellation is a resource-lifecycle
+  operation (the record is terminalized and live-cap bookkeeping freed),
+  never a debt refund — cancellation is client-influenceable (the endpoint
+  accepts possession of a pending nonce), so it must never erase the
+  issued-but-unsolved signal. The kind is kept for replay/compat
+  compatibility.
+
+### `assess_v2.lua`
+
+The directory also ships `assess_v2.lua` — the consolidated assessment
+script (v4 semantics) used by both implementations (embedded by the Rust
+store and loaded by the PHP `RedisRiskStateStore`). ONE atomic assessment
+call performs the full risk-v1 observation plus the risk-v2 first-seen
+session records and the outcome-ledger registration:
+
+- The v1 observation body is byte-identical to `risk-v1.lua` — the v1
+  contract (13-signal vector, weights, fixed-point semantics) is
+  unchanged. The script only extends the key set, the argv set and the
+  return with the two ephemeral session records and the pending
+  outcome-ledger entry.
+- Additions over the v1 script: KEYS[11] session first-seen
+  client-context tag record (SET NX, first write wins), KEYS[12] session
+  first-seen trusted-edge TLS tag record (SET NX), KEYS[13] pending
+  outcome-ledger entry (SET NX EX, mirroring `outcome_register.lua`
+  byte-for-byte). Event kinds accepted: 1..21.
+- Script bounds: at most 13 keys touched and 26 fixed-cost Redis calls
+  (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE + 3 GET + 4 SET); no KEYS/SCAN/
+  EVAL nesting and no iteration over attacker-sized collections, so the
+  runtime is O(1) in state size regardless of traffic volume.

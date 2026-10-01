@@ -520,8 +520,9 @@ mod tests {
     /// degraded state, never a silently unbounded client.
     #[tokio::test]
     async fn unavailable_provider_refuses_every_lookup_with_typed_error() {
-        let provider =
-            UnavailableEnrichmentProvider::new("failed to build enrichment HTTP client: tls".into());
+        let provider = UnavailableEnrichmentProvider::new(
+            "failed to build enrichment HTTP client: tls".into(),
+        );
         assert_eq!(provider.id().as_str(), "http_gateway_unavailable");
         assert!(provider.fields().is_empty());
         assert_eq!(provider.cost_eur(), 0.0);

@@ -55,7 +55,11 @@
 //! [`sweeps`] posts every unposted row with the same `FOR UPDATE SKIP
 //! LOCKED` discipline as the projectors, so a future writer — or `psql` — is
 //! posted with no further wiring; see the module docs for the exact claim
-//! protocol and the per-source gap statement.
+//! protocol and the per-source gap statement. [`sweeps`] also replays the
+//! billing sources (invoices, payment allocations, credit notes) whose live
+//! writers are best-effort hooks (audit SM7 F1), and [`provisioning`]
+//! auto-provisions the default legal entity, chart and open fiscal period on
+//! first posting so a fresh deployment keeps books instead of skipping them.
 //!
 //! # Guarantees of this crate
 //!
@@ -77,6 +81,7 @@ pub mod error;
 pub mod hash;
 pub mod periods;
 pub mod posting;
+pub mod provisioning;
 pub mod retention;
 pub mod sweeps;
 pub mod types;

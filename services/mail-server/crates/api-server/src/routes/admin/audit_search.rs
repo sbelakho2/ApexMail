@@ -62,9 +62,8 @@ fn decode_search_cursor(encoded: &str) -> Result<(f64, DateTime<Utc>, String), A
         ));
     };
     let mut parts = decoded.split(KEYSET_CURSOR_SEP);
-    let parse_error = |field: &str| {
-        ApiError::BadRequest(format!("invalid cursor: malformed {field}"))
-    };
+    let parse_error =
+        |field: &str| ApiError::BadRequest(format!("invalid cursor: malformed {field}"));
     let rank: f64 = parts
         .next()
         .and_then(|rank| rank.parse::<f64>().ok())
@@ -279,8 +278,9 @@ fn build_search_plan(
         // The rank expression is spelled out everywhere it is referenced —
         // the keyset predicate cannot use the output alias, and every
         // re-reference reuses the SAME tsquery bind parameter.
-        let rank_expr =
-            format!("ts_rank(fts_vector, plainto_tsquery('english', ${tsquery_param}))::double precision");
+        let rank_expr = format!(
+            "ts_rank(fts_vector, plainto_tsquery('english', ${tsquery_param}))::double precision"
+        );
         let paging = if keyset.is_some() {
             // Keyset path: strictly-less tuple comparison over the same
             // (rank, timestamp, id) tuple the ORDER BY uses. The VALUE side
@@ -1031,8 +1031,7 @@ mod tests {
         let ts = Utc::now();
         let rank = 0.06079271525000001f64;
         let (decoded_rank, decoded_ts, decoded_id) =
-            decode_search_cursor(&encode_search_cursor(rank, &ts, "row-1"))
-                .expect("valid cursor");
+            decode_search_cursor(&encode_search_cursor(rank, &ts, "row-1")).expect("valid cursor");
         assert_eq!(decoded_rank, rank);
         assert_eq!(decoded_ts, ts);
         assert_eq!(decoded_id, "row-1");
@@ -1266,7 +1265,8 @@ mod adversarial_tests {
         assert!(matches!(status, StatusCode::FORBIDDEN));
     }
 
-    const SEARCH_PROBE_SQL: &str = "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
+    const SEARCH_PROBE_SQL: &str =
+        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id, \
          details, ip_address, user_agent, outcome, timestamp, hash, signature, fts_vector)
          SELECT 'cur-' || lpad(g::text, 2, '0') || '-' || substr(gen_random_uuid()::text, 1, 8),
                 $1, 'usr_srch', 'probe.search', 'probe_resource', 'res-1',
@@ -1363,7 +1363,10 @@ mod adversarial_tests {
             );
         }
         assert_eq!(
-            by_cursor.iter().collect::<std::collections::HashSet<_>>().len(),
+            by_cursor
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             by_cursor.len(),
             "a cursor sweep must never repeat a row"
         );
@@ -1401,11 +1404,16 @@ mod adversarial_tests {
         //    to the (timestamp, id) pair; the action filter narrows to the
         //    seven probe rows.
         let (status, body) = env
-            .get(&format!("/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=1"))
+            .get(&format!(
+                "/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=1"
+            ))
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
-        assert!(body["nextCursor"].is_string(), "non-empty page mints a cursor");
+        assert!(
+            body["nextCursor"].is_string(),
+            "non-empty page mints a cursor"
+        );
         assert_eq!(body["hasMore"], true);
         assert_eq!(
             body["results"][0]["rank"], 0.0,
@@ -1422,15 +1430,14 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["hasMore"], true);
-        assert_ne!(
-            body["results"][0]["id"], "",
-            "continuation returns a row"
-        );
+        assert_ne!(body["results"][0]["id"], "", "continuation returns a row");
 
         // A cursor minted on the FINAL page (the full listing) honestly
         // continues to an empty page.
         let (status, body) = env
-            .get(&format!("/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=100"))
+            .get(&format!(
+                "/v1/admin/audit/search?tenantId={tenant}&action=probe.search&limit=100"
+            ))
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["results"].as_array().map(Vec::len), Some(7));

@@ -135,12 +135,40 @@ impl IdsEngine {
     }
 
     /// Inspect a packet/payload. Returns alerts and the recommended verdict.
+    ///
+    /// Convenience wrapper for [`Self::inspect_with_phase`] using the
+    /// SMTP COMMAND phase: a context-less packet-level inspection sees
+    /// command/verb traffic, not message bodies.
     pub fn inspect(
         &self,
         src_ip: IpAddr,
         dst_port: u16,
         protocol: &str,
         payload: &[u8],
+    ) -> (IdsVerdict, Vec<Alert>) {
+        self.inspect_with_phase(
+            src_ip,
+            dst_port,
+            protocol,
+            payload,
+            protocol_analyzer::SmtpPhase::Command,
+        )
+    }
+
+    /// Inspect a payload with protocol-phase context (audit SM5 F6).
+    ///
+    /// The `smtp_phase` argument only affects SMTP payloads: the NUL-byte
+    /// evasion rule (3000004) fires on the COMMAND stream but MUST stay
+    /// silent for DATA-phase message bodies, where NUL bytes are ordinary
+    /// binary mail content. Callers that scan DATA-time message payloads
+    /// MUST pass [`protocol_analyzer::SmtpPhase::Data`].
+    pub fn inspect_with_phase(
+        &self,
+        src_ip: IpAddr,
+        dst_port: u16,
+        protocol: &str,
+        payload: &[u8],
+        smtp_phase: protocol_analyzer::SmtpPhase,
     ) -> (IdsVerdict, Vec<Alert>) {
         let mut alerts = Vec::with_capacity(8);
         let mut verdict = IdsVerdict::Pass;
@@ -197,7 +225,7 @@ impl IdsEngine {
         // 2. Protocol anomaly detection
         let protocol_anomalies = match protocol {
             "smtp" if self.config.enable_smtp_validation => {
-                protocol_analyzer::analyze_smtp(payload)
+                protocol_analyzer::analyze_smtp(payload, smtp_phase)
             }
             "dns" if self.config.enable_dns_validation => protocol_analyzer::analyze_dns(payload),
             "tls" if self.config.enable_tls_validation => protocol_analyzer::analyze_tls(payload),
@@ -385,8 +413,11 @@ impl IdsEngine {
         // tracker maps grow without bound for the lifetime of the process.
         self.conn_tracker.cleanup_all(timeout, tracker_timeout);
 
-        // Evict stale alert rate-limit entries (older than 60 seconds)
-        let stale_cutoff = Instant::now() - Duration::from_secs(60);
+        // Evict stale alert rate-limit entries (older than 60 seconds).
+        // Audit SM5 F4: monotonic-safe subtraction — this runs in the
+        // background maintenance loop, whose panic would silently stop all
+        // cleanup on a host younger than the window.
+        let stale_cutoff = monotonic_cutoff(Instant::now(), Duration::from_secs(60));
         self.alert_counts
             .retain(|_, (_, instant)| *instant > stale_cutoff);
         self.evict_alert_counts_over_capacity();
@@ -499,6 +530,17 @@ impl IdsEngine {
             }
         })
     }
+}
+
+/// Monotonic-safe `now - window` (audit SM5 F4).
+///
+/// Plain `Instant::now() - window` PANICS when the result precedes the
+/// monotonic epoch — i.e. on any host whose current uptime is shorter
+/// than `window`. All window subtractions in this crate go through this
+/// helper: until the clock has been up for a full window, the cutoff
+/// degenerates to `now` (nothing expires yet).
+fn monotonic_cutoff(now: Instant, window: Duration) -> Instant {
+    now.checked_sub(window).unwrap_or(now)
 }
 
 /// Heuristic to decide whether an inspection event represents a TCP SYN
@@ -1231,5 +1273,77 @@ mod tests {
             "flagged port_scan entries must be removable by cleanup"
         );
         assert_eq!(stats.tracked_ips_half_open, 0);
+    }
+
+    // ── Audit SM5 F6:the SMTP NUL rule is command-phase only ─────────
+
+    #[test]
+    fn test_smtp_data_phase_nul_payload_is_not_dropped() {
+        // A DATA-time binary body (PDF header + NUL bytes) must not trip
+        // anomaly 3000004 — previously ANY inbound message with a binary
+        // attachment was classified as evasion and refused.
+        let engine = make_inline_engine();
+        let mut payload = b"Content-Type: application/pdf\r\n\r\n%PDF-1.7".to_vec();
+        payload.extend_from_slice(&[0x00, 0x01, 0x00, 0xFE, 0x00, 0xFF]);
+        let (verdict, alerts) = engine.inspect_with_phase(
+            ip("192.0.2.9"),
+            25,
+            "smtp",
+            &payload,
+            protocol_analyzer::SmtpPhase::Data,
+        );
+        assert!(
+            !alerts.iter().any(|a| a.id == 3000004),
+            "DATA-phase NUL bytes must not fire 3000004, got {:?}",
+            alerts.iter().map(|a| a.id).collect::<Vec<_>>()
+        );
+        assert_eq!(verdict, IdsVerdict::Pass);
+    }
+
+    #[test]
+    fn test_smtp_command_phase_nul_payload_is_still_dropped() {
+        let engine = make_inline_engine();
+        let payload = b"MAIL FROM:<a@b.com>\x00RCPT TO:<c@d.com>\r\n".to_vec();
+        let (verdict, alerts) = engine.inspect_with_phase(
+            ip("192.0.2.9"),
+            25,
+            "smtp",
+            &payload,
+            protocol_analyzer::SmtpPhase::Command,
+        );
+        assert!(
+            alerts.iter().any(|a| a.id == 3000004),
+            "command-stream NUL bytes must still fire 3000004"
+        );
+        assert_eq!(
+            verdict,
+            IdsVerdict::Drop,
+            "inline mode must enforce the Drop"
+        );
+    }
+
+    #[test]
+    fn test_inspect_defaults_to_command_phase() {
+        // The context-less `inspect` wrapper keeps the command-phase
+        // semantics (existing engine users scan verb traffic).
+        let engine = make_engine();
+        let payload = b"EHLO x\x00y\r\n".to_vec();
+        let (_, alerts) = engine.inspect(ip("192.0.2.9"), 25, "smtp", &payload);
+        assert!(alerts.iter().any(|a| a.id == 3000004));
+    }
+
+    // ── Audit SM5 F4:monotonic-safe cutoffs ──────────────────────────
+
+    #[test]
+    fn test_monotonic_cutoff_survives_window_longer_than_uptime() {
+        // `Instant::now() - window` panics whenever the host has been up
+        // for less than `window`; a 10-year window exceeds any plausible
+        // monotonic epoch, so the old code panicked right here.
+        let now = Instant::now();
+        let ten_years = Duration::from_secs(60 * 60 * 24 * 365 * 10);
+        let cutoff = monotonic_cutoff(now, ten_years);
+        assert!(cutoff <= now, "fallback must degenerate to now");
+        let cutoff = monotonic_cutoff(now, Duration::from_secs(1));
+        assert!(cutoff < now, "small windows still subtract normally");
     }
 }

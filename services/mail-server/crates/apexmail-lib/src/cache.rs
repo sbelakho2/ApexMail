@@ -81,24 +81,24 @@ mod tests {
     }
 
     /// Release-mode soft-skip contract (audit CI-2): under
-/// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a hard
-/// panic naming the variable, never a silent skip. (This crate does not
-/// depend on `migrator`, so the workspace guard is mirrored here rather than
-/// reused; a variable that IS set passes straight through.)
-fn assert_soft_skip_allowed(env_var: &str) {
-    if std::env::var(env_var)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
-        panic!(
-            "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
+    /// `APEXMAIL_RELEASE_TEST_MODE=1` a missing infrastructure variable is a hard
+    /// panic naming the variable, never a silent skip. (This crate does not
+    /// depend on `migrator`, so the workspace guard is mirrored here rather than
+    /// reused; a variable that IS set passes straight through.)
+    fn assert_soft_skip_allowed(env_var: &str) {
+        if std::env::var(env_var)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if std::env::var("APEXMAIL_RELEASE_TEST_MODE").as_deref() == Ok("1") {
+            panic!(
+                "APEXMAIL_RELEASE_TEST_MODE: required variable {env_var} is missing — \
              release CI must not skip infrastructure tests"
-        );
+            );
+        }
     }
-}
 
     /// Helper: build a deadpool pool from `REDIS_TEST_URL` (no ambient
     /// default; unset means skip), mirroring the rate-limiter convention.

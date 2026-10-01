@@ -54,7 +54,10 @@ fn unsubscribe_confirm_page_is_side_effect_free_html_with_post_form() {
     // With no anchors at all, no href can fetch-perform the unsubscribe;
     // the template's explanatory COMMENT mentions the legacy ?confirm=1
     // link, so the check must be anchor-scoped, not raw-substring.
-    assert!(!html.contains("href="), "no href may mutate consent: {html}");
+    assert!(
+        !html.contains("href="),
+        "no href may mutate consent: {html}"
+    );
     assert!(!html.contains("<script"), "no scripts on the page");
 }
 
@@ -110,8 +113,7 @@ fn preferences_page_renders_category_checkboxes_and_resubscribe() {
     );
 
     // Globally unsubscribed: the notice + the resubscribe affordance.
-    let suppressed =
-        render_preferences_page(TOKEN, EMAIL, "/p", &categories, true);
+    let suppressed = render_preferences_page(TOKEN, EMAIL, "/p", &categories, true);
     assert!(
         suppressed.contains("alert-warning"),
         "global-unsubscribe notice must be visible: {suppressed}"

@@ -229,6 +229,16 @@ impl DeliveryService {
     }
 
     /// Calculate retry schedule.
+    ///
+    /// SM10 F16: ONE schedule for every retryable (4xx) response, matching
+    /// the email processor's ACTUAL soft-bounce requeue
+    /// (`worker-processors` `handle_soft_bounce`: `retry_delay * 2^attempt`
+    /// with a ±20% anti-herd jitter applied THERE — this oracle answers the
+    /// canonical base). The previous per-type branches promised a fixed
+    /// 300 s greylist delay and server-honoured rate-limit delays that no
+    /// delivery path ever used — a classification oracle whose answers
+    /// drift from the behavior it mirrors is negative value. The parsed
+    /// `suggested_retry_delay` stays on [`SMTPResponse`] as metadata.
     pub fn calculate_retry_schedule(
         &self,
         response: &SMTPResponse,
@@ -241,26 +251,16 @@ impl DeliveryService {
             return None;
         }
 
-        let (delay, reason) = match response.response_type {
-            ResponseType::Greylist => (
-                self.retry_config.greylist_retry_delay_secs,
-                "greylist".to_string(),
-            ),
-            ResponseType::RateLimit => {
-                let delay = response
-                    .suggested_retry_delay
-                    .unwrap_or(self.retry_config.initial_delay_secs * 5);
-                (delay, "rate_limit".to_string())
-            }
-            _ => {
-                let delay = (self.retry_config.initial_delay_secs as f64
-                    * self
-                        .retry_config
-                        .backoff_multiplier
-                        .powi(current_attempt as i32)) as u64;
-                let delay = delay.min(self.retry_config.max_delay_secs);
-                (delay, "temporary_failure".to_string())
-            }
+        let delay = (self.retry_config.initial_delay_secs as f64
+            * self
+                .retry_config
+                .backoff_multiplier
+                .powi(current_attempt as i32)) as u64;
+        let delay = delay.min(self.retry_config.max_delay_secs);
+        let reason = match response.response_type {
+            ResponseType::Greylist => "greylist".to_string(),
+            ResponseType::RateLimit => "rate_limit".to_string(),
+            _ => "temporary_failure".to_string(),
         };
 
         let next = chrono::Utc::now() + chrono::Duration::seconds(delay as i64);
@@ -810,7 +810,10 @@ mod tests {
             suggested_retry_delay: None,
         };
         let schedule = svc.calculate_retry_schedule(&resp, 0).unwrap();
-        assert_eq!(schedule.delay_secs, 300);
+        // SM10 F16: greylist follows the SAME exponential schedule as every
+        // other 4xx (the email processor's soft-bounce base 30 * 2^0), not
+        // the old fixed 300 s promise no delivery path honored.
+        assert_eq!(schedule.delay_secs, 30);
         assert_eq!(schedule.reason, "greylist");
     }
 
@@ -936,20 +939,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_schedule_honours_suggested_delay_and_budgets() {
+    async fn retry_schedule_ignores_suggested_delay_and_budgets() {
         let svc = offline_service();
-        // Rate limit with a server-suggested delay uses that delay.
+        // SM10 F16: the schedule matches the email processor, which requeues
+        // EVERY 4xx on the same exponential base and ignores server retry
+        // hints — so a parsed "retry after 2 minutes" no longer bends the
+        // schedule (it stays on SMTPResponse as metadata).
         let mut resp = svc.parse_smtp_response(421, "retry after 2 minutes");
         resp.response_type = ResponseType::RateLimit;
         let schedule = svc.calculate_retry_schedule(&resp, 0).unwrap();
-        assert_eq!(schedule.delay_secs, 120);
+        assert_eq!(schedule.delay_secs, 30);
         assert_eq!(schedule.reason, "rate_limit");
         assert_eq!(schedule.attempt_number, 1);
+        assert_eq!(
+            resp.suggested_retry_delay,
+            Some(120),
+            "the parsed hint remains available as metadata"
+        );
 
-        // Rate limit without a hint falls back to initial_delay * 5.
+        // Without a hint: same schedule (the old initial_delay * 5 fallback
+        // is gone with the per-type branches).
         resp.suggested_retry_delay = None;
         let schedule = svc.calculate_retry_schedule(&resp, 0).unwrap();
-        assert_eq!(schedule.delay_secs, 5);
+        assert_eq!(schedule.delay_secs, 30);
 
         // The exponential delay is capped at max_delay_secs (needs a retry
         // budget larger than the default three to reach the cap at all).
@@ -984,6 +996,110 @@ mod tests {
         assert!(svc
             .calculate_retry_schedule(&temp, svc.retry_config.max_retries)
             .is_none());
+    }
+
+    // ── SM10 F16: parity with the email processor's ACTUAL behavior ────────
+    //
+    // SOURCE OF TRUTH duplicated by value — a shared constant would need a
+    // mail-common coupling that is out of bounds for this fix. If the email
+    // processor's schedule changes, these duplicated constants (and the
+    // worker's own tests) must move together:
+    //   worker-processors/src/common/config.rs `ProcessorConfig::default`:
+    //     retry_delay = 30 s, max_retries = 3
+    //   worker-processors/src/email/processor.rs `handle_soft_bounce`:
+    //     delay = retry_delay * 2^attempt (±20% anti-herd jitter applied
+    //     there; this oracle answers the canonical base).
+    const EMAIL_PROCESSOR_RETRY_DELAY_SECS: u64 = 30;
+    const EMAIL_PROCESSOR_MAX_RETRIES: u32 = 3;
+    const EMAIL_PROCESSOR_BACKOFF_MULTIPLIER: f64 = 2.0;
+
+    /// The default retry config must equal the email processor's actual
+    /// schedule constants, not a private dialect (the old default waited
+    /// 1 s and promised fixed 300 s greylist delays).
+    #[test]
+    fn retry_config_defaults_match_the_email_processor() {
+        let rc = RetryConfig::default();
+        assert_eq!(rc.initial_delay_secs, EMAIL_PROCESSOR_RETRY_DELAY_SECS);
+        assert_eq!(rc.max_retries, EMAIL_PROCESSOR_MAX_RETRIES);
+        assert_eq!(
+            rc.backoff_multiplier, EMAIL_PROCESSOR_BACKOFF_MULTIPLIER,
+            "the email processor requeues at retry_delay * 2^attempt"
+        );
+    }
+
+    /// EVERY retryable (4xx) response type must produce the email
+    /// processor's schedule — the worker classifies greylisted, rate-limited
+    /// and plain-temporary replies alike as Soft and requeues them on ONE
+    /// exponential ladder; past the retry budget nothing is scheduled (the
+    /// worker hard-bounces).
+    #[test]
+    fn every_4xx_response_follows_the_worker_soft_bounce_ladder() {
+        let svc = TestDelivery::new();
+        for (code, message, expected_type) in [
+            (450, "Greylisted, try again later", ResponseType::Greylist),
+            (
+                421,
+                "Rate limit exceeded for your IP",
+                ResponseType::RateLimit,
+            ),
+            (
+                451,
+                "Temporary local problem",
+                ResponseType::TemporaryFailure,
+            ),
+        ] {
+            let resp = svc.parse_smtp_response(code, message);
+            assert_eq!(resp.response_type, expected_type, "code {code}");
+            for attempt in 0..EMAIL_PROCESSOR_MAX_RETRIES {
+                let schedule = svc
+                    .calculate_retry_schedule(&resp, attempt)
+                    .unwrap_or_else(|| panic!("code {code} attempt {attempt} must be retryable"));
+                let expected = (EMAIL_PROCESSOR_RETRY_DELAY_SECS as f64
+                    * EMAIL_PROCESSOR_BACKOFF_MULTIPLIER.powi(attempt as i32))
+                    as u64;
+                assert_eq!(
+                    schedule.delay_secs, expected,
+                    "code {code} attempt {attempt}: the ladder must match the worker's"
+                );
+            }
+            assert!(
+                svc.calculate_retry_schedule(&resp, EMAIL_PROCESSOR_MAX_RETRIES)
+                    .is_none(),
+                "code {code}: past the worker's retry budget there is no schedule"
+            );
+        }
+    }
+
+    /// Classification parity: the worker's `classify_send_failure` sends
+    /// every 4xx to the retryable Soft arm and every 5xx to the terminal
+    /// Hard arm — `parse_smtp_response` must agree across the full ranges.
+    #[test]
+    fn smtp_code_ranges_classify_like_the_worker() {
+        let svc = TestDelivery::new();
+        for code in 400..500u16 {
+            let resp = svc.parse_smtp_response(code, "transient problem");
+            assert_ne!(
+                resp.response_type,
+                ResponseType::PermanentFailure,
+                "{code}: a 4xx must stay retryable (worker classifies Soft)"
+            );
+            assert!(
+                svc.calculate_retry_schedule(&resp, 0).is_some(),
+                "{code}: a 4xx must produce a schedule"
+            );
+        }
+        for code in 500..600u16 {
+            let resp = svc.parse_smtp_response(code, "permanent problem");
+            assert_eq!(
+                resp.response_type,
+                ResponseType::PermanentFailure,
+                "{code}: a 5xx must be terminal (worker classifies Hard)"
+            );
+            assert!(
+                svc.calculate_retry_schedule(&resp, 0).is_none(),
+                "{code}: a 5xx must never be scheduled"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1368,26 +1484,18 @@ mod tests {
             if current_attempt >= self.retry_config.max_retries {
                 return None;
             }
-            let (delay, reason) = match response.response_type {
-                ResponseType::Greylist => (
-                    self.retry_config.greylist_retry_delay_secs,
-                    "greylist".to_string(),
-                ),
-                ResponseType::RateLimit => {
-                    let delay = response
-                        .suggested_retry_delay
-                        .unwrap_or(self.retry_config.initial_delay_secs * 5);
-                    (delay, "rate_limit".to_string())
-                }
-                _ => {
-                    let delay = (self.retry_config.initial_delay_secs as f64
-                        * self
-                            .retry_config
-                            .backoff_multiplier
-                            .powi(current_attempt as i32)) as u64;
-                    let delay = delay.min(self.retry_config.max_delay_secs);
-                    (delay, "temporary_failure".to_string())
-                }
+            // SM10 F16: the double mirrors the service's ONE unified
+            // schedule (the email processor's soft-bounce ladder).
+            let delay = (self.retry_config.initial_delay_secs as f64
+                * self
+                    .retry_config
+                    .backoff_multiplier
+                    .powi(current_attempt as i32)) as u64;
+            let delay = delay.min(self.retry_config.max_delay_secs);
+            let reason = match response.response_type {
+                ResponseType::Greylist => "greylist".to_string(),
+                ResponseType::RateLimit => "rate_limit".to_string(),
+                _ => "temporary_failure".to_string(),
             };
             let next = chrono::Utc::now() + chrono::Duration::seconds(delay as i64);
             Some(RetrySchedule {

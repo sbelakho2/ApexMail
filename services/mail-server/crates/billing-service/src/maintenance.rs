@@ -7731,10 +7731,12 @@ mod coverage_adversarial {
 
         // ── wallet reservation cleanup: an expired, uncaptured reservation.
         seed_tenant_plan(env, "w6cdrv_resv", "growth", "active").await;
-        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ('w6cdrv_resv', 0, 'EUR')")
-            .execute(&env.pool)
-            .await
-            .expect("wallet");
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, currency) VALUES ('w6cdrv_resv', 0, 'EUR')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("wallet");
         sqlx::query(
             "INSERT INTO wallet_reservations
                  (id, wallet_id, tenant_id, amount, status, expires_at, created_at)
@@ -7760,7 +7762,13 @@ mod coverage_adversarial {
         // ── dunning grace expiry: a hard-suspended tenant past its grace
         // window with queued messages to purge.
         seed_tenant_plan(env, "w6cdrv_grace", "growth", "suspended").await;
-        seed_dunning(env, "w6cdrv_grace", "hard_suspended", Some(Utc::now() - chrono::Duration::hours(2))).await;
+        seed_dunning(
+            env,
+            "w6cdrv_grace",
+            "hard_suspended",
+            Some(Utc::now() - chrono::Duration::hours(2)),
+        )
+        .await;
         sqlx::query(
             r#"INSERT INTO messages (id, tenant_id, to_addresses, status, from_email, to_emails,
                                    open_count, click_count, unsubscribe_count, message_category,
@@ -8015,13 +8023,17 @@ mod coverage_adversarial {
             "delivery reconciliation report written"
         );
 
-        // KMD: with the day of month past the 20th, the loop generated the
-        // previous month's VAT return.
+        // KMD: the loop generates the previous month's VAT return only ON OR
+        // AFTER the 20th (the real-time gate in `generate_kmd_if_due`), so
+        // the expectation follows the same calendar — generated past the
+        // due day, deliberately absent before it. (A fixed "one row must
+        // appear" assertion silently failed on the 1st–19th of every month.)
+        let kmd_due = Utc::now().day() >= 20;
         poll_until!(
             deadline,
             "SELECT COUNT(*) FROM vat_kmd_returns",
-            |count| count >= 1,
-            "KMD VAT return generated for the previous month"
+            |count| if kmd_due { count >= 1 } else { count == 0 },
+            "KMD VAT return honours the 20th-of-the-month due gate"
         );
 
         // The loops keep running on the runtime until it drops; restore the
@@ -8166,7 +8178,10 @@ mod coverage_adversarial {
         .fetch_one(&env.pool)
         .await
         .expect("events");
-        assert_eq!(persisted, 1, "the DB insert committed before the script ran");
+        assert_eq!(
+            persisted, 1,
+            "the DB insert committed before the script ran"
+        );
         let mut conn = env.redis.get().await.expect("redis");
         let counter_kind: String = redis::cmd("TYPE")
             .arg(&counter_key)
@@ -8187,12 +8202,15 @@ mod coverage_adversarial {
         );
     });
 
-    env_test!(delete_redis_keys_with_an_empty_list_is_a_clean_noop, |env| {
-        let mut conn = env.redis.get().await.expect("redis");
-        delete_redis_keys(&mut conn, &[])
-            .await
-            .expect("empty key list is a no-op");
-    });
+    env_test!(
+        delete_redis_keys_with_an_empty_list_is_a_clean_noop,
+        |env| {
+            let mut conn = env.redis.get().await.expect("redis");
+            delete_redis_keys(&mut conn, &[])
+                .await
+                .expect("empty key list is a no-op");
+        }
+    );
 
     // ── SLA credit edges ────────────────────────────────────────────────
 
@@ -8206,15 +8224,31 @@ mod coverage_adversarial {
         // binary floating point anywhere near the money computation).
         let cases: [(&str, &str, Value); 6] = [
             ("w6csla_noflag", "90.0", serde_json::json!({})),
-            ("w6csla_good", "99.95", serde_json::json!({"slaGuarantee": true})),
-            ("w6csla_tiny", "99.85", serde_json::json!({"slaGuarantee": true})),
+            (
+                "w6csla_good",
+                "99.95",
+                serde_json::json!({"slaGuarantee": true}),
+            ),
+            (
+                "w6csla_tiny",
+                "99.85",
+                serde_json::json!({"slaGuarantee": true}),
+            ),
             (
                 "w6csla_capped",
                 "95.0",
                 serde_json::json!({"slaGuarantee": true, "slaCreditPercentage": 10}),
             ),
-            ("w6csla_noinv", "90.0", serde_json::json!({"slaGuarantee": true})),
-            ("w6csla_already", "90.0", serde_json::json!({"slaGuarantee": true})),
+            (
+                "w6csla_noinv",
+                "90.0",
+                serde_json::json!({"slaGuarantee": true}),
+            ),
+            (
+                "w6csla_already",
+                "90.0",
+                serde_json::json!({"slaGuarantee": true}),
+            ),
         ];
         for (tenant, uptime, features) in &cases {
             seed_plan(env, tenant, 1000, features.clone()).await;
@@ -8312,28 +8346,30 @@ mod coverage_adversarial {
 
     // ── dedicated-IP cancel fault arms ──────────────────────────────────
 
-    env_test!(dedicated_ip_cancel_failure_rolls_back_and_404_succeeds, |env| {
-        let mock = Mock::default();
-        mock.route("/v1/subscription_items/si_dead", 500, "stripe exploded");
-        mock.route(
-            "/v1/subscription_items/si_gone",
-            404,
-            r#"{"error":{"code":"resource_missing"}}"#,
-        );
-        let base = spawn_mock(mock.clone()).await;
+    env_test!(
+        dedicated_ip_cancel_failure_rolls_back_and_404_succeeds,
+        |env| {
+            let mock = Mock::default();
+            mock.route("/v1/subscription_items/si_dead", 500, "stripe exploded");
+            mock.route(
+                "/v1/subscription_items/si_gone",
+                404,
+                r#"{"error":{"code":"resource_missing"}}"#,
+            );
+            let base = spawn_mock(mock.clone()).await;
 
-        let guard = ENV_LOCK.lock().await;
-        let previous = (
-            std::env::var("STRIPE_SECRET_KEY").ok(),
-            std::env::var("STRIPE_API_BASE_URL").ok(),
-            std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
-        );
-        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c_dip");
-        std::env::set_var("STRIPE_API_BASE_URL", &base);
-        std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_w6c_dip");
+            let guard = ENV_LOCK.lock().await;
+            let previous = (
+                std::env::var("STRIPE_SECRET_KEY").ok(),
+                std::env::var("STRIPE_API_BASE_URL").ok(),
+                std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
+            );
+            std::env::set_var("STRIPE_SECRET_KEY", "sk_test_w6c_dip");
+            std::env::set_var("STRIPE_API_BASE_URL", &base);
+            std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_w6c_dip");
 
-        seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
-        sqlx::query(
+            seed_tenant_plan(env, "w6cdip_cancel", "growth", "active").await;
+            sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
                                         stripe_subscription_item_id)
              VALUES ('w6cdip-dead', 'w6cdip_cancel', '192.0.2.51', 'active', 'pending_cancel', 'si_dead'),
@@ -8343,43 +8379,44 @@ mod coverage_adversarial {
         .await
         .expect("pending cancels");
 
-        let client = Client::new();
-        let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+            let client = Client::new();
+            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+                .await
+                .expect("cancel sweep");
+            assert_eq!(
+                canceled, 1,
+                "the 404/resource_missing cancel succeeds, the 500 one does not"
+            );
+            let statuses: Vec<(String, String)> = sqlx::query_as(
+                "SELECT id, billing_status FROM dedicated_ips WHERE id LIKE 'w6cdip-%' ORDER BY id",
+            )
+            .fetch_all(&env.pool)
             .await
-            .expect("cancel sweep");
-        assert_eq!(
-            canceled, 1,
-            "the 404/resource_missing cancel succeeds, the 500 one does not"
-        );
-        let statuses: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, billing_status FROM dedicated_ips WHERE id LIKE 'w6cdip-%' ORDER BY id",
-        )
-        .fetch_all(&env.pool)
-        .await
-        .expect("statuses");
-        assert_eq!(
-            statuses,
-            vec![
-                ("w6cdip-dead".to_string(), "pending_cancel".to_string()),
-                ("w6cdip-gone".to_string(), "canceled".to_string()),
-            ],
-            "the Stripe failure rolled back whole, the missing resource was finalized"
-        );
+            .expect("statuses");
+            assert_eq!(
+                statuses,
+                vec![
+                    ("w6cdip-dead".to_string(), "pending_cancel".to_string()),
+                    ("w6cdip-gone".to_string(), "canceled".to_string()),
+                ],
+                "the Stripe failure rolled back whole, the missing resource was finalized"
+            );
 
-        match previous {
-            (Some(a), Some(b), Some(c)) => {
-                std::env::set_var("STRIPE_SECRET_KEY", a);
-                std::env::set_var("STRIPE_API_BASE_URL", b);
-                std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", c);
+            match previous {
+                (Some(a), Some(b), Some(c)) => {
+                    std::env::set_var("STRIPE_SECRET_KEY", a);
+                    std::env::set_var("STRIPE_API_BASE_URL", b);
+                    std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", c);
+                }
+                _ => {
+                    std::env::remove_var("STRIPE_SECRET_KEY");
+                    std::env::remove_var("STRIPE_API_BASE_URL");
+                    std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
+                }
             }
-            _ => {
-                std::env::remove_var("STRIPE_SECRET_KEY");
-                std::env::remove_var("STRIPE_API_BASE_URL");
-                std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
-            }
+            drop(guard);
         }
-        drop(guard);
-    });
+    );
 
     // ── cost margin status arms ─────────────────────────────────────────
 
@@ -8534,7 +8571,9 @@ mod coverage_adversarial {
         assert_eq!(balance, 500, "the credit survived the failed expiry");
 
         // With auditing healthy the same credit expires exactly once.
-        let expired = expire_stale_wallet_credits(&env.state).await.expect("expiry");
+        let expired = expire_stale_wallet_credits(&env.state)
+            .await
+            .expect("expiry");
         assert_eq!(expired, 1);
         let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
             .bind(tenant)
@@ -8551,7 +8590,9 @@ mod coverage_adversarial {
         .expect("debits");
         assert_eq!(debits, 1);
         assert_eq!(
-            expire_stale_wallet_credits(&env.state).await.expect("replay"),
+            expire_stale_wallet_credits(&env.state)
+                .await
+                .expect("replay"),
             0,
             "yesterday's expiry debit counts as consumption"
         );
@@ -8559,179 +8600,204 @@ mod coverage_adversarial {
 
     // ── restriction-aware admin reset ───────────────────────────────────
 
-    env_test!(admin_reset_reports_missing_holds_and_releases_messages, |env| {
-        let tenant = "w6cadmin_reset";
-        seed_tenant_plan(env, tenant, "growth", "active").await;
-        seed_dunning(env, tenant, "warning", None).await;
-        seed_message(env, tenant, "dunning_queued").await;
-        seed_message(env, tenant, "dunning_queued").await;
+    env_test!(
+        admin_reset_reports_missing_holds_and_releases_messages,
+        |env| {
+            let tenant = "w6cadmin_reset";
+            seed_tenant_plan(env, tenant, "growth", "active").await;
+            seed_dunning(env, tenant, "warning", None).await;
+            seed_message(env, tenant, "dunning_queued").await;
+            seed_message(env, tenant, "dunning_queued").await;
 
-        // No billing restriction exists: the reset still resets dunning and
-        // releases the queued messages, and must not pretend a hold cleared.
-        admin_reset_dunning_restriction_aware(
-            &env.pool,
-            &env.redis,
-            tenant,
-            "admin-w6c",
-            "w6c coverage reset",
-        )
-        .await
-        .expect("admin reset");
-        let (status, holds, queued): (String, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT status FROM dunning_records WHERE tenant_id = $1),
+            // No billing restriction exists: the reset still resets dunning and
+            // releases the queued messages, and must not pretend a hold cleared.
+            admin_reset_dunning_restriction_aware(
+                &env.pool,
+                &env.redis,
+                tenant,
+                "admin-w6c",
+                "w6c coverage reset",
+            )
+            .await
+            .expect("admin reset");
+            let (status, holds, queued): (String, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT status FROM dunning_records WHERE tenant_id = $1),
                     (SELECT COUNT(*) FROM tenant_restrictions
                      WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NOT NULL),
                     (SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'queued')",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("state");
-        assert_eq!(status, "healthy");
-        assert_eq!(holds, 0, "no hold existed to clear");
-        assert_eq!(queued, 2, "queued messages released");
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("state");
+            assert_eq!(status, "healthy");
+            assert_eq!(holds, 0, "no hold existed to clear");
+            assert_eq!(queued, 2, "queued messages released");
 
-        // A replay stays clean.
-        admin_reset_dunning_restriction_aware(
-            &env.pool,
-            &env.redis,
-            tenant,
-            "admin-w6c",
-            "w6c replay",
-        )
-        .await
-        .expect("admin reset replay");
-    });
+            // A replay stays clean.
+            admin_reset_dunning_restriction_aware(
+                &env.pool,
+                &env.redis,
+                tenant,
+                "admin-w6c",
+                "w6c replay",
+            )
+            .await
+            .expect("admin reset replay");
+        }
+    );
 
     // ── month-end closing audit fault ───────────────────────────────────
 
-    env_test!(month_end_closing_audit_failure_rolls_everything_back, |env| {
-        let tenant = "w6cmclose_audit";
-        seed_tenant_plan(env, tenant, "growth", "active").await;
-        let this_month = month_start(Utc::now());
-        let mid_last_month =
-            month_start(this_month - chrono::Days::new(1)) + chrono::Duration::days(10);
-        let invoice = Uuid::new_v4();
-        seed_invoice_row(env, invoice, tenant, "paid", mid_last_month, Some(mid_last_month), None).await;
+    env_test!(
+        month_end_closing_audit_failure_rolls_everything_back,
+        |env| {
+            let tenant = "w6cmclose_audit";
+            seed_tenant_plan(env, tenant, "growth", "active").await;
+            let this_month = month_start(Utc::now());
+            let mid_last_month =
+                month_start(this_month - chrono::Days::new(1)) + chrono::Duration::days(10);
+            let invoice = Uuid::new_v4();
+            seed_invoice_row(
+                env,
+                invoice,
+                tenant,
+                "paid",
+                mid_last_month,
+                Some(mid_last_month),
+                None,
+            )
+            .await;
 
-        env.break_table("billing_audit_log").await;
-        let error = perform_month_end_closing(&env.state)
-            .await
-            .expect_err("a broken audit trail must abort the closing");
-        env.restore_table("billing_audit_log").await;
-        assert!(
-            error.contains("Failed to insert billing audit log"),
-            "{error}"
-        );
-        // The whole transaction rolled back: nothing closed, nothing recorded.
-        let (closed, closings): (i64, i64) = sqlx::query_as(
-            "SELECT (SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL),
+            env.break_table("billing_audit_log").await;
+            let error = perform_month_end_closing(&env.state)
+                .await
+                .expect_err("a broken audit trail must abort the closing");
+            env.restore_table("billing_audit_log").await;
+            assert!(
+                error.contains("Failed to insert billing audit log"),
+                "{error}"
+            );
+            // The whole transaction rolled back: nothing closed, nothing recorded.
+            let (closed, closings): (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL),
                     (SELECT COUNT(*) FROM month_end_closings)",
-        )
-        .bind(invoice)
-        .fetch_one(&env.pool)
-        .await
-        .expect("rollback state");
-        assert_eq!((closed, closings), (0, 0));
+            )
+            .bind(invoice)
+            .fetch_one(&env.pool)
+            .await
+            .expect("rollback state");
+            assert_eq!((closed, closings), (0, 0));
 
-        // With the audit trail healthy the closing completes exactly once.
-        assert!(perform_month_end_closing(&env.state).await.expect("closing"));
-        assert!(!perform_month_end_closing(&env.state).await.expect("replay"));
-        let closed: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL",
-        )
-        .bind(invoice)
-        .fetch_one(&env.pool)
-        .await
-        .expect("closed");
-        assert_eq!(closed, 1);
-    });
+            // With the audit trail healthy the closing completes exactly once.
+            assert!(perform_month_end_closing(&env.state)
+                .await
+                .expect("closing"));
+            assert!(!perform_month_end_closing(&env.state).await.expect("replay"));
+            let closed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM invoices WHERE id = $1 AND closed_at IS NOT NULL",
+            )
+            .bind(invoice)
+            .fetch_one(&env.pool)
+            .await
+            .expect("closed");
+            assert_eq!(closed, 1);
+        }
+    );
 
     // ── usage-alert webhook failure arm ─────────────────────────────────
 
-    env_test!(usage_alert_webhook_failure_delivers_nothing_and_retries, |env| {
-        let tenant = "w6calert_fail";
-        // This test owns `alert:cooldown:{tenant}:*` in the shared Redis:
-        // a cooldown set by a previous run (1 h TTL) must not suppress the
-        // first delivery attempt.
-        {
-            let mut conn = env.redis.get().await.expect("redis");
-            let stale: Vec<String> = redis::cmd("KEYS")
-                .arg(format!("alert:cooldown:{tenant}:*"))
-                .query_async(&mut conn)
-                .await
-                .expect("scan cooldowns");
-            if !stale.is_empty() {
-                let _: () = redis::cmd("DEL")
-                    .arg(&stale)
+    env_test!(
+        usage_alert_webhook_failure_delivers_nothing_and_retries,
+        |env| {
+            let tenant = "w6calert_fail";
+            // This test owns `alert:cooldown:{tenant}:*` in the shared Redis:
+            // a cooldown set by a previous run (1 h TTL) must not suppress the
+            // first delivery attempt.
+            {
+                let mut conn = env.redis.get().await.expect("redis");
+                let stale: Vec<String> = redis::cmd("KEYS")
+                    .arg(format!("alert:cooldown:{tenant}:*"))
                     .query_async(&mut conn)
                     .await
-                    .expect("clear cooldowns");
+                    .expect("scan cooldowns");
+                if !stale.is_empty() {
+                    let _: () = redis::cmd("DEL")
+                        .arg(&stale)
+                        .query_async(&mut conn)
+                        .await
+                        .expect("clear cooldowns");
+                }
             }
-        }
-        seed_tenant_plan(env, tenant, "growth", "active").await;
-        seed_plan(env, "w6calert_plan", 100, json!({})).await;
-        sqlx::query("UPDATE tenants SET plan = 'w6calert_plan' WHERE id = $1")
-            .bind(tenant)
-            .execute(&env.pool)
-            .await
-            .expect("switch plan");
-        let mock = Mock::default();
-        mock.route("/hook", 500, "webhook down");
-        let base = spawn_mock(mock.clone()).await;
-        sqlx::query("UPDATE tenants SET settings = $2::jsonb WHERE id = $1")
-            .bind(tenant)
-            .bind(json!({"webhookUrl": format!("{base}/hook")}).to_string())
-            .execute(&env.pool)
-            .await
-            .expect("tenant webhook");
-        sqlx::query(
-            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent,
+            seed_tenant_plan(env, tenant, "growth", "active").await;
+            seed_plan(env, "w6calert_plan", 100, json!({})).await;
+            sqlx::query("UPDATE tenants SET plan = 'w6calert_plan' WHERE id = $1")
+                .bind(tenant)
+                .execute(&env.pool)
+                .await
+                .expect("switch plan");
+            let mock = Mock::default();
+            mock.route("/hook", 500, "webhook down");
+            let base = spawn_mock(mock.clone()).await;
+            sqlx::query("UPDATE tenants SET settings = $2::jsonb WHERE id = $1")
+                .bind(tenant)
+                .bind(json!({"webhookUrl": format!("{base}/hook")}).to_string())
+                .execute(&env.pool)
+                .await
+                .expect("tenant webhook");
+            sqlx::query(
+                "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent,
                                               notification_channel)
              VALUES ($1, 'emails', 50, 'webhook')",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("alert config");
-        sqlx::query(
-            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("alert config");
+            sqlx::query(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
              VALUES (gen_random_uuid(), $1, 'emails_sent', 80, NOW())",
-        )
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("usage");
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("usage");
 
-        let client = Client::new();
-        // Webhook down: nothing delivered, NO cooldown set — the next pass
-        // must retry.
-        let first = process_usage_alerts(&env.state, &client).await.expect("alerts");
-        assert_eq!(first.alerts_triggered, 0, "{first:?}");
-        assert_eq!(mock.call_count("/hook"), 1, "the webhook was attempted");
-        assert!(
-            !redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
-            "a failed delivery never sets the cooldown"
-        );
-        let last_triggered: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT last_triggered_at FROM usage_alert_configs WHERE tenant_id = $1",
-        )
-        .bind(tenant)
-        .fetch_one(&env.pool)
-        .await
-        .expect("last triggered");
-        assert!(last_triggered.is_none());
+            let client = Client::new();
+            // Webhook down: nothing delivered, NO cooldown set — the next pass
+            // must retry.
+            let first = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("alerts");
+            assert_eq!(first.alerts_triggered, 0, "{first:?}");
+            assert_eq!(mock.call_count("/hook"), 1, "the webhook was attempted");
+            assert!(
+                !redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
+                "a failed delivery never sets the cooldown"
+            );
+            let last_triggered: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT last_triggered_at FROM usage_alert_configs WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("last triggered");
+            assert!(last_triggered.is_none());
 
-        // Webhook recovers: the SAME threshold fires on the next pass.
-        mock.route("/hook", 200, "{}");
-        let second = process_usage_alerts(&env.state, &client).await.expect("alerts");
-        assert_eq!(second.alerts_triggered, 1, "{second:?}");
-        assert!(
-            redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
-            "a delivered alert sets the cooldown"
-        );
-        let third = process_usage_alerts(&env.state, &client).await.expect("alerts");
-        assert_eq!(third.alerts_triggered, 0, "cooldown suppresses the replay");
-    });
-
+            // Webhook recovers: the SAME threshold fires on the next pass.
+            mock.route("/hook", 200, "{}");
+            let second = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("alerts");
+            assert_eq!(second.alerts_triggered, 1, "{second:?}");
+            assert!(
+                redis_exists(env, &format!("alert:cooldown:{tenant}:emails:50")).await,
+                "a delivered alert sets the cooldown"
+            );
+            let third = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("alerts");
+            assert_eq!(third.alerts_triggered, 0, "cooldown suppresses the replay");
+        }
+    );
 }

@@ -1,0 +1,41 @@
+[package]
+name = "fuzz-tests-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Own (empty) workspace: this subproject is deliberately EXCLUDED from the
+# services/mail-server workspace — libFuzzer targets link a different global
+# allocator and sanitizer runtime, and `cargo fuzz` manages them as a
+# separate crate tree. It is not built by `cargo test`/`cargo check` of the
+# parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+prost = "0.13"
+
+mail-proto = { path = "../../mail-proto" }
+imap-proto = { path = "../../imap-proto-patched" }
+
+# Prevent this subproject from printing long stack traces for expected
+# timeouts; keep everything else at cargo-fuzz defaults.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_mail_proto"
+path = "fuzz_targets/fuzz_mail_proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_imap_response"
+path = "fuzz_targets/fuzz_imap_response.rs"
+test = false
+doc = false
+bench = false

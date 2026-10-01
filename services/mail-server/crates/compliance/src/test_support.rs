@@ -189,6 +189,7 @@ fn assemble_app_state(
         redis: redis_pool(),
         http_client: reqwest::Client::new(),
         dsar_rate_limiter,
+        trust_access_limiter: crate::trust_portal::TrustAccessRateLimiter::new(),
     })
 }
 

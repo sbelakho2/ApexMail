@@ -31,6 +31,37 @@ Production targets are for dedicated Hetzner ARM infrastructure.
 
 Threshold changes require a baseline run and an accompanying note in this file.
 
+## Baseline integration (SM12 F9)
+
+Every timed test wraps its inputs and outputs in `std::hint::black_box` (so
+LLVM cannot delete the measured work) and prints one machine-readable metric
+line in the exact shape `scripts/compare-baseline.sh` reads:
+
+```text
+PERF_METRIC {"id_generation":{"throughput_ops_per_sec":389718.0}}
+```
+
+Collect the lines into a results file (strip the `PERF_METRIC ` prefix, one
+JSON object per line, or merge with `jq -s 'add'`) and run the script as the
+regression gate:
+
+```sh
+cargo test -p perf-tests --release -- --nocapture 2>&1 \
+  | grep '^PERF_METRIC ' | sed 's/^PERF_METRIC //' > results.json
+jq -s 'add' results.json > merged.json
+../../scripts/compare-baseline.sh merged.json
+```
+
+If `PERF_RESULTS_JSON` is set, the same object is also appended to that file
+as one JSON line.
+
+In release builds the tests additionally assert a floor of 10% of the
+committed `docs/evaluation/baselines/v1.0.json` throughput (transcribed into
+`tests/budget.rs::baseline_ops_per_sec` — keep the two in sync). Debug builds
+only apply the load-scaled wall-clock budgets: debug throughput is 10–50×
+below the release-mode baseline by construction, so a baseline gate there
+would measure the compiler, not the code.
+
 ## Dependency Scope
 
 `perf-tests` is the cross-crate performance harness for core library behavior:
