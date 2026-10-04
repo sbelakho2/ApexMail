@@ -115,7 +115,7 @@ JSON array.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `limit` | number | No | Results per page (default 25, max 200) |
+| `limit` | number | No | Results per page (default 50, max 200) |
 | `offset` | number | No | Rows to skip (default 0, max 100,000) |
 
 #### Example Request

@@ -4,7 +4,7 @@
 > **Required scopes:** `contacts:read` (GET), `contacts:write` (POST / PUT / DELETE)
 > **Rate limit:** 120 requests/minute per API key (bulk endpoints: 20/minute)
 
-Manage your contact database — add, update, import, export, and segment contacts. Contacts are the individuals you send emails to, stored with customizable fields, tags, and list membership.
+Manage your contact database — add, update, import, and segment contacts. Contacts are the individuals you send emails to, stored with customizable fields, tags, and list membership.
 
 > **Note:** To prevent sending to unwanted addresses, see the [Suppressions API](suppressions.md) for managing bounce, complaint, and unsubscribe suppression entries.
 
@@ -108,7 +108,7 @@ pagination.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `limit` | number | No | Results per page (default 25, max 200) |
+| `limit` | number | No | Results per page (default 50, max 200) |
 | `offset` | number | No | Rows to skip (default 0, max 100,000) |
 | `cursor` | string | No | Opaque keyset cursor (`created_at`+`id` of the last row); overrides `offset` |
 | `tag` | string | No | Filter by tag |
@@ -138,8 +138,8 @@ curl -X GET "https://api.apexmail.ee/v1/contacts?limit=50&tag=early-adopter" \
   ],
   "error": null,
   "meta": {
-    "has_more": false,
-    "next_cursor": null
+    "hasMore": false,
+    "nextCursor": null
   }
 }
 ```

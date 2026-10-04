@@ -321,16 +321,28 @@ async fn list_contacts(
 
     let fetch_limit = limit + 1; // fetch one extra to detect has_more
 
+    // Documented `tag` filter (docs/api/endpoints/contacts.md): when set,
+    // only contacts whose `tags` jsonb array contains that tag are listed.
+    // The bind is jsonb `[tag]` and jsonb containment (`@>`) drives the
+    // predicate; `NULL` disables the filter so one SQL shape serves both
+    // the filtered and unfiltered paths.
+    let tag_filter: Option<serde_json::Value> = params
+        .tag
+        .as_deref()
+        .map(|tag| serde_json::json!([tag]));
+
     let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
         sqlx::query_as::<_, ContactRow>(
             "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
              FROM contacts WHERE tenant_id = $1
                AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3))
-             ORDER BY created_at DESC, id DESC LIMIT $4",
+               AND ($4::jsonb IS NULL OR COALESCE(tags, '[]'::jsonb) @> $4::jsonb)
+             ORDER BY created_at DESC, id DESC LIMIT $5",
         )
         .bind(&auth.tenant_id)
         .bind(cursor_ts)
         .bind(cursor_id)
+        .bind(tag_filter)
         .bind(fetch_limit)
         .fetch_all(&state.db)
         .await?
@@ -339,9 +351,12 @@ async fn list_contacts(
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, ContactRow>(
             "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
-             FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
+             FROM contacts WHERE tenant_id = $1
+               AND ($2::jsonb IS NULL OR COALESCE(tags, '[]'::jsonb) @> $2::jsonb)
+             ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4",
         )
         .bind(&auth.tenant_id)
+        .bind(tag_filter)
         .bind(fetch_limit)
         .bind(offset)
         .fetch_all(&state.db)
@@ -2332,6 +2347,123 @@ mod canonical_crud_tests {
             .await
             .expect("tenant B contact survives");
             assert_eq!(survives.email, "alice@example.com");
+
+            pool.close().await;
+        }
+    }
+
+    /// The documented `?tag=` list filter must actually restrict rows — it
+    /// used to be deserialized and silently ignored, so `?tag=anything`
+    /// returned every contact. Covers the filter alone and combined with the
+    /// keyset cursor, and confirms other tenants' like-tagged rows never leak.
+    #[tokio::test]
+    async fn list_tag_filter_restricts_rows_and_composes_with_cursor() {
+        if let Some(pool) = crate::test_db::canonical_pool("contacts_tag_filter").await {
+            let state = crate::app::test_support::test_state_over(pool.clone()).await;
+            let tenant_a = "ten_contacts_tag_a";
+            let tenant_b = "ten_contacts_tag_b";
+
+            let (_, vip) = create(
+                &state,
+                tenant_a,
+                "tag-vip@example.com",
+                None,
+                Some(vec!["vip".into()]),
+                None,
+            )
+            .await
+            .expect("create tagged contact");
+            create(
+                &state,
+                tenant_a,
+                "tag-plain@example.com",
+                None,
+                Some(vec!["beta".into()]),
+                None,
+            )
+            .await
+            .expect("create differently-tagged contact");
+            create(
+                &state,
+                tenant_a,
+                "tag-untagged@example.com",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create untagged contact");
+            // Same tag in tenant B — must stay invisible to tenant A.
+            create(
+                &state,
+                tenant_b,
+                "tag-vip@example.com",
+                None,
+                Some(vec!["vip".into()]),
+                None,
+            )
+            .await
+            .expect("create same-tagged contact in tenant B");
+
+            async fn list(
+                state: &AppState,
+                tenant: &str,
+                tag: Option<String>,
+                cursor: Option<String>,
+            ) -> Vec<serde_json::Value> {
+                let response = list_contacts(
+                    State(state.clone()),
+                    auth_for(tenant),
+                    HeaderMap::new(),
+                    Query(ListContactsQuery {
+                        limit: 50,
+                        offset: 0,
+                        cursor,
+                        tag,
+                    }),
+                )
+                .await
+                .expect("list contacts");
+                let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .expect("list body");
+                let json: serde_json::Value =
+                    serde_json::from_slice(&body).expect("list JSON");
+                json["data"].as_array().expect("data array").clone()
+            }
+
+            // Unfiltered: all three tenant-A contacts.
+            assert_eq!(list(&state, tenant_a, None, None).await.len(), 3);
+
+            // Tagged: exactly the vip contact — never the other rows, never
+            // tenant B's same-tagged row.
+            let vip_rows = list(&state, tenant_a, Some("vip".into()), None).await;
+            assert_eq!(vip_rows.len(), 1, "tag filter must restrict rows");
+            assert_eq!(vip_rows[0]["id"], serde_json::json!(vip.id));
+
+            assert!(
+                list(&state, tenant_a, Some("missing-tag".into()), None)
+                    .await
+                    .is_empty(),
+                "unknown tag must yield an empty page"
+            );
+
+            // The filter composes with the keyset cursor: paginate FROM the
+            // vip row itself (as the client would after a `limit=1` page 1) —
+            // no older row carries the tag, so page 2 must be empty.
+            let vip_ts = vip_rows[0]["created_at"].as_str().expect("created_at");
+            let vip_id = vip_rows[0]["id"].as_str().expect("id");
+            let cursor = encode_keyset_cursor(
+                &chrono::DateTime::parse_from_rfc3339(vip_ts)
+                    .expect("rfc3339")
+                    .with_timezone(&Utc),
+                &Uuid::parse_str(vip_id).expect("uuid"),
+            );
+            let cursor_rows = list(&state, tenant_a, Some("vip".into()), Some(cursor)).await;
+            assert!(
+                cursor_rows.is_empty(),
+                "tag + cursor must continue the keyset scan, not restart it"
+            );
 
             pool.close().await;
         }
