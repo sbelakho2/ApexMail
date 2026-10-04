@@ -31,6 +31,8 @@ curl -X POST https://api.apexmail.ee/v1/messages \
 - Use idempotency keys when your sender may retry the same write request.
 - Keep API keys server-side; never embed them in browser code.
 - Use the [API Explorer](/api-explorer/) to test payloads before wiring them into your application.
+- Score sender domains with the [Email Grader API](/docs/api/grader/) — free for ApexMail customers.
+- The complete [OpenAPI 3.1 specification](/docs/api/openapi/) is downloadable and validated in CI.
 
 ## API Versioning
 

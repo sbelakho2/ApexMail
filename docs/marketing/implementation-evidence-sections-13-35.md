@@ -47,7 +47,12 @@
 ### 13.6 — Reverify Resend claims
 - [x] 17 features verified against current official Resend sources
 - [x] Idempotency correctly documented (Yes, Idempotency-Key header)
-- [x] Scheduled sending correctly documented (Not supported)
+- [x] Scheduled sending: the 2026-07-29 "Not supported" record was STALE —
+  Resend has shipped `scheduled_at` (ISO 8601 or natural language, up to
+  72 hours ahead) since 2024-10. Corrected in comparison-evidence.json
+  during the 2026-10-04 re-verification; the Resend compare page never
+  rendered the false row (its comparison_sections omit scheduling), so no
+  live claim needed retracting.
 - **Evidence**: `content/compare/resend/index.md:1-175`, `docs/marketing/comparison-evidence.json` records 6-8
 
 ### 13.7 — Add comparison maintenance

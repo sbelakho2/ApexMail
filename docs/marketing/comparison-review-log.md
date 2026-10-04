@@ -8,7 +8,8 @@
 | Review Date | Reviewer | Competitors Verified | Changes Found | Claims Updated | Claims Removed | Prices Updated | Notes |
 |-------------|----------|---------------------|---------------|----------------|----------------|----------------|-------|
 | 2026-07-29 | Product Marketing | SendGrid, Resend, Postmark | Initial evidence database created | 6 records created | 0 | N/A | Baseline established |
-| _Next review: overdue since 2026-08-28 — schedule and record above_ | | | | | | | |
+| 2026-10-04 | Dogfood DF-8 (engineering) | SendGrid, Resend, Postmark, Mailgun, Amazon SES (all 11 records) | Resend scheduled sending shipped (`scheduled_at`, ≤72h — the "Not supported" record was stale); Resend region wording corrected (EU routing region selectable per domain; storage not region-bound); Mailgun "EU on Foundation 50K+" plan-gating unsupported by current docs — replaced with per-sending-domain selection (same account/plan) | 3 records corrected | 1 unsupported qualifier removed (Mailgun plan-gating) | None found — page snapshots (2026-08-19: SendGrid US$19.95/US$89.95, Postmark US$16.50/10k) re-affirmed against 2026 third-party sources | All 11 records re-verified against official sources; next_review moved to 2026-11-03 |
+| _Next review: due 2026-11-03_ | | | | | | | |
 
 ---
 

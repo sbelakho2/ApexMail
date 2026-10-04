@@ -287,6 +287,18 @@ validate_repo_gates() {
         ci_check "capability claims vs production wiring" \
             env CAPABILITY_GATE_STRICT="${CAPABILITY_GATE_STRICT:-0}" \
             python3 tools/check_capability_claims.py
+        # Marketing claims gates: (1) the pricing table and pricing.json's
+        # overage rates must match docs/pricing.md and the runtime authority
+        # (billing-service/src/plans.rs); (2) the comparison evidence base,
+        # review log, and compare-page pricing snapshots must be within the
+        # methodology's 30-day review cadence — the 2026-10-04 pass found the
+        # log "overdue since 2026-08-28" with nothing enforcing it, which is
+        # exactly the drift this gate prevents from re-landing.
+        ci_check "marketing pricing + comparison freshness" bash -c '
+            set -eu
+            python3 docs/marketing/check_pricing_parity.py
+            python3 docs/marketing/check_comparison_freshness.py
+        '
         # Repo-map drift guard (the coverage-catalog pattern):
         # tools/repo-map.md is GENERATED from the source manifests (workspace
         # members, Dockerfile targets, compose services, capability stages,

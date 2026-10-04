@@ -71,6 +71,8 @@ Under GDPR, you have the following rights:
 
 To exercise any of these rights, contact us at **privacy@apexmail.ee**. We will respond within 30 days.
 
+California residents: see our [Do Not Sell My Personal Information](/privacy/do-not-sell/) notice — ApexMail does not sell personal information.
+
 ## 7. Complaints
 
 If you believe that our processing of your personal data infringes the GDPR, you have the right to lodge a complaint with the **Estonian Data Protection Inspectorate** (Andmekaitse Inspektsioon):

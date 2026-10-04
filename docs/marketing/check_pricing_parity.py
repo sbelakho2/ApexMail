@@ -16,6 +16,7 @@ monthly email allowance; exits 1 otherwise.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,35 @@ def emails(text: str) -> int:
     return int(digits) if digits else 0
 
 
+def overage_rates_from_source() -> dict[str, float]:
+    """Parse per-plan overage €/1k straight out of the runtime authority.
+
+    billing-service/src/plans.rs encodes the enforced rate as millicents
+    per email (`"starter" => Some(80)` = €0.80 per 1,000 emails). The
+    marketing pricing.json carries the same number as `overage_per_1k`;
+    this keeps the two from drifting independently.
+    """
+    plans_rs = (
+        HERE.parent.parent
+        / "services" / "mail-server" / "crates" / "billing-service" / "src" / "plans.rs"
+    )
+    body = plans_rs.read_text()
+    fn = body.split("fn plan_overage_rate_millicents", 1)[1].split("\n}", 1)[0]
+    # plan id -> display name (field order in PlanSeed is name first)
+    display = {
+        pid: dn
+        for pid, dn in re.findall(r'\bname:\s*"([^"]+)"[\s\S]{0,300}?display_name:\s*"([^"]+)"', body)
+    }
+    # match arms may group plans: "growth" | "scale" | "enterprise" => Some(35)
+    rates: dict[str, float] = {}
+    for arm, millicents in re.findall(
+        r'((?:"[a-z-]+"\s*\|\s*)*"[a-z-]+")\s*=>\s*Some\((\d+)\)', fn
+    ):
+        for plan_id in re.findall(r'"([a-z-]+)"', arm):
+            rates[plan_id] = int(millicents) / 100.0  # millicents/email -> €/1k
+    return {dn: rates[pid] for pid, dn in display.items() if pid in rates}
+
+
 def main() -> int:
     mtext = MARKETING.read_text()
     ctext = CANONICAL.read_text()
@@ -96,6 +126,27 @@ def main() -> int:
         errors.append(
             f"plan coverage: marketing table shows {checked} rows, catalog has {len(catalog)}"
         )
+
+    # Overage parity: pricing.json's overage_per_1k must equal the rate the
+    # billing runtime actually enforces (plan_overage_rate_millicents).
+    pricing_json = HERE.parent.parent / "apps" / "marketing-zola" / "data" / "pricing.json"
+    pdata = json.loads(pricing_json.read_text())
+    pplans = pdata["plans"] if isinstance(pdata, dict) else pdata
+    enforced = overage_rates_from_source()
+    for plan in pplans:
+        name = plan.get("name", "")
+        want = enforced.get(name)
+        got = plan.get("overage_per_1k")
+        if want is None:
+            # Free (and any contractually-quoted plan) may be null; any other
+            # plan missing from the runtime map must also be null on the site.
+            if got is not None and name != "Free":
+                errors.append(f"{name}: overage_per_1k {got} but plans.rs defines no rate")
+            continue
+        if got is None:
+            errors.append(f"{name}: overage_per_1k missing, plans.rs enforces {want}")
+        elif abs(got - want) > 0.005:
+            errors.append(f"{name}: overage_per_1k {got} != enforced {want}")
 
     if errors:
         for e in errors:

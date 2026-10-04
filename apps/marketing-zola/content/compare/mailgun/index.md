@@ -9,8 +9,8 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun by Sinch is an email delivery platform with APIs for sending, receiving, and tracking email."
-pricing_as_of = "2026-08-19"
-methodology = "Public Mailgun documentation at mailgun.com/docs reviewed on the verification date. Pricing compared at Foundation 100K plan. Monthly billing. Features, limits, and pricing may change."
+pricing_as_of = "2026-10-04"
+methodology = "Public Mailgun documentation at mailgun.com/docs reviewed on the verification date. Pricing compared at Scale 100K plan (US$90/mo, 100,000 emails included). Monthly billing. Features, limits, and pricing may change."
 volume_assumption = "100,000 emails/month"
 billing_period = "monthly"
 currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
@@ -25,7 +25,7 @@ verdict_points = ["EU/EEA-oriented deployment configuration", "Current public ca
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU data centres (Germany primary, Finland backup) — no US processing for core data', comp = 'US (EU region available on Foundation 50K+ and higher plans)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Primary hosting region", apex = 'EU data centres (Germany primary, Finland backup) — no US processing for core data', comp = 'US default; EU region selectable per sending domain (same account and billing plan)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'No — US-based by default; EU region configured per sending domain<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — Sinch DPA covers Mailgun services<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},

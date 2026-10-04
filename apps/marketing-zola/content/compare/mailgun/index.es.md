@@ -9,9 +9,9 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun de Sinch es una plataforma de entrega de email con APIs para enviar, recibir y rastrear emails."
-pricing_as_of = "2026-08-19"
+pricing_as_of = "2026-10-04"
 last_verified = "2026-07-29"
-methodology = "Documentación pública de Mailgun en mailgun.com/docs revisada en la fecha de verificación. Precios comparados en el plan Foundation 100K. Facturación mensual. Las funciones, los límites y los precios pueden cambiar."
+methodology = "Documentación pública de Mailgun en mailgun.com/docs revisada en la fecha de verificación. Precios comparados en el plan Scale 100K (US$90/mes, 100.000 correos incluidos). Facturación mensual. Las funciones, los límites y los precios pueden cambiar."
 volume_assumption = "100.000 emails/mes"
 billing_period = "monthly"
 currency_note = "Los precios se muestran en EUR. Cuando un proveedor solo publica precios en USD, la cifra en EUR se convierte a 1 USD = €0.92 (tipo de referencia, 2026-08-19) y se muestra entre paréntesis el precio en USD publicado por el proveedor. Impuestos no incluidos."
@@ -26,7 +26,7 @@ verdict_points = ["Configuración de despliegue orientada a la UE/EEE", "Catálo
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "PROCESAMIENTO DE DATOS EN EL EEE", rows = [
-    { feature = "Región principal de alojamiento", apex = 'Configuración orientada a la UE/EEE por defecto; confirmar el despliegue activo', comp = 'EE. UU. (región UE disponible en Foundation 50K+ y planes superiores)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Región principal de alojamiento", apex = 'Configuración orientada a la UE/EEE por defecto; confirmar el despliegue activo', comp = 'EE. UU. (por defecto); región UE seleccionable por dominio de envío (misma cuenta y plan)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Procesamiento de datos en el EEE por defecto", apex = 'Configuración orientada a la UE/EEE por defecto; las ubicaciones activas dependen del acuerdo', comp = 'No — en EE. UU. por defecto; región UE configurada por dominio de envío<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Disponibilidad de la DPA", apex = 'Disponible en el acuerdo de ApexMail aplicable', comp = 'Disponible — la DPA de Sinch cubre los servicios de Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},

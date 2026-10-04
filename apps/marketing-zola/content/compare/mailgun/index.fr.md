@@ -9,9 +9,9 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun de Sinch est une plateforme de livraison d’emails proposant des API pour envoyer, recevoir et suivre les emails."
-pricing_as_of = "2026-08-19"
+pricing_as_of = "2026-10-04"
 last_verified = "2026-07-29"
-methodology = "Documentation publique de Mailgun sur mailgun.com/docs, consultée à la date de vérification. Tarifs comparés sur le forfait Foundation 100K. Facturation mensuelle. Les fonctionnalités, limites et tarifs peuvent changer."
+methodology = "Documentation publique de Mailgun sur mailgun.com/docs, consultée à la date de vérification. Tarifs comparés sur le forfait Scale 100K (US$90/mois, 100 000 e-mails inclus). Facturation mensuelle. Les fonctionnalités, limites et tarifs peuvent changer."
 volume_assumption = "100 000 emails/mois"
 billing_period = "mensuelle"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
@@ -26,7 +26,7 @@ verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue p
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "TRAITEMENT DES DONNÉES DANS L’EEE", rows = [
-    { feature = "Région d’hébergement principale", apex = 'Centres de données UE (Allemagne en primaire, Finlande en sauvegarde) — aucun traitement aux États-Unis pour les données principales', comp = 'États-Unis (région UE disponible sur les forfaits Foundation 50K+ et supérieurs)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Région d’hébergement principale", apex = 'Centres de données UE (Allemagne en primaire, Finlande en sauvegarde) — aucun traitement aux États-Unis pour les données principales', comp = 'États-Unis (par défaut) ; région UE sélectionnable pour chaque domaine émetteur (même compte et même forfait)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Traitement des données dans l’EEE par défaut", apex = 'Configuration par défaut orientée UE/EEE ; les lieux actifs sont propres à chaque accord', comp = 'Non — basé aux États-Unis par défaut ; région UE configurée par domaine d’envoi<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Disponibilité de la DPA", apex = 'Disponible dans le cadre de l’accord ApexMail applicable', comp = 'Disponible — la DPA de Sinch couvre les services Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},

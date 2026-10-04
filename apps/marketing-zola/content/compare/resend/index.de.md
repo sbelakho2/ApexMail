@@ -9,7 +9,7 @@ competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
 competitor_description = "Resend ist eine moderne E-Mail-API für Entwickler mit komponentenbasierter E-Mail-Erstellung."
-pricing_as_of = "2026-09-05"
+pricing_as_of = "2026-10-04"
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 verdict_title = "Warum ApexMail statt Resend?"

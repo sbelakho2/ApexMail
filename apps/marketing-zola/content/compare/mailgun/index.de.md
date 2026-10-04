@@ -9,9 +9,9 @@ competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
 competitor_description = "Mailgun von Sinch ist eine E-Mail-Versandplattform mit APIs zum Senden, Empfangen und Verfolgen von E-Mails."
-pricing_as_of = "2026-08-19"
+pricing_as_of = "2026-10-04"
 last_verified = "2026-07-29"
-methodology = "Öffentliche Mailgun-Dokumentation unter mailgun.com/docs, geprüft am Verifikationsdatum. Preise verglichen mit dem Foundation-100K-Tarif. Monatliche Abrechnung. Funktionen, Limits und Preise können sich ändern."
+methodology = "Öffentliche Mailgun-Dokumentation unter mailgun.com/docs, geprüft am Verifikationsdatum. Preise verglichen mit dem Scale-100K-Tarif (US$90/Monat, 100.000 E-Mails inklusive). Monatliche Abrechnung. Funktionen, Limits und Preise können sich ändern."
 volume_assumption = "100.000 E-Mails/Monat"
 billing_period = "monthly"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
@@ -26,7 +26,7 @@ verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller 
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EWR-DATENVERARBEITUNG", rows = [
-    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren (Deutschland primär, Finnland Backup) — keine Verarbeitung in den USA für Kerndaten', comp = 'USA (EU-Region verfügbar ab Foundation 50K+ und höheren Tarifen)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren (Deutschland primär, Finnland Backup) — keine Verarbeitung in den USA für Kerndaten', comp = 'USA (Standard); EU-Region pro Sending-Domain wählbar (gleiches Konto, gleicher Tarif)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Nein — standardmäßig US-basiert; EU-Region je Sende-Domain konfiguriert<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar — die Sinch-AVV deckt die Mailgun-Dienste ab<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},

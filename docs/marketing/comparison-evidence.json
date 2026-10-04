@@ -3,7 +3,7 @@
     "created": "2026-07-29",
     "owner": "Product Marketing",
     "review_cadence": "Monthly",
-    "next_review_due": "2026-08-28"
+    "next_review_due": "2026-11-03"
   },
   "records": [
     {
@@ -19,12 +19,12 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://sendgrid.com/pricing",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "US (global regions available on higher plans)",
       "qualification": "EU data centers available as add-on for Pro+ plans",
       "screenshot_archive": "docs/marketing/evidence/sendgrid-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "SendGrid",
@@ -39,12 +39,12 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://docs.sendgrid.com/ui/account-and-settings/data-residency",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "No (US-based; EU data centers available as add-on)",
       "qualification": "EU data residency is an add-on feature on Pro+ plans",
       "screenshot_archive": "docs/marketing/evidence/sendgrid-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "SendGrid",
@@ -59,12 +59,12 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://docs.sendgrid.com/api-reference/how-to-use-the-sendgrid-v3-api/requests",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "Not natively supported",
       "qualification": "SendGrid v3 API does not document idempotency key support",
       "screenshot_archive": "docs/marketing/evidence/sendgrid-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "SendGrid",
@@ -79,12 +79,12 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://sendgrid.com/pricing",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "No",
       "qualification": "SendGrid offers dedicated IPs but not dedicated application tenancy",
       "screenshot_archive": "docs/marketing/evidence/sendgrid-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "SendGrid",
@@ -99,32 +99,32 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://sendgrid.com/pricing",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "No",
       "qualification": "SendGrid does not offer BYOC or customer-cloud deployment",
       "screenshot_archive": "docs/marketing/evidence/sendgrid-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Resend",
       "feature": "Primary hosting region",
       "feature_definition": "Default geographic region where customer data is processed and stored",
       "apexmail_behavior": "EU (Hetzner, Germany)",
-      "competitor_behavior": "US (AWS us-east-1)",
+      "competitor_behavior": "US default; EU region selectable per sending domain for sending/routing (account data storage is not region-bound)",
       "apexmail_plan": "All plans",
       "competitor_plan": "All plans",
       "pricing_currency": "EUR",
       "billing_period": "Monthly",
       "volume_assumption": 100000,
       "official_competitor_source": "https://resend.com/docs/introduction",
-      "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "source_date": "2026-10-04",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
-      "approved_wording": "US (AWS us-east-1)",
-      "qualification": "Resend infrastructure runs on AWS us-east-1 by default",
+      "approved_wording": "US default; EU routing region selectable per sending domain",
+      "qualification": "Region selection controls routing only, per Resend docs (docs/dashboard/domains/regions) — it does not control where customer data is stored",
       "screenshot_archive": "docs/marketing/evidence/resend-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Resend",
@@ -139,32 +139,32 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://resend.com/docs/api-reference/introduction",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "Yes (Idempotency-Key header)",
       "qualification": "Resend supports idempotency via the Idempotency-Key header",
       "screenshot_archive": "docs/marketing/evidence/resend-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Resend",
       "feature": "Scheduled sending",
       "feature_definition": "API support for scheduling email delivery at a future date/time",
       "apexmail_behavior": "Yes (Developer+)",
-      "competitor_behavior": "Not supported",
+      "competitor_behavior": "Yes — scheduled_at parameter (ISO 8601 or natural language, up to 72 hours ahead)",
       "apexmail_plan": "Developer and above",
       "competitor_plan": "N/A",
       "pricing_currency": "EUR",
       "billing_period": "Monthly",
       "volume_assumption": 100000,
       "official_competitor_source": "https://resend.com/docs/api-reference/emails/send-email",
-      "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "source_date": "2026-10-04",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
-      "approved_wording": "Not supported",
-      "qualification": "Resend does not document scheduled sending in their API reference",
+      "approved_wording": "Yes — scheduled_at parameter, up to 72 hours ahead",
+      "qualification": "Announced 2024-10; verified against resend.com API docs 2026-10-04. Supersedes the earlier \"Not supported\" record, which was stale",
       "screenshot_archive": "docs/marketing/evidence/resend-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Postmark",
@@ -179,32 +179,32 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://postmarkapp.com/manage/data-processing",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "US (with EU data residency add-on)",
       "qualification": "EU data residency is available as an add-on on Business plans",
       "screenshot_archive": "docs/marketing/evidence/postmark-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Mailgun",
       "feature": "Primary hosting region",
       "feature_definition": "Default geographic region where customer data is processed and stored",
       "apexmail_behavior": "EU (Hetzner, Germany)",
-      "competitor_behavior": "US (EU region available on Foundation+ plans)",
+      "competitor_behavior": "US default; EU region selectable per sending domain (same account and billing plan)",
       "apexmail_plan": "All plans",
       "competitor_plan": "Foundation and above",
       "pricing_currency": "EUR",
       "billing_period": "Monthly",
       "volume_assumption": 100000,
       "official_competitor_source": "https://www.mailgun.com/pricing/",
-      "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "source_date": "2026-10-04",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
-      "approved_wording": "US (EU region available on Foundation+ plans)",
-      "qualification": "EU infrastructure available as a region selection on Foundation plans and above",
+      "approved_wording": "US default; EU region selectable per sending domain",
+      "qualification": "Official docs: a single account/billing plan can provision sending domains in the EU environment — the earlier \"Foundation 50K+\" plan-gating is not supported by current documentation and was removed",
       "screenshot_archive": "docs/marketing/evidence/mailgun-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     },
     {
       "competitor": "Amazon SES",
@@ -219,12 +219,12 @@
       "volume_assumption": 100000,
       "official_competitor_source": "https://docs.aws.amazon.com/ses/latest/dg/regions.html",
       "source_date": "2026-07-29",
-      "last_verified_date": "2026-07-29",
+      "last_verified_date": "2026-10-04",
       "reviewer": "Product Marketing",
       "approved_wording": "Multi-region (customer selects AWS region)",
       "qualification": "SES is available in multiple AWS regions including EU (Ireland, Frankfurt)",
       "screenshot_archive": "docs/marketing/evidence/amazon-ses-2026-07-29/",
-      "next_review_date": "2026-08-28"
+      "next_review_date": "2026-11-03"
     }
   ]
 }

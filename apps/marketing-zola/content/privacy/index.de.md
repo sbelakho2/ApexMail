@@ -71,6 +71,8 @@ Gemäß der DSGVO haben Sie folgende Rechte:
 
 Zur Ausübung dieser Rechte kontaktieren Sie uns unter **privacy@apexmail.ee**. Wir antworten innerhalb von 30 Tagen.
 
+Für Kalifornien: siehe unseren [Hinweis „Do Not Sell My Personal Information"](/privacy/do-not-sell/) — ApexMail verkauft keine persönlichen Daten.
+
 ## 7. Beschwerden
 
 Wenn Sie der Ansicht sind, dass unsere Verarbeitung Ihrer personenbezogenen Daten gegen die DSGVO verstößt, haben Sie das Recht, Beschwerde bei der **Estnischen Datenschutzinspektion** (Andmekaitse Inspektsioon) einzulegen:

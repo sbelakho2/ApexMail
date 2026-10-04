@@ -71,6 +71,8 @@ Bajo el RGPD, tiene los siguientes derechos:
 
 Para ejercer estos derechos, contáctenos en **privacy@apexmail.ee**. Responderemos en un plazo de 30 días.
 
+Residentes de California: consulte nuestro aviso [Do Not Sell My Personal Information](/privacy/do-not-sell/) — ApexMail no vende información personal.
+
 ## 7. Reclamaciones
 
 Si considera que nuestro tratamiento de sus datos personales infringe el RGPD, tiene derecho a presentar una reclamación ante la **Inspección de Protección de Datos de Estonia** (Andmekaitse Inspektsioon):
