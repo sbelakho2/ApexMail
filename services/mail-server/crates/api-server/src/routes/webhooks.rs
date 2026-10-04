@@ -21,7 +21,13 @@ pub fn router() -> Router<AppState> {
         .route("/", post(create_webhook).get(list_webhooks))
         .route(
             "/:id",
-            get(get_webhook).put(update_webhook).delete(delete_webhook),
+            // PATCH is the documented partial-update verb
+            // (docs/api/webhooks.md "Update Webhook"); PUT is kept as the
+            // original spelling so existing clients keep working.
+            get(get_webhook)
+                .put(update_webhook)
+                .patch(update_webhook)
+                .delete(delete_webhook),
         )
         .route("/:id/test", post(test_webhook))
         .route("/:id/rotate-secret", post(rotate_webhook_secret))
@@ -283,6 +289,15 @@ fn webhook_delivery_client(
 /// and the form twin.
 pub(crate) const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
 
+/// Does `error` carry the `uq_webhooks_tenant_url` unique violation? Used to
+/// map an endpoint-URL collision onto `409 Conflict` instead of a raw 500.
+pub(crate) fn is_unique_webhook_url_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|db| db.constraint())
+        .is_some_and(|constraint| constraint == "uq_webhooks_tenant_url")
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_webhook(
@@ -351,7 +366,20 @@ async fn create_webhook(
     .bind(&stored_secret)
     .bind(now)
     .execute(&state.db)
-    .await?;
+    .await
+    .map_err(|error| {
+        // `uq_webhooks_tenant_url` — re-registering the SAME endpoint URL was
+        // surfaced as a raw database 500; a duplicate is a client-correctable
+        // conflict, not a server fault.
+        if is_unique_webhook_url_violation(&error) {
+            ApiError::Conflict(format!(
+                "a webhook with this URL already exists for this tenant: {}",
+                body.url
+            ))
+        } else {
+            error.into()
+        }
+    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -463,7 +491,18 @@ async fn update_webhook(
     .bind(&id)
     .bind(&auth.tenant_id)
     .execute(&state.db)
-    .await?;
+    .await
+    .map_err(|error| {
+        // Same duplicate-URL contract as create: a URL change that collides
+        // with another webhook of this tenant is a 409, never a 500.
+        if is_unique_webhook_url_violation(&error) {
+            ApiError::Conflict(format!(
+                "a webhook with this URL already exists for this tenant: {url}"
+            ))
+        } else {
+            error.into()
+        }
+    })?;
 
     Ok(Json(WebhookResponse {
         id,

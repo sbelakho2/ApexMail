@@ -4383,6 +4383,16 @@ async fn form_webhook_create(
         // FIX (outage-honesty audit #16): the storage failure rides the
         // single honest exit — error-logged, outage-counted, standard
         // temporary-unavailable flash — never a bespoke "try again" copy.
+        // A DUPLICATE URL is not an outage: the same endpoint is already
+        // registered for this tenant (`uq_webhooks_tenant_url`), so the form
+        // says so instead of blaming storage.
+        Err(error) if crate::routes::webhooks::is_unique_webhook_url_violation(&error) => {
+            redirect_error(
+                "A webhook with this URL already exists for this organization.",
+                "/settings/webhooks",
+                &state.config,
+            )
+        }
         Err(error) => temporary_storage_failure(
             &WebActionError::Database(error),
             "/settings/webhooks",

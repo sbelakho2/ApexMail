@@ -326,10 +326,8 @@ async fn list_contacts(
     // The bind is jsonb `[tag]` and jsonb containment (`@>`) drives the
     // predicate; `NULL` disables the filter so one SQL shape serves both
     // the filtered and unfiltered paths.
-    let tag_filter: Option<serde_json::Value> = params
-        .tag
-        .as_deref()
-        .map(|tag| serde_json::json!([tag]));
+    let tag_filter: Option<serde_json::Value> =
+        params.tag.as_deref().map(|tag| serde_json::json!([tag]));
 
     let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
         sqlx::query_as::<_, ContactRow>(
@@ -2373,7 +2371,7 @@ mod canonical_crud_tests {
             )
             .await
             .expect("create tagged contact");
-            create(
+            let _ = create(
                 &state,
                 tenant_a,
                 "tag-plain@example.com",
@@ -2383,7 +2381,7 @@ mod canonical_crud_tests {
             )
             .await
             .expect("create differently-tagged contact");
-            create(
+            let _ = create(
                 &state,
                 tenant_a,
                 "tag-untagged@example.com",
@@ -2394,7 +2392,7 @@ mod canonical_crud_tests {
             .await
             .expect("create untagged contact");
             // Same tag in tenant B — must stay invisible to tenant A.
-            create(
+            let _ = create(
                 &state,
                 tenant_b,
                 "tag-vip@example.com",
@@ -2427,8 +2425,7 @@ mod canonical_crud_tests {
                 let body = axum::body::to_bytes(response.into_body(), 1 << 20)
                     .await
                     .expect("list body");
-                let json: serde_json::Value =
-                    serde_json::from_slice(&body).expect("list JSON");
+                let json: serde_json::Value = serde_json::from_slice(&body).expect("list JSON");
                 json["data"].as_array().expect("data array").clone()
             }
 

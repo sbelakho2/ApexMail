@@ -254,6 +254,12 @@ impl WebhookProcessor {
                       AND (wq2.scheduled_at IS NULL OR wq2.scheduled_at <= NOW())
                       AND (wq2.locked_until IS NULL OR wq2.locked_until < NOW())
                       AND w.enabled = true
+                      -- A webhook paused/disabled through the API
+                      -- (`status` = 'paused' | 'disabled') must stop
+                      -- receiving deliveries; `enabled` alone never goes
+                      -- false on that path, so gating on it only would
+                      -- deliver right through an operator's pause.
+                      AND w.status = 'active'
                     ORDER BY wq2.created_at ASC
                     LIMIT $1
                     FOR UPDATE OF wq2 SKIP LOCKED

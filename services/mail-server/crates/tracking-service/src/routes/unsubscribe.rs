@@ -940,9 +940,9 @@ async fn queue_unsub_webhook(
         let rows = sqlx::query_as::<_, (String,)>(
             r#"
             SELECT id FROM webhooks
-            WHERE tenant_id=$1 AND enabled=true
+            WHERE tenant_id=$1 AND enabled=true AND status='active'
               AND (events @> '"recipient.unsubscribed"'::jsonb OR events @> '"*"'::jsonb)
-        "#,
+            "#,
         )
         .bind(tenant_id)
         .fetch_all(&state.db)
