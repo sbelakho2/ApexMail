@@ -20,10 +20,18 @@ X-API-Key: am_live_...
 
 ## Common Query Parameters
 
-| Parameter    | Type   | Required | Description |
-|-------------|--------|----------|-------------|
-| `start_date` | string | Yes      | ISO 8601 date (`2026-01-01` or `2026-01-01T00:00:00Z`) |
-| `end_date`   | string | Yes      | ISO 8601 date, must be after `start_date` |
+| Parameter | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `from`    | string | Yes      | ISO 8601 timestamp (`2026-01-01T00:00:00Z`) |
+| `to`      | string | Yes      | ISO 8601 timestamp, must be after `from` |
+
+> **Implemented endpoints (this deployment):** `GET /v1/analytics/dashboard`,
+> `GET /v1/analytics/volume`, `GET /v1/analytics/engagement`,
+> `GET /v1/analytics/deliverability`, `GET /v1/analytics/export`,
+> `GET /v1/analytics/export/:job_id`, `POST /v1/analytics/subject-line`.
+> The `overview`, `timeseries`, `campaigns`, `domains`, `providers`, and
+> `bounce-analysis` sections below describe the planned surface and are not
+> served yet.
 
 Maximum date range is **90 days**. Dates are evaluated in the organization's configured timezone.
 

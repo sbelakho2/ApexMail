@@ -47,6 +47,29 @@ use crate::templates::{
 // one implementation.
 use crate::token_shape::is_valid_token_shape;
 
+/// Does the tenant a decoded token points at still exist?
+///
+/// A token's `tenant_id` travels inside the encrypted envelope, so it can
+/// reference a tenant that has since been deleted — or an arbitrary id minted
+/// by whoever holds the tracking secret. Letting such a request reach
+/// `record_unsubscribe` / the preferences INSERTs fails on the
+/// `suppressions_tenant_id_fkey` / `subscription_preferences_tenant_id_fkey`
+/// foreign keys: the MUA gets a 500 and (worse) a pending-retry entry is
+/// enqueued that can never succeed — a permanent poison loop in
+/// `apexmail:suppressions:pending`.
+///
+/// `None` means the database could not answer (transient outage): callers
+/// SKIP the early reject and fall through to the legacy record path, which
+/// fails honestly (500 + retry) exactly as before.
+async fn tenant_exists(state: &AppState, tenant_id: &str) -> Option<bool> {
+    sqlx::query_scalar::<_, i32>("SELECT 1 FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .map(|row| row.is_some())
+}
+
 /// F37:log a rejected token WITHOUT any raw token material — length and
 /// charset classification only. (Slicing at a fixed byte offset is exactly
 /// how multi-byte input used to panic; even on ASCII, fragments of a
@@ -127,6 +150,24 @@ pub async fn handle_unsub_post(
     // F13:attribute to the token's message (v2 tokens), else resolve via
     // the canonical recipient arrays, else "unknown" — never invent.
     let message_id = resolve_message_id(&state, &data).await;
+
+    // A token pointing at a tenant that no longer exists must answer an
+    // honest 4xx: the suppression INSERT would violate
+    // `suppressions_tenant_id_fkey`, 500 the MUA, and enqueue a
+    // pending-retry entry that can never succeed (poison loop).
+    if tenant_exists(&state, &data.tenant_id).await == Some(false) {
+        warn!(
+            tenant_id = %data.tenant_id,
+            "Unsubscribe POST: token references a nonexistent tenant"
+        );
+        return axum::http::Response::builder()
+            .status(400)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"error":"Invalid or expired token"}"#,
+            ))
+            .unwrap_or_default();
+    }
 
     // Dedup per (tenant, recipient) within 24 h:mail clients and MUA
     // auto-retries can fire the one-click POST repeatedly; only the first is
@@ -286,6 +327,16 @@ pub async fn handle_unsub_confirm_post(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let ip = extract_client_ip(&headers, addr.ip(), &state);
+
+    // Same nonexistent-tenant guard as the one-click POST: the suppression
+    // INSERT would violate the tenant FK (500 + poison retry entry).
+    if tenant_exists(&state, &data.tenant_id).await == Some(false) {
+        warn!(
+            tenant_id = %data.tenant_id,
+            "Unsubscribe confirm: token references a nonexistent tenant"
+        );
+        return Html(render_error_page("Invalid or expired unsubscribe link")).into_response();
+    }
 
     // Dedup per (tenant, recipient) within 24 h (double-clicks, retries).
     // F1:check-only here; the key is SET after a successful record (see the
@@ -479,6 +530,20 @@ pub async fn handle_prefs_post(
 
     let email = data.recipient.to_lowercase();
     let prefs_path = &state.config.tracking.preferences_path;
+
+    // Same nonexistent-tenant guard as the unsubscribe POSTs: every write in
+    // this handler (suppressions / subscription_preferences) carries a
+    // tenant FK, and a dead tenant would turn each save into a 500.
+    if tenant_exists(&state, &data.tenant_id).await == Some(false) {
+        warn!(
+            tenant_id = %data.tenant_id,
+            "Preferences POST: token references a nonexistent tenant"
+        );
+        return prefs_error_page(
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired preferences link.",
+        );
+    }
 
     // Global unsubscribe
     if form.unsubscribe_all.as_deref() == Some("true") {

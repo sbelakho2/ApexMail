@@ -4,7 +4,11 @@
 > **Required scopes:** `templates:read` (GET), `templates:write` (POST / PUT / DELETE)
 > **Rate limit:** 120 requests/minute per API key
 
-Templates are versioned, immutable-on-send email documents that support multiple rendering engines. Every mutation creates a new version internally; the active version is served by default.
+Templates store `{{variable}}`-placeholder email bodies. Every save snapshots
+the full content into an internal version history, so any previous version can
+be restored with the rollback endpoint. Mutating template endpoints
+additionally require the account's `custom_templates` entitlement (403
+Forbidden when the plan does not include it).
 
 ---
 
@@ -18,14 +22,20 @@ X-API-Key: am_live_...
 
 ---
 
-## Supported Template Engines
+## Template Syntax and Security
 
-| Engine | Description |
-|--------|-------------|
-| `handlebars` | Handlebars-based syntax with helpers (`{{#if}}`, `{{#each}}`, `{{formatDate}}`) — **default** |
-| `liquid` | Shopify Liquid-compatible engine |
-| `mjml` | MJML markup compiled to responsive HTML |
-| `plain` | No processing; HTML and text are used verbatim |
+- Placeholders are written `{{variable_name}}` in the `subject`, `html_body`,
+  and `text_body` fields.
+- At render time each supplied variable value is **HTML-entity-escaped** in
+  every output field (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` →
+  `&quot;`, `'` → `&#x27;`). A variable value containing `<script>` can never
+  yield executable markup in the render response.
+- A placeholder whose variable is **not supplied is left verbatim** in the
+  output (`Hello {{name}}` stays `Hello {{name}}`) — no error, no empty
+  substitution. Non-object `variables` values are treated as an empty set.
+- Template bodies themselves (`subject`, `html_body`, `text_body`) are stored
+  and returned verbatim: they are authored by authenticated users with the
+  `templates:write` scope, not by untrusted senders.
 
 ---
 
@@ -33,15 +43,12 @@ X-API-Key: am_live_...
 
 | HTTP Status | Code | Description |
 |------------|------|-------------|
-| 400 | `VALIDATION_ERROR` | Request body fails schema validation |
-| 400 | `SLUG_EXISTS` | A template with the same `slug` already exists in this organization |
-| 400 | `RENDER_FAILED` | Template rendering failed — usually a syntax error in the template body |
+| 400 | `VALIDATION_ERROR` | Request body fails schema validation (`name`, `subject`, and `html_body` are required and non-empty) |
 | 401 | `UNAUTHORIZED` | API key is missing or invalid |
-| 403 | `INSUFFICIENT_SCOPE` | API key does not have the required `templates:*` scope |
-| 404 | `NOT_FOUND` | Template ID does not exist or belongs to another organization |
-| 409 | `VERSION_CONFLICT` | Concurrent update detected; retry with the latest version |
+| 403 | `FORBIDDEN` | Missing scope, or the plan lacks the `custom_templates` entitlement |
+| 404 | `NOT_FOUND` | Template ID does not exist, belongs to another account, or the requested version was never saved |
+| 422 | `VALIDATION_ERROR` | Malformed JSON body (unknown fields are rejected) |
 | 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded |
-| 500 | `INTERNAL_ERROR` | Server-side error |
 
 ---
 
@@ -49,7 +56,7 @@ X-API-Key: am_live_...
 
 ### POST `/v1/templates`
 
-Create a new template.
+Create a template. The initial version is `1` with status `active`.
 
 **Scope:** `templates:write`
 
@@ -57,17 +64,13 @@ Create a new template.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Human-readable name (max 255 chars) |
-| `slug` | string | Yes | URL-safe unique identifier (`[a-z0-9-]`, max 128 chars) |
-| `description` | string | No | Internal description |
-| `category` | string | No | Grouping category (e.g. `transactional`, `marketing`, `onboarding`) |
-| `subject` | string | Yes | Email subject line; supports template variables |
-| `html` | string | Yes | HTML body of the email |
-| `text` | string | No | Plain-text fallback body |
-| `preheader` | string | No | Preview text shown in inbox |
-| `engine` | string | No | Rendering engine (default: `handlebars`) |
-| `defaultData` | object | No | Default merge variables used when rendering |
-| `metadata` | object | No | Arbitrary key-value metadata (max 50 keys, 500 chars per value) |
+| `name` | string | Yes | Human-readable name (non-empty) |
+| `subject` | string | Yes | Subject line, may contain `{{placeholders}}` |
+| `html_body` | string | Yes | HTML body, may contain `{{placeholders}}` |
+| `text_body` | string | No | Plain-text alternative |
+
+Unknown fields are rejected with 422. Request bodies are bounded by the
+platform request-size limit (40 MiB); there is no separate template-size cap.
 
 #### Example Request
 
@@ -77,22 +80,9 @@ curl -X POST "https://api.apexmail.ee/v1/templates" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Order Confirmation",
-    "slug": "order-confirmation",
-    "description": "Sent after a successful purchase",
-    "category": "transactional",
-    "subject": "Your order #{{order_id}} is confirmed",
-    "html": "<h1>Thanks, {{first_name}}!</h1><p>Order #{{order_id}} has been placed.</p>",
-    "text": "Thanks, {{first_name}}! Order #{{order_id}} has been placed.",
-    "preheader": "Your order is on its way",
-    "engine": "handlebars",
-    "defaultData": {
-      "first_name": "Customer",
-      "order_id": "000000"
-    },
-    "metadata": {
-      "team": "ecommerce",
-      "priority": "high"
-    }
+    "subject": "Your order is confirmed",
+    "html_body": "<h1>Thanks, {{first_name}}!</h1>",
+    "text_body": "Thanks, {{first_name}}!"
   }'
 ```
 
@@ -100,141 +90,15 @@ curl -X POST "https://api.apexmail.ee/v1/templates" \
 
 ```json
 {
-  "data": {
-    "id": "tpl_01HQMXJ5KXMW0NREP0YGCZKNVD",
-    "name": "Order Confirmation",
-    "slug": "order-confirmation",
-    "description": "Sent after a successful purchase",
-    "category": "transactional",
-    "subject": "Your order #{{order_id}} is confirmed",
-    "engine": "handlebars",
-    "active": true,
-    "version": 1,
-    "defaultData": {
-      "first_name": "Customer",
-      "order_id": "000000"
-    },
-    "metadata": {
-      "team": "ecommerce",
-      "priority": "high"
-    },
-    "created_at": "2026-01-15T10:30:00Z",
-    "updated_at": "2026-01-15T10:30:00Z"
-  }
-}
-```
-
----
-
-### GET `/v1/templates/:id`
-
-Retrieve a single template by ID.
-
-**Scope:** `templates:read`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID (`tpl_01HQ...`) |
-
-#### Example Request
-
-```bash
-curl -X GET "https://api.apexmail.ee/v1/templates/tpl_01HQMXJ5KXMW0NREP0YGCZKNVD" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx"
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": {
-    "id": "tpl_a1b2c3d4",
-    "name": "Order Confirmation",
-    "slug": "order-confirmation",
-    "description": "Sent after a successful purchase",
-    "category": "transactional",
-    "subject": "Your order #{{order_id}} is confirmed",
-    "html": "<h1>Thanks, {{first_name}}!</h1><p>Order #{{order_id}} has been placed.</p>",
-    "text": "Thanks, {{first_name}}! Order #{{order_id}} has been placed.",
-    "preheader": "Your order is on its way",
-    "engine": "handlebars",
-    "active": true,
-    "version": 3,
-    "defaultData": {
-      "first_name": "Customer",
-      "order_id": "000000"
-    },
-    "metadata": {
-      "team": "ecommerce",
-      "priority": "high"
-    },
-    "created_at": "2026-01-15T10:30:00Z",
-    "updated_at": "2026-01-20T14:15:00Z"
-  }
-}
-```
-
----
-
-### GET `/v1/templates/:id/versions`
-
-Retrieve the version history of a template, ordered newest-first.
-
-**Scope:** `templates:read`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Example Request
-
-```bash
-curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx"
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": [
-    {
-      "version": 3,
-      "active": true,
-      "subject": "Your order #{{order_id}} is confirmed",
-      "engine": "handlebars",
-      "created_at": "2026-01-20T14:15:00Z",
-      "created_by": "usr_5e6f7a8b",
-      "change_summary": "Updated CTA button color"
-    },
-    {
-      "version": 2,
-      "active": false,
-      "subject": "Your order #{{order_id}} is confirmed",
-      "engine": "handlebars",
-      "created_at": "2026-01-18T09:00:00Z",
-      "created_by": "usr_5e6f7a8b",
-      "change_summary": "Added preheader text"
-    },
-    {
-      "version": 1,
-      "active": false,
-      "subject": "Your order #{{order_id}} is confirmed",
-      "engine": "handlebars",
-      "created_at": "2026-01-15T10:30:00Z",
-      "created_by": "usr_5e6f7a8b",
-      "change_summary": "Initial version"
-    }
-  ],
-  "pagination": {
-    "total": 3,
-    "page": 1,
-    "per_page": 25
-  }
+  "id": "01HQMXJ5KXMW0NREP0YGCZKNVD",
+  "name": "Order Confirmation",
+  "subject": "Your order is confirmed",
+  "html_body": "<h1>Thanks, {{first_name}}!</h1>",
+  "text_body": "Thanks, {{first_name}}!",
+  "version": 1,
+  "status": "active",
+  "created_at": "2026-01-15T10:30:00+00:00",
+  "updated_at": "2026-01-15T10:30:00+00:00"
 }
 ```
 
@@ -242,62 +106,64 @@ curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
 
 ### GET `/v1/templates`
 
-List templates with filtering, searching, and sorting.
+List the account's templates, newest-update first. The response is a plain
+JSON array.
 
 **Scope:** `templates:read`
 
 #### Query Parameters
 
-| Parameter  | Type   | Required | Description |
-|-----------|--------|----------|-------------|
-| `category` | string | No | Filter by category |
-| `active`   | boolean | No | Filter by active status (default: all) |
-| `engine`   | string | No | Filter by rendering engine |
-| `search`   | string | No | Full-text search across `name`, `slug`, `description` |
-| `sort`     | string | No | Sort field: `name`, `created_at`, `updated_at` (default: `updated_at`); prefix with `-` for descending |
-| `page`     | number | No | Page number (default: `1`) |
-| `per_page`  | number | No | Results per page, max 100 (default: `25`) |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `limit` | number | No | Results per page (default 25, max 200) |
+| `offset` | number | No | Rows to skip (default 0, max 100,000) |
 
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=true&sort=-updated_at" \
+curl -X GET "https://api.apexmail.ee/v1/templates?limit=50" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
 #### Example Response — `200 OK`
 
 ```json
-{
-  "data": [
-    {
-      "id": "tpl_a1b2c3d4",
-      "name": "Order Confirmation",
-      "slug": "order-confirmation",
-      "category": "transactional",
-      "engine": "handlebars",
-      "active": true,
-      "version": 3,
-      "created_at": "2026-01-15T10:30:00Z",
-      "updated_at": "2026-01-20T14:15:00Z"
-    },
-    {
-      "id": "tpl_e5f6g7h8",
-      "name": "Password Reset",
-      "slug": "password-reset",
-      "category": "transactional",
-      "engine": "handlebars",
-      "active": true,
-      "version": 2,
-      "created_at": "2026-01-10T08:00:00Z",
-      "updated_at": "2026-01-12T11:45:00Z"
-    }
-  ],
-  "pagination": {
-    "total": 2,
-    "page": 1,
-    "per_page": 25
+[
+  {
+    "id": "01HQMXJ5KXMW0NREP0YGCZKNVD",
+    "name": "Order Confirmation",
+    "subject": "Your order is confirmed",
+    "html_body": "<h1>Thanks, {{first_name}}!</h1>",
+    "text_body": "Thanks, {{first_name}}!",
+    "version": 3,
+    "status": "active",
+    "created_at": "2026-01-15T10:30:00+00:00",
+    "updated_at": "2026-01-20T14:15:00+00:00"
   }
+]
+```
+
+---
+
+### GET `/v1/templates/:id`
+
+Retrieve a single template by ID, including the full current bodies.
+
+**Scope:** `templates:read`
+
+#### Example Response — `200 OK`
+
+```json
+{
+  "id": "01HQMXJ5KXMW0NREP0YGCZKNVD",
+  "name": "Order Confirmation",
+  "subject": "Your order is confirmed",
+  "html_body": "<h1>Thanks, {{first_name}}!</h1>",
+  "text_body": "Thanks, {{first_name}}!",
+  "version": 3,
+  "status": "active",
+  "created_at": "2026-01-15T10:30:00+00:00",
+  "updated_at": "2026-01-20T14:15:00+00:00"
 }
 ```
 
@@ -305,374 +171,131 @@ curl -X GET "https://api.apexmail.ee/v1/templates?category=transactional&active=
 
 ### PUT `/v1/templates/:id`
 
-Update a template. Only the supplied fields are changed (partial update semantics); a new version is created automatically.
+Update a template. Only the supplied fields are changed (partial update
+semantics); the version counter is incremented automatically and the new state
+is snapshotted so it can be rolled back to later.
 
 **Scope:** `templates:write`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Request Body
-
-All fields from `POST /v1/templates` are accepted, plus:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `active` | boolean | Set `false` to deactivate the template |
-
-#### Example Request
-
-```bash
-curl -X PUT "https://api.apexmail.ee/v1/templates/tpl_01HQMXJ5KXMW0NREP0YGCZKNVD" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "subject": "Order #{{order_id}} — Confirmed ✓",
-    "preheader": "We have received your order"
-  }'
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": {
-    "id": "tpl_a1b2c3d4",
-    "name": "Order Confirmation",
-    "slug": "order-confirmation",
-    "subject": "Order #{{order_id}} — Confirmed ✓",
-    "preheader": "We have received your order",
-    "engine": "handlebars",
-    "active": true,
-    "version": 4,
-    "updated_at": "2026-01-22T16:00:00Z"
-  }
-}
-```
-
----
-
-### POST `/v1/templates/:id/duplicate`
-
-Create a copy of a template with a new slug.
-
-**Scope:** `templates:write`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Source template ID |
 
 #### Request Body
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | No | Name for the duplicate (default: `"Copy of {original}"`) |
-| `slug` | string | Yes | Unique slug for the duplicate |
-
-#### Example Request
-
-```bash
-curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/duplicate" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Order Confirmation (V2 Test)",
-    "slug": "order-confirmation-v2-test"
-  }'
-```
-
-#### Example Response — `201 Created`
-
-```json
-{
-  "data": {
-    "id": "tpl_z9y8x7w6",
-    "name": "Order Confirmation (V2 Test)",
-    "slug": "order-confirmation-v2-test",
-    "category": "transactional",
-    "engine": "handlebars",
-    "active": true,
-    "version": 1,
-    "source_template_id": "tpl_a1b2c3d4",
-    "created_at": "2026-01-23T09:00:00Z",
-    "updated_at": "2026-01-23T09:00:00Z"
-  }
-}
-```
-
----
-
-### GET `/v1/templates/:id/preview`
-
-Returns the rendered HTML preview of a template using its `defaultData`.
-
-**Scope:** `templates:read`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Example Request
-
-```bash
-curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/preview" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx"
-```
+| `name` | string | No | New name |
+| `subject` | string | No | New subject |
+| `html_body` | string | No | New HTML body |
+| `text_body` | string | No | New plain-text body |
 
 #### Example Response — `200 OK`
 
-```json
-{
-  "data": {
-    "subject": "Your order #000000 is confirmed",
-    "html": "<h1>Thanks, Customer!</h1><p>Order #000000 has been placed.</p>",
-    "text": "Thanks, Customer! Order #000000 has been placed.",
-    "preheader": "Your order is on its way",
-    "engine": "handlebars",
-    "rendered_with": "defaultData"
-  }
-}
-```
-
----
-
-### GET `/v1/templates/:id/stats`
-
-Returns usage statistics for a template: send counts, performance metrics, and last-sent timestamp.
-
-**Scope:** `templates:read`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Example Request
-
-```bash
-curl -X GET "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/stats" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx"
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": {
-    "template_id": "tpl_a1b2c3d4",
-    "total_sends": 128450,
-    "total_delivered": 126300,
-    "rates": {
-      "delivery_rate": 0.9833,
-      "open_rate": 0.4120,
-      "click_rate": 0.1385,
-      "bounce_rate": 0.0167,
-      "complaint_rate": 0.0002
-    },
-    "last_sent_at": "2026-01-22T18:45:00Z",
-    "campaigns_using": 12,
-    "active_version": 3
-  }
-}
-```
-
----
-
-### POST `/v1/templates/:id/activate`
-
-Set the active version of a template. Only one version can be active at a time.
-
-**Scope:** `templates:write`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Request Body
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `version` | number | Yes | Version number to activate |
-
-#### Example Request
-
-```bash
-curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/activate" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{ "version": 2 }'
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": {
-    "id": "tpl_a1b2c3d4",
-    "active_version": 2,
-    "previous_version": 3,
-    "activated_at": "2026-01-23T10:00:00Z"
-  }
-}
-```
-
----
-
-### POST `/v1/templates/:id/render`
-
-Render a template with custom variables and return the output without sending an email.
-
-**Scope:** `templates:read`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Request Body
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `variables` | object | Yes | Merge variables to use for rendering |
-
-#### Example Request
-
-```bash
-curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/render" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "variables": {
-      "first_name": "Alice",
-      "order_id": "ORD-98765"
-    }
-  }'
-```
-
-#### Example Response — `200 OK`
-
-```json
-{
-  "subject": "Your order #ORD-98765 is confirmed",
-  "html": "<h1>Thanks, Alice!</h1><p>Order #ORD-98765 has been placed.</p>",
-  "text": "Thanks, Alice! Order #ORD-98765 has been placed."
-}
-```
-
-#### Error Response — `404 Not Found`
-
-```json
-{
-  "message": "template not found"
-}
-```
-
----
-
-### POST `/v1/templates/:id/versions`
-
-Explicitly create a new version of a template without changing the active version.
-
-**Scope:** `templates:write`
-
-#### Path Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
-
-#### Request Body
-
-Same fields as `POST /v1/templates` (except `slug` — inherited from parent). Additionally:
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `change_summary` | string | No | Description of what changed |
-
-#### Example Request
-
-```bash
-curl -X POST "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4/versions" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "html": "<h1>Thanks, {{first_name}}!</h1><p>Order #{{order_id}} confirmed. <a href=\"{{tracking_url}}\">Track it</a>.</p>",
-    "change_summary": "Added order tracking link"
-  }'
-```
-
-#### Example Response — `201 Created`
-
-```json
-{
-  "data": {
-    "id": "tpl_a1b2c3d4",
-    "version": 4,
-    "active": false,
-    "change_summary": "Added order tracking link",
-    "created_at": "2026-01-24T11:30:00Z",
-    "created_by": "usr_5e6f7a8b"
-  }
-}
-```
+The full template object (same shape as `GET /v1/templates/:id`) with the
+incremented `version`.
 
 ---
 
 ### DELETE `/v1/templates/:id`
 
-Soft-delete a template. The template is deactivated and hidden from list queries, but its data is retained for audit purposes. Templates actively in use by a scheduled campaign cannot be deleted.
+Delete a template permanently.
 
 **Scope:** `templates:write`
 
-#### Path Parameters
+#### Example Response — `204 No Content`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Template ID |
+---
+
+### POST `/v1/templates/:id/render`
+
+Render a template with custom variables and return the output without sending
+an email. Variable values are HTML-entity-escaped in the response (see
+*Template Syntax and Security*).
+
+**Scope:** `templates:read`
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `variables` | object | Yes | Merge variables; values may be strings, numbers, booleans, or nested JSON (all serialized and escaped). Not supplied placeholders stay verbatim. |
 
 #### Example Request
 
 ```bash
-curl -X DELETE "https://api.apexmail.ee/v1/templates/tpl_a1b2c3d4" \
-  -H "X-API-Key: am_live_xxxxxxxxxxxx"
+curl -X POST "https://api.apexmail.ee/v1/templates/01HQMXJ5KXMW0NREP0YGCZKNVD/render" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{ "variables": { "first_name": "Ada" } }'
 ```
 
 #### Example Response — `200 OK`
 
 ```json
 {
-  "data": {
-    "id": "tpl_a1b2c3d4",
-    "deleted": true,
-    "deleted_at": "2026-01-25T08:00:00Z"
-  }
+  "subject": "Your order is confirmed",
+  "html": "<h1>Thanks, Ada!</h1>",
+  "text": "Thanks, Ada!"
 }
 ```
 
-#### Error Response — `409 Conflict`
-
-```json
-{
-  "error": {
-    "code": "TEMPLATE_IN_USE",
-    "message": "Template is used by 2 scheduled campaigns and cannot be deleted",
-    "details": {
-      "campaign_ids": ["cmp_1a2b3c4d", "cmp_5e6f7g8h"]
-    }
-  }
-}
-```
+`text` is `null` when the template has no `text_body`.
 
 ---
 
+### POST `/v1/templates/:id/duplicate`
+
+Create a copy of a template. The copy is named `<name> (copy)`, starts at
+version `1`, and has status `draft`.
+
+**Scope:** `templates:write`
+
+#### Example Response — `201 Created`
+
+The full template object of the new copy.
+
+---
+
+### POST `/v1/templates/:id/rollback`
+
+Restore a template's content from its version history. Every save (create and
+each update) writes a snapshot of that exact state; rolling back restores
+`name`, `subject`, `html_body`, and `text_body` from the requested snapshot,
+and the template's `version` becomes the restored version number. The next
+update re-snapshots that version slot.
+
+**Scope:** `templates:write`
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `version` | number | Yes | Version number to restore |
+
+#### Example Request
+
+```bash
+curl -X POST "https://api.apexmail.ee/v1/templates/01HQMXJ5KXMW0NREP0YGCZKNVD/rollback" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{ "version": 1 }'
+```
+
+#### Example Response — `200 OK`
+
+The restored template object. A version that was never snapshotted returns
+`404 NOT_FOUND` (`template or version not found`).
+
+---
+
+## Versioning Semantics
+
+- Versions are a single linear counter on the template, not a browsable list;
+  there is no version-history endpoint. Rollback is the only way to revisit
+  older content.
+- Create → `version: 1`. Every `PUT` → increments by 1.
+- Rollback → `version` becomes the restored number; the restored content is
+  also what the next `PUT` snapshot overwrites.
+
+## Cross-Account Isolation
+
+Template IDs are only ever resolved within the authenticated account's
+tenant: a valid ID belonging to another account is indistinguishable from a
+nonexistent one (`404 NOT_FOUND`).

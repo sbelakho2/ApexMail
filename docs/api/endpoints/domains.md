@@ -298,7 +298,12 @@ X-API-Key: {{api_key}}
 
 ### Comprehensive Authentication Status
 
-Get a complete authentication score and grade for a domain.
+Get the per-check authentication posture for a domain. Each of the four
+outbound-authentication checks (SPF, DKIM, DMARC, Return-Path / custom MAIL
+FROM MX) reports `pass` or `fail` with the exact expected DNS value and, on
+failure, an actionable `fix` hint derived from the same record builders as
+`GET /v1/domains/:id/dns-records`. The MX check reports `not_required` when
+SES transport is disabled for the deployment.
 
 ```http
 GET /v1/domains/:id/auth-status
@@ -310,39 +315,44 @@ X-API-Key: {{api_key}}
 ```json
 {
   "domain": "example.com",
-  "score": 92,
-  "grade": "A",
-  "breakdown": {
-    "basic": { "status": "pass", "points": 60, "maxPoints": 60 },
-    "mtaSts": { "status": "pass", "points": 20, "maxPoints": 20 },
-    "bimi": { "status": "warning", "points": 10, "maxPoints": 15 },
-    "tlsrpt": { "status": "fail", "points": 0, "maxPoints": 5 }
+  "spf": {
+    "status": "fail",
+    "value": null,
+    "expected": "TXT bounce.example.com  v=spf1 include:amazonses.com ~all",
+    "fix": "Custom MAIL FROM SPF is misconfigured. Add a TXT record at host `bounce.example.com` with value `v=spf1 include:amazonses.com ~all`. ..."
   },
-  "checks": {
-    "spfDkimDmarc": {
-      "status": "healthy",
-      "issues": []
-    },
-    "mtaSts": {
-      "supported": true,
-      "mode": "enforce",
-      "errors": []
-    },
-    "bimi": {
-      "supported": true,
-      "logoValid": true,
-      "certificateValid": false
-    },
-    "tlsrpt": {
-      "supported": false
-    }
+  "dkim": {
+    "status": "fail",
+    "value": null,
+    "expected": "TXT <selector>._domainkey.example.com  v=DKIM1; k=rsa; p=...",
+    "fix": "DKIM is misconfigured. ..."
   },
-  "recommendations": [
-    "Consider obtaining a Verified Mark Certificate (VMC) for broader BIMI support",
-    "Add TLSRPT DNS record to receive TLS connection reports"
-  ]
+  "dmarc": {
+    "status": "fail",
+    "value": null,
+    "expected": "TXT _dmarc.example.com  v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee",
+    "fix": "DMARC missing. ..."
+  },
+  "mx": {
+    "status": "not_required",
+    "value": null,
+    "expected": null
+  },
+  "return_path": {
+    "status": "fail",
+    "value": null,
+    "expected": "MX 10 bounce.example.com  feedback-smtp.us-east-1.amazonses.com",
+    "fix": "Return-Path / bounce subdomain not configured. ..."
+  },
+  "overall_status": "unauthenticated"
 }
 ```
+
+`overall_status` is `unauthenticated` while no check passes, `partial` when
+some but not all required checks pass, and `authenticated` once SPF, DKIM,
+DMARC and the return path all pass. There is no numeric score or letter
+grade: each check is reported honestly as pass or fail with the exact DNS
+value to publish.
 
 ---
 

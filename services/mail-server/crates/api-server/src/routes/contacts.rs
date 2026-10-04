@@ -135,6 +135,23 @@ fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), ApiErro
     Ok(())
 }
 
+/// Column bound for `contacts.name` — VARCHAR(512) (migration 071). Enforced
+/// at the boundary so an oversized name is a controlled 422: unbounded, it
+/// tripped the database limit and surfaced as a 500 on create/update and as
+/// a failed chunk ("database error" 500) on bulk import.
+const MAX_CONTACT_NAME_LEN: usize = 512;
+
+fn validate_name(name: &Option<String>) -> Result<(), ApiError> {
+    if let Some(name) = name {
+        if name.chars().count() > MAX_CONTACT_NAME_LEN {
+            return Err(ApiError::Validation(vec![format!(
+                "name must be at most {MAX_CONTACT_NAME_LEN} characters"
+            )]));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a contact id from a request path ONCE, at the API boundary, and
 /// reject anything that is not a canonical UUID with a controlled 400 —
 /// contacts.id is a UUID column (migration 068), and an unvalidated text id
@@ -226,6 +243,7 @@ async fn create_contact(
     if !apexmail_lib::validation::is_valid_email(&body.email) {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
+    validate_name(&body.name)?;
 
     // Normalise to lowercase so the case-sensitive unique index on
     // (tenant_id, email) cannot be bypassed by varying case.
@@ -397,6 +415,7 @@ async fn update_contact(
 
     let existing = fetch_contact(&state, &auth.tenant_id, id).await?;
 
+    validate_name(&body.name)?;
     let name = body.name.or(existing.name);
     // A provided tag list fully replaces the stored one (validated against
     // the canonical shape); an absent one keeps the existing array.
@@ -516,11 +535,13 @@ async fn bulk_import(
         }
         // Tag shape is structural: one malformed list rejects the batch
         // before any database work rather than failing mid-upsert. Same for
-        // the metadata object contract (migration 171).
+        // the metadata object contract (migration 171) and the name column
+        // bound (an oversized name would fail its whole chunk as a 500).
         if let Some(tags) = &contact.tags {
             validate_tags(tags)?;
         }
         validate_metadata(&contact.metadata)?;
+        validate_name(&contact.name)?;
         if !seen.insert(contact.email.to_lowercase()) {
             updated += 1;
             continue;
@@ -1038,6 +1059,20 @@ async fn import_contacts(
             skipped += 1;
             continue;
         }
+        // Name column bound (VARCHAR(512)): reject the row here so one
+        // oversized name cannot fail its entire 500-row chunk at the
+        // database (every row of a failed chunk is skipped).
+        if name
+            .as_deref()
+            .is_some_and(|n| n.chars().count() > MAX_CONTACT_NAME_LEN)
+        {
+            errors.push(format!(
+                "Row {}: name exceeds {MAX_CONTACT_NAME_LEN} characters",
+                idx + 1
+            ));
+            skipped += 1;
+            continue;
+        }
         valid_rows.push((idx + 1, email, name.clone()));
     }
 
@@ -1213,6 +1248,22 @@ mod tests_extra {
         )
         .unwrap();
         assert_eq!(req.action.as_deref(), Some("remove"));
+    }
+
+    #[test]
+    fn test_validate_name_column_bound() {
+        // Absent and in-bounds names pass.
+        assert!(validate_name(&None).is_ok());
+        assert!(validate_name(&Some("Alice".into())).is_ok());
+        // Exactly 512 multi-byte characters pass (char_length semantics).
+        let at_bound = "ä".repeat(MAX_CONTACT_NAME_LEN);
+        assert!(validate_name(&Some(at_bound)).is_ok());
+        // 513 characters are rejected — a 10k-char name must be a 422,
+        // never the VARCHAR(512) database error surfacing as a 500.
+        let over = "x".repeat(MAX_CONTACT_NAME_LEN + 1);
+        assert!(validate_name(&Some(over)).is_err());
+        let hostile = "x".repeat(10_000);
+        assert!(validate_name(&Some(hostile)).is_err());
     }
 }
 

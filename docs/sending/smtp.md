@@ -13,10 +13,13 @@ ApexMail provides a standards-compliant SMTP relay for sending email.
 
 ## Credentials
 
-SMTP credentials are separate from API keys. Generate them in **Dashboard → Settings → SMTP Credentials**.
+SMTP authentication uses your **account credentials** — the same email
+address and password you use to log in to the dashboard. The submission
+server verifies them against your account (there is no separate
+`am_smtp_*` credential type).
 
-- **Username**: `am_smtp_xxxxxxxxxxxxxxxxxxxx`
-- **Password**: `am_smtp_secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+- **Username**: your account email address (e.g. `you@example.com`)
+- **Password**: your account password
 
 ## STARTTLS Requirement
 
@@ -41,8 +44,8 @@ Use `X-ApexMail-*` headers to control behavior:
 swaks --to recipient@example.org \
       --from hello@example.com \
       --server smtp.apexmail.ee:587 \
-      --auth-user am_smtp_xxxxxxxxxxxxxxxxxxxx \
-      --auth-password am_smtp_secret_xxx \
+      --auth-user you@example.com \
+      --auth-password 'YOUR-ACCOUNT-PASSWORD' \
       --tls \
       --header "Subject: Hello" \
       --header "X-ApexMail-Stream: transactional" \

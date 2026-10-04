@@ -24,15 +24,15 @@ X-API-Key: am_live_...
 
 | HTTP Status | Code | Description |
 |------------|------|-------------|
-| 400 | `VALIDATION_ERROR` | Request body fails schema validation |
-| 400 | `INVALID_EMAIL` | Email address is malformed |
-| 400 | `BULK_LIMIT_EXCEEDED` | Bulk operation exceeds the maximum entry count |
+| 400 | `VALIDATION_ERROR` | Request body fails schema validation (also used for malformed email addresses and bulk-limit refusals) |
+| 400 | `BAD_REQUEST` | Malformed path id (a contact id must be a UUID), malformed cursor, or over-limit CSV/XLSX import |
 | 401 | `UNAUTHORIZED` | API key is missing or invalid |
-| 403 | `INSUFFICIENT_SCOPE` | API key does not have the required scope |
-| 404 | `NOT_FOUND` | Contact ID does not exist |
-| 409 | `ALREADY_EXISTS` | Contact with this email already exists |
+| 403 | `FORBIDDEN` | API key does not have the required scope |
+| 404 | `NOT_FOUND` | Contact ID does not exist (or belongs to another account) |
+| 409 | `CONFLICT` | Contact with this email already exists in the account (case-insensitive) |
+| 413 | `PAYLOAD_TOO_LARGE` | XLSX file or sheet expands beyond the import limits |
+| 422 | `VALIDATION_ERROR` | Malformed JSON body (unknown fields, non-object metadata, oversized name/tag shapes) |
 | 429 | `RATE_LIMIT_EXCEEDED` | Rate limit exceeded |
-| 500 | `INTERNAL_ERROR` | Server-side error |
 
 ---
 
@@ -48,15 +48,13 @@ Create a new contact.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `email` | string | Yes | Email address (unique per account) |
-| `firstName` | string | No | Contact's first name |
-| `lastName` | string | No | Contact's last name |
-| `phone` | string | No | Phone number (E.164 format recommended) |
-| `company` | string | No | Company or organization |
-| `lists` | string[] | No | List IDs or names to subscribe to |
-| `tags` | string[] | No | Tags for segmentation |
-| `metadata` | object | No | Custom key-value metadata |
-| `source` | string | No | Acquisition source (e.g., `api`, `csv-import`) |
+| `email` | string | Yes | Email address (unique per account; case is normalized to lowercase) |
+| `name` | string | No | Contact's display name (max 512 characters) |
+| `tags` | string[] | No | Tags for segmentation (max 50 tags, each 1–64 characters) |
+| `metadata` | object | No | Custom key-value metadata (must be a JSON object) |
+
+Unknown fields are rejected with 422. A duplicate email (case-insensitive)
+is rejected with `409 CONFLICT`.
 
 #### Example Request
 
@@ -66,10 +64,7 @@ curl -X POST "https://api.apexmail.ee/v1/contacts" \
   -H "Content-Type: application/json" \
   -d '{
     "email": "jane@example.com",
-    "firstName": "Jane",
-    "lastName": "Doe",
-    "company": "Acme Inc.",
-    "lists": ["newsletter"],
+    "name": "Jane Doe",
     "tags": ["early-adopter"],
     "metadata": {
       "plan": "growth",
@@ -82,31 +77,30 @@ curl -X POST "https://api.apexmail.ee/v1/contacts" \
 
 ```json
 {
-  "data": {
-    "id": "con_7d8e9f0a",
-    "email": "j***@example.com",
-    "firstName": "Jane",
-    "lastName": "Doe",
-    "company": "Acme Inc.",
-    "status": "active",
-    "lists": ["newsletter"],
-    "tags": ["early-adopter"],
-    "metadata": {
-      "plan": "growth",
-      "signupCohort": "2026-Q1"
-    },
-    "source": "api",
-    "createdAt": "2026-01-15T12:00:00Z",
-    "updatedAt": "2026-01-15T12:00:00Z"
-  }
+  "id": "7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6",
+  "email": "jane@example.com",
+  "name": "Jane Doe",
+  "tags": ["early-adopter"],
+  "metadata": {
+    "plan": "growth",
+    "signupCohort": "2026-Q1"
+  },
+  "status": "active",
+  "created_at": "2026-01-15T12:00:00+00:00",
+  "updated_at": "2026-01-15T12:00:00+00:00"
 }
 ```
+
+The email address is returned in full: contacts API responses are only
+readable by credentials of the account that stored the contact, so no
+masking is applied.
 
 ---
 
 ### GET `/v1/contacts`
 
-List contacts with filtering, sorting, and pagination.
+List contacts, newest first, with tag filtering and keyset or offset
+pagination.
 
 **Scope:** `contacts:read`
 
@@ -114,18 +108,15 @@ List contacts with filtering, sorting, and pagination.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `status` | string | No | Filter by status: `active`, `unsubscribed`, `bounced`, `complained` |
-| `list` | string | No | Filter by list ID or name |
+| `limit` | number | No | Results per page (default 25, max 200) |
+| `offset` | number | No | Rows to skip (default 0, max 100,000) |
+| `cursor` | string | No | Opaque keyset cursor (`created_at`+`id` of the last row); overrides `offset` |
 | `tag` | string | No | Filter by tag |
-| `search` | string | No | Search by email or name |
-| `sort` | string | No | Sort field: `createdAt`, `email`, `lastActivityAt`; prefix with `-` for descending |
-| `page` | number | No | Page number (default: `1`) |
-| `per_page` | number | No | Results per page, max 100 (default: `25`) |
 
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.ee/v1/contacts?status=active&list=newsletter&sort=-createdAt&per_page=50" \
+curl -X GET "https://api.apexmail.ee/v1/contacts?limit=50&tag=early-adopter" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
@@ -135,21 +126,20 @@ curl -X GET "https://api.apexmail.ee/v1/contacts?status=active&list=newsletter&s
 {
   "data": [
     {
-      "id": "con_7d8e9f0a",
-      "email": "j***@example.com",
-      "firstName": "Jane",
-      "lastName": "Doe",
+      "id": "7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6",
+      "email": "jane@example.com",
+      "name": "Jane Doe",
       "status": "active",
-      "lists": ["newsletter"],
       "tags": ["early-adopter"],
-      "createdAt": "2026-01-15T12:00:00Z"
+      "metadata": null,
+      "created_at": "2026-01-15T12:00:00+00:00",
+      "updated_at": "2026-01-15T12:00:00+00:00"
     }
   ],
-  "pagination": {
-    "total": 15200,
-    "page": 1,
-    "per_page": 50,
-    "total_pages": 304
+  "error": null,
+  "meta": {
+    "has_more": false,
+    "next_cursor": null
   }
 }
 ```
@@ -162,10 +152,13 @@ Retrieve a single contact by ID.
 
 **Scope:** `contacts:read`
 
+The `id` is a UUID. An id belonging to another account is indistinguishable
+from a nonexistent one (`404 NOT_FOUND`); a non-UUID id is a `400 BAD_REQUEST`.
+
 #### Example Request
 
 ```bash
-curl -X GET "https://api.apexmail.ee/v1/contacts/con_7d8e9f0a" \
+curl -X GET "https://api.apexmail.ee/v1/contacts/7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
@@ -173,23 +166,16 @@ curl -X GET "https://api.apexmail.ee/v1/contacts/con_7d8e9f0a" \
 
 ```json
 {
-  "data": {
-    "id": "con_7d8e9f0a",
-    "email": "j***@example.com",
-    "firstName": "Jane",
-    "lastName": "Doe",
-    "company": "Acme Inc.",
-    "status": "active",
-    "lists": ["newsletter"],
-    "tags": ["early-adopter"],
-    "metadata": {
-      "plan": "growth"
-    },
-    "engagementScore": 72,
-    "lastActivityAt": "2026-02-10T08:30:00Z",
-    "createdAt": "2026-01-15T12:00:00Z",
-    "updatedAt": "2026-02-10T08:30:00Z"
-  }
+  "id": "7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6",
+  "email": "jane@example.com",
+  "name": "Jane Doe",
+  "tags": ["early-adopter"],
+  "metadata": {
+    "plan": "growth"
+  },
+  "status": "active",
+  "created_at": "2026-01-15T12:00:00+00:00",
+  "updated_at": "2026-02-10T08:30:00+00:00"
 }
 ```
 
@@ -197,35 +183,28 @@ curl -X GET "https://api.apexmail.ee/v1/contacts/con_7d8e9f0a" \
 
 ### PUT `/v1/contacts/:id`
 
-Update a contact's details. Fields not provided are left unchanged.
+Update a contact's details. Fields not provided are left unchanged. A
+supplied `tags` array fully replaces the stored tag list. `status` accepts
+`active`, `subscribed`, `unsubscribed`, `bounced`, `complained`, `deleted`.
 
 **Scope:** `contacts:write`
 
 #### Example Request
 
 ```bash
-curl -X PUT "https://api.apexmail.ee/v1/contacts/con_7d8e9f0a" \
+curl -X PUT "https://api.apexmail.ee/v1/contacts/7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
-    "company": "Acme Corp.",
-    "tags": {"add": ["upgraded"], "remove": ["trial"]}
+    "name": "Jane Doe-Doe",
+    "status": "unsubscribed"
   }'
 ```
 
 #### Example Response — `200 OK`
 
-```json
-{
-  "data": {
-    "id": "con_7d8e9f0a",
-    "email": "j***@example.com",
-    "company": "Acme Corp.",
-    "tags": ["early-adopter", "upgraded"],
-    "updatedAt": "2026-02-15T14:00:00Z"
-  }
-}
-```
+The full contact object (same shape as `GET /v1/contacts/:id`) with the
+updated fields and a fresh `updated_at`.
 
 ---
 
@@ -235,32 +214,26 @@ Permanently delete a contact record.
 
 **Scope:** `contacts:write`
 
-> **Note:** Deletion is irreversible. The email address hash is retained in the suppression list to prevent re-adding suppressed addresses.
+> **Note:** Deletion is irreversible. Re-creating the same email afterwards
+> is allowed — use the suppressions API if the address must never be mailed
+> again.
 
 #### Example Request
 
 ```bash
-curl -X DELETE "https://api.apexmail.ee/v1/contacts/con_7d8e9f0a" \
+curl -X DELETE "https://api.apexmail.ee/v1/contacts/7d8e9f0a-1b2c-3d4e-5f60-718293a4b5c6" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx"
 ```
 
-#### Example Response — `200 OK`
-
-```json
-{
-  "data": {
-    "id": "con_7d8e9f0a",
-    "deleted": true,
-    "deletedAt": "2026-02-20T10:00:00Z"
-  }
-}
-```
+#### Example Response — `204 No Content`
 
 ---
 
 ### POST `/v1/contacts/bulk`
 
-Perform bulk operations on contacts (tag, untag, add to list, remove from list, delete, restore).
+Import up to 10,000 contacts in one call. Existing emails are updated
+(partial upsert: supplied `name`/`metadata` overwrite, an omitted `tags`
+field preserves the stored tags while an explicit array replaces them).
 
 **Scope:** `contacts:write`
 
@@ -270,10 +243,7 @@ Perform bulk operations on contacts (tag, untag, add to list, remove from list, 
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `action` | string | Yes | `tag`, `untag`, `addToList`, `removeFromList`, `delete`, `restore` |
-| `ids` | string[] | No | Contact IDs to act on |
-| `filter` | object | No | Filter criteria instead of explicit IDs |
-| `value` | string | No | Action value (tag name, list ID, etc.) |
+| `contacts` | object[] | Yes | 1–10,000 contact objects with the same shape as `POST /v1/contacts` |
 
 #### Example Request
 
@@ -282,9 +252,10 @@ curl -X POST "https://api.apexmail.ee/v1/contacts/bulk" \
   -H "X-API-Key: am_live_xxxxxxxxxxxx" \
   -H "Content-Type: application/json" \
   -d '{
-    "action": "tag",
-    "ids": ["con_7d8e9f0a", "con_1b2c3d4e"],
-    "value": "webinar-attendee"
+    "contacts": [
+      { "email": "ada@example.com", "name": "Ada", "tags": ["webinar-attendee"] },
+      { "email": "bob@example.com", "name": "Bob" }
+    ]
   }'
 ```
 
@@ -292,82 +263,105 @@ curl -X POST "https://api.apexmail.ee/v1/contacts/bulk" \
 
 ```json
 {
-  "data": {
-    "total": 2,
-    "updated": 2,
-    "errors": 0
-  }
+  "created": 2,
+  "updated": 0,
+  "failed": 0
 }
 ```
+
+In-request duplicates collapse to their first occurrence and count as
+`updated`; rows with invalid emails count as `failed`.
 
 ---
 
 ### POST `/v1/contacts/bulk/delete`
 
-Permanently delete multiple contacts.
+Soft-delete multiple contacts by `ids` (sets `status: "deleted"`).
 
 **Scope:** `contacts:write`
 
-**Limits:** 1–10,000 contacts per request.
+Body: `{ "ids": ["<uuid>", ...] }` → `{ "affected": <n> }`
 
 ---
 
 ### POST `/v1/contacts/bulk/restore`
 
-Restore soft-deleted contacts.
+Restore soft-deleted contacts by `ids` (sets `status: "active"`).
 
 **Scope:** `contacts:write`
+
+Body: `{ "ids": ["<uuid>", ...] }` → `{ "affected": <n> }`
+
+---
+
+### POST `/v1/contacts/bulk/tag`
+
+Add or remove tags on multiple contacts by `ids`.
+
+**Scope:** `contacts:write`
+
+Body: `{ "ids": [...], "tags": ["vip"], "action": "add" | "remove" }`
+(`action` defaults to `add`). Adding a tag a contact already has is a no-op;
+a write that would exceed the 50-tag per-contact limit is rejected with 422.
+→ `{ "affected": <n> }`
 
 ---
 
 ### POST `/v1/contacts/bulk/resolve-duplicates`
 
-Find and resolve duplicate contacts based on email address. Returns a report of merged records.
+Soft-delete duplicate contacts, keeping the oldest row per lowercase email.
 
 **Scope:** `contacts:write`
+
+→ `{ "affected": <n> }`
 
 ---
 
 ### POST `/v1/contacts/import`
 
-Import contacts from a JSON or CSV payload. Supports up to **100,000** entries per import. Large imports are processed asynchronously.
+Import contacts synchronously from a CSV or XLSX file body. Up to **10,000**
+rows per import.
 
 **Scope:** `contacts:write`
 
-#### Request Body (JSON)
+- CSV (`Content-Type: text/csv`): first column `email`, second column
+  `name`; a header row is skipped.
+- XLSX (`Content-Type:
+  application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, max
+  2 MB): first sheet, first two columns (`email`, `name`); the header row is
+  skipped.
+
+#### Example Request
+
+```bash
+curl -X POST "https://api.apexmail.ee/v1/contacts/import" \
+  -H "X-API-Key: am_live_xxxxxxxxxxxx" \
+  -H "Content-Type: text/csv" \
+  --data-binary 'email,name
+ada@example.com,Ada
+bob@example.com,Bob'
+```
+
+#### Example Response — `200 OK`
 
 ```json
 {
-  "format": "json",
-  "list": "newsletter",
-  "entries": [
-    {
-      "email": "user1@example.com",
-      "firstName": "Alice",
-      "tags": ["newsletter"]
-    }
-  ]
+  "imported": 2,
+  "skipped": 1,
+  "errors": 1,
+  "error_details": ["Row 3: invalid email"],
+  "format": "csv"
 }
 ```
 
-#### Example Response — `202 Accepted`
-
-```json
-{
-  "data": {
-    "import_id": "imp_4a5b6c7d",
-    "status": "processing",
-    "total_entries": 50000,
-    "estimated_completion": "2026-01-25T14:05:00Z"
-  }
-}
-```
+`error_details` carries at most the first 50 row errors. In-file duplicate
+emails and invalid emails are skipped, not fatal.
 
 ---
 
 ### GET `/v1/contacts/counts`
 
-Get contact count statistics by status, list, and tag.
+Get contact count statistics by status for the account.
 
 **Scope:** `contacts:read`
 
@@ -382,20 +376,11 @@ curl -X GET "https://api.apexmail.ee/v1/contacts/counts" \
 
 ```json
 {
-  "data": {
-    "total": 15200,
-    "byStatus": {
-      "active": 13400,
-      "unsubscribed": 1200,
-      "bounced": 450,
-      "complained": 150
-    },
-    "byList": {
-      "all": 15200,
-      "newsletter": 8900,
-      "vip": 450
-    }
-  }
+  "total": 15200,
+  "active": 13400,
+  "unsubscribed": 1200,
+  "bounced": 450,
+  "complained": 150
 }
 ```
 
@@ -406,5 +391,5 @@ curl -X GET "https://api.apexmail.ee/v1/contacts/counts" \
 1. **Use bulk endpoints** for list hygiene tasks to stay within rate limits.
 2. **Check suppressions before sending** — use the [Suppressions API](suppressions.md) to verify addresses are not suppressed.
 3. **Tag for segmentation** rather than creating many small lists.
-4. **Import in batches** of up to 100,000 entries for large migrations.
+4. **Import in batches** of up to 10,000 rows per request.
 5. **Respect unsubscribes** — contacts with `unsubscribed` status are automatically excluded from sends.

@@ -9,12 +9,17 @@ Send your first email through the ApexMail SMTP relay.
 
 ## SMTP Credentials
 
-SMTP credentials are separate from API keys. Generate them in **Dashboard → Settings → SMTP Credentials**:
+SMTP authentication uses your **account credentials** — the same email
+address and password you log into the dashboard with. The submission server
+(`AUTH PLAIN` / `AUTH LOGIN`) verifies them directly against your account.
 
-- **Username**: `am_smtp_xxxxxxxxxxxxxxxxxxxx`
-- **Password**: `am_smtp_secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+> There is deliberately no separate `am_smtp_*` credential type: the
+> submission server accepts your account email as the SMTP username.
+
+- **Username**: your account email address (e.g. `you@example.com`)
+- **Password**: your account password
 - **Host**: `smtp.apexmail.ee`
-- **Port**: `587` (STARTTLS)
+- **Port**: `587` (STARTTLS — required before AUTH is offered)
 
 ## Send via curl (with msmtp-style wrapper)
 
@@ -24,8 +29,8 @@ Use `swaks` (Swiss Army Knife for SMTP) for testing:
 swaks --to recipient@example.org \
       --from hello@example.com \
       --server smtp.apexmail.ee:587 \
-      --auth-user am_smtp_xxxxxxxxxxxxxxxxxxxx \
-      --auth-password am_smtp_secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+      --auth-user you@example.com \
+      --auth-password 'YOUR-ACCOUNT-PASSWORD' \
       --tls \
       --header "Subject: Hello from SMTP" \
       --body "This is your first email sent via ApexMail SMTP relay."
@@ -37,8 +42,8 @@ swaks --to recipient@example.org \
 import smtplib
 from email.mime.text import MIMEText
 
-smtp_user = "am_smtp_xxxxxxxxxxxxxxxxxxxx"
-smtp_pass = "am_smtp_secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+smtp_user = "you@example.com"          # your account email address
+smtp_pass = "YOUR-ACCOUNT-PASSWORD"    # your account password
 host = "smtp.apexmail.ee"
 port = 587
 

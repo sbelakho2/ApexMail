@@ -748,18 +748,35 @@ pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
             "messages:send".into(),
             "messages:read".into(),
             "domains:read".into(),
+            // `domains:write` and `automations:write` are documented scopes
+            // (docs/api/endpoints/auth.md "Available Scopes") and are REQUIRED
+            // by the routes they govern (POST/verify/DELETE /v1/domains,
+            // automations mutations). Omitting them from the mintable
+            // registry made the documented API-key flows impossible: no key
+            // carrying those scopes could ever be minted, so every API-key
+            // domain/automation write was a guaranteed 403.
+            "domains:write".into(),
             "templates:read".into(),
             "templates:write".into(),
             "events:read".into(),
             "analytics:read".into(),
             "contacts:read".into(),
             "contacts:write".into(),
+            // `lists:read`/`lists:write` are the documented list scopes
+            // (docs/api/endpoints/lists.md "Required scopes") and are
+            // REQUIRED by every /v1/lists route. Leaving them out of the
+            // mintable registry made the documented scoped-key list flows
+            // impossible: the scope strings were rejected at issuance, so
+            // only wildcard holders could ever touch lists.
+            "lists:read".into(),
+            "lists:write".into(),
             "logs:read".into(),
             "webhooks:read".into(),
             "webhooks:write".into(),
             "campaigns:read".into(),
             "campaigns:write".into(),
             "automations:read".into(),
+            "automations:write".into(),
             "suppressions:read".into(),
             "suppressions:write".into(),
             "dedicated_ips:read".into(),
@@ -774,6 +791,7 @@ pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
             "events:read".into(),
             "analytics:read".into(),
             "contacts:read".into(),
+            "lists:read".into(),
             "logs:read".into(),
             "campaigns:read".into(),
             "suppressions:read".into(),
@@ -1738,11 +1756,33 @@ async fn revoke_user_sessions(
     let key = session_revocation_key(tenant_id, user_id);
     let revoked_after = Utc::now().timestamp();
 
-    let _: () =
-        deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &key, revoked_after, ttl_secs)
-            .await?;
+    // F-DF1 monotonic cutoff: a host clock that steps BACKWARDS (NTP
+    // correction, VM resync — observed live) must never lower the stored
+    // cutoff below one written earlier, or sessions revoked at the higher
+    // cutoff authenticate again. The cutoff only ever advances; the returned
+    // value is the EFFECTIVE cutoff so issuers bump `iat` past it (the login
+    // path's `session_issue_time_after_revocation` contract). Atomic in one
+    // Lua round trip; the TTL is refreshed either way so an advancing write
+    // and a held-off write both keep the marker alive for a full expiry.
+    let effective: i64 = deadpool_redis::redis::Script::new(
+        r#"
+        local prev = tonumber(redis.call('GET', KEYS[1])) or -1
+        local candidate = tonumber(ARGV[1])
+        if candidate > prev then
+            redis.call('SET', KEYS[1], candidate, 'EX', ARGV[2])
+            return candidate
+        end
+        redis.call('EXPIRE', KEYS[1], ARGV[2])
+        return prev
+    "#,
+    )
+    .key(&key)
+    .arg(revoked_after)
+    .arg(ttl_secs)
+    .invoke_async(&mut *conn)
+    .await?;
 
-    Ok(revoked_after)
+    Ok(effective)
 }
 
 async fn enqueue_verification_email(
@@ -1797,7 +1837,10 @@ pub fn router() -> Router<AppState> {
         // Canonical path-param form (F5/CWE-598); the query-string twin
         // below is deprecated but kept for in-flight links and old clients.
         .route("/verify-email/:token", get(verify_email_by_path))
-        .route("/verify-email", get(verify_email))
+        // Documented JSON form (docs/api/endpoints/auth.md): the token rides
+        // the request BODY — the safest transport (never a URL, header, or
+        // log). Same single-use exchange as the GET forms.
+        .route("/verify-email", post(verify_email_post).get(verify_email))
         .route("/reset-password", post(reset_password))
         .route("/api-keys", post(create_api_key).get(list_api_keys))
         .route("/api-keys/:id", delete(revoke_api_key))
@@ -1820,7 +1863,8 @@ pub fn control_plane_alias_router() -> Router<AppState> {
         // Canonical path-param form (F5/CWE-598); the query-string twin
         // below is deprecated but kept for in-flight links and old clients.
         .route("/verify-email/:token", get(verify_email_by_path))
-        .route("/verify-email", get(verify_email))
+        // Same documented JSON form as the canonical router (POST body token).
+        .route("/verify-email", post(verify_email_post).get(verify_email))
         .route("/reset-password", post(reset_password))
         .route("/logout", post(logout))
         .route("/refresh", post(refresh_token))
@@ -2147,116 +2191,30 @@ async fn insert_auth_audit_log(
 ) -> Result<(), ApiError> {
     // Canonical audit_logs schema (compliance hash chain): resource + details
     // columns, with NOT NULL outcome/hash/signature populated.
-    let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = Utc::now();
-    let mut hasher = Sha256::new();
-    hasher.update(tenant_id.as_bytes());
-    hasher.update(b"|");
-    hasher.update(user_id.as_bytes());
-    hasher.update(b"|");
-    hasher.update(action.as_bytes());
-    hasher.update(b"|");
-    hasher.update(metadata.to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(timestamp.to_rfc3339().as_bytes());
-    let hash = hex::encode(hasher.finalize());
-
-    // Chain the audit entry through the platform-wide hash-chain head
-    // (audit item M-10): the old `SELECT ... ORDER BY timestamp DESC LIMIT 1
-    // FOR UPDATE` on audit_logs serialised every login/MFA/recovery event
-    // platform-wide. The single head row advanced by
-    // `crate::audit_log::advance_chain_head` in this same transaction is the
-    // only serialization point, so concurrent auth events no longer queue
-    // behind each other's transactions while chain integrity is preserved.
-    let mut tx = state.db.begin().await?;
-    let previous_hash: Option<String> =
-        crate::audit_log::advance_chain_head(&mut *tx, &hash).await?;
-    // L-14/L-21: the production decision comes from the loaded config
-    // (`state.config.environment`), NOT a separate `ENVIRONMENT` env read —
-    // a deployment that configures the app as production through config
-    // loading must never silently fall back to the public dev signing key.
-    let signature = audit_log_signature(
+    //
+    // This used to be a FOURTH inline hash formula (tenant|user|action|
+    // metadata|timestamp — resource omitted, nanosecond timestamps), which
+    // made every auth audit row unreproducible from storage and unverifiable
+    // with the canonical writer's formula. Delegate to the one canonical
+    // writer instead: same head advance, same microsecond-truncated hash
+    // input, same signature over the chain link, FTS upkeep included.
+    crate::audit_log::insert_audit_log_with_env(
+        &state.db,
         state.config.environment.is_production(),
-        &hash,
-        previous_hash.as_deref().unwrap_or_default(),
-    )?;
-
-    sqlx::query(
-        "INSERT INTO audit_logs (
-            id, tenant_id, user_id, action, resource, resource_id,
-            details, ip_address, user_agent, outcome, error_message,
-            timestamp, hash, previous_hash, signature, created_at
-         ) VALUES (
-            $1, $2, $3, $4, 'auth', $5,
-            $6::jsonb, $7, $8, 'success', NULL,
-            $9, $10, $11, $12, $9
-         )",
+        Some(tenant_id),
+        Some(user_id),
+        action,
+        "auth",
+        None,
+        metadata,
+        ip_address,
+        user_agent,
     )
-    .bind(&id)
-    .bind(tenant_id)
-    .bind(user_id)
-    .bind(action)
-    // $5 is resource_id (there is none for auth events): skipping it
-    // shifted every later bind one placeholder left, so the metadata landed
-    // in resource_id and the text hash was bound into the timestamptz
-    // `timestamp` column — every MFA/recovery audit write failed with
-    // "column timestamp is of type timestamp with time zone but expression
-    // is of type text" and the login path returned 500.
-    .bind(Option::<&str>::None)
-    .bind(metadata)
-    .bind(ip_address)
-    .bind(user_agent)
-    .bind(timestamp)
-    .bind(&hash)
-    .bind(&previous_hash)
-    .bind(&signature)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    Ok(())
-}
-
-/// HMAC-SHA256 signature over the audit hash (and its chain link), keyed
-/// with `AUDIT_SIGNING_KEY`. In production the key MUST be configured — a
-/// publicly-known fallback would make every signature forgeable — so the
-/// function fails closed there (hard error on first use). Development keeps
-/// a fallback with a warning.
-///
-/// L-14/L-21: `is_production` is derived from the loaded config
-/// (`state.config.environment`), the single real source for the deployment
-/// environment. It previously re-read the `ENVIRONMENT` env var here, so a
-/// deployment configured as production through config loading could silently
-/// sign with the public fallback key.
-fn audit_log_signature(
-    is_production: bool,
-    hash: &str,
-    previous_hash: &str,
-) -> Result<String, ApiError> {
-    use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<Sha256>;
-    let key = match std::env::var("AUDIT_SIGNING_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        Ok(_) | Err(_) => {
-            if is_production {
-                return Err(ApiError::Internal(
-                    "AUDIT_SIGNING_KEY must be configured in production".into(),
-                ));
-            }
-            tracing::warn!(
-                "AUDIT_SIGNING_KEY not set — using development fallback for audit signatures"
-            );
-            "apexmail-auth-audit-fallback-key".to_string()
-        }
-    };
-    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
-        Ok(mac) => mac,
-        Err(_) => return Err(ApiError::Internal("audit HMAC init failed".into())),
-    };
-    mac.update(previous_hash.as_bytes());
-    mac.update(b"|");
-    mac.update(hash.as_bytes());
-    Ok(hex::encode(mac.finalize().into_bytes()))
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "auth audit write failed");
+        ApiError::Internal("audit write failed".into())
+    })
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -2402,7 +2360,7 @@ async fn login(
             });
 
             if count > 0 {
-                return Err(ApiError::RateLimited);
+                return Err(ApiError::RateLimitedIn(LOGIN_IP_RATE_LIMIT_WINDOW_SECS));
             }
         }
         Err(error) => {
@@ -2417,11 +2375,9 @@ async fn login(
     }
 
     let login_identifier = normalized_login_identifier(&body.email);
-    if login_lock_ttl(&state.redis, &login_identifier)
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::RateLimited);
+    if let Some(lock_ttl) = login_lock_ttl(&state.redis, &login_identifier).await? {
+        // The lockout TTL is known exactly — advertise it (Retry-After).
+        return Err(ApiError::RateLimitedIn(lock_ttl.max(1) as u64));
     }
 
     let user = sqlx::query_as::<_, UserRow>(
@@ -3332,6 +3288,13 @@ pub struct VerifyEmailQuery {
     pub token: String,
 }
 
+/// JSON body of the documented `POST /v1/auth/verify-email` form.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyEmailBody {
+    pub token: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct VerifyEmailResponse {
     pub success: bool,
@@ -3394,7 +3357,15 @@ async fn register(
             "company_name must be 1-100 characters".into(),
         ]));
     }
-    if body.email.is_empty() || body.email.len() > 254 {
+    // Structurally valid email only (F-DF1): the anti-enumeration 202 must
+    // never be the answer to an address that could not be delivered anyway.
+    // The bare empty/length check below used to admit `user@@host`, bare
+    // local-parts, embedded CR/LF (SMTP header-injection material) and
+    // leading whitespace — each minted a live tenant row and a verification
+    // email destined to dead-letter. `is_valid_email` is the SAME validator
+    // the contacts/import surface already enforces (RFC 5321 length, single
+    // unquoted `@`, local-part and domain grammar, control chars excluded).
+    if !apexmail_lib::validation::is_valid_email(&body.email) {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
     if display_name.len() > 100 {
@@ -3432,6 +3403,8 @@ async fn register(
         };
 
         if count > REGISTER_RATE_LIMIT_MAX_REQUESTS {
+            // RateLimitedMessage picks up the conservative default Retry-After
+            // (900s ≥ this 600s window) from ApiError::into_response.
             return Err(ApiError::RateLimitedMessage(register_rate_limit_message()));
         }
     }
@@ -3604,6 +3577,17 @@ async fn verify_email(
         "deprecated query-string email verification used; use /v1/auth/verify-email/{{token}}"
     );
     Ok(Json(verify_email_token(&state, &params.token).await?))
+}
+
+/// The documented JSON form (docs/api/endpoints/auth.md §Verify Email):
+/// `POST /v1/auth/verify-email {"token": ...}`. The token rides the request
+/// body — the transport that leaks nowhere (no URL, no header, no Referer).
+/// Same single-use, transactional exchange as the GET forms.
+async fn verify_email_post(
+    State(state): State<AppState>,
+    Json(body): Json<VerifyEmailBody>,
+) -> Result<Json<VerifyEmailResponse>, ApiError> {
+    Ok(Json(verify_email_token(&state, &body.token).await?))
 }
 
 /// Path-parameter form of email verification (F5/CWE-598): the token
@@ -4106,7 +4090,7 @@ async fn reset_password(
         };
 
         if count > max_requests {
-            return Err(ApiError::RateLimited);
+            return Err(ApiError::RateLimitedIn(window_secs));
         }
     }
 
@@ -4306,24 +4290,40 @@ async fn refresh_token(
     // logout blacklisted could still mint a brand-new session here. Same
     // key scheme and fail-closed Redis handling as the middleware's
     // blacklist check (middleware::auth::is_token_blacklisted).
+    //
+    // F-DF1 rotation race: the claim is a single atomic `SET NX EX`. The
+    // previous EXISTS-then-(later)-SET pair let N concurrent refreshes of
+    // the SAME cookie all observe "not blacklisted" and each mint its own
+    // live session — N credentials from one rotation. Now exactly one
+    // request wins the claim; every other presentation of the token —
+    // replay or race — is refused as revoked. Claiming before the user load
+    // is fail-closed: any subsequent refusal (suspended tenant, unverified
+    // email) leaves the old token dead, which is the safe direction.
     let blacklist_key = token_blacklist_key(&token);
-    let blacklisted: bool = {
+    let claim_won: bool = {
         let mut conn = state.redis.get().await.map_err(|error| {
             tracing::error!(error = %error, "Redis unavailable for token blacklist check on refresh");
             ApiError::ServiceUnavailable(
                 "authentication service temporarily unavailable".into(),
             )
         })?;
-        deadpool_redis::redis::AsyncCommands::exists(&mut *conn, &blacklist_key)
+        deadpool_redis::redis::cmd("SET")
+            .arg(&blacklist_key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(state.config.jwt_expiry.as_secs())
+            .query_async::<Option<String>>(&mut *conn)
             .await
+            .map(|claimed| claimed.is_some())
             .map_err(|error| {
-                tracing::error!(error = %error, "Redis EXISTS failed for token blacklist check on refresh");
+                tracing::error!(error = %error, "Redis SET NX failed for token blacklist claim on refresh");
                 ApiError::ServiceUnavailable(
                     "authentication service temporarily unavailable".into(),
                 )
             })?
     };
-    if blacklisted {
+    if !claim_won {
         tracing::info!(user_id = %user_id, "refresh refused for blacklisted token");
         return Err(ApiError::Unauthorized("session has been revoked".into()));
     }
@@ -4353,19 +4353,21 @@ async fn refresh_token(
         ));
     }
 
-    // Fix #20: Blacklist the old token so it cannot be reused.
-    {
-        let bl_key = token_blacklist_key(&token);
-        if let Ok(mut conn) = state.redis.get().await {
-            let ttl = state.config.jwt_expiry.as_secs();
-            let _: Result<(), _> =
-                deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &bl_key, "1", ttl).await;
-        }
-    }
+    // The rotation claim was already placed above (atomic SET NX), so the
+    // old token is blacklisted from the moment it won — no second write.
 
     let expiry_secs = state.config.jwt_expiry.as_secs() as i64;
     let now = Utc::now();
-    let exp = now + ChronoDuration::seconds(expiry_secs);
+
+    // Clock-step guard (F-DF1): `now` can land at or before the user's
+    // revocation cutoff when a host clock steps backwards between the login
+    // that wrote the cutoff and this refresh (observed live: marker and mint
+    // shared one second, so every rotated cookie failed its first `/me` with
+    // "session has been revoked"). The login path already issues past the
+    // cutoff via `session_issue_time_after_revocation` — refresh is the same
+    // issuance, so it gets the same guard.
+    let issued_at = session_issue_time_after_revocation(now, revoked_after);
+    let exp = issued_at + ChronoDuration::seconds(expiry_secs);
 
     let session_id = Uuid::new_v4().to_string();
 
@@ -4374,7 +4376,7 @@ async fn refresh_token(
         tenant_id: user.tenant_id.to_string(),
         scopes: scopes_for_role(&user.role),
         exp: exp.timestamp(),
-        iat: now.timestamp(),
+        iat: issued_at.timestamp(),
         jti: session_id,
         typ: Some("session".into()),
     };
@@ -4745,59 +4747,6 @@ mod tests {
         assert_eq!(login_lockout_duration(2), 1800);
         assert_eq!(login_lockout_duration(3), 3600);
         assert_eq!(login_lockout_duration(10), LOGIN_LOCKOUT_MAX_SECS);
-    }
-
-    /// Serialises tests that mutate the `AUDIT_SIGNING_KEY` process env var
-    /// (env access is process-global and cargo runs tests in parallel).
-    static AUDIT_KEY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[test]
-    fn test_audit_signature_refuses_fallback_key_in_production() {
-        let _guard = AUDIT_KEY_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        // Production without a configured key: hard error — never sign with
-        // the publicly-known development fallback (L-14/L-21).
-        std::env::remove_var("AUDIT_SIGNING_KEY");
-        match audit_log_signature(true, "hash", "prev") {
-            Err(ApiError::Internal(message)) if message.contains("AUDIT_SIGNING_KEY") => {}
-            other => {
-                panic!("production without AUDIT_SIGNING_KEY must refuse to sign, got {other:?}")
-            }
-        }
-
-        // Production with the key configured: real HMAC signature.
-        std::env::set_var("AUDIT_SIGNING_KEY", "prod-audit-key-0123456789abcdef");
-        let signed = audit_log_signature(true, "hash", "prev").expect("signs with real key");
-        assert_eq!(signed.len(), 64, "hex-encoded HMAC-SHA256");
-        assert!(!signed.is_empty() && signed.chars().all(|c| c.is_ascii_hexdigit()));
-
-        std::env::remove_var("AUDIT_SIGNING_KEY");
-    }
-
-    #[test]
-    fn test_audit_signature_uses_dev_fallback_outside_production() {
-        let _guard = AUDIT_KEY_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        std::env::remove_var("AUDIT_SIGNING_KEY");
-        let dev = audit_log_signature(false, "hash", "prev")
-            .expect("development may use the warned fallback key");
-        assert_eq!(dev.len(), 64);
-
-        // The configured key always wins, in any environment.
-        std::env::set_var("AUDIT_SIGNING_KEY", "shared-key-0123456789abcdef");
-        let keyed = audit_log_signature(false, "hash", "prev").unwrap();
-        assert_eq!(
-            keyed,
-            audit_log_signature(true, "hash", "prev").unwrap(),
-            "signature depends only on the key material, not the environment flag"
-        );
-        assert_ne!(keyed, dev, "fallback and real keys sign differently");
-
-        std::env::remove_var("AUDIT_SIGNING_KEY");
     }
 
     #[test]

@@ -555,15 +555,32 @@ async fn test_webhook(
     // material through the shared decrypt-or-migrate helper (the same
     // legacy semantics WebhooksRepo applies).
     let signing_secret = webhook_signing_secret(&state.db, &wh.id, &wh.secret).await?;
-    let signature =
-        apexmail_lib::crypto::create_hmac_signature(signing_secret.as_bytes(), &payload_bytes);
+
+    // Sign EXACTLY like a real delivery (worker-processors webhook
+    // processor): HMAC-SHA256 over "{ms}.{body}", advertised as
+    // `X-ApexMail-Signature: sha256=<hex>` with the millisecond timestamp in
+    // `X-ApexMail-Timestamp`. The previous test delivery used a private
+    // scheme (`X-Webhook-Signature`, bare hex over the raw payload), so a
+    // consumer that validated its verification code against a test fire
+    // failed on every real delivery.
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let mut signing_input = timestamp_ms.to_string().into_bytes();
+    signing_input.push(b'.');
+    signing_input.extend_from_slice(&payload_bytes);
+    let signature = format!(
+        "sha256={}",
+        apexmail_lib::crypto::create_hmac_signature(signing_secret.as_bytes(), &signing_input)
+    );
 
     let start = std::time::Instant::now();
     let result = client
         .post(&wh.url)
         .timeout(timeout)
         .header("Content-Type", "application/json")
-        .header("X-Webhook-Signature", &signature)
+        .header("X-ApexMail-Signature", &signature)
+        .header("X-ApexMail-Timestamp", timestamp_ms.to_string())
+        .header("X-ApexMail-Event", "test")
+        .header("X-ApexMail-Webhook-Id", &wh.id)
         .json(&payload)
         .send()
         .await;

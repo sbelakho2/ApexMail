@@ -46,10 +46,8 @@ Content-Type: application/json
 
 ```json
 {
-  "to": [
-    { "email": "recipient@example.com", "name": "Recipient Name" }
-  ],
-  "from": { "email": "sender@yourcompany.com", "name": "Your Company" },
+  "to": ["Recipient Name <recipient@example.com>"],
+  "from": "Your Company <sender@yourcompany.com>",
   "subject": "Welcome to Our Service",
   "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
   "text": "Welcome! Thanks for signing up.",
@@ -65,7 +63,7 @@ Content-Type: application/json
     "orderId": "ord_456"
   },
   "tags": ["welcome", "onboarding"],
-  "scheduledAt": "2024-01-20T10:00:00Z",
+  "scheduled_at": "2024-01-20T10:00:00Z",
   "priority": "normal"
 }
 ```
@@ -74,22 +72,25 @@ Content-Type: application/json
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `to` | array | ✓ | Array of recipient objects (max 50 per field) |
-| `from` | object | ✓ | Sender `{email, name?}`. Email must be verified. |
-| `replyTo` | string | | Reply-to email address |
-| `cc` | array | | CC recipients (max 50) |
-| `bcc` | array | | BCC recipients (max 50) |
+Addresses are plain RFC 5322 strings — a bare addr-spec (`sender@example.com`)
+or a display form (`Sender Name <sender@example.com>`).
+
+| `to` | string[] | ✓ | Recipient addresses (max 50 per field) |
+| `from` | string | ✓ | Sender address. Its domain must be verified. |
+| `reply_to` | string | | Reply-to email address |
+| `cc` | string[] | | CC recipients (max 50) |
+| `bcc` | string[] | | BCC recipients (max 50) |
 | `subject` | string | ✓* | Email subject (* unless template provides) |
 | `html` | string | ✓* | HTML body (* unless template or text provides) |
 | `text` | string | | Plain text body |
-| `templateId` | string | | Template UUID to use |
-| `templateData` | object | | Variables for template rendering |
+| `template_id` | string | | Template UUID to use |
+| `template_data` | object | | Variables for template rendering |
 | `headers` | object | | Custom email headers |
 | `attachments` | array | | File attachments (max 20, 25 MB each, 50 MB total) |
 | `metadata` | object | | Custom metadata (returned in webhooks) |
 | `tags` | string[] | | Tags for categorization (max 10, plain strings) |
-| `priority` | string | | `high`, `normal` (default), or `low` |
-| `scheduledAt` | string | | ISO 8601 timestamp for delayed sending |
+| `priority` | string or int | | `high`, `normal` (default), `low`, or 1-10 |
+| `scheduled_at` | string | | ISO 8601 timestamp for delayed sending |
 
 ### Attachment Object
 
@@ -109,8 +110,8 @@ Content-Type: application/json
   "to": "recipient@example.com",
   "from": "sender@yourcompany.com",
   "subject": "Welcome to Our Service",
-  "createdAt": "2024-01-15T10:30:00Z",
-  "scheduledAt": null,
+  "created_at": "2024-01-15T10:30:00Z",
+  "scheduled_at": null,
   "metadata": {
     "userId": "usr_123",
     "orderId": "ord_456"
@@ -124,12 +125,12 @@ Content-Type: application/json
 |--------|-------------|
 | `queued` | Message accepted and queued for sending |
 | `scheduled` | Message scheduled for future delivery |
-| `sending` | Message being processed |
-| `sent` | Message delivered to MTA |
-| `delivered` | Delivery confirmed |
+| `processing` | A worker has claimed the message's recipient rows and dispatch is underway |
+| `sent` | Every recipient copy reached a terminal delivered state |
+| `partial` | Some (but not all) recipient copies reached a terminal delivered state |
 | `bounced` | Delivery failed (bounce) |
-| `rejected` | Message rejected (validation failed) |
-| `canceled` | Scheduled message canceled |
+| `failed` | Delivery permanently failed without an address-proof bounce (dead-lettered) |
+| `cancelled` | Remaining deliveries were cancelled before dispatch |
 
 ---
 
@@ -168,7 +169,7 @@ X-API-Key: {{api_key}}
       "to": "recipient@example.com",
       "from": "sender@yourcompany.com",
       "subject": "Welcome to Our Service",
-      "createdAt": "2024-01-15T10:30:00Z",
+      "created_at": "2024-01-15T10:30:00Z",
       "sentAt": "2024-01-15T10:30:05Z",
       "deliveredAt": "2024-01-15T10:30:10Z",
       "opens": 2,
@@ -206,11 +207,11 @@ X-API-Key: {{api_key}}
   "to": "recipient@example.com",
   "from": "sender@yourcompany.com",
   "fromName": "Your Company",
-  "replyTo": "support@yourcompany.com",
+  "reply_to": "support@yourcompany.com",
   "subject": "Welcome to Our Service",
   "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>",
   "text": "Welcome! Thanks for signing up.",
-  "templateId": "tmpl_welcome_001",
+  "template_id": "tmpl_welcome_001",
   "headers": {
     "X-Custom-Header": "custom-value"
   },
@@ -228,7 +229,7 @@ X-API-Key: {{api_key}}
   "tags": ["welcome", "onboarding"],
   "trackOpens": true,
   "trackClicks": true,
-  "createdAt": "2024-01-15T10:30:00Z",
+  "created_at": "2024-01-15T10:30:00Z",
   "sentAt": "2024-01-15T10:30:05Z",
   "deliveredAt": "2024-01-15T10:30:10Z",
   "events": [
@@ -382,21 +383,18 @@ X-API-Key: {{api_key}}
 ```json
 {
   "id": "msg_abc123xyz",
-  "status": "canceled",
-  "canceledAt": "2024-01-15T12:00:00Z"
+  "status": "cancelled",
+  "created_at": "2024-01-15T12:00:00Z"
 }
 ```
 
-### Error Response
-
-```json
-{
-  "error": {
-    "code": "message_already_sent",
-    "message": "Cannot cancel message that has already been sent"
-  }
-}
-```
+Cancelling an already-dispatched or terminal message fails with `409 CONFLICT`:
+while any recipient row is still pending the cancel flips the remaining
+deliveries to `cancelled`; once a worker has claimed at least one recipient
+copy (or the message is already in a terminal state) the dispatch boundary has
+been crossed and the API answers
+`"message can no longer be cancelled: dispatch has already started for at least one recipient"`
+(or `"message cannot be cancelled (already cancelled or in a terminal state)"`).
 
 ---
 
@@ -410,7 +408,7 @@ Reference a template by ID and provide variables:
 {
   "to": "user@example.com",
   "from": "sender@yourcompany.com",
-  "templateId": "tmpl_welcome_001",
+  "template_id": "tmpl_welcome_001",
   "variables": {
     "firstName": "John",
     "accountUrl": "https://app.yourcompany.com",

@@ -98,11 +98,17 @@ pub enum ApiError {
     #[error("{0}")]
     Conflict(String),
 
-    #[error("rate limit exceeded")]
+    #[error("too many requests")]
     RateLimited,
 
     #[error("{0}")]
     RateLimitedMessage(String),
+
+    /// Rate limited with a KNOWN retry window in seconds. Carries the exact
+    /// window so the response can advertise an honest `Retry-After`
+    /// (docs/api/rate-limits.md: "Present on `429` responses").
+    #[error("too many requests")]
+    RateLimitedIn(u64),
 
     #[error("{0}")]
     PayloadTooLarge(String),
@@ -121,6 +127,24 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// Conservative default `Retry-After` (seconds) for rate-limit refusals
+    /// whose exact window is not carried by the variant. Matches the
+    /// documented auth-flow windows (login/forgot/reset: 15 minutes).
+    const RATE_LIMIT_RETRY_AFTER_DEFAULT_SECS: u64 = 900;
+
+    /// `Retry-After` (seconds) advertised on `429` responses, per
+    /// docs/api/rate-limits.md. Exact when the caller knows the window
+    /// ([`ApiError::RateLimitedIn`]), conservative otherwise.
+    fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Self::RateLimited | Self::RateLimitedMessage(_) => {
+                Some(Self::RATE_LIMIT_RETRY_AFTER_DEFAULT_SECS)
+            }
+            Self::RateLimitedIn(secs) => Some(*secs),
+            _ => None,
+        }
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -128,7 +152,9 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::RateLimited | Self::RateLimitedMessage(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited | Self::RateLimitedMessage(_) | Self::RateLimitedIn(_) => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -144,7 +170,9 @@ impl ApiError {
             Self::Forbidden(_) => "FORBIDDEN",
             Self::NotFound(_) => "NOT_FOUND",
             Self::Conflict(_) => "CONFLICT",
-            Self::RateLimited | Self::RateLimitedMessage(_) => "RATE_LIMIT_EXCEEDED",
+            Self::RateLimited | Self::RateLimitedMessage(_) | Self::RateLimitedIn(_) => {
+                "RATE_LIMIT_EXCEEDED"
+            }
             Self::PayloadTooLarge(_) => "PAYLOAD_TOO_LARGE",
             Self::Timeout => "REQUEST_TIMEOUT",
             Self::Internal(_) => "INTERNAL_ERROR",
@@ -181,7 +209,15 @@ impl IntoResponse for ApiError {
             meta: None,
         };
 
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Some(secs) = self.retry_after_secs() {
+            if let Ok(header_value) = secs.to_string().parse() {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, header_value);
+            }
+        }
+        response
     }
 }
 

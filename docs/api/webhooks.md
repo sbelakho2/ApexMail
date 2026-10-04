@@ -34,6 +34,16 @@ Webhooks allow you to receive HTTP POST requests when events happen in ApexMail,
 
 ## Event Types
 
+> **Envelope:** every delivery body is a single JSON object with the keys
+> `id`, `type`, `tenantId`, `timestamp`, and `data` — e.g.
+> `{"id":"evt_...","type":"recipient.unsubscribed","tenantId":"...","timestamp":"...","data":{...}}`.
+> The examples below show the shape of the `data` object. Also note which
+> events are currently produced: `recipient.unsubscribed` (tracking
+> service), `message.bounced` / `message.complained` (SES feedback
+> webhooks). `message.opened` / `message.clicked` are accepted subscription
+> event names, but the tracking pipeline does not enqueue webhook
+> deliveries for them yet.
+
 ### `message.accepted`
 
 Triggered when a message is accepted for delivery.
@@ -200,18 +210,21 @@ All webhooks include a signature header for verification:
 
 ```
 X-ApexMail-Signature: sha256=abc123...
-X-ApexMail-Timestamp: 1705312200
+X-ApexMail-Timestamp: 1791139155214
 ```
 
-The canonical signed payload is:
+`X-ApexMail-Timestamp` is a **unix timestamp in milliseconds**. The canonical
+signed payload is that exact header value, then a dot, then the raw request
+body:
 
 ```
-{unix_timestamp}.{raw_request_body}
+{unix_timestamp_ms}.{raw_request_body}
 ```
 
 Compute an HMAC-SHA256 digest of that string with your webhook secret, then
 compare it in constant time against the value from `X-ApexMail-Signature`
-(without the `sha256=` prefix).
+(without the `sha256=` prefix). Deliveries also carry `X-ApexMail-Event`,
+`X-ApexMail-Webhook-Id`, and `X-ApexMail-Delivery-Id` headers.
 
 ### SDK Helpers
 

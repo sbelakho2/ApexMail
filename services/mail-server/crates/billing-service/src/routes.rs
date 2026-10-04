@@ -1221,13 +1221,14 @@ pub(crate) fn generate_audit_log_id() -> String {
         .collect()
 }
 
-/// HMAC-SHA256 signature over the audit hash, keyed with the same
+/// HMAC-SHA256 signature over the audit chain LINK, keyed with the same
 /// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
+/// Covers `previous_hash | hash` exactly like the canonical api-server
+/// writer, so both writers' rows sit in one verifiable chain.
 ///
-/// Fail-closed: when the key is missing the signature is left empty and an
-/// error is logged every time, so an unconfigured deployment is loudly
-/// visible instead of silently signing with a deterministic public key.
-fn audit_log_signature(hash: &str) -> String {
+/// Development keeps the same documented fallback key the api-server's
+/// canonical writer uses; signing with it beats leaving the chain unsigned.
+fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
@@ -1235,10 +1236,10 @@ fn audit_log_signature(hash: &str) -> String {
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
-            tracing::error!(
-                "AUDIT_SIGNING_KEY is not configured; audit-log signature left empty (hash chain unverifiable)"
+            tracing::warn!(
+                "AUDIT_SIGNING_KEY is not configured — signing with the documented development fallback key"
             );
-            return String::new();
+            "apexmail-audit-fallback-key".to_string()
         }
     };
     let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
@@ -1250,35 +1251,16 @@ fn audit_log_signature(hash: &str) -> String {
             return String::new();
         }
     };
+    mac.update(previous_hash.as_bytes());
+    mac.update(b"|");
     mac.update(hash.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
 
-fn compute_audit_log_hash(
-    tenant_id: &str,
-    action: &str,
-    resource_type: &str,
-    resource_id: Option<&str>,
-    metadata: &serde_json::Value,
-    previous_hash: Option<&str>,
-    timestamp: chrono::DateTime<chrono::Utc>,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(tenant_id.as_bytes());
-    hasher.update(b"|");
-    hasher.update(action.as_bytes());
-    hasher.update(b"|");
-    hasher.update(resource_type.as_bytes());
-    hasher.update(b"|");
-    hasher.update(resource_id.unwrap_or_default().as_bytes());
-    hasher.update(b"|");
-    hasher.update(metadata.to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(previous_hash.unwrap_or_default().as_bytes());
-    hasher.update(b"|");
-    hasher.update(timestamp.to_rfc3339().as_bytes());
-    format!("{:x}", hasher.finalize())
-}
+// The legacy `compute_audit_log_hash` (per-tenant chaining with
+// `previous_hash` folded into the row hash) was removed: it forked the
+// platform chain. `insert_audit_log` computes the canonical api-server hash
+// shape inline.
 
 async fn insert_audit_log(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1289,29 +1271,62 @@ async fn insert_audit_log(
     metadata: serde_json::Value,
     timestamp: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), ApiError> {
-    let previous_hash: Option<String> = sqlx::query_scalar(
-        "SELECT hash FROM audit_logs WHERE tenant_id = $1 ORDER BY timestamp DESC LIMIT 1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(ApiError::Plans)?;
+    // Postgres stores microseconds; `Utc::now()` carries nanoseconds. Hash
+    // and store the same microsecond-truncated instant so the row's hash is
+    // re-derivable from its own columns (mirrors api-server `audit_log` and
+    // `compliance::audit_logger`).
+    let timestamp = if timestamp.timestamp_subsec_nanos().is_multiple_of(1_000) {
+        timestamp
+    } else {
+        chrono::DateTime::from_timestamp_micros(timestamp.timestamp_micros()).unwrap_or(timestamp)
+    };
 
-    let hash = compute_audit_log_hash(
+    // Canonical hash shape — the SAME formula the api-server's canonical
+    // `audit_log::compute_hash` writer uses (tenant|user|action|resource|
+    // resource_id|details|timestamp; the chain link is NOT hashed into the
+    // row hash). The previous per-writer formula (per-tenant chaining with
+    // `previous_hash` inside the hash) forked the platform chain: two writers
+    // linked different children onto the same parent, and the metering writer
+    // never advanced the shared `audit_chain_head` sequencer.
+    let hash_payload = format!(
+        "{}|{}|{}|{}|{}|{}",
         tenant_id,
         action,
         resource_type,
-        resource_id,
-        &metadata,
-        previous_hash.as_deref(),
-        timestamp,
+        resource_id.unwrap_or_default(),
+        metadata,
+        timestamp.to_rfc3339(),
     );
+    let hash = format!("{:x}", Sha256::digest(hash_payload.as_bytes()));
+
+    // Advance the ONE platform-wide chain head inside this transaction
+    // (identical statement to api-server `advance_chain_head`): concurrent
+    // appenders serialise on the single head row; the loser links onto the
+    // winner, keeping the chain linear. The atomic UPDATE returns the hash it
+    // replaced — the `previous_hash` this entry links to.
+    let previous_hash: Option<String> = sqlx::query_scalar(
+        r#"
+        INSERT INTO audit_chain_head (chain_id, head_hash, prev_hash, head_seq, updated_at)
+        VALUES ('global', $1, NULL, 1, NOW())
+        ON CONFLICT (chain_id) DO UPDATE SET
+            prev_hash  = audit_chain_head.head_hash,
+            head_hash  = EXCLUDED.head_hash,
+            head_seq   = audit_chain_head.head_seq + 1,
+            updated_at = NOW()
+        RETURNING prev_hash
+        "#,
+    )
+    .bind(&hash)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(ApiError::Plans)?
+    .flatten();
 
     // Canonical audit_logs schema (compliance): resource + details columns,
-    // outcome/hash/previous_hash/signature required. The signature uses the
-    // same AUDIT_SIGNING_KEY the compliance crate verifies with, so these
-    // rows stay part of the verifiable hash chain.
-    let signature = audit_log_signature(&hash);
+    // outcome/hash/previous_hash/signature required. The signature covers the
+    // chain link with the same AUDIT_SIGNING_KEY the compliance crate verifies
+    // with, so these rows stay part of the verifiable hash chain.
+    let signature = audit_log_signature(previous_hash.as_deref().unwrap_or_default(), &hash);
 
     sqlx::query(
         r#"

@@ -53,9 +53,23 @@ static DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
     ).ok()
 });
 
-/// Internationalised domain: allows non-ASCII UTF-8 characters (RFC 6531).
+/// Internationalised domain: allows non-ASCII UTF-8 characters (RFC 6531)
+/// while keeping the structural rules the ASCII branch enforces.
+///
+/// # Security (homograph / RTL probing)
+/// The label class excludes, on top of controls/DEL/C1/`@`/whitespace:
+/// - `_` and `*` (never valid hostname characters; the ASCII path rejects
+///   them, so the IDN path must not become a bypass);
+/// - `[` / `]` (domain-literal syntax belongs to the ASCII literal branch);
+/// - invisible/format characters used in homograph attacks: soft hyphen
+///   U+00AD, zero-width U+200B-U+200F (incl. LRM/RLM), bidi overrides
+///   U+202A-U+202E, invisible math U+2060-U+2064, and BOM U+FEFF. A domain
+///   such as `bad\u{ad}example.com` must not validate.
 static IDN_DOMAIN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"^(?:[^\x00-\x1F\x7F-\x9F@\s]+\.)+[^\x00-\x1F\x7F-\x9F@\s]{2,}$").ok()
+    Regex::new(
+        "^(?:[^\\x00-\\x20\\x7F-\\x9F@\\s\\x{AD}\\x{200B}-\\x{200F}\\x{202A}-\\x{202E}\\x{2060}-\\x{2064}\\x{FEFF}_\\*\\[\\]]+\\.)+[^\\x00-\\x20\\x7F-\\x9F@\\s\\x{AD}\\x{200B}-\\x{200F}\\x{202A}-\\x{202E}\\x{2060}-\\x{2064}\\x{FEFF}_\\*\\[\\]]{2,}$",
+    )
+    .ok()
 });
 
 /// Domain literal: `[` ... `]` containing IPv4, IPv6, or other text.
@@ -384,6 +398,32 @@ mod tests {
         assert!(!is_valid_domain("no-tld"));
         assert!(!is_valid_domain("-leading.com"));
         assert!(!is_valid_domain(".leading-dot.com"));
+    }
+
+    #[test]
+    fn test_idn_domain_structural_rules_match_ascii_path() {
+        // Genuine RFC 6531 IDN still validates.
+        assert!(is_valid_domain("café.example.dev"));
+        assert!(is_valid_domain("münchen.de"));
+
+        // Hazard characters the ASCII branch rejects must not slip through
+        // the looser IDN branch (homograph / hostname bypass probes).
+        assert!(!is_valid_domain("café._dmarc.example.dev"), "underscore");
+        assert!(!is_valid_domain("café.*.example.dev"), "wildcard");
+        assert!(!is_valid_domain("café.[bad].example.dev"), "brackets");
+        assert!(
+            !is_valid_domain("bad\u{ad}example.example.dev"),
+            "soft hyphen (invisible homograph character)"
+        );
+        assert!(
+            !is_valid_domain("bad\u{200f}example.example.dev"),
+            "RLM (bidi control)"
+        );
+        assert!(
+            !is_valid_domain("bad\u{202e}example.example.dev"),
+            "bidi override"
+        );
+        assert!(!is_valid_domain("bad\u{feff}example.example.dev"), "BOM");
     }
 
     #[test]

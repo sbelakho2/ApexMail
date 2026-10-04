@@ -333,6 +333,20 @@ async fn create_domain(
         )]));
     }
 
+    // A sending domain must be a DNS name. `is_valid_domain` deliberately
+    // accepts RFC 5321 address-literals (`[192.168.1.1]`) because the shared
+    // validator also gates email recipient domains, but SES can never verify
+    // a literal and the generated record hostnames (`bounce.[…]`) would be
+    // malformed. The console form enforces the same DNS-name charset
+    // (routes/web.rs `form_domain_create`), so the JSON surface must not be
+    // the laxer path.
+    if domain_name.starts_with('[') {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid domain name: {} — a sending domain must be a DNS name, not an address literal",
+            domain_name
+        )]));
+    }
+
     // Runtime entitlement snapshot, fetched BEFORE the transaction. The
     // authoritative capacity decision is evaluated below against the
     // in-transaction count; the SQL plan check stays as the race guard.

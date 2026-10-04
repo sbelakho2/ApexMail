@@ -129,6 +129,21 @@ fn map_automation_write_error(error: sqlx::Error) -> ApiError {
     ApiError::from(error)
 }
 
+/// `automations.name` is VARCHAR(255) (live schema). Without this guard a
+/// longer name surfaces as a raw database "value too long" error — a 500.
+/// Reject it at the handler with the same VALIDATION_ERROR shape the sibling
+/// CRUD routes (campaigns, lists) use.
+const MAX_AUTOMATION_NAME_LEN: usize = 255;
+
+fn validate_automation_name(name: &str) -> Result<(), ApiError> {
+    if name.len() > MAX_AUTOMATION_NAME_LEN {
+        return Err(ApiError::Validation(vec![format!(
+            "name must be {MAX_AUTOMATION_NAME_LEN} characters or fewer"
+        )]));
+    }
+    Ok(())
+}
+
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +213,7 @@ async fn create_automation(
             "name and at least one action are required".into(),
         ]));
     }
+    validate_automation_name(&body.name)?;
 
     let id = Uuid::new_v4();
     let now = Utc::now();
@@ -327,6 +343,7 @@ async fn update_automation(
     let existing = fetch_automation(&state, &auth.tenant_id, id.clone()).await?;
 
     let name = body.name.unwrap_or(existing.name);
+    validate_automation_name(&name)?;
     let trigger = body.trigger.unwrap_or(existing.trigger_config);
     let actions = body
         .actions

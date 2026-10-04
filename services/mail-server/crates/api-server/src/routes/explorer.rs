@@ -716,6 +716,24 @@ fn is_example_com_domain(body: &serde_json::Value) -> bool {
     }
 }
 
+/// Both rate-limit windows on the public explorer surface (the Redis fixed
+/// window and the in-process emergency window) are 60 s, so a `429` can
+/// honestly advertise `Retry-After: 60` — the same header contract every
+/// other `429` on the API honours (error.rs `retry_after_secs`,
+/// middleware/rate_limiter.rs). The hand-rolled HTML error pages here bypass
+/// `ApiError`, so the header is attached at the page builders.
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+fn retry_after_headers(status: StatusCode) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&RATE_LIMIT_WINDOW_SECS.to_string()) {
+            headers.insert(axum::http::header::RETRY_AFTER, value);
+        }
+    }
+    headers
+}
+
 fn error_page(status: StatusCode, message: &str) -> Response {
     let outcome = ui_foundation::explorer::ExplorerOutcome {
         method: "POST",
@@ -727,6 +745,7 @@ fn error_page(status: StatusCode, message: &str) -> Response {
     };
     (
         status,
+        retry_after_headers(status),
         Html(ui_foundation::explorer::explorer_response_page(&outcome)),
     )
         .into_response()
@@ -1053,6 +1072,7 @@ pub async fn grade_domain(
 fn grader_error_page(status: StatusCode, domain: &str, code: &str, message: &str) -> Response {
     (
         status,
+        retry_after_headers(status),
         Html(ui_foundation::explorer::grader_error_page(
             domain, code, message,
         )),
@@ -1258,6 +1278,38 @@ mod tests {
         // Degenerate input stays a valid empty label (plan names are never
         // empty in billing_service::plans, but the helper is total).
         assert_eq!(title(""), "");
+    }
+
+    #[test]
+    fn four_twenty_nine_pages_advertise_retry_after_other_statuses_do_not() {
+        let limited = error_page(StatusCode::TOO_MANY_REQUESTS, "slow down");
+        assert_eq!(
+            limited
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("60"),
+            "the documented 429 Retry-After contract applies to the explorer's HTML pages too"
+        );
+        let too_large = error_page(StatusCode::PAYLOAD_TOO_LARGE, "big");
+        assert!(too_large
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_none());
+        // The grader error page honours the same contract.
+        let graded = grader_error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "x.com",
+            "RATE_LIMITED",
+            "slow down",
+        );
+        assert_eq!(
+            graded
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("60")
+        );
     }
 }
 

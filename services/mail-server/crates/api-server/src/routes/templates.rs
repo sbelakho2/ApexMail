@@ -562,6 +562,35 @@ mod tests {
         assert_eq!(result, "A B");
     }
 
+    /// Render-contract pin (docs/api/endpoints/templates.md "Template Syntax
+    /// and Security"): variable VALUES are HTML-entity-escaped in the render
+    /// output — an XSS payload can never survive substitution — while a
+    /// placeholder with no supplied variable stays verbatim.
+    #[test]
+    fn test_substitute_escapes_values_and_keeps_missing_placeholders_verbatim() {
+        let mut vars = serde_json::Map::new();
+        vars.insert(
+            "name".into(),
+            serde_json::Value::String("<script>alert(1)</script>".into()),
+        );
+        vars.insert(
+            "sig".into(),
+            serde_json::Value::String("\"><img src=x onerror=alert(1)>".into()),
+        );
+        let result = substitute("<p>Hello {{name}} — {{sig}} / {{missing}}</p>", &vars);
+        assert_eq!(
+            result,
+            "<p>Hello &lt;script&gt;alert(1)&lt;/script&gt; — &quot;&gt;&lt;img src=x onerror=alert(1)&gt; / {{missing}}</p>"
+        );
+
+        // Non-string values are serialized then escaped with the same rules.
+        let mut obj = serde_json::Map::new();
+        obj.insert("a".into(), serde_json::json!(1));
+        let mut vars2 = serde_json::Map::new();
+        vars2.insert("name".into(), serde_json::Value::Object(obj));
+        assert_eq!(substitute("{{name}}", &vars2), "{&quot;a&quot;:1}");
+    }
+
     #[test]
     fn test_template_response_serialisation() {
         let resp = TemplateResponse {

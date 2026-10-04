@@ -711,6 +711,15 @@ pub fn build_app(state: AppState) -> Router {
             state.clone(),
             auth::require_auth,
         ))
+        // Bridge the SSR form double-submit contract onto the session header
+        // check: runs BEFORE `require_auth` so zero-JS `/web/*` form posts
+        // carrying a valid signed `_csrf` field can authenticate (see
+        // `form_csrf_bridge_middleware`). JSON API requests pass through
+        // untouched.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::form_csrf_bridge_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ddos::ddos_protection_middleware,
@@ -1093,6 +1102,20 @@ async fn content_type_check(
             || content_type.starts_with("multipart/form-data")
             || content_type.starts_with("application/x-www-form-urlencoded")
             || content_type.starts_with("text/plain")
+            // POST /v1/contacts/import consumes a raw CSV / XLSX body
+            // (routes/contacts.rs `import_contacts`); the natural media
+            // types for those payloads must reach the handler instead of
+            // dying in this gate with 415 before the route's own format
+            // sniffing can run.
+            || content_type.starts_with("text/csv")
+            // SCIM 2.0 provisioning (RFC 7644 §3.1): the documented and
+            // IdP-standard media type for /v1/scim create/replace/patch
+            // bodies. axum's `Json` extractor already accepts any
+            // `application/+json` suffix, so this gate was the one place the
+            // documented `application/scim+json` bodies died with 415.
+            || content_type.starts_with("application/scim+json")
+            || content_type.starts_with("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            || content_type.starts_with("application/octet-stream")
             || content_type.is_empty();
 
         if !has_valid_content_type {
@@ -1181,6 +1204,9 @@ fn auth_page_error_message(error: &crate::error::ApiError) -> String {
         | crate::error::ApiError::ServiceUnavailable(message) => message.clone(),
         crate::error::ApiError::Validation(details) => details.join(" "),
         crate::error::ApiError::RateLimited => {
+            "Too many verification attempts. Please wait and try again.".into()
+        }
+        crate::error::ApiError::RateLimitedIn(_) => {
             "Too many verification attempts. Please wait and try again.".into()
         }
         crate::error::ApiError::RateLimitedMessage(message) => message.clone(),
@@ -5950,6 +5976,37 @@ mod adversarial_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn csv_import_content_types_pass_the_gate() {
+        // The contact-import route consumes raw CSV / XLSX bodies; its
+        // natural media types must reach the route instead of 415-ing in the
+        // global content-type gate.
+        let Some((app, _pool)) = app_and_pool("adv_app_import_ct").await else {
+            return;
+        };
+        for content_type in [
+            "text/csv",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/octet-stream",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    request(Method::POST, "/v1/contacts/import")
+                        .header("content-type", content_type)
+                        .body(Body::from("email,name\n"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(
+                resp.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{content_type} must not be refused by the content-type gate"
+            );
+        }
     }
 
     #[tokio::test]

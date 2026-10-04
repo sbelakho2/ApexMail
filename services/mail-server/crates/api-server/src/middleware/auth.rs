@@ -196,6 +196,76 @@ pub(crate) fn validate_session_csrf(
     validate_csrf_token(header_token, csrf_secret)
 }
 
+/// Largest urlencoded body the form-CSRF bridge will buffer to find the
+/// `_csrf` field. SSR forms are tiny; anything larger is passed through
+/// untouched (and then fails the ordinary header check).
+const FORM_CSRF_BRIDGE_MAX_BODY: usize = 64 * 1024;
+
+/// Bridge the SSR form double-submit contract onto the JSON header contract.
+///
+/// The zero-JavaScript web/control-plane surfaces render every authenticated
+/// POST form with a signed `_csrf` hidden field (the ui form-hygiene gate
+/// pins exactly that), but native form submissions CANNOT set the
+/// `X-CSRF-Token` header `validate_session_csrf` demands — so every
+/// session-cookie form POST to `/web/*` was rejected 403 before reaching the
+/// handler's own `check_csrf`, breaking the entire authenticated form
+/// surface (impersonate/suspend buttons, contacts, campaigns, logout …).
+///
+/// For browser form POSTs only, this middleware validates the form field
+/// under the SAME rules as the header path (double-submit cookie equality +
+/// HMAC signature via `validate_csrf_token`, both constant-time) and, when
+/// valid, injects the equivalent header so the downstream check passes. No
+/// new trust is granted: the injected value already satisfied every check
+/// the header would have to pass. JSON API requests, requests that already
+/// carry the header, and non-form content types pass through untouched.
+pub async fn form_csrf_bridge_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    let applies = req.method() == axum::http::Method::POST
+        && req.uri().path().starts_with("/web/")
+        && req.headers().get(CSRF_HEADER_NAME).is_none()
+        && req.headers().get(axum::http::header::COOKIE).is_some()
+        && req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .map(str::trim)
+                    .map(|mime| mime.eq_ignore_ascii_case("application/x-www-form-urlencoded"))
+                    .unwrap_or(false)
+            });
+
+    if applies {
+        let (mut parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, FORM_CSRF_BRIDGE_MAX_BODY)
+            .await
+            .map_err(|_| ApiError::BadRequest("request body too large".into()))?;
+
+        let form_token = form_urlencoded::parse(&bytes)
+            .find(|(key, _)| key == "_csrf")
+            .map(|(_, value)| value.into_owned());
+        let cookie_token = extract_cookie(&parts.headers, CSRF_COOKIE_NAME);
+        if let (Some(form_token), Some(cookie_token)) = (form_token, cookie_token) {
+            if !form_token.is_empty()
+                && apexmail_lib::timing_safe_compare(&form_token, &cookie_token)
+                && validate_csrf_token(&form_token, &state.config.csrf_secret).is_ok()
+            {
+                if let Ok(value) = axum::http::HeaderValue::from_str(&form_token) {
+                    parts.headers.insert(CSRF_HEADER_NAME, value);
+                }
+            }
+        }
+        req = axum::http::Request::from_parts(parts, axum::body::Body::from(bytes));
+    }
+
+    Ok(next.run(req).await)
+}
+
 fn is_control_plane_static_key_request(path: &str, on_control_plane_host: bool) -> bool {
     on_control_plane_host && path.starts_with("/v1/admin/")
 }

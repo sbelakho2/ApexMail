@@ -75,6 +75,12 @@ services:
       CSRF_SECRET: ${CSRF_SECRET:-local-dev-csrf-secret-32chars-min}
       IMPERSONATION_SECRET: ${IMPERSONATION_SECRET:-local-dev-impersonation-secret-32chars}
       CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:-local-dev-control-plane-api-key-32chars}
+      # Dev parity for local webhook listeners (docs dogfood): the api-server
+      # refuses loopback webhook URLs unless this explicit override is set.
+      # MFA_SECRET_ENCRYPTION_KEY pins the shared secret-at-rest key so
+      # webhook signing secrets written here decrypt in the worker.
+      APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS: "true"
+      MFA_SECRET_ENCRYPTION_KEY: ${MFA_SECRET_ENCRYPTION_KEY:?at-rest key required}
     ports:
       - "127.0.0.1:${API_PORT:-8080}:8080"
       - "127.0.0.1:${API_METRICS_PORT:-9090}:9090"
@@ -134,6 +140,123 @@ services:
     tmpfs: []
     profiles:
       - full-stack
+
+  # ── Dogfood/dev parity (SEND/TRACKING dogfood 2026-10-04) ────────────────
+  # The dev docs (docs/getting-started/first-smtp-email.md) document port 587
+  # STARTTLS submission as REQUIRED, and the compose worker block documents
+  # "EMAIL_TRANSPORT_TYPE=smtp (dev: mailpit)" as the local transport. The
+  # base compose ships neither TLS material for the MTA nor the smtp/tracking
+  # worker env, so 587 advertised STARTTLS and then failed every handshake
+  # (454), and all worker mail dead-ended in the unconfigured SES shared pool.
+  # These overrides enable the documented dev flow: real STARTTLS on the edge
+  # (self-signed dev cert under secrets/dev-mta-tls/, gitignored) and
+  # worker delivery through Mailpit with per-domain DKIM signing plus
+  # open/click/unsubscribe tracking pointed at the local tracking service.
+  mta:
+    environment:
+      TLS_ENABLED: "true"
+      TLS_CERT_PATH: /run/tls/cert.pem
+      TLS_KEY_PATH: /run/tls/key.pem
+      # Shared dev token for the mailstore gRPC hop (inbound mailbox
+      # delivery). Mailstore only exists in the prod overlay otherwise.
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me-01}
+    volumes:
+      - ./secrets/dev-mta-tls/cert.pem:/run/tls/cert.pem:ro
+      - ./secrets/dev-mta-tls/key.pem:/run/tls/key.pem:ro
+    ports:
+      # A native host Postfix ("MacBook-Pro.local ESMTP Postfix") already
+      # binds 127.0.0.1:25/465/587 on this machine, so the base compose
+      # publications silently lose the bind race and host-side SMTP tests
+      # hit the WRONG server. Publish the same listeners on non-conflicting
+      # loopback ports for host-side dogfooding.
+      - "127.0.0.1:5525:25"
+      - "127.0.0.1:5587:587"
+      - "127.0.0.1:5465:465"
+
+  # ── Dogfood/dev parity (MAIL-PLANE dogfood 2026-10-04) ───────────────────
+  # The base compose points mta + imap-server at MAILSTORE_GRPC_ADDR
+  # (http://mailstore:50051 "inbound mailbox delivery"), but the mailstore
+  # service was only defined in docker-compose.prod.yml — in dev the mailbox
+  # pipeline had nowhere to land and the imap-server had no TLS material, so
+  # IMAPS (993, README/ARCHITECTURE.md) never listened and the container sat
+  # permanently unhealthy. These overrides give the dev stack the same wiring
+  # the prod overlay ships: a local mailstore (loopback-equivalent internal
+  # bind + shared dev token), the token on both mail clients, and the dev
+  # TLS cert mounted for IMAPS. The token is a dev-only literal; production
+  # keeps the Docker-secret form (INTERNAL_SERVICE_TOKEN_FILE).
+  mailstore:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: mailstore
+    container_name: apexmail-mailstore-1
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "mailstore"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      MAILSTORE_BIND_ADDR: 0.0.0.0:50051
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me-01}
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/50051' 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  imap-server:
+    environment:
+      # Same dev cert the MTA serves on 465/STARTTLS (self-signed, gitignored).
+      INBOUND_CERT_PATH: /run/tls/cert.pem
+      INBOUND_KEY_PATH: /run/tls/key.pem
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me-01}
+    volumes:
+      - ./secrets/dev-mta-tls/cert.pem:/run/tls/cert.pem:ro
+      - ./secrets/dev-mta-tls/key.pem:/run/tls/key.pem:ro
+    ports:
+      # Host 993 is free on dev machines (25/465/587 are shadowed instead).
+      - "127.0.0.1:993:993"
+
+  worker:
+    environment:
+      EMAIL_TRANSPORT_TYPE: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_TLS: "false"
+      DKIM_ENABLED: "true"
+      DKIM_PRIVATE_KEY_ENCRYPTION_KEY: ${DKIM_PRIVATE_KEY_ENCRYPTION_KEY:?DKIM key required}
+      TRACKING_ENABLED: "true"
+      TRACKING_SECRET_KEY: ${TRACKING_SECRET_KEY:-dev-tracking-secret-key-minimum-32-chars-long}
+      TRACKING_PUBLIC_HOST: http://127.0.0.1:3001
+      # Dev webhook testing (dogfood): admit the loopback listener the same
+      # way the api-server's APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS does, and let
+      # the at-rest secret key match the api-server's so webhook signing
+      # secrets decrypt consistently.
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: "true"
+      ALLOW_WEBHOOK_HTTP: "true"
+      MFA_SECRET_ENCRYPTION_KEY: ${MFA_SECRET_ENCRYPTION_KEY:?at-rest key required}
 
 networks:
   apexmail_data:

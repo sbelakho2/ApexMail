@@ -46,6 +46,16 @@ pub struct SsrfValidator {
     max_resolution_age: Duration,
 }
 
+/// True for the literal loopback hostnames the static blocklist contains
+/// (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`, `[::1]`). Used only by the
+/// dev-only `WEBHOOK_ALLOW_PRIVATE_TARGETS` escape hatch.
+fn is_loopback_hostname(hostname: &str) -> bool {
+    matches!(
+        hostname,
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | "[::1]"
+    )
+}
+
 // trust-dns 0.26: TokioAsyncResolver::tokio is gone; build a TokioResolver
 // (builder defaults already equal ResolverOpts::default()).
 static SSRF_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
@@ -107,6 +117,15 @@ impl SsrfValidator {
                 "Webhook URL must use HTTPS (set ALLOW_WEBHOOK_HTTP to allow HTTP in non-production)".to_string()
             ));
         }
+        // Dev/test-only escape hatch mirroring the api-server's
+        // `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS`: when explicitly set, private /
+        // loopback delivery targets are admitted so local integration tests
+        // (e.g. a 127.0.0.1 listener) can receive webhooks. Default OFF —
+        // production must never set this; every other check (hostname
+        // blocklist, scheme, DNS-rebinding freshness) still applies.
+        let allow_private = std::env::var("WEBHOOK_ALLOW_PRIVATE_TARGETS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         if url.scheme() != "https" && url.scheme() != "http" {
             return Err(ProcessorError::Job(format!(
                 "Invalid scheme: {}",
@@ -123,8 +142,14 @@ impl SsrfValidator {
             .ok_or_else(|| ProcessorError::Job("URL has no host".to_string()))?
             .to_lowercase();
 
-        // Check blocked hostnames
-        if self.is_blocked_hostname(&hostname) {
+        // Check blocked hostnames. Under the dev-only private-target
+        // override, loopback literals are admitted (they would otherwise
+        // always be refused by the IP checks below anyway) — every other
+        // blocked hostname (metadata endpoints, k8s internals) stays
+        // refused even then.
+        if self.is_blocked_hostname(&hostname)
+            && !(allow_private && is_loopback_hostname(&hostname))
+        {
             return Err(ProcessorError::Job(
                 "URL points to internal/localhost address".to_string(),
             ));
@@ -140,7 +165,7 @@ impl SsrfValidator {
             None => hostname.as_str(),
         };
         if let Ok(ip) = ip_literal.parse::<IpAddr>() {
-            if is_private_ip(&ip) {
+            if is_private_ip(&ip) && !allow_private {
                 return Err(ProcessorError::Job(format!(
                     "URL resolves to private IP: {}",
                     ip
@@ -165,7 +190,7 @@ impl SsrfValidator {
         }
 
         for ip in &ips {
-            if is_private_ip(ip) {
+            if is_private_ip(ip) && !allow_private {
                 return Err(ProcessorError::Job(format!(
                     "URL resolves to private IP: {}",
                     ip
@@ -636,6 +661,32 @@ mod adversarial_tests {
                 || text.contains("could not be resolved"),
             "fail-closed either way, got: {text}"
         );
+    }
+
+    /// The private-target escape hatch is explicitly opt-in: absent by
+    /// default (loopback refused), admitted when set, refused again the
+    /// moment it is removed. Mirrors the api-server's
+    /// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS` dev parity.
+    #[test]
+    fn private_targets_admitted_only_under_explicit_override() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
+        let strict = SsrfValidator::new();
+        let error = futures::executor::block_on(
+            strict.validate_and_resolve_url("http://127.0.0.1:9999/hook"),
+        )
+        .expect_err("loopback must be refused without the override");
+        assert!(error.to_string().contains("private IP"), "got: {error}");
+
+        std::env::set_var("WEBHOOK_ALLOW_PRIVATE_TARGETS", "true");
+        let permissive = SsrfValidator::new();
+        let resolved = futures::executor::block_on(
+            permissive.validate_and_resolve_url("http://127.0.0.1:9999/hook"),
+        )
+        .expect("the explicit override admits the loopback listener");
+        assert_eq!(resolved.port, 9999);
+        assert!(resolved.host_is_ip);
+        std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
     }
 
     #[tokio::test]

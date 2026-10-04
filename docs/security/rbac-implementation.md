@@ -22,8 +22,8 @@ ApexMail implements Role-Based Access Control (RBAC) through a **scope-based per
 |------|----------------|-------------|
 | **owner** | `*` (wildcard) | Full access to all operations |
 | **admin** | `*` (wildcard) | Full access to all operations |
-| **developer** | `messages:send`, `messages:read`, `domains:read`, `templates:read`, `templates:write`, `events:read`, `analytics:read`, `contacts:read`, `contacts:write` | Can send/read messages, manage templates and contacts |
-| **viewer** | `messages:read`, `domains:read`, `templates:read`, `events:read`, `analytics:read`, `contacts:read` | Read-only access |
+| **developer** | `messages:send`, `messages:read`, `domains:read`, `domains:write`, `templates:read`, `templates:write`, `events:read`, `analytics:read`, `contacts:read`, `contacts:write`, `lists:read`, `lists:write`, `logs:read`, `webhooks:read`, `webhooks:write`, `campaigns:read`, `campaigns:write`, `automations:read`, `automations:write`, `suppressions:read`, `suppressions:write`, `dedicated_ips:read`, `dedicated_ips:write`, `support:read`, `support:write` | Can send/read messages, manage templates, contacts, lists, campaigns, automations, webhooks, suppressions, dedicated IPs, and support |
+| **viewer** | `messages:read`, `domains:read`, `templates:read`, `events:read`, `analytics:read`, `contacts:read`, `lists:read`, `logs:read`, `campaigns:read`, `suppressions:read`, `dedicated_ips:read`, `support:read` | Read-only access |
 | **member** (default) | `messages:read` | Minimal read access |
 
 **Source:** [auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs#L130-L159)

@@ -48,7 +48,11 @@ pub struct SuppressionResponse {
     pub id: String,
     pub email: String,
     pub reason: String,
-    pub source: String,
+    /// Nullable: rows written by the tracking-service (unsubscribe /
+    /// complaint flows) legitimately carry no `source`. Serializes as
+    /// `null` rather than failing the whole list with a decode error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub created_at: String,
 }
 
@@ -209,7 +213,7 @@ async fn create_suppression(
             id,
             email,
             reason: body.reason,
-            source: body.source,
+            source: Some(body.source),
             created_at: now.to_rfc3339(),
         }),
     ))
@@ -399,7 +403,8 @@ struct SuppressionRow {
     id: String,
     email: String,
     reason: String,
-    source: String,
+    /// Nullable column: the tracking-service's unsubscribe insert omits it.
+    source: Option<String>,
     created_at: DateTime<Utc>,
 }
 

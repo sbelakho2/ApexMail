@@ -256,9 +256,9 @@ impl From<ApiError> for ScimError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
-            ApiError::RateLimited | ApiError::RateLimitedMessage(_) => {
-                StatusCode::TOO_MANY_REQUESTS
-            }
+            ApiError::RateLimited
+            | ApiError::RateLimitedMessage(_)
+            | ApiError::RateLimitedIn(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Timeout => StatusCode::REQUEST_TIMEOUT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -3452,6 +3452,65 @@ mod tests {
             "emails": [{ "value": user_name, "primary": true }],
             "active": active,
         })
+    }
+
+    /// RFC 7644 §3.1 + docs/api/endpoints/scim.md: create/replace/patch
+    /// bodies arrive as `Content-Type: application/scim+json` — the media
+    /// type every IdP sends. `ScimBody` must retag it onto the standard JSON
+    /// extractor instead of refusing it with 415.
+    #[tokio::test]
+    async fn scim_media_type_bodies_are_accepted_on_write_routes() {
+        let Some(fixture) = scim_fixture("scim_media_type_writes").await else {
+            return;
+        };
+        let ScimFixture { app, key_a, .. } = &fixture;
+        let email = format!("router-scnm-{}@example.com", Uuid::new_v4().simple());
+
+        let (status, _, body) = scim_call_raw(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(scim_user_payload(&email, "MediaType", true).to_string()),
+            "application/scim+json",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        let user_id = body["id"].as_str().expect("server id").to_string();
+
+        // PATCH with the SCIM media type too.
+        let patch = json!({
+            "schemas": [SCIM_PATCH_OP_SCHEMA],
+            "Operations": [{ "op": "replace", "path": "active", "value": false }],
+        });
+        let (status, _, body) = scim_call_raw(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{user_id}"),
+            Some(patch.to_string()),
+            "application/scim+json",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["active"], false);
+
+        // A genuinely wrong media type stays refused (honest 4xx), not
+        // silently reinterpreted.
+        let (status, _, _) = scim_call_raw(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(scim_user_payload(&email, "MediaType", true).to_string()),
+            "text/plain",
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "non-JSON media type is a mapped client error, not 500"
+        );
     }
 
     /// Full lifecycle over the wire: create (inactive) → get → replace

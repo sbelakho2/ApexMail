@@ -915,8 +915,15 @@ struct LegacyInvoiceDto {
     issued_at: chrono::DateTime<Utc>,
     due_at: chrono::DateTime<Utc>,
     paid_at: Option<chrono::DateTime<Utc>>,
-    period_start: chrono::DateTime<Utc>,
-    period_end: chrono::DateTime<Utc>,
+    /// Nullable on the table — every Rust writer (api-server admin writer,
+    /// billing-service invoice/credit-note/sweep writers) populates the
+    /// period bounds, but nothing in the schema enforces it and no migration
+    /// backfills it. Decoded as an Option so one legacy/imported row with
+    /// NULL bounds renders `periodStart: null` instead of 500-ing the ENTIRE
+    /// invoice list/detail/PDF/XML surface (same class as audit F05's
+    /// nullable billing_address, fixed live by the 2026-10-04 dogfood).
+    period_start: Option<chrono::DateTime<Utc>>,
+    period_end: Option<chrono::DateTime<Utc>>,
     purchase_order_number: Option<String>,
     notes: Option<String>,
     pdf_url: Option<String>,
@@ -945,8 +952,11 @@ struct LegacyInvoiceRow {
     issued_at: chrono::DateTime<Utc>,
     due_at: chrono::DateTime<Utc>,
     paid_at: Option<chrono::DateTime<Utc>>,
-    period_start: chrono::DateTime<Utc>,
-    period_end: chrono::DateTime<Utc>,
+    /// See [`LegacyInvoiceDto::period_start`] — nullable on the table,
+    /// decoded as an Option so a NULL bound can never fail the whole
+    /// invoice surface.
+    period_start: Option<chrono::DateTime<Utc>>,
+    period_end: Option<chrono::DateTime<Utc>>,
     purchase_order_number: Option<String>,
     notes: Option<String>,
     pdf_url: Option<String>,
@@ -1674,6 +1684,13 @@ fn format_invoice_date(date: chrono::DateTime<Utc>) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
+/// Render an optional invoice date (the period bounds are nullable on the
+/// table — see [`LegacyInvoiceRow`]); an absent bound renders as an em dash
+/// instead of inventing a date.
+fn format_optional_invoice_date(date: Option<chrono::DateTime<Utc>>) -> String {
+    date.map(format_invoice_date).unwrap_or_else(|| "—".into())
+}
+
 /// Format cents with the invoice's actual currency (the invoice carries a
 /// `currency` column; USD invoices were being rendered with a € symbol).
 fn format_invoice_currency_with(cents: i64, currency: &str) -> String {
@@ -1979,8 +1996,8 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
             }
             parts
         },
-        period_start = format_invoice_date(invoice.period_start),
-        period_end = format_invoice_date(invoice.period_end),
+        period_start = format_optional_invoice_date(invoice.period_start),
+        period_end = format_optional_invoice_date(invoice.period_end),
     )
 }
 
@@ -2946,26 +2963,34 @@ async fn estimate_overage_cost(
         _ => auth.tenant_id.clone(),
     };
 
-    let email_limit = plans::get_plan_for_tenant(&state.db, &estimate_tenant)
-        .await?
+    let resolved_plan = plans::get_plan_for_tenant(&state.db, &estimate_tenant).await?;
+    let email_limit = resolved_plan
+        .as_ref()
         .map(|plan| plan.email_limit)
         // Unknown tenant: fall back to the validated client value (legacy
         // callers) — the estimate is advisory.
         .unwrap_or(body.email_limit);
 
-    // The deployed overage rate (env-configurable), not a hardcoded 40 —
-    // must quote the same rate the overage sweep invoices with.
-    let overage_cost_cents = plans::calculate_overage_cost_with_rate(
-        emails_sent,
-        email_limit,
-        billing_service::config::configured_overage_rate_millicents(),
-    );
+    // Quote the rate the overage sweep actually INVOICES with: the per-plan
+    // ladder (`plan_overage_rate_millicents` — pricing.md "Developer €0.80,
+    // Pro €0.60, Growth/Business €0.35", the ladder `overage.rs` snapshots).
+    // The flat `OVERAGE_RATE_MILLICENTS` default (40) is only a fallback for
+    // plans without a ladder entry; quoting the flat rate for paid plans used
+    // to understate a Pro overage by 40% versus the eventual invoice line.
+    let rate_millicents = resolved_plan
+        .as_ref()
+        .map(|plan| plans::plan_overage_rate_millicents(&plan.name))
+        .unwrap_or(None)
+        .unwrap_or_else(billing_service::config::configured_overage_rate_millicents);
+    let overage_cost_cents =
+        plans::calculate_overage_cost_with_rate(emails_sent, email_limit, rate_millicents);
 
     Ok(billing_success_response(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
             "emailLimit": email_limit,
         },
+        "overageRateMillicents": rate_millicents,
         "overageCostCents": overage_cost_cents,
         "overageCostUsd": cents_to_usd_string(overage_cost_cents),
     })))
@@ -4487,8 +4512,8 @@ async fn admin_create_invoice(
             issued_at: now,
             due_at,
             paid_at: None,
-            period_start,
-            period_end,
+            period_start: Some(period_start),
+            period_end: Some(period_end),
             purchase_order_number: None,
             notes: body.notes,
             pdf_url: None,
@@ -5220,8 +5245,8 @@ mod tests {
             issued_at,
             due_at,
             paid_at: None,
-            period_start: issued_at,
-            period_end: due_at,
+            period_start: Some(issued_at),
+            period_end: Some(due_at),
             purchase_order_number: Some("PO-<123>".into()),
             notes: Some("Handle <carefully> & confirm".into()),
             pdf_url: None,
@@ -7161,6 +7186,83 @@ mod adversarial_tests {
 
         let (status, _, _) = get_raw(&env, &format!("/v1/billing/invoices/{leaked}/xml")).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A row with NULL period bounds (nullable columns; no migration
+    /// backfills them — legacy Stripe-era or externally imported rows) used
+    /// to 500 the ENTIRE invoice surface: the FromRow decode demanded a
+    /// non-Option timestamp. Same class as audit F05's nullable
+    /// billing_address: decode as Option, render null, never fail the read.
+    #[tokio::test]
+    async fn invoice_with_null_period_bounds_lists_and_renders_instead_of_500() {
+        let Some(pool) = pool_for("invoice_null_period").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advinv",
+            1000,
+            10000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advinv", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices
+             (id, tenant_id, stripe_invoice_id, invoice_number, status, currency, amount,
+              subtotal, vat_total, total, line_items, issued_at, due_at,
+              period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, NULL, '2026-000042', 'paid', 'EUR', 5000, 5000, 0, 5000, $3,
+                     NOW(), NOW() + INTERVAL '14 days', NULL, NULL, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(&tenant)
+        .bind(sample_line_items().to_string())
+        .execute(&pool)
+        .await
+        .expect("seed NULL-period invoice");
+
+        // The LIST must survive one bad row.
+        let (status, body) = get(&env, "/v1/billing/invoices").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body["data"]["invoices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|invoice| invoice["invoiceNumber"] == "2026-000042")
+            .unwrap()
+            .clone();
+        assert!(row["periodStart"].is_null(), "{row}");
+        assert!(row["periodEnd"].is_null(), "{row}");
+
+        // Detail, printable PDF and e-invoice XML all render.
+        let (status, body) = get(&env, &format!("/v1/billing/invoices/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["periodStart"].is_null(), "{body}");
+        let (status, _, bytes) = get_raw(&env, &format!("/v1/billing/invoices/{id}/pdf")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("Period: — to —"), "{html}");
+        let (status, _, bytes) = get_raw(&env, &format!("/v1/billing/invoices/{id}/xml")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
     }
     // ── Stripe checkout / portal (against a local mock) ─────────
 
@@ -9123,8 +9225,8 @@ mod adversarial_tests {
             issued_at,
             due_at: issued_at,
             paid_at: None,
-            period_start: issued_at,
-            period_end: issued_at,
+            period_start: Some(issued_at),
+            period_end: Some(issued_at),
             purchase_order_number: None,
             notes: None,
             pdf_url: None,

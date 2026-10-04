@@ -140,7 +140,8 @@ async fn forgot_password(
             });
 
             if count > 0 {
-                return Err(ApiError::RateLimited);
+                // Exact 15-minute dual window (IP + email) → honest Retry-After.
+                return Err(ApiError::RateLimitedIn(window_secs));
             }
         }
         Err(error) => {

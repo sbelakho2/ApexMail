@@ -251,7 +251,12 @@ fn is_foreign_key_violation(error: &sqlx::Error) -> bool {
 pub struct TenantRow {
     pub id: String,
     pub name: String,
-    pub slug: String,
+    /// The column is nullable (`tenants.slug` has no NOT NULL, and the
+    /// partial index `idx_tenants_slug` is `WHERE slug IS NOT NULL`) and the
+    /// shipped API-explorer sandbox seed (`sbx0explorer0000000000000x`)
+    /// inserts a NULL slug — decoding into `String` 500'd the whole list
+    /// for every operator. Surface the honest SQL NULL instead.
+    pub slug: Option<String>,
     pub plan: String,
     pub status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -277,6 +282,10 @@ pub struct UpdateTenantRequest {
 /// (different) allowlists — this one guards the direct PATCH field.
 const TENANT_ALLOWED_STATUSES: [&str; 3] = ["active", "suspended", "pending"];
 
+/// `tenants.name` is VARCHAR(255): an over-long (or empty) name must be a
+/// 400 validation error, never a raw 22001 database error surfacing as a 500.
+const TENANT_NAME_MAX_CHARS: usize = 255;
+
 fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiError> {
     // Tenant plan changes are entitlement-bearing. They must go through the
     // dedicated billing admin override endpoint, which validates the plan and
@@ -294,6 +303,13 @@ fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiE
             return Err(ApiError::Validation(vec![format!(
                 "invalid status '{status}': must be one of {}",
                 TENANT_ALLOWED_STATUSES.join(", "),
+            )]));
+        }
+    }
+    if let Some(name) = &body.name {
+        if name.trim().is_empty() || name.chars().count() > TENANT_NAME_MAX_CHARS {
+            return Err(ApiError::Validation(vec![format!(
+                "name must be between 1 and {TENANT_NAME_MAX_CHARS} characters"
             )]));
         }
     }
@@ -412,6 +428,9 @@ async fn update_tenant(
     // mutation (the action path above always was). One transaction: a name
     // update succeeding while the status update fails must not leave a
     // half-applied edit; rows_affected gates the 404.
+    // (Name length is already validated by `validate_generic_tenant_update`
+    // — `tenants.name` is VARCHAR(255) and an over-long name must never
+    // reach the UPDATE as a raw 22001 database error.)
     let mut tx = state.db.begin().await?;
     let mut changed = false;
     let mut rows_affected: u64 = 0;
@@ -606,6 +625,45 @@ mod tests {
 
         validate_generic_tenant_update(&request)
             .expect("non-entitlement tenant fields should remain available");
+    }
+
+    #[test]
+    fn generic_tenant_update_rejects_names_over_the_column_limit() {
+        // `tenants.name` is VARCHAR(255); a longer (or empty) name must be
+        // rejected as validation input, never reach the UPDATE to surface
+        // as a 22001 database error (500).
+        let mut over_long = "n".repeat(256);
+        over_long.push_str("— 10k adversarial —");
+        for bad in [
+            String::new(),
+            "   ".to_string(),
+            "x".repeat(10_000),
+            over_long,
+        ] {
+            let request = UpdateTenantRequest {
+                id: "tenant_123".into(),
+                action: None,
+                name: Some(bad),
+                plan: None,
+                status: None,
+            };
+            assert!(
+                matches!(
+                    validate_generic_tenant_update(&request),
+                    Err(ApiError::Validation(_))
+                ),
+                "over-long/empty tenant name must be rejected"
+            );
+        }
+        let boundary = UpdateTenantRequest {
+            id: "tenant_123".into(),
+            action: None,
+            name: Some("n".repeat(255)),
+            plan: None,
+            status: None,
+        };
+        validate_generic_tenant_update(&boundary)
+            .expect("a 255-character name is exactly at the column limit");
     }
 
     #[test]
@@ -936,6 +994,27 @@ mod adversarial_tests {
         assert!(items
             .iter()
             .all(|t| t["id"].is_string() && t["slug"].is_string()));
+
+        // The `tenants.slug` column is nullable and the shipped explorer
+        // sandbox seed carries a NULL slug — a NULL row must list as an
+        // honest `null`, never decode-fail the endpoint into a 500.
+        let null_slug_id = format!("tns{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'Null Slug Co', NULL, 'free', 'active')",
+        )
+        .bind(&null_slug_id)
+        .execute(&pool)
+        .await
+        .expect("seed NULL-slug tenant");
+        let (status, body) = env.get("/v1/admin/tenants").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let null_row = body
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["id"] == null_slug_id)
+            .expect("NULL-slug tenant listed");
+        assert!(null_row["slug"].is_null(), "{null_row}");
 
         let (status, body) = env.get("/v1/admin/tenants?limit=1").await;
         assert_eq!(status, StatusCode::OK, "{body}");

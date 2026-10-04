@@ -14,46 +14,60 @@ Domain verification proves you control the domain you're sending from. It is req
 
 ### 1. Add Your Domain
 
-In the dashboard, navigate to **Domains → Add Domain** and enter your domain name (e.g., `example.com`).
+In the dashboard, navigate to **Domains → Add Domain** and enter your domain name (e.g., `example.com`),
+or call `POST /v1/domains` with an API key. Creation generates an encrypted 2048-bit RSA
+DKIM key pair and a unique selector; the private key never leaves the server.
 
 ### 2. Copy DNS Records
 
-ApexMail generates DNS records you must add to your domain's DNS configuration:
+Fetch the exact records for your domain — `GET /v1/domains/:id/dns-records` (or the domain's
+dashboard view). ApexMail requires four records:
 
-- **TXT record** for domain ownership verification.
-- **TXT record** for SPF (Sender Policy Framework).
-- **CNAME records** for DKIM (DomainKeys Identified Mail).
-- **CNAME record** for return-path alignment.
-- **CNAME record** for tracking domain (open/click tracking).
+- **TXT record** at `bounce.<domain>` with the custom MAIL FROM SPF value
+  (`v=spf1 include:amazonses.com ~all`).
+- **TXT record** at `<selector>._domainkey.<domain>` with the DKIM public key
+  (`v=DKIM1; k=rsa; p=…`) — a direct TXT record, not a CNAME.
+- **TXT record** at `_dmarc.<domain>` with the DMARC policy.
+- **MX record** at `bounce.<domain>` (priority `10`) pointing at the region's
+  `feedback-smtp.<region>.amazonses.com`.
+
+Values are deployment- and domain-specific (the DKIM key and selector are generated per
+domain); examples from another account will not verify. Always copy them from your own
+`dns-records` response.
 
 ### 3. Add Records to DNS
 
-Log into your DNS provider and copy each record from the domain's dashboard
-view. Exact ownership, SPF, DKIM, return-path, and tracking values are
-deployment- and domain-specific; examples from another account may not verify.
+Log into your DNS provider and publish each record from the domain's dashboard view.
 
 ### 4. Verify
 
-Return to the dashboard and click **Verify**. DNS propagation can take up to 48 hours, though most providers update within minutes.
-
-## API: Verify Domain
+Trigger verification — the dashboard **Verify** button, or:
 
 ```bash
-curl -s -X POST https://api.apexmail.ee/v1/domains/example.com/verify \
+curl -s -X POST https://api.apexmail.ee/v1/domains/:id/verify \
   -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
+Verification performs live DNS lookups, so publish the records first. DNS propagation can
+take up to 48 hours, though most providers update within minutes. While the records are
+absent or mismatched, the domain honestly reports the failure and stays `pending`:
+
 ```json
 {
   "domain": "example.com",
-  "status": "verified",
-  "spf": "valid",
-  "dkim": "valid",
-  "dmarc": "not_configured",
-  "verified_at": "2026-01-15T10:35:00Z"
+  "spf_verified": false,
+  "dkim_verified": false,
+  "dmarc_verified": false,
+  "return_path_verified": false,
+  "status": "pending"
 }
 ```
+
+Once every record resolves and (in SES mode) the identity reports ready, the same call
+returns `"status": "verified"` with the per-check booleans `true`. `GET
+/v1/domains/:id/auth-status` explains exactly which record is missing or wrong and how to
+fix it.
 
 ## Next Steps
 

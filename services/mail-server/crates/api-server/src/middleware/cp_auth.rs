@@ -287,7 +287,35 @@ pub(crate) async fn verify_cp_session(
     }
 
     // ── Machine credentials pass without a CP session ───────
-    if bearer.user_id.is_none() && bearer.tenant_id == "system" {
+    // Slug-aware (audit F1 parity): a DB-backed system-tenant API key
+    // authenticates with its real tenant id (`system_internal_tenant01`),
+    // not the `system` sentinel — the same literal comparison that
+    // `require_system_tenant` already fixed for operators. Membership
+    // resolves through the SAME slug-aware check the operator gate uses;
+    // a lookup failure fails CLOSED.
+    let is_machine_credential = bearer.user_id.is_none() && bearer.tenant_id == "system";
+    let is_machine_credential = if is_machine_credential {
+        true
+    } else if bearer.user_id.is_none() {
+        match crate::routes::web::is_system_tenant(state, &bearer.tenant_id).await {
+            Ok(system_tenant) => system_tenant,
+            Err(error) => {
+                tracing::error!(error = %error, "cp_auth machine-credential gate: lookup failed");
+                log_cp_access(
+                    state,
+                    bearer.api_key_id.as_deref(),
+                    path,
+                    StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    "cp_machine_key_lookup_failed",
+                )
+                .await;
+                return Err(ApiError::Internal("authentication error".into()));
+            }
+        }
+    } else {
+        false
+    };
+    if is_machine_credential {
         log_cp_access(
             state,
             bearer.api_key_id.as_deref(),

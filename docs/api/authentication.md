@@ -141,7 +141,7 @@ Response:
 Successful login also sets:
 
 ```http
-Set-Cookie: am_session=<jwt>; HttpOnly; Path=/; SameSite=Lax
+Set-Cookie: am_session=<jwt>; HttpOnly; Path=/; Max-Age=86400; SameSite=Strict
 Cache-Control: no-store, private
 Pragma: no-cache
 ```
@@ -333,50 +333,76 @@ Response:
 
 ## Multi-Factor Authentication
 
+MFA is TOTP-based (SHA-256, 6 digits, 30-second period; ±1 step clock drift).
+Codes and challenges are single-use, and the session rotates on every
+enrollment/verification. Owner/admin roles can be forced to enroll at login
+(the login then returns `202` with `status: "mfa_setup_required"` and a
+`challengeToken` instead of a session).
+
+> There is currently NO API endpoint to disable MFA once enrolled;
+> disabling requires operator assistance.
+
 ### Enabling MFA
 ```http
-POST /v1/auth/mfa/enable
-Authorization: Bearer {{jwt_token}}
-Content-Type: application/json
-
-{
-  "method": "totp"
-}
+POST /v1/auth/mfa/setup
+Authorization: Bearer <session token>   (or an am_session cookie)
 ```
 
 Response:
 ```json
 {
+  "challengeToken": "mfa_...",
   "secret": "JBSWY3DPEHPK3PXP",
-  "qrCode": "data:image/png;base64,...",
-  "backupCodes": [
-    "abc123def456",
-    "ghi789jkl012",
-    "mno345pqr678",
-    "stu901vwx234",
-    "yza567bcd890"
-  ]
+  "otpauthUrl": "otpauth://totp/ApexMail:user%40example.com?secret=...&issuer=ApexMail&algorithm=SHA256&digits=6&period=30"
 }
 ```
 
-### Verifying MFA Setup
+Render `otpauthUrl` as a QR code client-side.
+
+### Confirming MFA Setup
 ```http
-POST /v1/auth/mfa/verify
-Authorization: Bearer {{jwt_token}}
+POST /v1/auth/mfa/confirm-setup
+Authorization: Bearer <session token>   (or an am_session cookie)
 Content-Type: application/json
 
 {
-  "code": "123456"
+  "challenge_token": "mfa_...",
+  "mfaCode": "123456"
 }
 ```
+
+Response — ten one-time recovery codes, each consumable once in place of a
+TOTP code:
+```json
+{
+  "mfaEnabled": true,
+  "recoveryCodes": ["BZDPKHWR2H7X", "..."]
+}
+```
+
+### Completing an MFA Login Challenge
+```http
+POST /v1/auth/mfa/verify
+Content-Type: application/json
+X-CSRF-Token: <token from GET /v1/auth/csrf>
+
+{
+  "challenge_token": "mfa_...",
+  "mfaCode": "123456"
+}
+```
+
+A recovery code is supplied as `"recoveryCode"` instead of `mfaCode`. On
+success the endpoint returns the same session shape as login and sets the
+`am_session` cookie.
 
 ### MFA Methods
 | Method | Description |
 |--------|-------------|
-| `totp` | Time-based OTP (Google Authenticator) |
-| `sms` | SMS verification code |
-| `email` | Email verification code |
-| `webauthn` | Hardware security keys |
+| `totp` | Time-based OTP, HMAC-SHA256 (authenticator apps) |
+
+Email-delivered codes exist only for administrator accounts whose policy
+requires MFA but has no TOTP secret enrolled.
 
 ---
 

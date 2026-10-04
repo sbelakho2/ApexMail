@@ -11491,8 +11491,6 @@ components:
         - billingAddress
         - issuedAt
         - dueAt
-        - periodStart
-        - periodEnd
         - createdAt
         - updatedAt
       properties:
@@ -11537,11 +11535,17 @@ components:
               format: date-time
             - type: 'null'
         periodStart:
-          type: string
-          format: date-time
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
+          description: Billing period bounds. Nullable — every writer populates
+            them, but legacy/imported rows may predate the column fill.
         periodEnd:
-          type: string
-          format: date-time
+          oneOf:
+            - type: string
+              format: date-time
+            - type: 'null'
         purchaseOrderNumber:
           oneOf:
             - type: string

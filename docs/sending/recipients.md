@@ -80,7 +80,7 @@ curl -s https://api.apexmail.ee/v1/suppressions/user@example.org \
 }
 ```
 
-ApexMail automatically skips suppressed recipients — you don't need to filter them before sending.
+Suppressed recipients are enforced at send time: `POST /v1/messages` (and the batch endpoint) rejects the request with `400 VALIDATION_ERROR` naming the first suppressed recipient, e.g. `"recipient is suppressed: user@example.org"`. Filter suppressed addresses before sending (via the check endpoint above or `GET /v1/suppressions`) — the API does not silently skip them.
 
 ### Suppress a Recipient
 

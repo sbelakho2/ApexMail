@@ -306,15 +306,32 @@ fn env_required(key: &str) -> Result<String, ConfigError> {
 
 fn env_required_pem(key: &str) -> Result<String, ConfigError> {
     let raw = env_required(key)?;
-    Ok(raw.replace("\\n", "\n"))
+    Ok(normalize_pem_value(&raw))
+}
+
+/// Normalize a PEM value sourced from an environment variable: unescape the
+/// `\n` escapes single-line env files require, strip surrounding whitespace,
+/// and guarantee a newline-terminated final line.
+///
+/// PEM decoders (OpenSSL, `jsonwebtoken`'s RSA/PKCS#8 readers) reject a
+/// `-----END …-----` final line that is not newline-terminated. Quoting a
+/// multi-line PEM in a `.env` file (`JWT_PUBLIC_KEY_PEM="…END KEY-----"`)
+/// swallows the closing newline, and every authenticated request then fails
+/// key decoding — normalize here so the config layer is tolerant of that
+/// widespread packaging style.
+fn normalize_pem_value(raw: &str) -> String {
+    let unescaped = raw.replace("\\n", "\n");
+    let trimmed = unescaped.trim();
+    format!("{trimmed}\n")
 }
 
 fn parse_optional_pem_list(value: Option<String>) -> Vec<String> {
     value
         .unwrap_or_default()
         .split("||")
-        .map(|pem| pem.trim().replace("\\n", "\n"))
+        .map(|pem| pem.trim())
         .filter(|pem| !pem.is_empty())
+        .map(normalize_pem_value)
         .collect()
 }
 
@@ -2064,13 +2081,14 @@ mod adversarial_tests {
             );
         }
 
-        // PEM lists: `||` separated, trimmed, `\n` unescaped, empties dropped.
+        // PEM lists: `||` separated, trimmed, `\n` unescaped, empties dropped,
+        // each entry newline-terminated for PEM decoders.
         assert!(parse_optional_pem_list(None).is_empty());
         assert!(parse_optional_pem_list(Some(String::new())).is_empty());
         assert!(parse_optional_pem_list(Some("||  ||".into())).is_empty());
         assert_eq!(
             parse_optional_pem_list(Some("a\\nb|| c ".into())),
-            vec!["a\nb".to_string(), "c".to_string()]
+            vec!["a\nb\n".to_string(), "c\n".to_string()]
         );
 
         // CSV: trims, drops empties, keeps every element (even "*" plus others).
@@ -2078,13 +2096,16 @@ mod adversarial_tests {
         assert_eq!(parse_csv("*").len(), 1);
         assert_eq!(parse_csv("*,https://x").len(), 2);
 
-        // env_required_pem unescapes and reports the missing variable.
+        // env_required_pem unescapes, newline-terminates, reports the missing variable.
         assert!(matches!(
             env_required("CONFIG_TEST_DEFINITELY_MISSING"),
             Err(ConfigError::MissingVar(name)) if name == "CONFIG_TEST_DEFINITELY_MISSING"
         ));
         std::env::set_var("CONFIG_TEST_PEM", "line1\\nline2");
-        assert_eq!(env_required_pem("CONFIG_TEST_PEM").unwrap(), "line1\nline2");
+        assert_eq!(
+            env_required_pem("CONFIG_TEST_PEM").unwrap(),
+            "line1\nline2\n"
+        );
         std::env::remove_var("CONFIG_TEST_PEM");
 
         // URL locality.
@@ -2552,13 +2573,13 @@ mod adversarial_tests {
             assert_eq!(config.environment, expected, "ENVIRONMENT={raw:?}");
         }
 
-        // Previous verification keys are split and unescaped.
+        // Previous verification keys are split, unescaped, and newline-terminated.
         sandbox.minimal_dev();
         sandbox.set("JWT_PREVIOUS_PUBLIC_KEYS_PEM", "a\\nb||c");
         let config = Config::from_env().unwrap();
         assert_eq!(
             config.jwt_previous_public_keys_pem,
-            vec!["a\nb".to_string(), "c".to_string()]
+            vec!["a\nb\n".to_string(), "c\n".to_string()]
         );
     }
 

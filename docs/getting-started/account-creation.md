@@ -11,12 +11,17 @@ Create an ApexMail account to start sending email.
 
 ## Test Mode
 
-New accounts start in **Test Mode**. In test mode:
+Integration testing without real delivery is provided by the test
+addresses and test keys (see [Test Mode](../sending/test-mode.md)):
 
-- You can send up to 100 emails per day.
-- Emails are only delivered to verified recipient addresses.
-- No billing is required.
-- All features are available for integration testing.
+- Send to deterministic `@test.apexmail.ee` addresses
+  (`delivered@`, `soft-bounce@`, `hard-bounce@`, ...) to exercise every
+  lifecycle outcome — no external mail leaves the platform.
+- Messages sent with an `am_test_` API key are routed through test mode
+  regardless of recipient.
+
+Regular accounts can send immediately after verifying a sending domain;
+there is no separate account-level "test mode" gate on recipients.
 
 ## Moving to Production
 
@@ -32,31 +37,26 @@ After account creation, generate API keys from **Dashboard → Settings → API 
 
 1. Click **Create API Key**.
 2. Give the key a descriptive name.
-3. Choose the appropriate scopes (`send`, `read`, `admin`).
+3. Choose the appropriate scopes (e.g. `messages:send`, `messages:read`,
+   `domains:read`, `events:read`, `webhooks:write` — or the `*` wildcard).
 4. Copy the key immediately — it won't be shown again.
 
 ```bash
 export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxx"
 ```
 
-## Example: Verify Account Works
+## Example: Verify the Key Works
 
 ```bash
-curl -s https://api.apexmail.ee/v1/account \
+curl -s https://api.apexmail.ee/v1/domains \
   -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
-Expected response:
-
-```json
-{
-  "id": "acct_xxxxxxxxxxxx",
-  "name": "My Workspace",
-  "mode": "test",
-  "created_at": "2026-01-15T10:30:00Z"
-}
-```
+Expected response: HTTP 200 with a JSON array of your sending domains
+(empty until you add one). (`GET /v1/account` does not exist; profile
+information lives at `GET /v1/account/profile`, which is session-cookie
+authenticated, not API-key authenticated.)
 
 ## Related
 

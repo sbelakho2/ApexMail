@@ -67,6 +67,27 @@ fn state_is_production() -> bool {
         .unwrap_or(false)
 }
 
+/// Postgres `timestamptz` stores microseconds, but `Utc::now()` carries
+/// nanosecond precision. The hash is computed over `timestamp.to_rfc3339()`;
+/// hashing the pre-insert (nanosecond) value while storing the rounded
+/// (microsecond) one makes every row's hash UNREPRODUCIBLE from storage —
+/// no verifier can re-derive it, which defeats the chain's purpose. Both the
+/// hash input and the bound column therefore use the same microsecond-
+/// truncated instant (the same discipline `compliance::audit_logger` applies).
+fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
+    let nanos = ts.timestamp_subsec_nanos();
+    if nanos.is_multiple_of(1_000) {
+        return ts;
+    }
+    let micros = ts.timestamp_micros();
+    match DateTime::from_timestamp_micros(micros) {
+        Some(truncated) => truncated,
+        // Out-of-range instants cannot occur for `Utc::now()`; fall back to
+        // the original value rather than inventing a different timestamp.
+        None => ts,
+    }
+}
+
 fn compute_hash(
     tenant_id: Option<&str>,
     user_id: Option<&str>,
@@ -272,6 +293,9 @@ pub async fn insert_audit_log_in_tx_with_env(
     timestamp: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let id = Uuid::new_v4().to_string();
+    // Hash and store the SAME microsecond-truncated instant: the stored row
+    // must be re-derivable from its own columns (see `truncate_to_micros`).
+    let timestamp = truncate_to_micros(timestamp);
     let hash = compute_hash(
         tenant_id,
         user_id,

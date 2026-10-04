@@ -141,12 +141,16 @@ async fn create_campaign(
 ) -> Result<(StatusCode, Json<CampaignResponse>), ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-    if body.name.is_empty() || body.name.len() > 200 {
+    // `chars().count()`, not `String::len()`: the limit (and the DB
+    // VARCHAR(255/998) columns, which count characters) are character-based,
+    // and the validation message below promises characters. A byte check
+    // rejected legitimate 150-character CJK/cyrillic names.
+    if body.name.is_empty() || body.name.chars().count() > 200 {
         return Err(ApiError::Validation(vec![
             "name is required and must be 200 characters or fewer".into(),
         ]));
     }
-    if body.subject.is_empty() || body.subject.len() > 500 {
+    if body.subject.is_empty() || body.subject.chars().count() > 500 {
         return Err(ApiError::Validation(vec![
             "subject is required and must be 500 characters or fewer".into(),
         ]));
@@ -314,14 +318,34 @@ async fn delete_campaign(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["campaigns:write"])?;
 
-    let result = sqlx::query("DELETE FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
-        .bind(parse_campaign_id(&id)?)
-        .bind(&auth.tenant_id)
-        .execute(&state.db)
-        .await?;
+    // Documented contract (docs/api/endpoints/campaigns.md "Delete
+    // Campaign"): only draft or canceled campaigns may be deleted. The
+    // conditional DELETE guards the transition atomically, and a 0-row
+    // outcome is disambiguated afterward so a live campaign yields an
+    // honest 409 while an unknown/cross-tenant one stays a 404.
+    let result = sqlx::query(
+        "DELETE FROM campaigns
+         WHERE id = $1::uuid AND tenant_id = $2 AND status IN ('draft', 'canceled')",
+    )
+    .bind(parse_campaign_id(&id)?)
+    .bind(&auth.tenant_id)
+    .execute(&state.db)
+    .await?;
 
     if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("campaign not found".into()));
+        let Some(status): Option<String> = sqlx::query_scalar(
+            "SELECT status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(parse_campaign_id(&id)?)
+        .bind(&auth.tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+        else {
+            return Err(ApiError::NotFound("campaign not found".into()));
+        };
+        return Err(ApiError::Conflict(format!(
+            "campaigns in status '{status}' cannot be deleted; only draft or canceled campaigns can be"
+        )));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -706,6 +730,37 @@ mod adversarial_tests {
         .await;
         assert!(matches!(long_subject, Err(ApiError::Validation(_))));
 
+        // Limits count CHARACTERS (the documented contract and the response
+        // message), not bytes: a 200-cyrillic-character name (400 bytes) is
+        // valid, a 201-character one is not.
+        let unicode_200 = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "а".repeat(200),
+                subject: "s".into(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(
+            unicode_200.is_ok(),
+            "200-character unicode name must be accepted, got {unicode_200:?}"
+        );
+        let unicode_201 = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "а".repeat(201),
+                subject: "s".into(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(unicode_201, Err(ApiError::Validation(_))));
+
         // An unknown / cross-tenant template_id is a 404, never a silent FK.
         let missing_template = create_campaign(
             State(state.clone()),
@@ -1024,13 +1079,38 @@ mod adversarial_tests {
                 .expect("foreign still exists");
         assert_eq!(still_there, 1);
 
-        // Own delete → 204, second delete → 404.
-        let deleted = delete_campaign(State(state.clone()), write.clone(), Path(own.to_string()))
-            .await
-            .expect("delete own");
-        assert_eq!(deleted, StatusCode::NO_CONTENT);
-        let deleted_again =
+        // A campaign that is not draft/canceled can no longer be deleted —
+        // `own` is 'resending' after the resend block above.
+        let delete_live =
             delete_campaign(State(state.clone()), write.clone(), Path(own.to_string())).await;
+        assert!(
+            matches!(delete_live, Err(ApiError::Conflict(_))),
+            "deleting a 'resending' campaign must conflict, got {delete_live:?}"
+        );
+
+        // Own draft delete → 204, second delete → 404.
+        let deletable = seed_campaign(
+            &pool,
+            &tenant_a,
+            &format!("Deletable-{tag}"),
+            "draft",
+            Utc::now(),
+        )
+        .await;
+        let deleted = delete_campaign(
+            State(state.clone()),
+            write.clone(),
+            Path(deletable.to_string()),
+        )
+        .await
+        .expect("delete own draft");
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        let deleted_again = delete_campaign(
+            State(state.clone()),
+            write.clone(),
+            Path(deletable.to_string()),
+        )
+        .await;
         assert!(matches!(deleted_again, Err(ApiError::NotFound(_))));
 
         // Scope gates.

@@ -2205,8 +2205,9 @@ async fn form_cp_login(
             ),
             &state.config,
         );
-        let challenge_cookie = format!(
-            "apexmail_login_challenge={challenge}; Path=/login; Max-Age=300; HttpOnly; SameSite=Lax{}",
+        let challenge_cookie =
+            format!(
+            "apexmail_login_challenge={challenge}; Path=/; Max-Age=300; HttpOnly; SameSite=Lax{}",
             if is_secure(&state.config) { "; Secure" } else { "" },
         );
         if let Ok(value) = challenge_cookie.parse() {
@@ -2324,6 +2325,9 @@ fn kiwi_failure_message(error: &crate::error::ApiError) -> String {
             message.clone()
         }
         ApiError::RateLimited => "Too many CAPTCHA attempts — wait a moment and try again.".into(),
+        ApiError::RateLimitedIn(_) => {
+            "Too many CAPTCHA attempts — wait a moment and try again.".into()
+        }
         _ => "CAPTCHA verification failed — please retry.".into(),
     }
 }
@@ -2541,7 +2545,7 @@ async fn perform_password_login(
                 &state.config,
             );
             let challenge_cookie = format!(
-                "apexmail_login_challenge={challenge}; Path=/login; Max-Age=300; HttpOnly; SameSite=Lax{}",
+                "apexmail_login_challenge={challenge}; Path=/; Max-Age=300; HttpOnly; SameSite=Lax{}",
                 if is_secure(&state.config) { "; Secure" } else { "" },
             );
             if let Ok(value) = challenge_cookie.parse() {
@@ -4006,6 +4010,62 @@ async fn form_impersonate_end(
             "/cp",
             &state.config,
         );
+    }
+    // Mirror the JSON twin's audit (routes::impersonate::end_impersonation):
+    // a web-console "Terminate impersonation" used to clear the cookie with
+    // NO `impersonation_session_ended` audit row, while the same action over
+    // the JSON surface always audited. Verify the cookie with the SAME
+    // secret/key-names the web start mints (`impersonation_secret`,
+    // `jti`/`tenantId`); a legacy or foreign cookie still ends — it just
+    // cannot contribute identities to the audit row.
+    if let Some(token) = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix("impersonation_session=")
+            })
+        })
+        .filter(|t| !t.is_empty())
+    {
+        if let Some(payload) =
+            verify_impersonation_cookie_payload(token, &state.config.impersonation_secret)
+        {
+            let audit = crate::audit_log::insert_audit_log(
+                &state.db,
+                payload.get("tenantId").and_then(|v| v.as_str()),
+                payload
+                    .get("operatorId")
+                    .and_then(|v| v.as_str())
+                    .or(user.user_id.as_deref()),
+                "impersonation_session_ended",
+                "session",
+                payload.get("jti").and_then(|v| v.as_str()),
+                serde_json::json!({
+                    "operator_id": payload.get("operatorId").and_then(|v| v.as_str()).unwrap_or(""),
+                    "operator_name": payload.get("operatorName").and_then(|v| v.as_str()).unwrap_or(""),
+                    "token_id": payload.get("jti").and_then(|v| v.as_str()).unwrap_or(""),
+                    "tenant_id": payload.get("tenantId").and_then(|v| v.as_str()).unwrap_or(""),
+                    "ended_via": "web_console",
+                }),
+                None,
+                None,
+            )
+            .await;
+            if let Err(error) = audit {
+                // The start side treats a failed audit as a refusal ("an
+                // unaudited impersonation session is never minted"); the end
+                // must be equally honest — but the session IS terminating,
+                // so report the failure instead of silently clearing.
+                tracing::error!(error = %error, "impersonation end audit write failed");
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    "/cp",
+                    &state.config,
+                );
+            }
+        }
     }
     let mut response = redirect_success("Impersonation session ended.", "/cp", &state.config);
     let clear = format!(
@@ -7382,6 +7442,46 @@ fn impersonation_sign_payload(payload: &serde_json::Value, secret: &str) -> Opti
     let sig_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     Some(format!("{payload_b64}.{sig_b64}"))
+}
+
+/// Verify a web-minted impersonation cookie and return its payload.
+///
+/// The exact inverse of [`impersonation_sign_payload`]: signature compared
+/// through the crate's constant-time equality, and the signed `exp`
+/// (millis) still in the future. `None` for any malformed, forged, or
+/// expired cookie — callers treat that as "end without attribution", never
+/// as an error.
+fn verify_impersonation_cookie_payload(token: &str, secret: &str) -> Option<serde_json::Value> {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let (payload_b64, sig_b64) = token.rsplit_once('.')?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload_b64.as_bytes());
+    let expected = mac.finalize().into_bytes();
+    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(sig_b64.as_bytes())
+        .ok()?;
+    // Hex-encode both sides: timing_safe_compare takes &str, and hex is
+    // length-matched even when the provided signature decodes shorter
+    // (early length mismatch must not leak via timing).
+    let expected_hex = hex::encode(expected);
+    let provided_hex = hex::encode(&provided);
+    if !apexmail_lib::timing_safe_compare(&expected_hex, &provided_hex) {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64.as_bytes())
+            .ok()?,
+    )
+    .ok()?;
+    let exp = payload.get("exp")?.as_i64()?;
+    if Utc::now().timestamp_millis() >= exp {
+        return None;
+    }
+    Some(payload)
 }
 
 /// Consume an impersonation jti single-use — the JSON route's

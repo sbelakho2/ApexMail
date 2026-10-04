@@ -277,6 +277,89 @@ async fn one_click_answers_500_when_the_suppression_cannot_be_recorded() {
 }
 
 #[tokio::test]
+async fn one_click_unknown_tenant_is_rejected_not_500_and_poisons_nothing() {
+    // A token whose envelope names a tenant that does not exist (deleted
+    // tenant, or an id minted by a secret holder) used to reach
+    // record_unsubscribe, fail on suppressions_tenant_id_fkey, answer 500 —
+    // and enqueue a pending-retry entry that fails forever (poison loop in
+    // apexmail:suppressions:pending). All three consent-mutating surfaces
+    // must instead answer an honest 4xx and write NOTHING.
+    let Some((state, redis, db)) = test_support::live_redis_pg_state(&[]).await else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    let srv = server(&state).await;
+    let tenant = unique("tn_ghost");
+    let email = "ghost@example.com";
+
+    // Sanity: the tenant really is absent (FK would fail).
+    let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1")
+        .bind(&tenant)
+        .fetch_optional(&db)
+        .await
+        .expect("tenant probe");
+    assert!(exists.is_none());
+
+    let before_retry_len: i64 = {
+        let mut conn = redis.get().await.expect("redis conn");
+        redis::cmd("LLEN")
+            .arg(crate::processor::REDIS_SUPPRESSION_RETRY_KEY)
+            .query_async(&mut *conn)
+            .await
+            .expect("llen retry queue")
+    };
+
+    // RFC 8058 one-click: 400 JSON, never a 500.
+    let token = legacy_token(&tenant, email);
+    let resp = srv
+        .post(&format!("/u/{token}"))
+        .text("List-Unsubscribe=One-Click")
+        .await;
+    assert_eq!(
+        resp.status_code().as_u16(),
+        400,
+        "unknown-tenant one-click must be a client error: {}",
+        resp.text()
+    );
+    assert!(resp.text().contains("Invalid or expired token"));
+
+    // Manual confirm: HTML error page, no suppression row.
+    let resp = srv
+        .post(&format!("/u/{token}/confirm"))
+        .form(&[("confirm", "true")])
+        .await;
+    assert!(resp.text().contains("Invalid or expired"));
+
+    // Preferences save: HTML error page, no rows.
+    let ptok = prefs_token(&tenant, email);
+    let resp = srv
+        .post(&format!("/p/{ptok}"))
+        .form(&[("unsubscribe_all", "true")])
+        .await;
+    assert!(resp.text().contains("Invalid or expired preferences link"));
+
+    // Nothing was persisted: no suppression row, no dedup claim, and the
+    // retry queue grew by ZERO entries (no poison).
+    assert_eq!(suppression_count(&db, &tenant, email).await, 0);
+    let mut conn = redis.get().await.expect("redis conn");
+    let claimed: Option<String> = redis::cmd("GET")
+        .arg(format!("unsub:dedup:{tenant}:{email}"))
+        .query_async(&mut *conn)
+        .await
+        .expect("dedup get");
+    assert_eq!(claimed, None, "the dedup slot must stay unclaimed");
+    let after_retry_len: i64 = redis::cmd("LLEN")
+        .arg(crate::processor::REDIS_SUPPRESSION_RETRY_KEY)
+        .query_async(&mut *conn)
+        .await
+        .expect("llen retry queue after");
+    assert_eq!(
+        after_retry_len, before_retry_len,
+        "a nonexistent-tenant token must not enqueue a retry entry"
+    );
+}
+
+#[tokio::test]
 async fn confirm_endpoint_requires_the_form_field_and_a_valid_token() {
     let Some((state, _redis, _db)) = test_support::live_redis_pg_state(&[]).await else {
         eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");

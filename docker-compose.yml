@@ -379,6 +379,10 @@ services:
       # `docker compose up` comes up healthy.
       HOST: 0.0.0.0
       PORT: "8080"
+      # Absolute base for action links in system emails (verify-email,
+      # password reset). Override in .env for local development so links
+      # are clickable (default was http://0.0.0.0:3000 — unusable in browsers).
+      BASE_URL: ${BASE_URL:-http://0.0.0.0:3000}
       # ── Internal service auth (shared with pdf-renderer) ──────────────────
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
       # Per-domain DKIM private keys are encrypted before database storage.
@@ -638,6 +642,20 @@ services:
       METRICS_PORT: "9093"
       EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-ses}
       AWS_REGION: ${AWS_REGION:-eu-west-1}
+      # SMTP relay settings for EMAIL_TRANSPORT_TYPE=smtp (dev: mailpit).
+      # Empty SMTP_HOST keeps the SES-selected sentinel behavior (see
+      # worker.rs smtp_host_for), so production SES deployments are unaffected.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_TLS: ${SMTP_TLS:-true}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      # SMTP transport requires DKIM signing config (enforced by the worker:
+      # "verified domains must not be sent unsigned").
+      DKIM_ENABLED: ${DKIM_ENABLED:-false}
+      DKIM_SELECTOR: ${DKIM_SELECTOR:-apexmail}
+      DKIM_KEY_PATH: ${DKIM_KEY_PATH:-}
+      DKIM_DOMAIN: ${DKIM_DOMAIN:-}
       # ── Customer automation executor (moved from sales-autopilot) ────────
       WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
       AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
@@ -982,6 +1000,9 @@ services:
       DB_PASSWORD_FILE: /run/secrets/postgres_password
       AWS_REGION: ${AWS_REGION:-eu-west-1}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      # Dogfood finding: SM9 hardening requires AI_ADMIN_TOKEN in production
+      # mode; without this wiring the service crash-loops on boot.
+      AI_ADMIN_TOKEN: ${AI_ADMIN_TOKEN:-dev-ai-admin-token-change-me}
     depends_on:
       postgres:
         condition: service_healthy

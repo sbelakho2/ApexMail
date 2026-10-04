@@ -17,18 +17,24 @@ curl -s -X POST https://api.apexmail.ee/v1/messages \
     "from": "hello@example.com",
     "to": ["recipient@example.org"],
     "subject": "Hello from ApexMail",
-    "text_body": "This is your first email sent via the ApexMail REST API.",
-    "html_body": "<p>This is your first email sent via the <strong>ApexMail REST API</strong>.</p>"
+    "text": "This is your first email sent via the ApexMail REST API.",
+    "html": "<p>This is your first email sent via the <strong>ApexMail REST API</strong>.</p>"
   }' | jq .
 ```
 
 ## Response
 
+`202 Accepted` — the message is queued for delivery (idempotent under an
+`Idempotency-Key` header):
+
 ```json
 {
-  "id": "msg_01JABCDEFGHIJKLM",
-  "status": "accepted",
-  "created_at": "2026-01-15T10:40:00Z"
+  "data": {
+    "id": "01913b2e-6f3a-7cc2-9f4a-5e6d1a2b3c4d",
+    "status": "queued",
+    "created_at": "2026-01-15T10:40:00+00:00"
+  },
+  "error": null
 }
 ```
 
@@ -45,8 +51,8 @@ curl -s -X POST https://api.apexmail.ee/v1/messages \
     "from": "noreply@example.com",
     "to": ["user@example.org"],
     "subject": "Reset your password",
-    "text_body": "Click here to reset your password: https://example.com/reset?token=abc123",
-    "html_body": "<p>Click here to <a href=\"https://example.com/reset?token=abc123\">reset your password</a>.</p>"
+    "text": "Click here to reset your password: https://example.com/reset?token=abc123",
+    "html": "<p>Click here to <a href=\"https://example.com/reset?token=abc123\">reset your password</a>.</p>"
   }' | jq .
 ```
 
@@ -62,8 +68,8 @@ payload = {
     "from": "hello@example.com",
     "to": ["recipient@example.org"],
     "subject": "Hello from Python",
-    "text_body": "Sent via the ApexMail API.",
-    "html_body": "<p>Sent via the <strong>ApexMail API</strong>.</p>"
+    "text": "Sent via the ApexMail API.",
+    "html": "<p>Sent via the <strong>ApexMail API</strong>.</p>"
 }
 
 response = requests.post(
@@ -91,8 +97,8 @@ const response = await fetch("https://api.apexmail.ee/v1/messages", {
     from: "hello@example.com",
     to: ["recipient@example.org"],
     subject: "Hello from Node.js",
-    text_body: "Sent via the ApexMail API.",
-    html_body: "<p>Sent via the <strong>ApexMail API</strong>.</p>"
+    text: "Sent via the ApexMail API.",
+    html: "<p>Sent via the <strong>ApexMail API</strong>.</p>"
   })
 });
 
@@ -102,7 +108,7 @@ console.log(await response.json());
 ## Check Delivery Status
 
 ```bash
-curl -s https://api.apexmail.ee/v1/messages/msg_01JABCDEFGHIJKLM \
+curl -s https://api.apexmail.ee/v1/messages/01913b2e-6f3a-7cc2-9f4a-5e6d1a2b3c4d \
   -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
