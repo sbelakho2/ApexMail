@@ -88,8 +88,8 @@ pub fn router() -> Router<AppState> {
 ///
 /// Mounted from app.rs on the `/v1/admin` control-plane stack
 /// (`require_system_tenant_middleware` → `require_cp_auth`), giving billing
-/// admin the same MFA'd-session + idle/absolute-timeout + per-request-recheck
-/// + `cp_access_log` policy. The CP gate's explicit machine-credential
+/// admin the same MFA'd-session, idle/absolute-timeout, per-request-recheck
+/// and `cp_access_log` policy. The CP gate's explicit machine-credential
 /// carve-out (a system-tenant API key with no user identity — audited as
 /// `cp_machine_key`) keeps programmatic callers working.
 pub fn admin_router() -> Router<AppState> {
@@ -6886,7 +6886,7 @@ mod adversarial_tests {
                   status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
                   cancel_at_period_end, created_at, updated_at)
                  VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, 'advsub', 'monthly',
-                         NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', false, NOW(), NOW())",
+                         NOW() - INTERVAL '5 days' - INTERVAL '6 hours', NOW() - INTERVAL '5 days' - INTERVAL '6 hours' + INTERVAL '30 days', false, NOW(), NOW())",
             )
             .bind(&tenant)
             .bind(stripe_id)
@@ -6928,7 +6928,7 @@ mod adversarial_tests {
               subtotal, vat_total, total, line_items, billing_address, issued_at, due_at,
               paid_at, period_start, period_end, created_at, updated_at)
              VALUES ($1, $2, NULL, $3, $4, 'USD', $5, $5, 0, $5, $6, $7,
-                     NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', NULL,
+                     NOW() - INTERVAL '10 days' - INTERVAL '6 hours', NOW() - INTERVAL '10 days' - INTERVAL '6 hours' + INTERVAL '30 days', NULL,
                      NOW() - INTERVAL '11 days', NOW() + INTERVAL '19 days', NOW(), NOW())",
         )
         .bind(id)
@@ -7634,7 +7634,9 @@ mod adversarial_tests {
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, $4, $5,
-                     NOW() - make_interval(days => $6::int), NOW() + make_interval(days => $7::int),
+                     NOW() - make_interval(days => $6::int) - INTERVAL '6 hours',
+                     NOW() - make_interval(days => $6::int) - INTERVAL '6 hours'
+                         + make_interval(days => $6::int + $7::int),
                      false, NOW(), NOW())",
         )
         .bind(tenant)
@@ -7804,7 +7806,9 @@ mod adversarial_tests {
             "INSERT INTO subscriptions (id, tenant_id, plan_name, status, billing_interval,
                                         current_period_start, current_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, 'advstarter', 'active', 'monthly',
-                     NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', NOW(), NOW())",
+                     NOW() - INTERVAL '10 days' - INTERVAL '6 hours',
+                     NOW() - INTERVAL '10 days' - INTERVAL '6 hours' + INTERVAL '30 days',
+                     NOW(), NOW())",
         )
         .bind(&legacy_tenant)
         .execute(&pool)
@@ -7824,7 +7828,7 @@ mod adversarial_tests {
               status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
               cancel_at_period_end, created_at, updated_at)
              VALUES (gen_random_uuid(), $1, $2, 'cus_admin', 'price_admin', $3, $4, 'monthly',
-                     NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', false, NOW(), NOW())",
+                     NOW() - INTERVAL '5 days' - INTERVAL '6 hours', NOW() - INTERVAL '5 days' - INTERVAL '6 hours' + INTERVAL '30 days', false, NOW(), NOW())",
         )
         .bind(tenant)
         .bind(format!("sub_admin_{}", uuid::Uuid::new_v4().simple()))

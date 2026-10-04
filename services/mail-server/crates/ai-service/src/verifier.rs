@@ -1039,10 +1039,13 @@ impl ClaimTokens {
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_uppercase() && !c.is_ascii_digit());
-            if index > 0 && first_is_upper && lower.chars().count() >= 2 {
-                if !CLAIM_STOPWORDS.contains(&lower.as_str()) && !entities.contains(&lower) {
-                    entities.push(lower);
-                }
+            if index > 0
+                && first_is_upper
+                && lower.chars().count() >= 2
+                && !CLAIM_STOPWORDS.contains(&lower.as_str())
+                && !entities.contains(&lower)
+            {
+                entities.push(lower);
             }
         }
 

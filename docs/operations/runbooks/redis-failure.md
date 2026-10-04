@@ -2,6 +2,12 @@
 
 **Severity:** SEV1–SEV3 (depending on impact)
 
+> **Architecture truth:** ApexMail runs as a single Hetzner host with Docker
+> Compose (see [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)). Every command in
+> this runbook is a Compose command executed on the deploy host at
+> `/opt/apexmail`. There is one Redis instance; there is no Kubernetes or Helm
+> anywhere in this deployment.
+
 ## Table of Contents
 - [Architecture Context](#architecture-context)
 - [Symptoms](#symptoms)
@@ -26,13 +32,26 @@ Redis is used by ApexMail for:
 - **Analytics counters:** Real-time metrics (will reset, no data loss)
 - **Distributed locking:** Failover coordination (locks auto-expire)
 
-**Eviction policy:** dev `allkeys-lru`, prod `volatile-lru` (configured via `REDIS_MAXMEMORY_POLICY` in [`docker-compose.yml`](../../docker-compose.yml))
-**Max memory:** dev 512MB / prod 1GB (`REDIS_MAXMEMORY`; container memory limit set in the compose files)
-**Persistence:** AOF with `appendfsync everysec`
+**Eviction policy:** dev `noeviction`, prod `volatile-lru` (configured via `REDIS_MAXMEMORY_POLICY` in [`docker-compose.yml`](../../../docker-compose.yml); the prod overlay raises memory to 768mb under a 1G container cap)
+**Max memory:** dev 512MB / prod 768MB (`REDIS_MAXMEMORY`; container memory limit set in the compose files)
+**Persistence:** AOF with `appendfsync everysec` (the entrypoint in [`deploy/redis/entrypoint.sh`](../../../deploy/redis/entrypoint.sh) owns the config)
+
+**Operator auth (applies to every command below).** The `default` Redis user
+(authenticates with the `redis_password` compose secret) has `CONFIG`,
+`SHUTDOWN`, `FLUSHALL` and replication commands **revoked** by the ACL in the
+entrypoint. Read/diagnostic commands work with it; commands that change
+server config need the break-glass `admin` user, enabled by setting
+`REDIS_ADMIN_PASSWORD` (see the entrypoint header). The helper used below:
+
+```bash
+cd /opt/apexmail
+rc() { docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis \
+       sh -c "redis-cli --no-auth-warning -a \"\$(cat /run/secrets/redis_password)\" $*"; }
+```
 
 ## Symptoms
 
-- Alerts: `HighMemoryUsage` on Redis pods, `ApiHighLatencyP99` (Redis calls timing out), `ApiRateLimitThrottling` (rate limiter unavailable = deny)
+- Alerts: `HighMemoryUsage` on the redis container, `ApiHighLatencyP99` (Redis calls timing out), `ApiRateLimitThrottling` (rate limiter unavailable = deny)
 - Application errors: `redis: connection refused`, `redis: read timeout`, `redis: out of memory`
 - Metrics: Redis `used_memory` near `maxmemory`, `evicted_keys` > 0, `rejected_connections` > 0
 - Behavioral: Rate limiting fails open? (Check config — default should fail **closed** = deny if Redis down)
@@ -49,35 +68,35 @@ Redis is used by ApexMail for:
 
 1. **Check Redis availability:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli PING
+   rc PING
    # Expected: PONG
    ```
 
 2. **Check memory usage:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO memory | grep -E 'used_memory|maxmemory|maxmemory_policy'
+   rc INFO memory | grep -E 'used_memory|maxmemory|maxmemory_policy'
    ```
 
 3. **Check eviction rate:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO stats | grep evicted_keys
+   rc INFO stats | grep evicted_keys
    # If > 0, memory is under pressure
    ```
 
 4. **Check the keyspace hit rate:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO stats | grep -E 'keyspace_hits|keyspace_misses'
+   rc INFO stats | grep -E 'keyspace_hits|keyspace_misses'
    # Hit rate should be > 90%
    ```
 
 5. **Check connected clients:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO clients | grep connected_clients
+   rc INFO clients | grep connected_clients
    ```
 
 6. **Check slow queries:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli SLOWLOG GET 10
+   rc SLOWLOG GET 10
    ```
 
 ## Recovery Procedures
@@ -86,30 +105,32 @@ Redis is used by ApexMail for:
 
 **When:** Redis is not accepting connections.
 
-1. **Verify Redis process is running:**
+1. **Verify the redis container is running:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- ps aux | grep redis
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml ps redis
    ```
 
 2. **Check Redis logs:**
    ```bash
-   kubectl logs -n apexmail deploy/redis-master --tail=100
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=100 redis
    ```
 
-3. **Check if Redis crashed:**
+3. **Check if Redis crashed and restarted** (restart count and last state):
    ```bash
-   kubectl describe pod -n apexmail -l app.kubernetes.io/name=redis
-   # Check restart count and last state
+   docker inspect apexmail-redis --format '{{.RestartCount}} {{.State.Status}} {{.State.ExitCode}}'
    ```
 
 4. **Restart Redis:**
    ```bash
-   kubectl rollout restart deploy/redis-master -n apexmail
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart redis
    ```
 
 5. **If persistent disk issue:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- df -h
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis df -h /data
    # Check AOF/RDB directory space
    ```
 
@@ -117,37 +138,40 @@ Redis is used by ApexMail for:
 
 **When:** Redis is evicting keys (`evicted_keys` > 0) or rejecting writes.
 
-1. **Temporarily increase `maxmemory`:**
+1. **Temporarily increase `maxmemory`** (needs the break-glass `admin` user —
+   the ACL revokes `CONFIG` from the app user; it only lasts until restart):
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli CONFIG SET maxmemory "1gb"
-   # Note: This only lasts until restart. Update Helm values permanently.
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning --user admin -a "$REDIS_ADMIN_PASSWORD" CONFIG SET maxmemory 1536mb'
+   # Permanent fix: raise REDIS_MAXMEMORY in the prod env and recreate the
+   # service — see step 5.
    ```
 
 2. **Identify largest keys:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli --bigkeys
+   rc --bigkeys
    ```
 
 3. **Clear non-critical keys:**
    ```bash
    # Flush only specific key patterns (not all!)
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli KEYS "analytics:*" | head -100 | xargs -r redis-cli DEL
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli KEYS "temp:*" | xargs -r redis-cli DEL
+   rc KEYS "analytics:*" | head -100 | xargs -r rc DEL
+   rc KEYS "temp:*" | xargs -r rc DEL
    ```
 
 4. **Check for memory leak:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO keyspace
+   rc INFO keyspace
    # Compare key count to baseline
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli DBSIZE
+   rc DBSIZE
    ```
 
-5. **Permanent fix — update `REDIS_MAXMEMORY` / `REDIS_MAXMEMORY_POLICY` in the compose env:**
-   ```yaml
-   redis:
-     configuration: |-
-       maxmemory 2gb
-       maxmemory-policy allkeys-lru
+5. **Permanent fix — raise `REDIS_MAXMEMORY` / change `REDIS_MAXMEMORY_POLICY`**
+   in the prod env file, then recreate the service:
+   ```bash
+   # In /opt/apexmail/.env (or the prod env file): REDIS_MAXMEMORY=1536mb
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d redis
    ```
 
 ### Procedure 3: Data Loss / Corruption
@@ -156,22 +180,23 @@ Redis is used by ApexMail for:
 
 1. **Stop Redis:**
    ```bash
-   kubectl scale deployment redis-master -n apexmail --replicas=0
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml stop redis
    ```
 
-2. **Attempt AOF repair:**
+2. **Attempt AOF repair** (the data volume is `redis_data`, mounted at `/data`;
+   `redis-check-aof` runs from a throwaway container because the service is stopped):
    ```bash
-   # Find the AOF file
-   kubectl exec -n apexmail deploy/redis-master -- ls -la /data/appendonly.aof
-   # Run redis-check-aof
-   kubectl exec -n apexmail deploy/redis-master -- redis-check-aof --fix /data/appendonly.aof
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm --entrypoint redis-check-aof redis \
+     --fix /data/appendonly.aof
    ```
 
-3. **If AOF repair fails, start without persistence:**
-   ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-server \
-     --appendonly no --save "" --loadmodule /usr/lib/redis/modules/redisbloom.so
-   ```
+3. **If AOF repair fails:** restore the latest encrypted Redis backup
+   (produced by the `redis-backup` service / deploy/hardening — same decrypt
+   pattern as the postgres restore in the [db recovery runbook](./db-recovery.md)),
+   or rebuild the cache from scratch (step 4) — every Redis consumer in
+   ApexMail repopulates (see [Data Reconciliation](#data-reconciliation)).
 
 4. **Rebuild cache from scratch:**
    ```bash
@@ -181,41 +206,33 @@ Redis is used by ApexMail for:
 
 ### Procedure 4: Replication Failure
 
-**When:** Redis replicas are not syncing.
-
-1. **Check replication status:**
-   ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO replication
-   ```
-
-2. **Check replica connectivity:**
-   ```bash
-   kubectl exec -n apexmail deploy/redis-replica -- redis-cli PING
-   kubectl exec -n apexmail deploy/redis-replica -- redis-cli ROLE
-   ```
-
-3. **Re-sync from master:**
-   ```bash
-   kubectl exec -n apexmail deploy/redis-replica -- redis-cli REPLICAOF <master-ip> 6379
-   ```
+**When:** n/a on this deployment — ApexMail runs a **single** Redis instance;
+there are no replicas to sync. (`REPLICAOF` is additionally revoked by the
+Redis ACL, so a rogue replication attempt fails closed.) A clustered/replicated
+Redis topology is a roadmap item only — see
+[`redis-cluster-migration.md`](../../architecture/redis-cluster-migration.md),
+which is marked as a roadmap document. If Redis itself is down, follow
+[Procedure 1](#procedure-1-connection-failure).
 
 ### Procedure 5: AOF / RDB Write Failure
 
 **When:** Persistent storage full or permissions issue.
 
-1. **Check disk space on Redis volume:**
+1. **Check disk space on the redis volume:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- df -h /data
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis df -h /data
    ```
 
-2. **Clean up old AOF files:**
+2. **Rewrite the AOF to reclaim space:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli BGREWRITEAOF
+   rc BGREWRITEAOF
    ```
 
-3. **Disable AOF temporarily** (emergency only):
+3. **Disable AOF temporarily** (emergency only; needs the break-glass `admin`
+   user — the app-user ACL revokes `CONFIG`):
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli CONFIG SET appendonly no
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning --user admin -a "$REDIS_ADMIN_PASSWORD" CONFIG SET appendonly no'
    # Re-enable after recovery: CONFIG SET appendonly yes
    ```
 
@@ -225,18 +242,18 @@ After any Redis recovery procedure:
 
 ```bash
 # 1. Basic connectivity
-kubectl exec -n apexmail deploy/redis-master -- redis-cli PING
+rc PING
 
 # 2. Memory within limits
-kubectl exec -n apexmail deploy/redis-master -- redis-cli INFO memory | grep used_memory_human
+rc INFO memory | grep used_memory_human
 
 # 3. Keyspace functional
-kubectl exec -n apexmail deploy/redis-master -- redis-cli SET test-key "test-value" EX 10
-kubectl exec -n apexmail deploy/redis-master -- redis-cli GET test-key
+rc SET test-key "test-value" EX 10
+rc GET test-key
 # Should return "test-value" then auto-expire
 
 # 4. Rate limiter functional
-kubectl exec -n apexmail deploy/redis-master -- redis-cli INCR "rate-limiter:test:counter"
+rc INCR "rate-limiter:test:counter"
 
 # 5. Application health
 curl -sf https://api.apexmail.ee/health/deep | jq '.components.redis'
@@ -263,6 +280,6 @@ Run the cache warming script to speed up recovery:
 ## Related
 
 - [Cache Warming Strategy](../cache-warming.md)
-- [docker-compose.yml (Redis service)](../../docker-compose.yml)
+- [docker-compose.yml (Redis service)](../../../docker-compose.yml)
 - [Cache warming script](../../../deploy/scripts/cache-warm.sh)
 - [Incident Response Runbook](./incident-response.md)

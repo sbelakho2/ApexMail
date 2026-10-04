@@ -38,9 +38,7 @@ pub fn fuzz_seed() -> u64 {
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .unwrap_or(DEFAULT_FUZZ_SEED);
-        eprintln!(
-            "fuzz-tests: RNG seed = {seed} (set FUZZ_SEED=<u64> to reproduce a failure)"
-        );
+        eprintln!("fuzz-tests: RNG seed = {seed} (set FUZZ_SEED=<u64> to reproduce a failure)");
         seed
     })
 }

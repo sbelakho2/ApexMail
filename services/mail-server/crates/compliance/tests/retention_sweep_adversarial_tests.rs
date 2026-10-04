@@ -30,6 +30,22 @@ async fn sweep_db(suffix: &str) -> Option<PgPool> {
     }
 }
 
+/// The owner + unprivileged hostile-role pairing for the PRIVILEGE-failure
+/// scenarios (audit 2026-10-02 #12a): the sweeper runs AS the hostile role
+/// so a revoked privilege fails with 42501 for real — against a superuser
+/// connection `REVOKE ... FROM CURRENT_USER` is a silent no-op.
+async fn sweep_hostile_pair(suffix: &str) -> Option<migrator::test_support::HostileDb> {
+    match migrator::test_support::fresh_hostile_canonical_pool(
+        &format!("sweep_hostile_{suffix}"),
+        &format!("sweep_hostile_{suffix}"),
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
+}
+
 /// An initialized audit logger whose retention never trims anything.
 async fn quiet_audit(pool: &PgPool) -> AuditLogger {
     let logger = AuditLogger::new(
@@ -348,17 +364,24 @@ async fn zero_retention_overlay_degrades_when_absent_or_unreadable() {
     assert_eq!(events.zero_retention_tenants, 0);
     assert_eq!(tenant_events_count(&pool, Some(&tenant)).await, 0);
 
-    // Unreadable table (privilege failure).
-    let Some(pool) = sweep_db("locked_overlay").await else {
+    // Unreadable table (privilege failure). Audit #12a: the sweeper runs AS
+    // the unprivileged hostile role and the OWNER revokes the overlay read
+    // from THAT role — a superuser's `REVOKE ... FROM CURRENT_USER` would be
+    // a silent no-op and the "degradation" would prove nothing.
+    let Some(pair) = sweep_hostile_pair("locked_overlay").await else {
         return;
     };
+    let (owner, pool) = (pair.owner, pair.hostile);
     let tenant = unique_tenant();
-    seed_tenant(&pool, &tenant, false, None).await;
-    seed_event(&pool, Some(&tenant), 40).await;
-    sqlx::query("REVOKE SELECT ON ent_compliance_configs FROM CURRENT_USER")
-        .execute(&pool)
-        .await
-        .expect("revoke overlay");
+    seed_tenant(&owner, &tenant, false, None).await;
+    seed_event(&owner, Some(&tenant), 40).await;
+    sqlx::query(&format!(
+        r#"REVOKE SELECT ON ent_compliance_configs FROM "{}""#,
+        pair.role
+    ))
+    .execute(&owner)
+    .await
+    .expect("revoke overlay");
     let audit = quiet_audit(&pool).await;
     let report = RetentionSweeper::new(pool.clone(), 7, 30, 365)
         .run_sweep(&audit)
@@ -367,24 +390,29 @@ async fn zero_retention_overlay_degrades_when_absent_or_unreadable() {
     let events = category(&report, "events");
     assert_eq!(events.status, SweepStatus::Deleted);
     assert_eq!(events.zero_retention_tenants, 0);
-    assert_eq!(tenant_events_count(&pool, Some(&tenant)).await, 0);
+    assert_eq!(tenant_events_count(&owner, Some(&tenant)).await, 0);
 }
 
 // ── Privilege failures and degraded optional stores ─────────────────────────
 
 /// A non-schema privilege failure on a store is a FAILED target — the report
 /// says so with the error, and other stores still sweep.
+///
+/// Audit 2026-10-02 #12a: the sweeper runs AS the unprivileged hostile role
+/// and the OWNER revokes the events read from THAT role, so the failure is a
+/// genuine 42501 (a superuser's `REVOKE ... FROM CURRENT_USER` is a no-op).
 #[tokio::test]
 async fn privilege_failure_fails_the_target_without_stalling_the_run() {
-    let Some(pool) = sweep_db("revoked_events").await else {
+    let Some(pair) = sweep_hostile_pair("revoked_events").await else {
         return;
     };
+    let (owner, pool) = (pair.owner, pair.hostile);
     let tenant = unique_tenant();
-    seed_tenant(&pool, &tenant, false, None).await;
-    seed_event(&pool, Some(&tenant), 40).await;
+    seed_tenant(&owner, &tenant, false, None).await;
+    seed_event(&owner, Some(&tenant), 40).await;
 
-    sqlx::query("REVOKE SELECT ON events FROM CURRENT_USER")
-        .execute(&pool)
+    sqlx::query(&format!(r#"REVOKE SELECT ON events FROM "{}""#, pair.role))
+        .execute(&owner)
         .await
         .expect("revoke");
 

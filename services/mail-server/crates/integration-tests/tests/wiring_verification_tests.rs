@@ -75,7 +75,9 @@ mod rate_limiter_wiring {
         // Per-tenant isolation on the REAL KeyedRateLimiter: tenant A
         // exhausting its own bucket must leave tenant B untouched. The old
         // local-HashMap version could never catch a shared-bucket regression.
-        let limiter = KeyedRateLimiter::from_params(/* rps */ 10, /* burst */ 3, /* max_keys */ 100);
+        let limiter = KeyedRateLimiter::from_params(
+            /* rps */ 10, /* burst */ 3, /* max_keys */ 100,
+        );
 
         for _ in 0..3 {
             assert!(

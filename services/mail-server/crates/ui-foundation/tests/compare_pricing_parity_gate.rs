@@ -43,7 +43,7 @@ fn compare_pricing_parity_gate_passes_on_the_working_tree() {
     }
     let output = Command::new("python3")
         .arg(&script)
-        .current_dir(&repo_root())
+        .current_dir(repo_root())
         .output()
         .expect("spawn python3 for the compare pricing-parity gate");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -110,6 +110,20 @@ _provision_test_services() {
     _TEST_ENV=''
     if [ "${CI_TEST_DB:-none}" = ephemeral ] || [ "${CI_TEST_REDIS:-0}" = 1 ]; then
         ci_docker_ok || ci_die "ephemeral test services requested but docker is unavailable"
+        # Sweep the debris of previous runs' hard failures (daemon restart /
+        # kill skips the exit-cleanup), which eventually fills the Docker VM
+        # disk mid-suite: dangling volumes (the ephemeral postgres's data
+        # dir) and runaway container logs. `volume prune` only touches
+        # DANGLING (unreferenced) volumes; the log truncation keeps file
+        # handles intact — running containers are never affected.
+        docker volume prune -f >/dev/null 2>&1 || true
+        # shellcheck disable=SC2046  # container IDs are word-split by design
+        for _c_log in $(docker inspect --format '{{.LogPath}}' $(docker ps -aq) 2>/dev/null); do
+            [ -f "$_c_log" ] || continue
+            [ "$(stat -f %z "$_c_log" 2>/dev/null || stat -c %s "$_c_log" 2>/dev/null)" -gt 536870912 ] \
+                && ci_warn "truncating oversized container log: $_c_log" \
+                && truncate -s 0 "$_c_log" 2>/dev/null || true
+        done
     fi
     if [ "${CI_TEST_DB:-none}" = ephemeral ]; then
         _pg_port=$(ci_free_port)
@@ -233,9 +247,16 @@ run_cargo_tests() {
             fi
         done
         _nx_log=$RUN_DIR/nextest.log
+        # Concurrency cap (external audit 2026-10-02 follow-up): every
+        # DB-gated test provisions its own canonical-chain clone (~0.5-1GB
+        # on disk); full-parallel provisioning on an 8-cpu host peaks past
+        # 13GB and dies mid-suite with "No space left on device". 4 jobs
+        # bounds the clone disk peak while the suite still completes —
+        # override with CI_NEXTEST_JOBS on a bigger runner.
+        _nx_jobs="${CI_NEXTEST_JOBS:-4}"
         # shellcheck disable=SC2086  # _TEST_ENV/_nx_args are intentional word lists
         if ! (cd "$WS" && _cargo_run_capture "$_nx_log" env $_TEST_ENV CARGO_TERM_COLOR=never \
-                cargo nextest run --workspace --all-targets $_nx_args); then
+                cargo nextest run --workspace --all-targets --test-threads "$_nx_jobs" $_nx_args); then
             ci_err "cargo nextest run FAILED — see the output above"
             soft_skip_log_gate "$_nx_log" || return "$CI_EXIT_FAIL"
             return "$CI_EXIT_FAIL"

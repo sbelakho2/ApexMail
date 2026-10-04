@@ -457,10 +457,7 @@ mod network_pipeline {
             "WAF must classify the query as SqlInjection, matches: {:?}",
             waf_result.matches
         );
-        let sqli_alerts: Vec<_> = alerts
-            .iter()
-            .filter(|a| a.category == "sqli")
-            .collect();
+        let sqli_alerts: Vec<_> = alerts.iter().filter(|a| a.category == "sqli").collect();
         assert!(
             !sqli_alerts.is_empty(),
             "IDS must raise its sqli-signature alert, got alerts: {:?}",
@@ -870,7 +867,10 @@ mod chained_pipeline {
         }
 
         for s in &stages {
-            println!("pipeline stage {}: hard_reject={} ({})", s.stage, s.hard_reject, s.detail);
+            println!(
+                "pipeline stage {}: hard_reject={} ({})",
+                s.stage, s.hard_reject, s.detail
+            );
         }
         combine(&stages)
     }
@@ -947,7 +947,11 @@ mod chained_pipeline {
 
         let dlp = DlpEngine::new();
         let dlp_verdict = dlp.scan(body, Some(BAD_SENDER_DOMAIN));
-        let types: Vec<_> = dlp_verdict.pii_findings.iter().map(|f| f.pii_type).collect();
+        let types: Vec<_> = dlp_verdict
+            .pii_findings
+            .iter()
+            .map(|f| f.pii_type)
+            .collect();
         assert!(
             types.contains(&dlp_engine::pii::PiiType::Ssn)
                 && types.contains(&dlp_engine::pii::PiiType::CreditCard),

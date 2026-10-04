@@ -2,6 +2,11 @@
 
 **Severity:** SEV1–SEV3 (depending on impact)
 
+> **Architecture truth:** ApexMail runs as a single Hetzner host with Docker
+> Compose (see [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)). Every command in
+> this runbook is a Compose command executed on the deploy host at
+> `/opt/apexmail`. There is no Kubernetes or Helm anywhere in this deployment.
+
 ## Table of Contents
 - [Symptoms](#symptoms)
 - [Severity Classification](#severity-classification)
@@ -9,7 +14,7 @@
 - [Recovery Procedures](#recovery-procedures)
   - [Procedure 1: Connection Pool Exhaustion](#procedure-1-connection-pool-exhaustion)
   - [Procedure 2: Slow Query / Lock Contention](#procedure-2-slow-query--lock-contention)
-  - [Procedure 3: Primary Failure / Failover](#procedure-3-primary-failure--failover)
+  - [Procedure 3: Postgres Down / Restart](#procedure-3-postgres-down--restart)
   - [Procedure 4: Data Corruption](#procedure-4-data-corruption)
   - [Procedure 5: WAL Disk Full](#procedure-5-wal-disk-full)
 - [Post-Recovery Verification](#post-recovery-verification)
@@ -32,21 +37,31 @@
 
 ## Initial Diagnosis
 
+All commands below run on the deploy host, from the checkout at
+`/opt/apexmail`. The canonical invocation is:
+
+```bash
+cd /opt/apexmail
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail ...
+```
+
 1. **Check database connectivity:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- pg_isready -U apexmail
-   # Expected: "db-0:5432 - accepting connections"
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
+     pg_isready -U apexmail
+   # Expected: "accepting connections"
    ```
 
 2. **Check connection count:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT count(*), state FROM pg_stat_activity GROUP BY state;"
    ```
 
 3. **Check for blocking locks:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT blocked_locks.pid AS blocked_pid, blocking_locks.pid AS blocking_pid,
              blocked_activity.query AS blocked_query,
              blocking_activity.query AS blocking_query
@@ -67,15 +82,19 @@
       WHERE NOT blocked_locks.granted;"
    ```
 
-4. **Check replication status:**
+4. **Check for long-running transactions** (they hold vacuums/locks and bloat WAL):
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
-     "SELECT * FROM pg_stat_replication;"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
+     "SELECT pid, usename, state, now() - xact_start AS xact_age, left(query, 60)
+      FROM pg_stat_activity
+      WHERE xact_start IS NOT NULL
+      ORDER BY xact_age DESC
+      LIMIT 10;"
    ```
 
 5. **Check WAL disk usage:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT count(*) AS wal_files, sum(size)::numeric/1024/1024 AS total_mb FROM pg_ls_waldir();"
    ```
 
@@ -87,7 +106,7 @@
 
 1. **Identify idle connections to terminate:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pid, state, usename, application_name, query_start, state_change
       FROM pg_stat_activity
       WHERE state = 'idle' AND state_change < now() - interval '10 minutes'
@@ -96,7 +115,7 @@
 
 2. **Terminate idle connections (older than 10 min):**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pg_terminate_backend(pid)
       FROM pg_stat_activity
       WHERE state = 'idle' AND state_change < now() - interval '10 minutes';"
@@ -104,7 +123,7 @@
 
 3. **Terminate all non-essential connections (emergency):**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pg_terminate_backend(pid)
       FROM pg_stat_activity
       WHERE usename != 'apexmail' AND pid != pg_backend_pid();"
@@ -115,7 +134,7 @@
 
 5. **Temporarily increase `max_connections`** if needed (requires restart):
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "ALTER SYSTEM SET max_connections = 300;"
    # Then reload: SELECT pg_reload_conf();
    ```
@@ -126,7 +145,7 @@
 
 1. **Identify slow running queries:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pid, now() - pg_stat_activity.query_start AS duration,
              query, state, wait_event_type, wait_event
       FROM pg_stat_activity
@@ -137,19 +156,19 @@
 
 2. **Cancel (not terminate) a specific query:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pg_cancel_backend(<pid>);"
    ```
 
 3. **Force terminate if cancel doesn't work:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT pg_terminate_backend(<pid>);"
    ```
 
 4. **Check for missing indexes causing seq scans:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT relname, seq_scan, seq_tup_read, idx_scan, idx_tup_fetch
       FROM pg_stat_user_tables
       WHERE seq_scan > 1000 AND idx_scan = 0
@@ -159,13 +178,13 @@
 
 5. **Run VACUUM ANALYZE** to update query planner statistics:
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "VACUUM ANALYZE;"
    ```
 
 6. **Check for table bloat:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT schemaname, tablename, n_dead_tup, n_live_tup,
              round(n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup, 0) * 100, 2) AS dead_pct
       FROM pg_stat_user_tables
@@ -173,52 +192,44 @@
       ORDER BY n_dead_tup DESC;"
    ```
 
-### Procedure 3: Primary Failure / Failover
+### Procedure 3: Postgres Down / Restart
 
-**When:** PostgreSQL primary is unreachable or corrupted.
+**When:** The `postgres` container is unreachable or crash-looping. This
+deployment runs a **single** PostgreSQL instance — there is no standby to
+promote (streaming replicas are a roadmap item; see
+[`postgres-read-replicas.md`](../../deployment/postgres-read-replicas.md),
+which is marked as such).
 
-1. **Verify primary down:**
-   ```bash
-   kubectl exec -n apexmail deploy/postgres -- pg_isready -U apexmail -h <primary-host>
-   # Connection refused or timeout
-   ```
-
-2. **Check standby status:**
-   ```bash
-   kubectl exec -n apexmail deploy/postgres-standby -- psql -U apexmail -c \
-     "SELECT pg_is_in_recovery(), pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn();"
-   ```
-
-3. **Execute failover:**
-   The programmatic path is the `FailoverService` state machine in the `ha`
-   crate (`services/mail-server/crates/ha/src/failover.rs` — Redis-coordinated
-   lock + state, `pg_promote` under the lock). Manual equivalent on the
-   single-host compose deployment:
+1. **Verify the container is down / restart-looping:**
    ```bash
    cd /opt/apexmail
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
-     psql -U apexmail -c "SELECT pg_promote();"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml ps postgres
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=100 postgres
+   # Look for the crash reason (OOM-kill, corrupt data dir, bad config)
+   ```
+
+2. **Check the programmatic failover path:**
+   The HA data plane is the `FailoverService` state machine in the `ha`
+   crate (`services/mail-server/crates/ha/src/failover.rs` — Redis-coordinated
+   lock + state, `pg_promote` under the lock). On this single-primary
+   deployment `pg_promote()` is a no-op on an already-primary server; the
+   service exists so a future standby can be attached without code changes.
+
+3. **Restart postgres (the data directory is intact):**
+   ```bash
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart postgres
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres pg_isready -U apexmail
+   ```
+
+4. **Reset application connection pools** so stale sockets recover immediately:
+   ```bash
+   cd /opt/apexmail
    docker compose -f docker-compose.yml -f docker-compose.prod.yml restart api-server worker tracking mta
    ```
 
-4. **Manual promotion if auto-failover fails:**
-   ```bash
-   kubectl exec -n apexmail deploy/postgres-standby -- psql -U apexmail -c \
-     "SELECT pg_promote();"
-   ```
-
-5. **Update application endpoints:**
-   ```bash
-   kubectl patch svc postgres -n apexmail -p \
-     '{"spec":{"selector":{"role":"standby"}}}'  # Then update DNS
-   ```
-
-6. **Verify new primary:**
-   ```bash
-   kubectl exec -n apexmail deploy/postgres-standby -- pg_isready -U apexmail
-   kubectl exec -n apexmail deploy/postgres-standby -- psql -U apexmail -c "SELECT pg_is_in_recovery();"
-   # Expected: "f" (false = not in recovery = primary)
-   ```
+5. **If the data directory is unusable:** restore from backup (Procedure 4),
+   then `up -d` again and verify (Post-Recovery Verification below).
 
 ### Procedure 4: Data Corruption
 
@@ -226,17 +237,22 @@
 
 1. **Stop all application traffic:**
    ```bash
-   kubectl scale deployment -n apexmail --all --replicas=0
+   cd /opt/apexmail
+   # Stop the DB-writing services (the canonical stack list lives in
+   # ci/stages/deploy.sh STACK_SERVICES; keep postgres + nginx running).
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml stop \
+     api-server worker mta imap-server mailstore tracking enterprise \
+     sales-autopilot billing-service compliance analytics-worker ai-service
    ```
 
 2. **Identify corruption scope:**
    ```bash
    # Check for corrupt relations
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -d apexmail -c \
      "SELECT datname, pg_catalog.pg_database_size(datname) FROM pg_catalog.pg_database;"
-   
+
    # Run amcheck against suspected tables
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -d apexmail -c \
      "CREATE EXTENSION IF NOT EXISTS amcheck;
       SELECT bt_index_check(c.oid)
       FROM pg_catalog.pg_class c
@@ -258,11 +274,14 @@
    ```bash
    # Compare row counts of critical tables
    for table in email_queue mail_messages tenants users; do
-     echo "${table}: prod=$(kubectl exec ... -c "SELECT count(*) FROM ${table}") restored=$(kubectl exec ... -c "SELECT count(*) FROM ${table}")"
+     count=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -t -A -c \
+       "SELECT count(*) FROM ${table}")
+     echo "${table}: ${count}"
    done
+   # Sanity-check the counts against the pre-incident values from monitoring.
    ```
 
-5. **Redirect traffic** to restored database.
+5. **Restore traffic:** `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d` (recreates the services stopped in step 1).
 
 ### Procedure 5: WAL Disk Full
 
@@ -270,7 +289,7 @@
 
 1. **Check WAL usage:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "SELECT count(*) AS wal_files,
              pg_size_pretty(sum(size)) AS total_size
       FROM pg_ls_waldir();"
@@ -278,26 +297,26 @@
 
 2. **Identify replication slot issues:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "SELECT slot_name, slot_type, database, active, restart_lsn, confirmed_flush_lsn
       FROM pg_replication_slots;"
    ```
 
-3. **Remove stale replication slot** (if standby is permanently down):
+3. **Remove stale replication slot** (if any consumer is permanently gone):
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "SELECT pg_drop_replication_slot('slot_name');"
    ```
 
 4. **Force WAL switch:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "SELECT pg_switch_wal();"
    ```
 
 5. **Re-enable WAL archiving if disabled:**
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "ALTER SYSTEM SET archive_mode = 'on';
       ALTER SYSTEM SET archive_command = 'cp %p /wal-archive/%f';
       SELECT pg_reload_conf();"
@@ -308,24 +327,23 @@
 After any database recovery procedure, run:
 
 ```bash
+cd /opt/apexmail
+
 # 1. Verify database is accepting connections
-kubectl exec -n apexmail deploy/postgres -- pg_isready -U apexmail
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres pg_isready -U apexmail
 
 # 2. Verify write capability
-kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
   "INSERT INTO _dr_recovery_test (ts) VALUES (now());
    SELECT * FROM _dr_recovery_test;
    DELETE FROM _dr_recovery_test WHERE ts < now();"
 
 # 3. Verify query performance
-kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
   "EXPLAIN (ANALYZE, BUFFERS) SELECT count(*) FROM email_queue;"
 
-# 4. Verify replication (if standby exists)
-kubectl exec -n apexmail deploy/postgres-standby -- psql -U apexmail -c \
-  "SELECT pg_is_in_recovery(),
-          pg_last_wal_receive_lsn(),
-          pg_last_wal_replay_lsn();"
+# 4. Verify the full stack is up (compose view of every service)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
 
 # 5. Verify application health
 curl -sf https://api.apexmail.ee/health/deep | jq '.status'

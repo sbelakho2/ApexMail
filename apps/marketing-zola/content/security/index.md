@@ -4,7 +4,7 @@ description = "ApexMail security controls: encryption, authentication, network d
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-02"
 +++
 
 ## Encryption
@@ -65,12 +65,11 @@ System integrity is verified through automated, recurring checks across the depl
 
 | Control | What Is Verified | Frequency | Evidence |
 |---|---|---|---|
-| **Signed deployment artifacts** | All application binaries and container images are cryptographically signed at build time. Deployments validate signatures before rollout. | Every build | Build attestation logs (immutable, append-only) |
-| **Database-integrity checks** | PostgreSQL checksum validation on all data pages; hash-chain integrity on audit-log tables via chained SHA-256 digests. | Continuous (checksum on read); nightly full scan | Alert on corruption; audit-log chain verification endpoint |
-| **Immutable deployment logs** | Every deployment event (who, what, when, git commit, artifact hash) is recorded in an append-only log. | Every deployment | Deployment history endpoint; tamper-evident log |
-| **File-integrity monitoring** | System binaries, configuration files, and TLS certificates are monitored for unauthorized modification. | Continuous (inotify-based) | Alert on modification outside approved change windows |
-| **Verified backup restores** | Automated restore tests validate backup integrity and recoverability. | Weekly | Restore success/failure log; sample data comparison |
-| **Runtime integrity** | Application processes are monitored for unexpected binary changes or configuration drift vs. the declared infrastructure-as-code state. | Continuous | Drift detection alert; reconciliation report |
+| **Deployment artifact integrity** | Container images are digest-verified, not signed: each pipeline run records a release manifest (per-image SHA-256 digests, `SHA256SUMS.images`) and renders a digest-pinned compose override; deployment refuses to bring up any image whose digest does not match that manifest. | Every deployment | Release manifest + pre-deploy digest verification in the deploy stage |
+| **Audit-log integrity** | Audit-log tables carry a hash chain: each row's SHA-256 digest is chained to its predecessor. | Continuous (per write) | Audit-log hash chain |
+| **Deployment records** | Every pipeline run records a manifest (stage, status, exit code, duration) plus per-stage logs. These are internal operational records with no tamper-proofing guarantee and no customer-facing query surface. | Every deployment | CI run manifests (`ci/runs/<ts>/manifest.json`) |
+| **Backup verification** | Every backup is automatically decrypted and structurally validated (`pg_restore --list`) before the plaintext is deleted — a backup that cannot be read is never counted as good. Full restore drills are manual at the documented quarterly cadence. | Every backup (automated validation); quarterly (manual drills) | Backup-time restorability validation; DR drill records |
+| **Runtime resilience** | Services run health-checked with automatic restart; a failed post-deploy content probe triggers automatic rollback to the previous image pins. | Continuous | Container healthchecks; deploy-stage verify + rollback |
 
 All verification results are internal operational controls. Current security-review material may be made available to qualified Enterprise prospects or customers upon request; it is not an external certification or a product entitlement.
 
@@ -78,13 +77,13 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 ## Infrastructure Security
 
-- Hetzner Online GmbH for compute, storage, and networking in the configured deployment region.
+- Hetzner Online GmbH for compute, storage, and networking in the configured deployment region (a single host runs the full stack; there is no multi-region topology).
 - CIS-hardened Debian/Ubuntu operating systems.
 - Automated security patching with staged rollout.
-- Immutable infrastructure through infrastructure-as-code.
-- Network segmentation between application, data, and management planes.
-- Network isolation: application servers, database servers, and management interfaces on separate VLANs.
-- Secrets management via sealed secrets and environment isolation.
+- Declarative, version-controlled deployment: the entire stack is defined in Docker Compose files and deployed by the self-hosted CI pipeline.
+- Docker network segmentation between frontend, backend, and database networks on the deployment host.
+- Host firewall: inbound access limited to the mail/web service ports (25, 80, 443, 587, 993) plus operator ports; databases have no host port exposure.
+- Secrets management via Docker secrets mounted from permission-restricted files (0600); no secrets baked into images or source.
 
 ## Vulnerability Management
 

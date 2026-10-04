@@ -536,10 +536,9 @@ pub async fn get_plan_by_name(pool: &PgPool, name: &str) -> Result<Option<Plan>,
     .fetch_optional(pool)
     .await?;
 
-    Ok(row
-        .map(|r| r.try_into_plan())
+    row.map(|r| r.try_into_plan())
         .transpose()
-        .map_err(BillingError::into_sqlx_decode)?)
+        .map_err(BillingError::into_sqlx_decode)
 }
 
 /// Resolve a tenant's effective plan.

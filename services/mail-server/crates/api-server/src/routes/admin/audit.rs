@@ -596,11 +596,16 @@ mod tests {
         outcome: &str,
         details: serde_json::Value,
     ) {
+        // NOW() - 5s: the container clock can drift a few seconds ahead of
+        // the test process (Docker VM skew) — a seed stamped at plain NOW()
+        // then lands OUTSIDE the handler's `timestamp <= Utc::now()` window
+        // and the test flakes. Pinning the seed into the past makes the
+        // test deterministic on skewed hosts.
         sqlx::query(
             "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, resource_id,
                  details, ip_address, user_agent, outcome, timestamp, hash, signature)
              VALUES ($1, 'system', $2, $3, 'audit_probe', $3, $4, '127.0.0.1', 'cov-test/1',
-                     $5, NOW(), 'seed-hash', 'seed-sig')",
+                     $5, NOW() - INTERVAL '5 seconds', 'seed-hash', 'seed-sig')",
         )
         .bind(format!("cov-audit-{tag}-{}", uuid::Uuid::new_v4().simple()))
         .bind(user_id)
@@ -850,7 +855,7 @@ mod tests {
          SELECT 'cur-' || lpad(g::text, 2, '0') || '-' || substr(gen_random_uuid()::text, 1, 8),
                 $1, 'usr_cur', 'cov.cursor.' || g, 'audit_probe', 'res',
                 '{\"reason\": \"seed\"}'::jsonb, '127.0.0.1', 'cur-test/1', 'success',
-                NOW(), 'seed-hash', 'seed-sig'
+                NOW() - INTERVAL '5 seconds', 'seed-hash', 'seed-sig'
          FROM generate_series(0, $2 - 1) AS g";
 
     fn list_params(

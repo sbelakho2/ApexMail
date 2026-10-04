@@ -71,6 +71,29 @@ fn classify_replication_lag(
     }
 }
 
+/// External audit #8: the "no replication timestamp" arm is topology-aware.
+/// A deployment whose config EXPECTS replicas (`DB_REPLICA_HOSTS`) but
+/// cannot observe any replication state at all must not be reported
+/// healthy — that is a replica topology failure, not a standalone. Pure
+/// helper so both arms are unit-testable.
+fn classify_missing_replay_timestamp(expects_replicas: bool) -> (HealthStatus, Option<String>) {
+    if expects_replicas {
+        (
+            HealthStatus::Unhealthy,
+            Some(
+                "No replication timestamp although replicas are configured \
+                 (DB_REPLICA_HOSTS) — replication is down or unobservable"
+                    .into(),
+            ),
+        )
+    } else {
+        (
+            HealthStatus::Healthy,
+            Some("Standalone / no replication timestamp".into()),
+        )
+    }
+}
+
 /// HealthCheckService monitors the cluster's overall health.
 pub struct HealthCheckService {
     pool: PgPool,
@@ -214,6 +237,10 @@ impl HealthCheckService {
         let pool = self.pool.clone();
         let threshold = self.config.replication.lag_threshold_ms as f64;
         let warning = self.config.replication.warning_lag_ms as f64;
+        // External audit #8: whether the configured topology EXPECTS
+        // replicas — the "no replication timestamp at all" outcome is only
+        // healthy for a genuine standalone.
+        let expects_replicas = !self.config.database.replica_hosts.is_empty();
         check_component("replication", async move {
             // pg_last_xact_replay_timestamp() only means something on a
             // standby. On a primary it returns the last local commit time,
@@ -232,8 +259,10 @@ impl HealthCheckService {
                 Some((in_recovery, lag_ms)) => {
                     Ok(classify_replication_lag(in_recovery, lag_ms, threshold, warning))
                 }
-                // No row at all:standalone / no replication configured.
-                None => Ok((HealthStatus::Healthy, Some("Standalone / no replication timestamp".into()))),
+                // No row at all: healthy standalone — unless the config
+                // EXPECTS replicas, in which case this is a topology
+                // failure (external audit #8).
+                None => Ok(classify_missing_replay_timestamp(expects_replicas)),
             }
         }).await
     }
@@ -489,5 +518,23 @@ mod tests {
         let (status, msg) = classify_replication_lag(true, None, 30_000.0, 10_000.0);
         assert_eq!(status, HealthStatus::Healthy);
         assert!(msg.unwrap().contains("Standby"));
+    }
+
+    // ── External audit #8: the missing-timestamp arm is topology-aware ─
+
+    #[test]
+    fn test_missing_replay_timestamp_is_topology_aware() {
+        // A genuine standalone (no replicas configured, no replication
+        // state observable) stays healthy.
+        let (status, msg) = classify_missing_replay_timestamp(false);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(msg.unwrap().contains("Standalone"));
+
+        // A deployment whose config EXPECTS replicas but observes no
+        // replication state at all is a topology failure — never healthy.
+        let (status, msg) = classify_missing_replay_timestamp(true);
+        assert_eq!(status, HealthStatus::Unhealthy);
+        let message = msg.unwrap();
+        assert!(message.contains("DB_REPLICA_HOSTS"), "{message}");
     }
 }

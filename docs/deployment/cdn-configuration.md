@@ -1,5 +1,13 @@
 # CDN Configuration
 
+> **ARCHITECTURE-TRUTH: ROADMAP / ALTERNATIVE-DEPLOYMENT** — No CDN is part
+> of the deployed architecture: ApexMail serves everything from nginx on a
+> single Hetzner host with Docker Compose (see
+> [`ARCHITECTURE.md`](../../ARCHITECTURE.md)); there is no Helm chart or
+> ingress. This is a design study (SCALE-H-05) for an alternative edge
+> topology, preserved for design value — do not execute it as an operational
+> runbook.
+
 > **SCALE-H-05** | Owner: Platform Engineering | Last updated: 2026-05-17
 
 ## Overview

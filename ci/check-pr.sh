@@ -30,12 +30,12 @@ CI_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 . "$CI_DIR/lib.sh"
 
 _ref=HEAD
-_stages=validate,test,security
+_stages=validate,docs,test,security
 _allow_dirty=0
 while [ $# -gt 0 ]; do
     case $1 in
-        --skip-security) _stages=validate,test; shift ;;
-        --fast)          _stages=validate; shift ;;
+        --skip-security) _stages=validate,docs,test; shift ;;
+        --fast)          _stages=validate,docs; shift ;;
         --allow-dirty)   _allow_dirty=1; shift ;;
         -*)              ci_die "unknown option: $1" ;;
         *)               _ref=$1; shift ;;

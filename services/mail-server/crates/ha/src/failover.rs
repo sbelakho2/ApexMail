@@ -894,6 +894,7 @@ impl FailoverService {
     /// 3. only then are the claims rewritten (all dropped, the winner's set
     ///    fresh — value = this coordinator's node id so
     ///    `run_claim_refresh_loop`'s compare-and-expire can keep it alive).
+    ///
     /// A fencing failure ABORTS with the claims untouched.
     pub async fn resolve_split_brain(&self, winner_node: &str) -> Result<(), String> {
         info!(winner = winner_node, "Resolving split-brain");

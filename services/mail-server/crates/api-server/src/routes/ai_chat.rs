@@ -543,14 +543,16 @@ mod adversarial_tests {
         // P1-SECURITY: the target tenant travels in the REQUIRED
         // x-apexmail-tenant-id header (ai-service no longer accepts a body
         // tenant), scoped to the AUTHENTICATED tenant.
-        let headers = history_headers.lock().unwrap();
-        assert_eq!(headers.len(), 1, "exactly one history call");
-        assert!(
-            headers[0].to_lowercase().contains("x-apexmail-tenant-id:")
-                && headers[0].contains(tenant.as_str()),
-            "history proxy must forward the authenticated tenant header: {}",
-            headers[0]
-        );
+        {
+            let headers = history_headers.lock().unwrap();
+            assert_eq!(headers.len(), 1, "exactly one history call");
+            assert!(
+                headers[0].to_lowercase().contains("x-apexmail-tenant-id:")
+                    && headers[0].contains(tenant.as_str()),
+                "history proxy must forward the authenticated tenant header: {}",
+                headers[0]
+            );
+        }
 
         // Unconfigured / unreachable service arms.
         let (unconfigured, _t) =

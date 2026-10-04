@@ -1135,7 +1135,7 @@ mod tests {
             .expect("public literal must pass");
         assert_eq!(
             addrs,
-            vec!["93.184.216.34:80"]
+            ["93.184.216.34:80"]
                 .iter()
                 .map(|a| a.parse::<std::net::SocketAddr>().expect("addr"))
                 .collect::<Vec<_>>()

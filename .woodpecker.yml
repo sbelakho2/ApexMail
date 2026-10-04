@@ -54,7 +54,7 @@ when:
 # Audit SM14 F9: the ONE executor-image reference, digest-pinned. YAML anchor
 # dereferenced (`*ci_image`) by every step — bump the digest in ONE place.
 variables:
-  - &ci_image ghcr.io/sbelakho2/apexmail-ci@sha256:0000000000000000000000000000000000000000000000000000000000000000  # PLACEHOLDER — operator: replace with the pushed image digest
+  - &ci_image ghcr.io/sbelakho2/apexmail-ci@sha256:3e3fedac72307c5a7e0fd72933f055e71be0c9f399f1e58ed05aa74550f3c3d5  # Pushed 2026-10-03 from ci/ci-image (docker build ends with --assert).
 
 # Full history: the secret scan inspects every commit (clone depth 0).
 clone:
@@ -64,6 +64,18 @@ clone:
       depth: 0
 
 services:
+  # Hostile-permission tests (external audit 2026-10-02 #12a): the test
+  # stage's TEST_DATABASE_URL credential (`postgres`) IS a superuser, so the
+  # test bootstrap AUTO-PROVISIONS the dedicated non-superuser role
+  # `apexmail_test_app` (LOGIN; no SUPERUSER/CREATEDB/CREATEROLE; least-
+  # privilege DML grants per provisioned test database) that the compliance
+  # hostile-permission suites run as. Operator note for a hardened CI
+  # Postgres: if the test credential is ever demoted below superuser,
+  # pre-create that role (`CREATE ROLE apexmail_test_app LOGIN NOSUPERUSER
+  # NOCREATEDB NOCREATEROLE NOREPLICATION;`) and set TEST_HOSTILE_DATABASE_URL
+  # in the stage environment; otherwise those suites soft-skip only locally
+  # and HARD-FAIL in release mode (APEXMAIL_RELEASE_TEST_MODE=1) naming the
+  # missing variable.
   - name: postgres
     image: postgres:16-alpine
     environment:
@@ -117,6 +129,16 @@ steps:
       CI_MISSING_TOOLS: fail
     commands:
       - ./ci/woodpecker/stage.sh validate
+
+  # --- documentation architecture-truth gates (audit EXT-E #11): production
+  #     runbooks must not teach kubectl/helm operations — the deployment is a
+  #     single Hetzner host with Docker Compose. REQUIRED (CI_DOCS_TRUTH_CHECK).
+  - name: docs
+    image: *ci_image
+    environment:
+      CI_MISSING_TOOLS: fail
+    commands:
+      - ./ci/woodpecker/stage.sh docs
 
   # --- UI/UX gates over the exported visual fixtures (flash copy, form
   #     hygiene, a11y, dead links, terminology, strings-catalog drift) ---

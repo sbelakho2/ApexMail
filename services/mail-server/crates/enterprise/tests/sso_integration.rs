@@ -844,7 +844,7 @@ async fn integration_saml_rejects_expired_assertion() {
     // expiry branch itself is asserted by the SIGNED unit tests in `sso.rs`.
     // Reproducing a reason-specific rejection here would require an IdP to sign
     // the fixture, which is exactly why this file was `#[ignore]`d.
-    let error = result.err().expect("an unsigned assertion must be refused");
+    let error = result.expect_err("an unsigned assertion must be refused");
     assert!(
         error.contains("signature")
             || error.contains("Signature")
@@ -917,7 +917,7 @@ async fn integration_saml_rejects_issuer_mismatch() {
         .await;
     // Refused on the signature precondition (unsigned fixture); the issuer
     // branch is asserted by the signed unit tests in `sso.rs`.
-    let error = result.err().expect("an unsigned assertion must be refused");
+    let error = result.expect_err("an unsigned assertion must be refused");
     assert!(
         error.contains("signature")
             || error.contains("Signature")
@@ -990,7 +990,7 @@ async fn integration_saml_rejects_audience_mismatch() {
 
     // Refused on the signature precondition (unsigned fixture); the audience
     // branch is asserted by the signed unit tests in `sso.rs`.
-    let error = result.err().expect("an unsigned assertion must be refused");
+    let error = result.expect_err("an unsigned assertion must be refused");
     assert!(
         error.contains("signature")
             || error.contains("Signature")

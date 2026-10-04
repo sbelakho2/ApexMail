@@ -901,7 +901,7 @@ mod tests {
             result.response, "Please try again or contact support@apexmail.ee",
             "the fallback text, never a partial model answer"
         );
-        assert_eq!(result.streamed, false, "nothing streamed was a success");
+        assert!(!result.streamed, "nothing streamed was a success");
         assert_eq!(result.retries, MAX_RETRIES, "the full ladder was used");
         assert_eq!(
             mock.request_count(),

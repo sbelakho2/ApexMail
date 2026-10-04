@@ -24,8 +24,8 @@ comparison_sections = [
     { feature = "P95-Annahme bis zum ersten Zustellversuch", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Nicht öffentlich dokumentiert</span>', winner = "none" },
     { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
     { feature = "Automatisches IP-Warm-up", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatisch (von Postmark verwaltet)</span>', winner = "none" },
-    { feature = "BIMI-Unterstützung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "MTA-STS-Unterstützung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
+    { feature = "BIMI-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "MTA-STS-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "DSGVO-Automatisierung", apex = '<span class="text-brand-600 font-semibold">Vollständige DSR-Abwicklung</span>', comp = '<span class="text-surface-600">Selbst verwaltet</span>', winner = "none" },

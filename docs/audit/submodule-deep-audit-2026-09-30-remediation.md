@@ -133,6 +133,45 @@ back-to-back cadence that previously reproduced the pollution deterministically)
 assertion changes, zero widget-asset changes, parity intact. The browser suite that entered
 this campaign at 132/88 now stands at 220/0.
 
+## External audit wave (2026-10-02) — post-push review remediated
+
+An independent external review of the pushed HEAD (d63d57e8) returned 20 findings
+(1 release blocker, 4 P1, 9 P2, 3 P3 + two positive assessments). All actionable
+items were executed in a narrow wave:
+
+- **Release blocker (#1)**: the all-zero `&ci_image` placeholder — the CI image is built
+  from HEAD with its own `--assert` gate, pushed, and the real digest pinned; the
+  validate-stage check hardened from warn to FAIL on the placeholder; pipeline proven.
+- **#2/#7/#8/#9/#10 (HA)**: `sync-mode` moved behind the admin credential with
+  named-standby validation (wildcard `'*'` refused); `/replication/status` now reads
+  runtime PostgreSQL truth (`SHOW synchronous_standby_names`) with configured-vs-effective
+  drift; health is topology-aware (configured-but-missing replicas = degraded/unhealthy);
+  startup rejects failover+replicas-without-fencing (exit 78); sync-mode intent is
+  persisted in Redis before mutation, reconciled on a 30 s loop, with idempotent rollback
+  to the recorded prior setting.
+- **#3/#4/#5/#6/#14 (truth system)**: `docs/deployment-facts.json` is the single
+  machine-readable registry (24 facts, evidence-linked); both claim checkers consume it;
+  the capability registry's data model separates implementation stage from deployment
+  reality; the Security page, Trust Center (5-label taxonomy), all comparison pages and
+  locales (BIMI/MTA-STS ✓→✗; ARC verified set-nowhere → ✗), PITR/DPA texts, and the
+  stale DLP/compose/warm-up text were purged. Checker corpus 7→31 files; drift
+  injections proven in both directions.
+- **#11/#16 (runbooks)**: 9 runbooks rewritten from Kubernetes commands to working
+  Compose operations; 3 documents marked ARCHITECTURE-TRUTH: ROADMAP; a new required
+  `docs` pipeline stage fails any operational doc containing kubectl/helm without a
+  marker (drift-proven through the real pipeline runner); stale `TODO(mta-owner)`
+  resolved (the frozen ledger migration deliberately untouched).
+- **#12 (test determinism)**: hostile-permission tests now run as a provisioned
+  non-superuser `apexmail_test_app` role (superuser no-op can never silently pass); the
+  MTA feedback-loop flake root-caused to tokio paused-clock auto-advance (retries
+  deleted, 10/10 proofs); the explorer cache flake serialized on the production
+  advisory lock (10/10 full-parallel proofs).
+- **#13 (branch protection as evidence)**: `scripts/verify-branch-protection.sh` queries
+  the GitHub API and fails blessing unless the required protections verify.
+
+The reviewer's §19 assessment — that the 192-finding remediation held up under an
+attempted re-open of its highest-risk fixes — is recorded as independent confirmation.
+
 ## P0 closure note
 
 The four P0s (manufactured test suites) are closed: `stub_detection_tests.rs` now contains 19

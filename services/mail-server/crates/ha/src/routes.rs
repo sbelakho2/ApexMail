@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::failover::FailoverService;
 use crate::health_check::HealthCheckService;
 use crate::multi_region::MultiRegionService;
-use crate::replication::ReplicationService;
+use crate::replication::{ReplicationService, SetSyncModeError};
 use crate::types::*;
 use apexmail_lib::crypto::timing_safe_compare;
 
@@ -163,10 +163,14 @@ async fn fence_guard(
 /// - **admin** — destructive cluster-topology operations
 ///   (failover initiation, failback, split-brain resolution, manual
 ///   promotion, backup restore, chaos-experiment start, region fence/
-///   unfence). Accept ONLY the admin key; the internal service key is held
-///   by every internal workload and must not authorize topology changes.
-/// - **internal** — everything else; the internal service key OR the admin
-///   key. Mutating requests in this group still pass the fence guard.
+///   unfence, replication sync-mode flips). Accept ONLY the admin key; the
+///   internal service key is held by every internal workload and must not
+///   authorize topology changes. (External audit 2026-10-02 #2: sync-mode
+///   is topology-class too — `set_sync_mode` rewrites
+///   `synchronous_standby_names`, which changes the cluster's commit-
+///   durability and can stall writes cluster-wide.)
+/// - **internal** — everything else; the internal service key OR the
+///   admin key. Mutating requests in this group still pass the fence guard.
 /// - `/health` — unauthenticated liveness probe.
 pub fn build_router(state: Arc<AppState>) -> Router<()> {
     let admin_routes = Router::new()
@@ -187,6 +191,10 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
         .route("/api/v1/backup/restore", post(backup_restore))
         // Replication
         .route("/api/v1/replication/promote", post(replication_promote))
+        // External audit #2: sync-mode flips are cluster-topology changes
+        // (they rewrite synchronous_standby_names) — admin-only, like
+        // promote.
+        .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
         // Chaos Engineering
         .route("/api/v1/chaos/experiments", post(chaos_start))
         // Region fencing (STONITH key placement/lift)
@@ -226,7 +234,6 @@ pub fn build_router(state: Arc<AppState>) -> Router<()> {
             "/api/v1/replication/slots/:name",
             delete(replication_delete_slot),
         )
-        .route("/api/v1/replication/sync-mode", put(replication_sync_mode))
         .route(
             "/api/v1/replication/lag/history",
             get(replication_lag_history),
@@ -612,18 +619,52 @@ async fn replication_promote(
 #[serde(deny_unknown_fields)]
 struct SyncModeRequest {
     synchronous: bool,
+    /// External audit #2: when `synchronous` is true, the request must NAME
+    /// the exact standby(s) to place in `synchronous_standby_names` — the
+    /// '*' wildcard form is refused by the service guard. Ignored for
+    /// `synchronous=false`.
+    #[serde(default)]
+    standbys: Vec<String>,
 }
 
+/// External audit #2: the sync-mode handler surfaces the service guard's
+/// DETERMINISTIC refusals as 409/422 with the reason — never as a 500.
 async fn replication_sync_mode(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SyncModeRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
-    state
+) -> Result<Response, StatusCode> {
+    match state
         .replication
-        .set_sync_mode(body.synchronous)
+        .set_sync_mode(body.synchronous, body.standbys.clone())
         .await
-        .map(|_| Json(serde_json::json!({ "synchronous": body.synchronous })))
-        .map_err(internal_err)
+    {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "synchronous": body.synchronous,
+                "standbys": body.standbys,
+            })),
+        )
+            .into_response()),
+        Err(SetSyncModeError::Refused(refusal)) => {
+            let status = refusal.status_code();
+            let reason = refusal.message();
+            tracing::warn!(
+                status = status.as_u16(),
+                reason = %reason,
+                "sync-mode transition refused"
+            );
+            Ok((
+                status,
+                Json(serde_json::json!({
+                    "error": reason,
+                    "synchronous": body.synchronous,
+                })),
+            )
+                .into_response())
+        }
+        Err(SetSyncModeError::Failed(e)) => Err(internal_err(e)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1372,7 +1413,7 @@ mod tests {
             config.database.replica_hosts = vec![];
             let app: Router<()> = build_router(test_state_with_config(Arc::new(config)));
 
-            let destructive: [(&str, &str); 6] = [
+            let destructive: [(&str, &str); 7] = [
                 ("POST", "/api/v1/failover/initiate"),
                 ("POST", "/api/v1/replication/promote"),
                 ("POST", "/api/v1/backup/restore"),
@@ -1382,6 +1423,9 @@ mod tests {
                 // like initiate/promote.
                 ("POST", "/api/v1/failover/failback"),
                 ("POST", "/api/v1/regions/some-node/fence"),
+                // External audit #2: sync-mode flips rewrite
+                // synchronous_standby_names — the same topology class.
+                ("PUT", "/api/v1/replication/sync-mode"),
             ];
 
             for (method, uri) in destructive {

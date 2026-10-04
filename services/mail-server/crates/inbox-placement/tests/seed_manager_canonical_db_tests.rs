@@ -10,17 +10,15 @@ use uuid::Uuid;
 /// One PRIVATE canonical database per test: nextest runs each test as its
 /// own process, and a shared name would be dropped mid-test by a sibling's
 /// provisioning (observed as PoolTimedOut under parallel load).
-fn db(test: &'static str) -> impl std::future::Future<Output = Option<PgPool>> {
-    async move {
-        match migrator::test_support::fresh_canonical_pool(
-            test,
-            Box::leak(format!("ip_seed_{test}").into_boxed_str()),
-        )
-        .await
-        {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+async fn db(test: &'static str) -> Option<PgPool> {
+    match migrator::test_support::fresh_canonical_pool(
+        test,
+        Box::leak(format!("ip_seed_{test}").into_boxed_str()),
+    )
+    .await
+    {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
     }
 }
 

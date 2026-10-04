@@ -421,7 +421,7 @@ fn dedup_overlap_copies<T>(
 
 /// The chunk whose slice in the joined scan text contains `scan_offset`
 /// (the table is in ascending scan order; later entries win).
-fn chunk_for_scan_offset<'t>(chunk_table: &'t [ChunkSpan], scan_offset: usize) -> &'t ChunkSpan {
+fn chunk_for_scan_offset(chunk_table: &[ChunkSpan], scan_offset: usize) -> &ChunkSpan {
     let mut selected = &chunk_table[0];
     for chunk in chunk_table {
         if chunk.scan_start <= scan_offset {

@@ -3417,12 +3417,13 @@ mod coverage_adversarial {
             effective, 6_000,
             "the first freeze owns the idempotency keys"
         );
-        let stored: serde_json::Value =
-            sqlx::query_scalar("SELECT payload FROM invoice_collection_outbox WHERE invoice_id = $1")
-                .bind(invoice_id)
-                .fetch_one(&env.pool)
-                .await
-                .expect("payload");
+        let stored: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("payload");
         assert_eq!(
             frozen_collection_amount(Some(&stored)),
             Some(6_000),

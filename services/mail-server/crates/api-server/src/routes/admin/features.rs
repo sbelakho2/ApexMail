@@ -353,7 +353,7 @@ mod tests {
         let name = format!("flag-{}", Uuid::new_v4().simple());
         sqlx::query(
             "INSERT INTO feature_flags (id, name, description, enabled, created_at, updated_at)
-             VALUES ($1, $2, 'seed', $3, NOW(), NOW())",
+             VALUES ($1, $2, 'seed', $3, NOW() - INTERVAL '5 seconds', NOW() - INTERVAL '5 seconds')",
         )
         .bind(id)
         .bind(&name)
@@ -464,7 +464,7 @@ mod tests {
         let name = flag_name();
         sqlx::query(
             "INSERT INTO feature_flags (id, name, description, enabled, created_at, updated_at)
-             VALUES ($1, $2, 'listed', true, NOW(), NOW())",
+             VALUES ($1, $2, 'listed', true, NOW() - INTERVAL '5 seconds', NOW() - INTERVAL '5 seconds')",
         )
         .bind(Uuid::new_v4())
         .bind(&name)

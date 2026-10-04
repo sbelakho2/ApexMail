@@ -3277,6 +3277,66 @@ mod verify_source_wire_tests {
             .expect("no panic");
     }
 
+    /// Task-join bound for the virtual-time wire tests (audit 2026-10-02
+    /// #12b): far beyond every server timer (120s command idle, 300s DATA
+    /// line, 600s DATA total, 1800s session deadline). Only used for joins
+    /// on an already-finishing session task — the completion is queued, so
+    /// the runtime never parks into an advance here — and as a loud bound on
+    /// a genuinely wedged session. Reply reads use
+    /// [`FBL_HEARTBEAT_READ_BOUND`]: an idle park under `start_paused`
+    /// advances the clock to the EARLIEST armed timer regardless of
+    /// in-flight bytes, so a bound above a server timer lets that server
+    /// timer fire mid-request — the exact race the removed nextest
+    /// `retries = 2` stanza used to absorb.
+    const FBL_VIRTUAL_READ_BOUND: Duration = Duration::from_secs(3600);
+
+    /// Heartbeat-loop bound: deliberately SMALLER than the server's 120s
+    /// command-idle budget. Tokio's current-thread auto-advance jumps the
+    /// paused clock to the EARLIEST armed timer on every idle park — even
+    /// with in-flight socket bytes — so a read bound at or above a server
+    /// timer makes the SERVER's timer fire mid-request (the wrong 421). A
+    /// 30s bound keeps every advance on the client's own timer; the reply
+    /// bytes are already queued (the write completed), so the read's
+    /// inner-first poll wins at the park that observes them.
+    const FBL_HEARTBEAT_READ_BOUND: Duration = Duration::from_secs(30);
+
+    /// One reply line under [`FBL_HEARTBEAT_READ_BOUND`]. A bound elapse
+    /// means that park advanced the clock without the peer's readiness being
+    /// dispatched — the bytes are queued (the write completed) or a server
+    /// timer is still armed further out, so the next bounded park either
+    /// observes them or walks the clock toward the armed server deadline.
+    async fn fbl_heartbeat_read_line(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        use tokio::io::AsyncBufReadExt as _;
+        for _ in 0..30 {
+            let mut line = String::new();
+            match tokio::time::timeout(FBL_HEARTBEAT_READ_BOUND, reader.read_line(&mut line)).await
+            {
+                Err(_) => continue,
+                Ok(Ok(_)) => return line,
+                Ok(Err(e)) => panic!("reply read failed: {e}"),
+            }
+        }
+        panic!("no reply within 30 bounded parks — the session is wedged");
+    }
+
+    /// A complete (possibly multi-line) SMTP reply, line by line under
+    /// [`fbl_heartbeat_read_line`].
+    async fn fbl_heartbeat_read_full_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let line = fbl_heartbeat_read_line(reader).await;
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn fbl_stalled_data_phase_answers_421_under_virtual_time() {
         let server = super::tests::test_fbl_server(true);
@@ -3290,9 +3350,11 @@ mod verify_source_wire_tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        assert!(super::tests::fbl_read_reply(&mut reader)
-            .await
-            .starts_with("220"));
+        assert!(
+            super::tests::fbl_read_reply_bounded(&mut reader, FBL_HEARTBEAT_READ_BOUND)
+                .await
+                .starts_with("220")
+        );
         writer
             .write_all(
                 b"EHLO c\r\n\
@@ -3302,23 +3364,30 @@ mod verify_source_wire_tests {
             )
             .await
             .unwrap();
+        // Every reply read keeps the CLIENT's timer the runtime's earliest
+        // (30s bound + bounded retry): an auto-advance must never be able to
+        // fast-forward the server's 120s command-idle timer while the batch
+        // is still being delivered — the idle 421 it produces would pre-empt
+        // the queued 250s and the choreography would die on `starts_with('2')`
+        // (observed once per ~15 solo runs before this was tightened).
         for _ in 0..3 {
-            assert!(super::tests::fbl_read_full_reply(&mut reader)
-                .await
-                .starts_with('2'));
+            let reply = fbl_heartbeat_read_full_reply(&mut reader).await;
+            assert!(reply.starts_with('2'), "{reply:?}");
         }
-        assert!(super::tests::fbl_read_full_reply(&mut reader)
-            .await
-            .starts_with("354"));
-        use tokio::io::AsyncBufReadExt as _;
-        let mut line = String::new();
-        reader.read_line(&mut line).await.expect("reply read");
-        let reply = line;
+        let reply = fbl_heartbeat_read_full_reply(&mut reader).await;
+        assert!(reply.starts_with("354"), "{reply:?}");
+        // Nothing more will arrive via I/O — the server is parked on ITS
+        // DATA deadline (per-line 300s, clamped inside the 600s total), and
+        // the client sent nothing after DATA, so there is no in-flight byte
+        // to lose a race against. Each bounded park advances the clock +30s
+        // toward that deadline; when it fires the server answers 421 and the
+        // bounded read observes it.
+        let reply = fbl_heartbeat_read_line(&mut reader).await;
         assert!(
             reply.starts_with("421 4.4.2 Data timeout exceeded"),
             "a stalled FBL DATA phase must be answered 421 4.4.2: {reply:?}"
         );
-        tokio::time::timeout(Duration::from_secs(5), task)
+        tokio::time::timeout(FBL_VIRTUAL_READ_BOUND, task)
             .await
             .expect("session must finish")
             .expect("no panic");
@@ -3326,8 +3395,24 @@ mod verify_source_wire_tests {
 
     #[tokio::test(start_paused = true)]
     async fn fbl_session_deadline_closes_with_421_under_virtual_time() {
-        // Heartbeat NOOPs with the client owning the nearer timer (30s sleep,
-        // 60s read budget) so the 120s idle timer can never be the closer.
+        // Heartbeat NOOPs drive the session to its 30-minute deadline
+        // (audit 2026-10-02 #12b — replaces the flaky sleep-before-read
+        // loop whose `retries = 2` stanza was removed).
+        //
+        // Why the 30s read bound BELOW is load-bearing: on tokio's
+        // current-thread runtime, auto-advance jumps the paused clock to
+        // the EARLIEST armed timer on every idle park — regardless of
+        // in-flight socket bytes (the cross-thread `did_wake` guard never
+        // fires here). A client read bound ≥ the server's 120s command-idle
+        // budget therefore lets the runtime fast-forward the SERVER's idle
+        // timer while the NOOP is still being delivered, and the session
+        // closes with the WRONG 421 (idle, not deadline) — the exact race
+        // the removed retry stanza used to absorb. With a 30s bound every
+        // advance lands on the CLIENT's own timer (+30s per park), the
+        // server's idle budget is never outrun (it re-arms +120s per reply
+        // and each iteration consumes ≤ +90s), and the accumulated heartbeat
+        // gaps deterministically walk the clock into the 1800s session
+        // deadline.
         let server = super::tests::test_fbl_server(true);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3339,24 +3424,27 @@ mod verify_source_wire_tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        assert!(super::tests::fbl_read_reply(&mut reader)
-            .await
-            .starts_with("220"));
+        assert!(
+            super::tests::fbl_read_reply_bounded(&mut reader, FBL_HEARTBEAT_READ_BOUND)
+                .await
+                .starts_with("220")
+        );
         use tokio::io::AsyncBufReadExt as _;
         let mut saw_deadline = false;
         for _ in 0..70 {
             writer.write_all(b"NOOP\r\n").await.unwrap();
             writer.flush().await.unwrap();
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // Read the reply BEFORE advancing the clock: the write already
+            // completed, so the reply is queued; if this park advanced the
+            // clock past the bound without the readiness being dispatched
+            // (at most once — the edge is latched and the next park observes
+            // it), the bounded retry re-parks and reads it.
             let reply = loop {
                 let mut line = String::new();
-                match tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
+                match tokio::time::timeout(FBL_HEARTBEAT_READ_BOUND, reader.read_line(&mut line))
                     .await
                 {
-                    Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                        continue;
-                    }
+                    Err(_) => continue,
                     Ok(Ok(0)) => panic!("session ended without the deadline reply"),
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => panic!("read failed: {e}"),
@@ -3368,12 +3456,16 @@ mod verify_source_wire_tests {
                 break;
             }
             assert!(reply.starts_with("250"), "{reply:?}");
+            // Heartbeat gap, spent with NO request in flight: this client
+            // sleep is the runtime's earliest timer, so the server's 120s
+            // idle budget can never be outrun by a clock jump.
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
         assert!(
             saw_deadline,
             "the 30-minute FBL session deadline must close with 421"
         );
-        tokio::time::timeout(Duration::from_secs(5), task)
+        tokio::time::timeout(FBL_VIRTUAL_READ_BOUND, task)
             .await
             .expect("session must finish")
             .expect("no panic");

@@ -598,7 +598,7 @@ mod tests {
             for _ in 0..occurrences {
                 sqlx::query(
                     "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp)
-                     VALUES ($1, $2, $3, $4, NOW())",
+                     VALUES ($1, $2, $3, $4, NOW() - INTERVAL '5 seconds')",
                 )
                 .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
                 .bind(&tenant)
@@ -642,7 +642,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, transport, created_at)
-             VALUES ($1, 'system_internal_tenant01', 'sender@apexmail.ee', '[]', 'delivery probe', 'sent', $2, NOW())",
+             VALUES ($1, 'system_internal_tenant01', 'sender@apexmail.ee', '[]', 'delivery probe', 'sent', $2, NOW() - INTERVAL '5 seconds')",
         )
         .bind(id)
         .bind(transport)
@@ -660,7 +660,7 @@ mod adversarial_tests {
     ) {
         sqlx::query(
             "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
-             VALUES ($1, 'system_internal_tenant01', $2, $3, $4, NOW())",
+             VALUES ($1, 'system_internal_tenant01', $2, $3, $4, NOW() - INTERVAL '5 seconds')",
         )
         .bind(format!(
             "evt_{}",

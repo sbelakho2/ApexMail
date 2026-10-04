@@ -3054,13 +3054,11 @@ pub fn web_dashboard_page() -> String {
     // series — figures the static page cannot know. The data-backed
     // dashboard renders real KPIs; this no-data fallback now states that
     // delivery health is unavailable — not 100%, not zero.
-    let dna_block = format!(
-        "<div class=\"rounded-sm border border-surface-200 bg-surface-50 p-4\">\
+    let dna_block = "<div class=\"rounded-sm border border-surface-200 bg-surface-50 p-4\">\
 <p class=\"apex-klabel mb-1\">delivery · 30d</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight\">unavailable</p>\
 <p class=\"mt-1 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health and send-volume charts load from your own send events — nothing has been fabricated here, and an absent figure is not zero.</p>\
-</div>"
-    );
+</div>";
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
 <header class=\"flex flex-col gap-2\">\
@@ -3110,7 +3108,7 @@ pub fn web_dashboard_page() -> String {
 </article>\
 </div>\
 </section>
-</div>".to_string().replace("{DNA_DASH}", &dna_block)
+</div>".to_string().replace("{DNA_DASH}", dna_block)
 }
 
 /// Campaigns list page.

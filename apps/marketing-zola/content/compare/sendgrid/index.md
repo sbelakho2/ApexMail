@@ -33,7 +33,7 @@ comparison_sections = [
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic</span>', comp = '<span class="text-surface-600">Automatic</span>', winner = "tie" },
     { feature = "DKIM Rotation", apex = '<span class="text-brand-600 font-semibold">Configurable automatic</span>', comp = '<span class="text-surface-600">Manual</span>', winner = "none" },
     { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
+    { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Tools", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Documented DPA</span>', winner = "apexmail" },

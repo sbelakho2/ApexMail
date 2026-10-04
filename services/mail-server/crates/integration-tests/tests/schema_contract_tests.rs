@@ -393,13 +393,12 @@ async fn register_http_ceremony_persists_tenant_user_and_queue() {
 
     // The users row exists, carries a UUID id + owner role, and the password
     // hash is a verifiable PHC string (never a plaintext/cleared value).
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id::text, password_hash, role FROM users WHERE email = $1",
-    )
-    .bind(&email)
-    .fetch_optional(&pool)
-    .await
-    .expect("users lookup must not error");
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT id::text, password_hash, role FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&pool)
+            .await
+            .expect("users lookup must not error");
     let Some((user_id, password_hash, role)) = row else {
         panic!("the register ceremony must persist a users row for {email}");
     };

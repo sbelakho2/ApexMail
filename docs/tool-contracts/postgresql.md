@@ -7,8 +7,8 @@
 | **Version** | PostgreSQL 15+ |
 | **Role** | Primary persistent data store |
 | **Hosting** | Hetzner Cloud ARM server (currently CAX41) (dedicated instance) |
-| **Replication** | WAL-based streaming to hot standby |
-| **Backups** | pg_dump + continuous WAL archiving → Hetzner S3 |
+| **Replication** | None — single node, no standby (see `docs/operations/disaster-recovery.md`) |
+| **Backups** | Nightly encrypted `pg_dump` via the `postgres-backup` compose service; restore-verified at backup time. No WAL archiving, no PITR |
 
 ---
 
@@ -160,26 +160,35 @@ Used for **low-volume, latency-sensitive** internal signaling. NOT a replacement
 
 ## 8. Replication & Backup
 
-### Streaming Replication
+> **Reality (rewritten 2026-10-02).** Earlier versions of this section
+> described a hot standby, STONITH fencing, WAL archiving to Hetzner S3 and
+> PITR. **None of that exists.** The authoritative source is
+> `docs/operations/disaster-recovery.md`.
 
-- One hot standby replica on a separate Hetzner CAX41.
-- `synchronous_commit = on` for the primary (async streaming to standby).
-- Standby serves read-only analytics queries to offload the primary.
-- Promotion is manual via `pg_ctl promote` — triggered by STONITH fencing through the Hetzner Robot API.
+### Replication
+
+- **None.** There is a single PostgreSQL node on the production host — no
+  streaming replication, no hot standby, no read replica, no failover
+  automation. A host failure is an outage until the host is rebuilt.
 
 ### Backup Strategy
 
 | Method | Frequency | Retention | Destination |
 |--------|-----------|-----------|-------------|
-| `pg_dump --format=custom` | Daily 02:00 UTC | 30 days | Hetzner S3 `s3://apexmail-backups/pg/daily/` |
-| WAL archiving (`archive_command`) | Continuous | 7 days | Hetzner S3 `s3://apexmail-backups/pg/wal/` |
-| Weekly full base backup | Sunday 03:00 UTC | 90 days | Hetzner S3 `s3://apexmail-backups/pg/weekly/` |
+| `pg_dump --format=custom` (encrypted AES-256, via the `postgres-backup` compose service) | Nightly | 14 daily / 8 weekly / 6 monthly generations (newest 30 bound) | Host-local `/backups` volume; optional offsite rsync mirror (`BACKUP_TARGET`) |
+
+Every backup is verified for restorability at backup time (decrypt +
+`pg_restore --list` before the plaintext is deleted); the backup container's
+healthcheck turns red if no fresh artifact exists.
 
 ### Recovery
 
-- Point-in-time recovery (PITR) is supported via WAL replay to any timestamp within the 7-day WAL window.
+- **Point-in-time recovery is not implemented.** The recovery point is the
+  last nightly backup (RPO up to ~24 h).
 - Recovery procedure is documented in `docs/operations/disaster-recovery.md`.
-- Recovery is tested quarterly by restoring to a scratch server and running the validation suite.
+- Recovery is exercised manually in the quarterly DR drill (restore to a
+  scratch host and run the validation suite —
+  `docs/operations/disaster-recovery-testing.md`).
 
 ---
 
@@ -189,7 +198,6 @@ Used for **low-volume, latency-sensitive** internal signaling. NOT a replacement
 |--------|--------|----------------|
 | Query p95 latency | < 50 ms | > 100 ms |
 | Active connections | < 80 | > 90 |
-| Replication lag | < 1 s | > 5 s |
 | WAL generation rate | — | > 500 MB/h sustained |
 | Dead tuple ratio | < 5 % | > 10 % |
 
@@ -197,4 +205,4 @@ Autovacuum is tuned for high-churn tables (`emails`, `email_events`) with `autov
 
 ---
 
-*Last updated: 2026-02-09*
+*Last updated: 2026-10-02* (§8 + header rewritten to the single-host, no-PITR reality)

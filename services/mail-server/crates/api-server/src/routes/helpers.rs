@@ -623,7 +623,7 @@ mod tests {
         assert!(!table_exists(&pool, &unique_table).await.expect("probe"));
         // …and it is memoized (one catalog query for this database + probe).
         assert!(
-            capability_cache_len() >= before + 1,
+            capability_cache_len() > before,
             "the Ok verdict must be memoized"
         );
         assert!(!table_exists(&pool, &unique_table).await.expect("cached"));
@@ -640,7 +640,7 @@ mod tests {
             "tenants.id exists in the canonical schema"
         );
         assert!(
-            capability_cache_len() >= before_columns + 1,
+            capability_cache_len() > before_columns,
             "the Ok column verdict must be memoized"
         );
         assert!(

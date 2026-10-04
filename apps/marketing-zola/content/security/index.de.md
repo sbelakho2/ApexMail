@@ -4,7 +4,7 @@ description = "ApexMail-Sicherheitskontrollen: Verschlüsselung, Authentifizieru
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-02"
 +++
 
 ## Verschlüsselung
@@ -65,22 +65,21 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 | Kontrolle | Was wird verifiziert | Häufigkeit | Nachweis |
 |---|---|---|---|
-| **Signierte Bereitstellungsartefakte** | Alle Anwendungsbinärdateien und Container-Images werden zum Build-Zeitpunkt kryptografisch signiert. Bereitstellungen validieren Signaturen vor dem Rollout. | Jeder Build | Build-Attestierungsprotokolle (unveränderlich, nur anhängend) |
-| **Datenbankintegritätsprüfungen** | PostgreSQL-Prüfsummenvalidierung auf allen Datenseiten; Hash-Ketten-Integrität in Audit-Log-Tabellen über verkettete SHA-256-Digests. | Kontinuierlich (Prüfsumme beim Lesen); nächtlicher vollständiger Scan | Alarm bei Korruption; Audit-Log-Kettenverifikations-Endpunkt |
-| **Unveränderliche Bereitstellungsprotokolle** | Jedes Bereitstellungsereignis (wer, was, wann, Git-Commit, Artefakt-Hash) wird in einem Nur-Anhängen-Protokoll aufgezeichnet. | Jede Bereitstellung | Bereitstellungsverlaufs-Endpunkt; manipulationssicheres Protokoll |
-| **Dateiintegritätsüberwachung** | Systembinärdateien, Konfigurationsdateien und TLS-Zertifikate werden auf unbefugte Änderungen überwacht. | Kontinuierlich (inotify-basiert) | Alarm bei Änderungen außerhalb genehmigter Änderungsfenster |
-| **Verifizierte Backup-Wiederherstellungen** | Automatisierte Wiederherstellungstests validieren Backup-Integrität und Wiederherstellbarkeit. | Wöchentlich | Wiederherstellungs-Erfolgs-/Fehlerprotokoll; Vergleich von Beispieldaten |
-| **Laufzeitintegrität** | Anwendungsprozesse werden auf unerwartete Binäränderungen oder Konfigurationsabweichungen gegenüber dem deklarierten Infrastructure-as-Code-Zustand überwacht. | Kontinuierlich | Abweichungserkennungsalarm; Abstimmungsbericht |
+| **Integrität der Bereitstellungsartefakte** | Container-Images werden per Digest verifiziert, nicht signiert: Jede Pipeline-Ausführung zeichnet ein Release-Manifest auf (SHA-256-Digests je Image, `SHA256SUMS.images`) und erzeugt eine digest-gepinnte Compose-Override-Datei; die Bereitstellung verweigert den Start jedes Images, dessen Digest nicht zum Manifest passt. | Jede Bereitstellung | Release-Manifest + Digest-Verifizierung vor dem Rollout in der Deploy-Stufe |
+| **Audit-Log-Integrität** | Audit-Log-Tabellen tragen eine Hash-Kette: Der SHA-256-Digest jeder Zeile ist mit ihrem Vorgänger verkettet. | Kontinuierlich (je Schreibvorgang) | Audit-Log-Hash-Kette |
+| **Bereitstellungsprotokolle** | Jede Pipeline-Ausführung zeichnet ein Manifest (Stufe, Status, Exit-Code, Dauer) sowie Stufen-Protokolle auf. Dies sind Betriebsprotokolle, kein manipulationssicheres, kundenseitiges Protokoll. | Jede Bereitstellung | CI-Run-Manifeste (`ci/runs/<ts>/manifest.json`) |
+| **Backup-Verifizierung** | Jedes Backup wird automatisch entschlüsselt und strukturell validiert (`pg_restore --list`), bevor die Klartext-Kopie gelöscht wird — ein nicht lesbares Backup gilt nie als gut. Vollständige Wiederherstellungsübungen sind manuell und folgen der dokumentierten vierteljährlichen Kadenz. | Je Backup (automatische Validierung); vierteljährlich (manuelle Übungen) | Wiederherstellbarkeitsprüfung beim Backup; DR-Übungsprotokolle |
+| **Laufzeit-Resilienz** | Dienste laufen mit Healthchecks und automatischem Neustart; ein fehlgeschlagener Content-Probe nach dem Deploy löst automatisches Rollback auf die vorherigen Image-Pins aus. | Kontinuierlich | Container-Healthchecks; Verify-Stufe + Rollback |
 
 ## Infrastruktursicherheit
 
-- Hetzner Online GmbH für Compute, Storage und Networking in der konfigurierten Bereitstellungsregion.
+- Hetzner Online GmbH für Compute, Storage und Networking in der konfigurierten Bereitstellungsregion (ein einzelner Host betreibt den gesamten Stack; es gibt keine Multi-Region-Topologie).
 - CIS-gehärtete Debian/Ubuntu-Betriebssysteme.
 - Automatisierte Sicherheitspatches mit gestaffelter Einführung.
-- Unveränderliche Infrastruktur durch Infrastructure-as-Code.
-- Netzwerksegmentierung zwischen Anwendungs-, Daten- und Managementebenen.
-- Netzwerkisolation: Anwendungsserver, Datenbankserver und Verwaltungsschnittstellen in separaten VLANs.
-- Geheimnisverwaltung über versiegelte Geheimnisse und Umgebungsisolation.
+- Deklarative, versionskontrollierte Bereitstellung: Der gesamte Stack ist in Docker-Compose-Dateien definiert und wird über die selbst gehostete CI-Pipeline ausgerollt.
+- Docker-Netzwerksegmentierung zwischen Frontend-, Backend- und Datenbank-Netzwerken auf dem Bereitstellungshost.
+- Host-Firewall: Eingehender Zugriff auf die Mail-/Web-Service-Ports (25, 80, 443, 587, 993) sowie Operator-Ports beschränkt; Datenbanken haben keine Host-Port-Freigabe.
+- Geheimnisverwaltung über Docker Secrets aus berechtigungsbeschränkten Dateien (0600); keine Geheimnisse in Images oder Quellcode.
 
 ## Schwachstellenmanagement
 

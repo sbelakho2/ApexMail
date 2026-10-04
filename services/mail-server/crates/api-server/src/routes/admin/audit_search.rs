@@ -846,7 +846,7 @@ mod tests {
             sqlx::query(
                 "INSERT INTO audit_logs (id, tenant_id, action, resource, details, timestamp, fts_vector,
                                          outcome, hash, signature)
-                 VALUES ($1, 'tenant-a', 'user.login', 'session', '{\"who\":\"admin\"}'::jsonb, NOW() - make_interval(mins => $2),
+                 VALUES ($1, 'tenant-a', 'user.login', 'session', '{\"who\":\"admin\"}'::jsonb, NOW() - make_interval(mins => $2 + 1),
                          to_tsvector('english', 'user.login session admin'),
                          'success', 'seed-hash', 'seed-signature')",
             )
@@ -1271,7 +1271,7 @@ mod adversarial_tests {
          SELECT 'cur-' || lpad(g::text, 2, '0') || '-' || substr(gen_random_uuid()::text, 1, 8),
                 $1, 'usr_srch', 'probe.search', 'probe_resource', 'res-1',
                 $3::jsonb, '198.51.100.9', 'probe-agent', 'success',
-                NOW(), 'seed-hash', 'seed-signature',
+                NOW() - INTERVAL '5 seconds', 'seed-hash', 'seed-signature',
                 to_tsvector('english', $3::text)
          FROM generate_series(0, $2 - 1) AS g";
 
@@ -1456,12 +1456,9 @@ mod adversarial_tests {
         for bad in [
             "zz",
             encode_cursor("no-separator-here").as_str(),
-            encode_cursor(&format!("1.5\nnot-a-time\nrow-id")).as_str(),
-            encode_cursor(&format!("NaN\n2026-01-01T00:00:00Z\nrow-id")).as_str(),
-            encode_cursor(&format!(
-                "1.5\n2026-01-01T00:00:00Z\nx'; DROP TABLE audit_logs; --"
-            ))
-            .as_str(),
+            encode_cursor("1.5\nnot-a-time\nrow-id").as_str(),
+            encode_cursor("NaN\n2026-01-01T00:00:00Z\nrow-id").as_str(),
+            encode_cursor("1.5\n2026-01-01T00:00:00Z\nx'; DROP TABLE audit_logs; --").as_str(),
         ] {
             let (status, body) = env
                 .get(&format!("/v1/admin/audit/search?cursor={bad}"))
@@ -1521,7 +1518,7 @@ mod coverage_residual_tests {
                      outcome, timestamp, hash, signature, fts_vector)
                  VALUES (replace(gen_random_uuid()::text, '-', ''), $1, 'usr_1', $2,
                          'audit_probe', '{\"needle\": \"haystack\"}'::jsonb, 'success',
-                         NOW(), 'h', 's',
+                         NOW() - INTERVAL '5 seconds', 'h', 's',
                          to_tsvector('english', $2 || ' haystack'))",
             )
             .bind(&tenant)

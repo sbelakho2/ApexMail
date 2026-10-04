@@ -112,7 +112,13 @@ fn mint_token(tenant: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -
 /// act as TWO different members of the same tenant — the repaired
 /// separation-of-duties refuses self-approval, and approval happy paths need
 /// a distinct approver.
-fn mint_token_as(tenant: &str, sub: &str, admin: bool, aud: Option<&str>, iss: Option<&str>) -> String {
+fn mint_token_as(
+    tenant: &str,
+    sub: &str,
+    admin: bool,
+    aud: Option<&str>,
+    iss: Option<&str>,
+) -> String {
     #[derive(serde::Serialize)]
     struct Claims<'a> {
         sub: &'a str,

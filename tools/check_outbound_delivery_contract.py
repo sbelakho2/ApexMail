@@ -54,6 +54,9 @@ def _scan_for_retired_references() -> list[str]:
             continue
         if "/target/" in relative or relative.startswith("target/"):
             continue
+        if relative.startswith(".kilo/"):
+            # Separate stale worktrees on disk, not this checkout's files.
+            continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -78,6 +81,11 @@ def main() -> int:
     for path in sorted(CRATES.rglob("*.rs")):
         relative = path.relative_to(CRATES).as_posix()
         if relative in APPROVED_FILES:
+            continue
+        # Generated code in cargo build dirs (e.g. the cargo-fuzz subproject's
+        # target/ protoc output) is not a delivery entry point; scanning it
+        # produced false candidates. Build outputs are never approved surface.
+        if "/target/" in f"/{relative}":
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         if any(pattern.search(text) for pattern in SENDER_PATTERNS):

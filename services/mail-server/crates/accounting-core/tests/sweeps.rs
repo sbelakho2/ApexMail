@@ -679,13 +679,12 @@ async fn sweep_failures_are_counted_rolled_back_and_retried() {
 
     // The auto-provisioning is real and observable: a default entity exists
     // and an OPEN fiscal period covers the row's document date.
-    let default_entity: Uuid = sqlx::query_scalar(
-        "SELECT id FROM legal_entities WHERE is_default LIMIT 1",
-    )
-    .fetch_optional(&pool)
-    .await
-    .expect("default entity lookup")
-    .expect("the sweep auto-provisioned the default legal entity (audit SM7 F1)");
+    let default_entity: Uuid =
+        sqlx::query_scalar("SELECT id FROM legal_entities WHERE is_default LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .expect("default entity lookup")
+            .expect("the sweep auto-provisioned the default legal entity (audit SM7 F1)");
     let covering: Uuid = sqlx::query_scalar(
         "SELECT id FROM fiscal_periods \
          WHERE legal_entity_id = $1 AND status = 'open' \

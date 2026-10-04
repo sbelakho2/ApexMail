@@ -3071,14 +3071,16 @@ mod tests {
     /// They must be classified Deferred and continue on the follow-up unit.
     #[tokio::test]
     async fn rcpt_transport_abort_after_an_accept_defers_the_unattempted_recipients() {
-        let mut server_config = FakeSmtpConfig::default();
         // Recipient b gets a hostile reply: the client's RCPT read fails as
         // a transport error (unparseable multiline reply), while the
         // connection itself stays open and in sync — DATA still completes.
-        server_config.raw_rcpt = Some((
-            "b@example.com".to_string(),
-            b"250-OK\r\n550 protocol-confused\r\n".to_vec(),
-        ));
+        let server_config = FakeSmtpConfig {
+            raw_rcpt: Some((
+                "b@example.com".to_string(),
+                b"250-OK\r\n550 protocol-confused\r\n".to_vec(),
+            )),
+            ..FakeSmtpConfig::default()
+        };
         let harness = harness(relay_config(), server_config).await;
         let mut request = request();
         request.recipients = vec![

@@ -20,19 +20,15 @@ slow-timeout = { period = "1800s", terminate-after = 2 }
 # limit with margin.
 [test-groups]
 all-tests = { max-threads = 8 }
+# Explorer sandbox-cache tests share one sandbox key row across processes;
+# serialize them so sibling re-mints can't flip the convergence assertions.
+explorer-sandbox = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'all()'
 test-group = 'all-tests'
 
-# The FBL virtual-time tests choreograph a paused tokio clock against REAL
-# loopback sockets: tokio's auto-advance and the OS delivery of the peer's
-# bytes can lose a race when a full-workspace instrumented run starves the
-# CPU, Elapsing a reply read that arrived a microsecond late in real time.
-# The choreography itself is deterministic per nextest process (verified
-# across dozens of isolated and crate-level runs), so the retry only absorbs
-# the cross-process scheduling race; a real regression still fails every
-# attempt.
+
 [[profile.default.overrides]]
-filter = 'test(fbl_stalled_data_phase_answers_421_under_virtual_time) or test(fbl_session_deadline_closes_with_421_under_virtual_time)'
-retries = 2
+filter = 'test(concurrent_first_requests_converge_on_a_live_sandbox_key) or test(sandbox_key_is_cached_per_process_and_capped_at_one_row) or test(sandbox_cache_self_heals_when_a_sibling_re_mints_the_key_row) or test(sandbox_adopts_the_shared_key) or test(concurrent_first_requests_converge)'
+test-group = 'explorer-sandbox'

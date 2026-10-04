@@ -1785,7 +1785,7 @@ async fn crash_window_w3_committed_but_not_acked_replays_idempotently() {
 
     let event = wal_event(&tenant, &message, EventType::Opened);
     let envelope = build_wal_envelope(&serde_json::to_string(&event).unwrap());
-    seed_wal(&redis, &[envelope.clone()]).await;
+    seed_wal(&redis, std::slice::from_ref(&envelope)).await;
 
     // Claim (lease held)…
     {
@@ -2050,7 +2050,7 @@ async fn permanently_failing_batch_dead_letters_exactly_once_without_wedging() {
     let good_rows: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND message_id = $2")
             .bind(&tenant)
-            .bind(&format!("{message}-good"))
+            .bind(format!("{message}-good"))
             .fetch_one(&db)
             .await
             .unwrap();
@@ -2151,7 +2151,7 @@ async fn dead_letter_entries_failure_arms_are_swallowed() {
             .query_async(&mut *conn)
             .await;
     }
-    proc.dead_letter_entries(&[poison.clone()], "unparsable_envelope", 0)
+    proc.dead_letter_entries(std::slice::from_ref(&poison), "unparsable_envelope", 0)
         .await;
     {
         let mut conn = redis.get().await.unwrap();

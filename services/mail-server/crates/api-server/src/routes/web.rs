@@ -2482,7 +2482,7 @@ async fn perform_password_login(
         }
         crate::routes::auth::PasswordLoginVerdict::SsoRequired => {
             return redirect_error(
-                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled",
+                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled.",
                 "/login",
                 &state.config,
             );
@@ -15086,7 +15086,6 @@ mod coverage_auth_admin_tests {
         let secret: String = uuid::Uuid::new_v4()
             .into_bytes()
             .iter()
-            .take(20)
             .map(|byte| alphabet[(byte & 0x1f) as usize] as char)
             .collect();
         let aad = format!("user_id={enrolled_id}").into_bytes();
@@ -15255,14 +15254,16 @@ mod coverage_auth_admin_tests {
     /// a manually driven current-thread runtime instead.
     #[test]
     fn signup_forgot_and_reset_password_round_trip() {
-        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(signup_forgot_and_reset_password_inner());
+        {
+            let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            runtime.block_on(signup_forgot_and_reset_password_inner());
+        }
     }
 
     async fn signup_forgot_and_reset_password_inner() {
@@ -16996,7 +16997,7 @@ mod adversarial_outage_tests {
         for symbol in secret_base32.trim_end_matches('=').bytes() {
             let value = alphabet
                 .iter()
-                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .position(|&a| a.eq_ignore_ascii_case(&symbol))
                 .expect("base32 alphabet") as u64;
             bits = (bits << 5) | value;
             bit_count += 5;
@@ -18051,7 +18052,7 @@ mod residual_zero_tests {
         for symbol in secret_base32.trim_end_matches('=').bytes() {
             let value = alphabet
                 .iter()
-                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .position(|&a| a.eq_ignore_ascii_case(&symbol))
                 .expect("base32 alphabet") as u64;
             bits = (bits << 5) | value;
             bit_count += 5;
@@ -21596,13 +21597,15 @@ mod residual_zero_tests {
         // Scoped: the guard must be gone before the phases below re-lock
         // `seen` (a same-thread std Mutex re-lock deadlocks the runtime).
         {
-            let seen = engine.seen.lock().unwrap();
-            assert_eq!(seen.len(), 2, "both sources hit the engine");
-            assert!(
-                seen.iter()
-                    .all(|(_, key, _)| key.as_deref() == Some("residual-internal-token")),
-                "the internal service token must ride every engine call: {seen:?}"
-            );
+            {
+                let seen = engine.seen.lock().unwrap();
+                assert_eq!(seen.len(), 2, "both sources hit the engine");
+                assert!(
+                    seen.iter()
+                        .all(|(_, key, _)| key.as_deref() == Some("residual-internal-token")),
+                    "the internal service token must ride every engine call: {seen:?}"
+                );
+            }
         }
 
         // Mixed: first source enriches, second fails with a detail body.
@@ -21700,15 +21703,17 @@ mod residual_zero_tests {
             flash_text(&response, &config),
             "Outreach enrollment accepted: 2 accepted, 1 rejected."
         );
-        let seen = engine.seen.lock().unwrap();
-        let (_, key, body) = &seen[0];
-        assert_eq!(key.as_deref(), Some("residual-internal-token"));
-        let payload: serde_json::Value = serde_json::from_str(body).expect("json payload");
-        assert_eq!(payload["sequenceId"], "seq-1");
-        assert_eq!(payload["autonomyPolicyId"], "pol-1");
-        assert_eq!(payload["experimentId"], "exp-9");
-        assert_eq!(payload["contactIds"][2], "c3");
-        drop(seen);
+        {
+            let seen = engine.seen.lock().unwrap();
+            let (_, key, body) = &seen[0];
+            assert_eq!(key.as_deref(), Some("residual-internal-token"));
+            let payload: serde_json::Value = serde_json::from_str(body).expect("json payload");
+            assert_eq!(payload["sequenceId"], "seq-1");
+            assert_eq!(payload["autonomyPolicyId"], "pol-1");
+            assert_eq!(payload["experimentId"], "exp-9");
+            assert_eq!(payload["contactIds"][2], "c3");
+            drop(seen);
+        }
 
         // Quota-pause style failure: the engine's structured error surfaces.
         *engine.enroll.lock().unwrap() = (
@@ -22426,7 +22431,7 @@ mod residual_zero_tests {
         )
         .bind(uuid::Uuid::new_v4())
         .bind(&tenant)
-        .bind(&format!("first-{tag}.example.test"))
+        .bind(format!("first-{tag}.example.test"))
         .execute(&app.db)
         .await
         .expect("seed the plan's one domain");
@@ -23220,7 +23225,7 @@ mod residual_zero_tests {
             // am-* selector, a fresh encrypted key bound to the new tenant,
             // and every verification flag reset for the new owner.
             let domain_name = format!("bare-{tag}.example.test");
-            assert_eq!(seeded.domain_without_dkim.is_empty(), false);
+            assert!(!seeded.domain_without_dkim.is_empty());
             let (headers, form) = signed_form(
                 &app.config,
                 &[
@@ -23683,7 +23688,7 @@ mod deferred_feature_tests {
         for symbol in secret_base32.trim_end_matches('=').bytes() {
             let value = alphabet
                 .iter()
-                .position(|&a| a.to_ascii_uppercase() == symbol.to_ascii_uppercase())
+                .position(|&a| a.eq_ignore_ascii_case(&symbol))
                 .expect("base32 alphabet") as u64;
             bits = (bits << 5) | value;
             bit_count += 5;
@@ -24077,9 +24082,11 @@ mod deferred_feature_tests {
 
     #[tokio::test]
     async fn resend_verification_requeues_a_fresh_token() {
-        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        {
+            let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
         let Some(app) = coverage_support::state("df_resend_fresh").await else {
             eprintln!("skipping: no TEST_DATABASE_URL");
             return;
@@ -24195,9 +24202,11 @@ mod deferred_feature_tests {
             eprintln!("skipping: TEST_REDIS_URL unset");
             return;
         }
-        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        {
+            let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
         let Some(app) = coverage_support::state("df_resend_limit").await else {
             eprintln!("skipping: no TEST_DATABASE_URL");
             return;
@@ -24618,8 +24627,8 @@ mod deferred_feature_tests {
         .expect("seed event");
     }
 
-    fn stat_kpi<'a>(
-        page: &'a ui_foundation::view_data::ListPageData,
+    fn stat_kpi(
+        page: &ui_foundation::view_data::ListPageData,
         label: &str,
     ) -> ui_foundation::view_data::KpiCardData {
         page.kpis

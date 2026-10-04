@@ -28,10 +28,7 @@ fn test_config() -> RateLimitConfig {
 /// Unique per-run key prefix so parallel suite re-runs against the same
 /// Redis never collide.
 fn unique_prefix(test_name: &str) -> String {
-    format!(
-        "itest:rl:{test_name}:{}:",
-        uuid::Uuid::new_v4().simple()
-    )
+    format!("itest:rl:{test_name}:{}:", uuid::Uuid::new_v4().simple())
 }
 
 /// Resolve TEST_REDIS_URL per the workspace soft-skip contract: `None`
@@ -126,7 +123,10 @@ async fn fallback_peek_fails_open_and_does_not_consume_budget() {
     let config = RateLimitConfig::new(10).with_burst(2);
     let limiter = RedisLimiter::fallback_only(&config).with_fallback_shares(1);
 
-    assert!(limiter.check().await.is_allowed(), "first token is spendable");
+    assert!(
+        limiter.check().await.is_allowed(),
+        "first token is spendable"
+    );
     for _ in 0..10 {
         let peeked = limiter.peek().await;
         assert!(
@@ -154,7 +154,12 @@ async fn fallback_peek_fails_open_and_does_not_consume_budget() {
 /// IS set but unreachable is infrastructure breakage — PANIC with a clear
 /// message (never a soft skip), matching how the DB-backed suites treat a
 /// configured-but-broken TEST_DATABASE_URL.
-async fn connected_limiter(test_name: &str, prefix: &str, url: &str, config: &RateLimitConfig) -> RedisLimiter {
+async fn connected_limiter(
+    test_name: &str,
+    prefix: &str,
+    url: &str,
+    config: &RateLimitConfig,
+) -> RedisLimiter {
     match RedisLimiter::connect(config, url).await {
         Some(limiter) => limiter.with_prefix(prefix),
         None => panic!(
@@ -168,8 +173,7 @@ async fn connected_limiter(test_name: &str, prefix: &str, url: &str, config: &Ra
 /// it, reports the ACTUAL remaining tokens, and `reset` clears state.
 #[tokio::test]
 async fn redis_path_enforces_token_bucket_burst_and_reset() {
-    let Some(url) = test_redis_url("redis_path_enforces_token_bucket_burst_and_reset").await
-    else {
+    let Some(url) = test_redis_url("redis_path_enforces_token_bucket_burst_and_reset").await else {
         return;
     };
     let prefix = unique_prefix("token_bucket");
@@ -226,8 +230,14 @@ async fn redis_path_tenant_keys_are_independent() {
         &config,
     )
     .await;
-    limiter.reset_for_tenant(Some("tenant-a")).await.expect("clean a");
-    limiter.reset_for_tenant(Some("tenant-b")).await.expect("clean b");
+    limiter
+        .reset_for_tenant(Some("tenant-a"))
+        .await
+        .expect("clean a");
+    limiter
+        .reset_for_tenant(Some("tenant-b"))
+        .await
+        .expect("clean b");
 
     assert!(
         limiter
@@ -251,8 +261,14 @@ async fn redis_path_tenant_keys_are_independent() {
         "tenant-b must keep an independent Redis bucket"
     );
 
-    limiter.reset_for_tenant(Some("tenant-a")).await.expect("cleanup a");
-    limiter.reset_for_tenant(Some("tenant-b")).await.expect("cleanup b");
+    limiter
+        .reset_for_tenant(Some("tenant-a"))
+        .await
+        .expect("cleanup a");
+    limiter
+        .reset_for_tenant(Some("tenant-b"))
+        .await
+        .expect("cleanup b");
 }
 
 /// Shared-state semantics: a NEW limiter instance (pod restart, another
@@ -260,8 +276,7 @@ async fn redis_path_tenant_keys_are_independent() {
 /// in the process.
 #[tokio::test]
 async fn redis_path_state_survives_new_limiter_instances() {
-    let Some(url) = test_redis_url("redis_path_state_survives_new_limiter_instances").await
-    else {
+    let Some(url) = test_redis_url("redis_path_state_survives_new_limiter_instances").await else {
         return;
     };
     let prefix = unique_prefix("restart");
@@ -331,7 +346,10 @@ async fn redis_path_concurrent_checks_share_the_multiplexed_connection() {
         .collect();
     let mut allowed = 0;
     for h in handles {
-        assert!(h.await.expect("check task must not panic"), "fresh tenant check");
+        assert!(
+            h.await.expect("check task must not panic"),
+            "fresh tenant check"
+        );
         allowed += 1;
     }
     assert_eq!(allowed, 20, "all concurrent distinct-tenant checks pass");

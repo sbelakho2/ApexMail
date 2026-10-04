@@ -1,5 +1,11 @@
 # PostgreSQL Read Replicas
 
+> **ARCHITECTURE-TRUTH: ROADMAP** — Read replicas are NOT deployed. ApexMail
+> runs a **single** PostgreSQL instance on one Hetzner host with Docker
+> Compose (see [`ARCHITECTURE.md`](../../ARCHITECTURE.md)); there is no Helm
+> chart and no AWS/RDS. This is a scale-up design study (SCALE-H-02),
+> preserved for design value — do not execute it as an operational runbook.
+
 > **SCALE-H-02** | Owner: Platform Engineering | Last updated: 2026-05-17
 
 ## Overview

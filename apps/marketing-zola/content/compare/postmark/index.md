@@ -17,15 +17,17 @@ og_image = "/images/og-image.png"
 # single loop, so design changes to the row/winner markup happen in ONE place.
 # Cell values are raw HTML (rendered with | safe) to preserve color-emphasis
 # spans and any inline markup. Winner is one of: apexmail | competitor | tie | none.
-# Postmark never declares a winner — every row uses winner = "none".
+# Postmark rows editorially avoid declaring a winner; the one exception is
+# MTA-STS (competitor supports it; ApexMail does not enforce it in delivery
+# — see docs/deployment-facts.json mta_sts_enforcement).
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
     { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
     { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
-    { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
-    { feature = "MTA-STS Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
+    { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "MTA-STS Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-brand-600">✓</span>', winner = "competitor" }
   ]},
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">Full DSR handling</span>', comp = '<span class="text-surface-600">Self-managed</span>', winner = "none" },

@@ -32,7 +32,16 @@ def main() -> int:
         package_id = node["id"]
         if package_id not in workspace_ids:
             continue
-        graph[package_id] = [dep for dep in node["dependencies"] if dep in workspace_ids]
+        # A crate's self-path dev-dependency (`outbound-mta = { path = ".",
+        # features = ["test-support"] }`) is the standard cargo idiom for
+        # enabling an own feature in tests — cargo itself accepts it, and a
+        # genuine unit cycle is rejected by cargo outright. Skip self-edges
+        # so the idiom is not misread as a dependency cycle.
+        graph[package_id] = [
+            dep
+            for dep in node["dependencies"]
+            if dep in workspace_ids and dep != package_id
+        ]
 
     visiting: list[str] = []
     visited: set[str] = set()

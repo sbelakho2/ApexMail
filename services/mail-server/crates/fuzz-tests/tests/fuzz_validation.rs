@@ -12,7 +12,9 @@
 //! * `fuzz_uuid_validation_oracle` / `fuzz_sanitize_round_trip` — the same
 //!   principle for the UUID and sanitization surfaces.
 
-use apexmail_lib::validation::{has_null_bytes, is_valid_domain, is_valid_email, is_valid_uuid, sanitize_string};
+use apexmail_lib::validation::{
+    has_null_bytes, is_valid_domain, is_valid_email, is_valid_uuid, sanitize_string,
+};
 use fuzz_tests::*;
 use rand::Rng;
 
@@ -30,7 +32,10 @@ fn fuzz_email_validation_never_panics() {
         }
         // Oracle: a string containing a raw control char can never be valid.
         if input.chars().any(|c| c.is_control()) {
-            assert!(!verdict, "validator accepted a control-char string: {input:?}");
+            assert!(
+                !verdict,
+                "validator accepted a control-char string: {input:?}"
+            );
         }
     }
     // Fixed edge inputs with asserted verdicts (previously discarded).
@@ -231,8 +236,7 @@ fn fuzz_email_with_unicode() {
         // the split or the domain regex cannot survive them.
         if local.contains('@') || domain.contains('@') {
             assert!(!verdict, "embedded @ must invalidate: {email:?}");
-        } else if local.chars().any(char::is_whitespace)
-            || domain.chars().any(char::is_whitespace)
+        } else if local.chars().any(char::is_whitespace) || domain.chars().any(char::is_whitespace)
         {
             assert!(!verdict, "whitespace must invalidate: {email:?}");
         } else if local.chars().all(char::is_alphanumeric)
@@ -265,8 +269,14 @@ fn fuzz_very_long_inputs() {
             !is_valid_email(&long_input),
             "a {size}-char address must exceed the 254 cap"
         );
-        assert!(!is_valid_domain(&long_input), "oversized domain must be invalid");
-        assert!(!is_valid_uuid(&long_input), "oversized UUID must be invalid");
+        assert!(
+            !is_valid_domain(&long_input),
+            "oversized domain must be invalid"
+        );
+        assert!(
+            !is_valid_uuid(&long_input),
+            "oversized UUID must be invalid"
+        );
         assert!(!has_null_bytes(&long_input));
     }
 }

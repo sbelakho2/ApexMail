@@ -346,7 +346,7 @@ mod overload_tests {
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(waiter.is_finished(), false, "no capacity yet — must wait");
+        assert!(!waiter.is_finished(), "no capacity yet — must wait");
 
         drop(permit);
         let admitted = waiter.await.expect("waiter task");

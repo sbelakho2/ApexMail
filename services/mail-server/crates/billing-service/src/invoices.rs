@@ -947,7 +947,7 @@ pub async fn get_invoice_by_id(
     .await
     .map_err(InvoiceError::Db)?;
 
-    Ok(row.map(|r| r.into_invoice()).transpose()?)
+    row.map(|r| r.into_invoice()).transpose()
 }
 
 // ---------------------------------------------------------------------------

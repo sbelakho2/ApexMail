@@ -1681,8 +1681,10 @@ mod tests {
         // A 4-byte cap makes the engine reject every real payload with
         // FileTooLarge: the wiring must record decision=ERROR (with the
         // sanitized error detail) and never strip or refuse.
-        let mut sandbox_config = sandbox::config::SandboxConfig::default();
-        sandbox_config.max_file_size = 4;
+        let sandbox_config = sandbox::config::SandboxConfig {
+            max_file_size: 4,
+            ..Default::default()
+        };
         let engine = sandbox::engine::SandboxEngine::with_config(sandbox_config);
         let outcome = run_attachment_scan(
             &engine,
@@ -1726,9 +1728,11 @@ mod tests {
              just words\r\n\
              --RAWB--\r\n"
             .as_slice();
-        let mut sandbox_config = sandbox::config::SandboxConfig::default();
-        sandbox_config.reject_threshold = 0.0;
-        sandbox_config.suspicious_threshold = 0.0;
+        let sandbox_config = sandbox::config::SandboxConfig {
+            reject_threshold: 0.0,
+            suspicious_threshold: 0.0,
+            ..Default::default()
+        };
         let engine = sandbox::engine::SandboxEngine::with_config(sandbox_config);
         let outcome = run_attachment_scan(
             &engine,

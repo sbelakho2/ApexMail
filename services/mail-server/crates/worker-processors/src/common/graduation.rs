@@ -2,18 +2,21 @@
 //!
 //! The canonical 60-day schedule (see `mail_common::warmup`) grows a warming
 //! IP's daily ceiling until day 60, after which the limit is unbounded — but
-//! nothing in the tree SCHEDULED the lifecycle transition, so a fully-warmed
-//! IP stayed labelled `warming` until an operator intervened. Send-time
-//! admission derives the cap from `warmup_started_at`, so an ungraduated IP
-//! kept functioning; the label was a lie the control plane told itself.
+//! nothing in the tree used to SCHEDULE the lifecycle transition, so a
+//! fully-warmed IP stayed labelled `warming` until an operator intervened.
+//! Send-time admission derives the cap from `warmup_started_at`, so an
+//! ungraduated IP kept functioning; the label was a lie the control plane
+//! told itself.
 //!
 //! [`graduate_mature_warmup_ips`] runs the idempotent transition
 //! `warming → active` for every IP whose warmup anchor is at or past
-//! `FULL_WARMUP_DAYS`, writing one audit row per graduation. The worker's
-//! poll loop invokes it daily-ish (it is idempotent: a second pass finds no
-//! candidates); the control plane's manual graduation route keeps working —
+//! `FULL_WARMUP_DAYS`, writing one audit row per graduation. The worker
+//! spawns it on an HOURLY cadence (see `bin/worker.rs`; the compose `worker`
+//! service description names the reconciler) — each pass is a no-op unless an
+//! IP matured, and the control plane's manual graduation route keeps working:
 //! the reconciler only ever performs the same transition the state machine
-//! allows.
+//! allows. `warmup_progress` interpolation itself has no periodic caller —
+//! `DedicatedIpProvider::tick_warmup()` remains a manual bookkeeping helper.
 #![deny(unsafe_code)]
 
 use sqlx::PgPool;

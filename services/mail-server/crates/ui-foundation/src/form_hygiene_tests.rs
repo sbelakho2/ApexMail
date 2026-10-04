@@ -182,7 +182,7 @@ fn every_form_input_has_label_or_aria_label_or_is_hidden() {
         off_allowlist.join("\n"),
     );
     assert!(
-        exempt_total <= UNLABELED_CONTROL_BASELINE,
+        exempt_total == UNLABELED_CONTROL_BASELINE,
         "unlabeled form controls on exempt documents regressed: {exempt_total} > baseline {UNLABELED_CONTROL_BASELINE}. New controls must ship labelled; shrink UNLABELED_CONTROL_EXEMPT instead.",
     );
     println!(

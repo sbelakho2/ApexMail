@@ -2463,7 +2463,7 @@ mod tests {
                 "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')",
             )
             .bind(contact_id)
-            .bind(&tenant)
+            .bind(tenant)
             .execute(&seed_pool)
             .await
             .expect("seed contact");
@@ -2474,7 +2474,7 @@ mod tests {
                  VALUES ($1, $2, $3, 'email', $4, LOWER($4), 'valid', 0.9)",
             )
             .bind(Uuid::new_v4())
-            .bind(&tenant)
+            .bind(tenant)
             .bind(contact_id)
             .bind(&email)
             .execute(&seed_pool)
@@ -3584,7 +3584,7 @@ mod tests {
                 "SELECT id FROM sales_accounts WHERE tenant_id = $1 AND domain = ANY($2)",
             )
             .bind(tenant)
-            .bind(&domains)
+            .bind(domains)
             .fetch_all(&db)
             .await
             .unwrap_or_default();
@@ -3603,7 +3603,7 @@ mod tests {
                 "DELETE FROM enriched_companies WHERE tenant_id = $1 AND domain = ANY($2)",
             )
             .bind(tenant)
-            .bind(&domains)
+            .bind(domains)
             .execute(&db)
             .await;
         }
@@ -4520,7 +4520,7 @@ mod coverage_wave_routes {
         // database is reused); never delete the shared tenant's other rows.
         sqlx::query("DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)")
             .bind(tenant)
-            .bind(&senders)
+            .bind(senders)
             .execute(&db)
             .await
             .expect("clear stale fixture inbox messages");
@@ -4617,7 +4617,7 @@ mod coverage_wave_routes {
             "DELETE FROM sales_inbox_messages WHERE tenant_id = $1 AND sender = ANY($2)",
         )
         .bind(tenant)
-        .bind(&senders)
+        .bind(senders)
         .execute(&db)
         .await;
     }
@@ -4681,20 +4681,17 @@ mod coverage_wave_routes {
         .await
         .expect("seed inbox message");
 
-        let post_reply = |app: Router, body: serde_json::Value| {
-            let tenant = tenant;
-            async move {
-                app.oneshot(
-                    Request::post(format!("/inbox/{inbox_id}/reply"))
-                        .header("x-api-key", "test-key")
-                        .header("x-tenant-id", tenant)
-                        .header("content-type", "application/json")
-                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-            }
+        let post_reply = |app: Router, body: serde_json::Value| async move {
+            app.oneshot(
+                Request::post(format!("/inbox/{inbox_id}/reply"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
         };
 
         let first = post_reply(
@@ -5068,7 +5065,10 @@ mod coverage_wave_routes {
         let event_id = event["id"].as_str().expect("event id").to_string();
         assert_eq!(event["title"], title);
         assert!(
-            event["meeting_link"].as_str().unwrap_or_default().len() > 0,
+            !event["meeting_link"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
             "a conferencing link is generated: {event}"
         );
 
@@ -5253,7 +5253,6 @@ mod coverage_wave_routes {
 
         let get_slots = |query: String| {
             let app = app.clone();
-            let tenant = tenant;
             async move {
                 app.oneshot(
                     Request::get(format!("/calendar/slots?{query}"))

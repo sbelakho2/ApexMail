@@ -1013,7 +1013,9 @@ pub mod test_support {
         )
         .await
         .unwrap_or_else(|_| panic!("timed out connecting to canonical test database {url}"))
-        .unwrap_or_else(|error| panic!("could not connect to canonical test database {url}: {error}"))
+        .unwrap_or_else(|error| {
+            panic!("could not connect to canonical test database {url}: {error}")
+        })
     }
 
     /// One-call provisioning core for a suite-level OnceCell-INIT block: the
@@ -1057,6 +1059,353 @@ pub mod test_support {
             Ok(pool) => pool,
             Err(error) => panic!("{}", error.panic_message()),
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Hostile-permission testing (external audit 2026-10-02 #12a).
+    //
+    // `REVOKE ... FROM CURRENT_USER` is a NO-OP when the test connection is a
+    // PostgreSQL superuser: a superuser's table access bypasses every grant
+    // check, so a "permission failure" test silently proves nothing on the
+    // Woodpecker CI credential (whose `postgres` user IS a superuser). The
+    // provisioning below gives those tests a real unprivileged identity:
+    // a dedicated LOGIN role with exactly the DML grants a least-privilege
+    // production app role would hold, so revoking a privilege from it makes
+    // the next query fail with 42501 for real.
+    // ───────────────────────────────────────────────────────────────────────
+
+    /// The dedicated NON-SUPERUSER role the hostile-permission tests run as.
+    /// Created by [`fresh_hostile_canonical_pool`] whenever the
+    /// `TEST_DATABASE_URL` connection is a superuser; the creation is
+    /// serialized cluster-wide by an advisory lock and is idempotent.
+    pub const HOSTILE_TEST_ROLE: &str = "apexmail_test_app";
+
+    /// Operator override naming an ALREADY-PROVISIONED unprivileged role's
+    /// connection (`postgresql://<role>[:<password>]@<host>:<port>/<any-db>`).
+    /// Set this when the `TEST_DATABASE_URL` credential is NOT a superuser
+    /// (so [`HOSTILE_TEST_ROLE`] cannot be auto-provisioned): the hostile
+    /// tests then connect as the URL's role. The role's password (if any)
+    /// lives only in the operator's environment, never in the repo.
+    pub const HOSTILE_DATABASE_URL_VAR: &str = "TEST_HOSTILE_DATABASE_URL";
+
+    /// The owner + hostile role pairing a hostile-permission test needs.
+    ///
+    /// * [`HostileDb::owner`] — the `TEST_DATABASE_URL` identity. Seeding,
+    ///   DDL fault injection (DROP/ALTER/DROP COLUMN) and the REVOKE
+    ///   statements run here: they need table ownership, which the unmanaged
+    ///   role must never have.
+    /// * [`HostileDb::hostile`] — every connection runs AS
+    ///   [`HostileDb::role`] (via `SET ROLE` on the derived URL, or a direct
+    ///   connection when `TEST_HOSTILE_DATABASE_URL` is set). The machinery
+    ///   under test runs here so a revoked privilege genuinely bites.
+    pub struct HostileDb {
+        pub owner: PgPool,
+        pub hostile: PgPool,
+        /// The role every [`HostileDb::hostile`] connection resolves as
+        /// (`SELECT current_user` was verified to equal this before the
+        /// handle was returned — a provisioning mistake cannot silently
+        /// re-create the superuser no-op this helper exists to fix).
+        pub role: String,
+    }
+
+    /// The database ROLE a URL connects as (its userinfo user), if any.
+    fn role_of_url(url: &str) -> Option<String> {
+        let (_scheme, rest) = url.split_once("://")?;
+        let userinfo = rest.split('@').next()?;
+        let user = userinfo.split(':').next()?;
+        let user = user.trim();
+        (!user.is_empty()).then(|| user.to_string())
+    }
+
+    /// Create [`HOSTILE_TEST_ROLE`] if absent — a plain LOGIN role with NONE
+    /// of SUPERUSER/CREATEDB/CREATEROLE/REPLICATION. Serialized by a cluster
+    /// advisory lock so parallel nextest processes provisioning the role on
+    /// the same server cannot race the existence check. Must be called on a
+    /// superuser connection (CREATE ROLE requires CREATEROLE or superuser).
+    ///
+    /// The lock is taken in its OWN statement before the conditional CREATE:
+    /// inside one DO block the EXISTS probe would read the statement's
+    /// statement-start snapshot — i.e. BEFORE the lock (and the sibling's
+    /// just-committed role) became visible — and two processes could then
+    /// both attempt the CREATE, the loser dying on
+    /// `pg_authid_rolname_index`. An existing role is success either way.
+    async fn ensure_hostile_role(pool: &PgPool) -> Result<(), ProvisionError> {
+        let create_block = format!(
+            "DO $$
+             BEGIN
+               IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{}') THEN
+                 CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+               END IF;
+             END $$;",
+            HOSTILE_TEST_ROLE, HOSTILE_TEST_ROLE
+        );
+        let mut tx = pool.begin().await.map_err(|error| {
+            ProvisionError::new(
+                "hostile-role-create",
+                format!("begin role-provision transaction: {error}"),
+            )
+        })?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind("apexmail:hostile-test-role")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                ProvisionError::new(
+                    "hostile-role-create",
+                    format!("role-provision advisory lock: {error}"),
+                )
+            })?;
+        if let Err(error) = sqlx::query(&create_block).execute(&mut *tx).await {
+            // Lost the race despite the lock (e.g. a role created outside
+            // this helper): an EXISTING role with the right shape is still a
+            // success; anything else is a real failure.
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname = $1)")
+                    .bind(HOSTILE_TEST_ROLE)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap_or(false);
+            if !exists {
+                return Err(ProvisionError::new(
+                    "hostile-role-create",
+                    format!("create role {HOSTILE_TEST_ROLE}: {error}"),
+                ));
+            }
+        }
+        tx.commit().await.map_err(|error| {
+            ProvisionError::new(
+                "hostile-role-create",
+                format!("commit role-provision transaction: {error}"),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Grant the hostile role the DML a least-privilege production app role
+    /// holds on this database (no DDL, no superuser escapes). Idempotent.
+    /// The canonical schema has no GRANT model of its own (the production
+    /// app connects as the table owner), so this IS the grant set the
+    /// hostile tests assume: every revocation they perform is measured
+    /// against exactly these privileges.
+    async fn grant_hostile_role(owner: &PgPool, role: &str) -> Result<(), ProvisionError> {
+        for statement in [
+            format!(r#"GRANT USAGE ON SCHEMA public TO "{role}""#),
+            format!(
+                r#"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{role}""#
+            ),
+            format!(r#"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{role}""#),
+        ] {
+            sqlx::query(&statement)
+                .execute(owner)
+                .await
+                .map_err(|error| {
+                    ProvisionError::new("hostile-role-grant", format!("{statement}: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    /// A fresh canonical test database PLUS the hostile-role pairing: the
+    /// owner pool provisions/seeds/revokes, the hostile pool runs the
+    /// machinery under test as an unprivileged role.
+    ///
+    /// Role resolution, in order:
+    ///
+    /// 1. `TEST_HOSTILE_DATABASE_URL` — connect directly as the URL's role
+    ///    (credentials from the operator's environment; the db segment is
+    ///    rewritten to this test's fresh database);
+    /// 2. the `TEST_DATABASE_URL` connection IS a superuser — provision
+    ///    [`HOSTILE_TEST_ROLE`] (idempotent) and derive the hostile pool
+    ///    from the same connect options, every connection `SET ROLE`d;
+    /// 3. otherwise — no hostile role is provisionable. The soft-skip
+    ///    contract decides: under `APEXMAIL_RELEASE_TEST_MODE=1` this PANICS
+    ///    naming [`HOSTILE_DATABASE_URL_VAR`]; a developer-local run
+    ///    soft-skips (`Ok(None)`), exactly like an unset fixture variable.
+    ///
+    /// `Ok(None)` therefore means "the suite is explicitly unconfigured (no
+    /// usable hostile identity)"; every configured failure is
+    /// `Err(ProvisionError)` and must FAIL the test.
+    pub async fn fresh_hostile_canonical_pool(
+        test_name: &str,
+        db_suffix: &str,
+    ) -> Result<Option<HostileDb>, ProvisionError> {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let Some(database_url) = database_url else {
+            assert_soft_skip_allowed("TEST_DATABASE_URL");
+            eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
+            return Ok(None);
+        };
+        let owner = match fresh_canonical_pool(test_name, db_suffix).await? {
+            Some(pool) => pool,
+            None => return Ok(None),
+        };
+        let result = finish_hostile_pool(test_name, &database_url, &owner, db_suffix).await;
+        if result.is_err() {
+            owner.close().await;
+        }
+        result.map(|opt| {
+            opt.map(|(hostile, role)| HostileDb {
+                owner,
+                hostile,
+                role,
+            })
+        })
+    }
+
+    /// Body of [`fresh_hostile_canonical_pool`] after the owner pool exists:
+    /// resolve the hostile identity, grant it, verify it. Returns
+    /// `Ok(None)` for the provisionable-nowhere soft skip.
+    async fn finish_hostile_pool(
+        test_name: &str,
+        database_url: &str,
+        owner: &PgPool,
+        db_suffix: &str,
+    ) -> Result<Option<(PgPool, String)>, ProvisionError> {
+        let (server_part, db_part) = database_url
+            .rsplit_once('/')
+            .ok_or_else(|| test_database_url_without_segment(database_url))?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let db_name = bounded_test_db_name(db_only, db_suffix);
+
+        if let Some(hostile_base) = std::env::var(HOSTILE_DATABASE_URL_VAR)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            // Operator-provisioned role: connect DIRECTLY as that role. Its
+            // grants on this fresh database still come from the owner —
+            // an unmanaged role cannot grant itself anything.
+            let role = role_of_url(&hostile_base).ok_or_else(|| {
+                ProvisionError::new(
+                    "hostile-url-parse",
+                    format!("{HOSTILE_DATABASE_URL_VAR} has no user in its userinfo"),
+                )
+            })?;
+            grant_hostile_role(owner, &role).await?;
+            let hostile = connect_hostile_url(&hostile_base, &db_name, &role).await?;
+            return Ok(Some((hostile, role)));
+        }
+
+        // Auto-provisioning path: only a superuser can create the role AND
+        // would make every REVOKE a silent no-op for itself. Detect honestly
+        // via the role's `rolsuper` flag, never by attempting a privileged
+        // statement (whose failure semantics differ across managed cloud
+        // Postgres flavors).
+        let superuser: bool =
+            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                .fetch_one(owner)
+                .await
+                .map_err(|error| {
+                    ProvisionError::new(
+                        "hostile-superuser-probe",
+                        format!("read rolsuper for current_user: {error}"),
+                    )
+                })?;
+        if !superuser {
+            assert_soft_skip_allowed(HOSTILE_DATABASE_URL_VAR);
+            eprintln!(
+                "skipping {test_name}: the TEST_DATABASE_URL role is not a superuser, so \
+                 {HOSTILE_TEST_ROLE} cannot be provisioned — set {HOSTILE_DATABASE_URL_VAR} \
+                 to run hostile-permission tests"
+            );
+            return Ok(None);
+        }
+
+        ensure_hostile_role(owner).await?;
+        grant_hostile_role(owner, HOSTILE_TEST_ROLE).await?;
+        let hostile =
+            connect_hostile_set_role(owner, server_part, &db_name, HOSTILE_TEST_ROLE).await?;
+        Ok(Some((hostile, HOSTILE_TEST_ROLE.to_string())))
+    }
+
+    /// Connect a hostile pool that impersonates `role` on every session
+    /// (derived from the owner pool's own connect options, so sslmode and
+    /// any other URL parameters carry over). The direct-connection
+    /// alternative for a `TEST_HOSTILE_DATABASE_URL` the operator controls.
+    async fn connect_hostile_set_role(
+        owner: &PgPool,
+        server_part: &str,
+        db_name: &str,
+        role: &str,
+    ) -> Result<PgPool, ProvisionError> {
+        let url = format!("{server_part}/{db_name}");
+        let role_owned = role.to_string();
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .after_connect(move |conn, _| {
+                let statement = format!(r#"SET ROLE "{}""#, role_owned);
+                Box::pin(async move {
+                    sqlx::query(&statement).execute(&mut *conn).await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*owner.connect_options()).clone())
+            .await;
+        verify_hostile_identity(pool, &url, role).await
+    }
+
+    /// Connect a hostile pool straight to an operator-provisioned
+    /// `TEST_HOSTILE_DATABASE_URL`, with the db segment rewritten to this
+    /// test's fresh database (query strings on the base URL are dropped,
+    /// mirroring [`fresh_canonical_pool`]'s URL handling).
+    async fn connect_hostile_url(
+        hostile_base: &str,
+        db_name: &str,
+        role: &str,
+    ) -> Result<PgPool, ProvisionError> {
+        let (server_part, _) = hostile_base.rsplit_once('/').ok_or_else(|| {
+            ProvisionError::new(
+                "hostile-url-parse",
+                format!("{HOSTILE_DATABASE_URL_VAR} {hostile_base:?} has no database segment"),
+            )
+        })?;
+        let url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&url)
+            .await;
+        verify_hostile_identity(pool, &url, role).await
+    }
+
+    /// The identity gate: the hostile pool MUST resolve `current_user` as
+    /// the unprivileged role before any test touches it. A pool that fails
+    /// to connect, or connects with the wrong identity (e.g. the role was
+    /// dropped, or SET ROLE did not take), is a configured failure — the
+    /// superuser no-op this helper exists to eliminate must never come back
+    /// silently.
+    async fn verify_hostile_identity(
+        pool: Result<PgPool, sqlx::Error>,
+        url: &str,
+        role: &str,
+    ) -> Result<PgPool, ProvisionError> {
+        let pool = pool.map_err(|error| {
+            ProvisionError::new("hostile-connect", format!("connect {url}: {error}"))
+        })?;
+        let current: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&pool)
+            .await
+            .map_err(|error| {
+                ProvisionError::new(
+                    "hostile-identity",
+                    format!("read current_user on {url}: {error}"),
+                )
+            })?;
+        let expected = format!("\"{role}\"");
+        if current != role && current != expected {
+            pool.close().await;
+            return Err(ProvisionError::new(
+                "hostile-identity",
+                format!(
+                    "the hostile pool connects as {current:?}, not as the unprivileged role \
+                     {role:?} — a superuser identity would make every REVOKE a silent no-op"
+                ),
+            ));
+        }
+        Ok(pool)
     }
 
     /// A **shared** canonical database: create-if-absent, reuse-if-present.

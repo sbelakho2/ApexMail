@@ -245,7 +245,7 @@ fn rcpt_resolution_reply(
     }
 }
 
-/// Inbound SMTP server.
+// Inbound SMTP server.
 // ── SM10 F4: data-plane STONITH fence gate ─────────────────────────────
 //
 // The HA failover coordinator places `ha:fenced:{node_id}` keys in Redis;

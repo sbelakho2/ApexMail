@@ -113,12 +113,14 @@ New IPs start in `warming` status with a graduated send volume:
 | 55-59 | 250,000 |
 | 60+ | Unlimited |
 
-`DedicatedIpProvider::tick_warmup()` updates `warmup_progress` and graduates
-IPs to `active` status after 60 days, but **nothing in this tree schedules
-it** — there is no warmup cron; an operator must invoke it
+Three warmup layers, three schedulers: send-time admission is gated by
+`dedicated_ips.warmup_started_at` (automatic; never by `warmup_progress`);
+graduation to `active` status after 60 days is automatic — the worker daemon
+runs the warmup-graduation reconciler hourly
+([`graduation.rs`](../../services/mail-server/crates/worker-processors/src/common/graduation.rs));
+but `DedicatedIpProvider::tick_warmup()` — the `warmup_progress`
+interpolation — **has no periodic caller**; an operator must invoke it
 ([`ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504)).
-Send-time admission is gated by `dedicated_ips.warmup_started_at`, not by
-`warmup_progress`.
 
 > **During warmup**, messages exceeding the IP's daily limit are DEFERRED
 > through the normal requeue path until capacity frees up. There is no

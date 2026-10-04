@@ -82,14 +82,22 @@ pub fn limit_for_day(day: u32) -> u64 {
   `/admin/warmup` routes are **advisory catalog data only** and are not read
   by any send path (see
   [`api-server/src/routes/admin/warmup.rs`](../../services/mail-server/crates/api-server/src/routes/admin/warmup.rs:1)).
-- **Progress bookkeeping is not currently scheduled.** `DedicatedIpProvider`
-  exposes `tick_warmup()` (updates `dedicated_ips.warmup_progress` and
-  graduates IPs to `active` after `FULL_WARMUP_DAYS`,
+- **The three warmup layers are not scheduled the same way.**
+  (1) *Send-volume admission* is automatic and needs no scheduler: the
+  worker's `EmailProcessor::check_warmup_limit` derives the cap from
+  `warmup_started_at` (bullet above).
+  (2) *Graduation* (`warming → active` after `FULL_WARMUP_DAYS`) is
+  automatic: the worker daemon runs the warmup-graduation reconciler
+  ([`worker-processors/src/common/graduation.rs`](../../services/mail-server/crates/worker-processors/src/common/graduation.rs),
+  spawned hourly in
+  [`worker-processors/src/bin/worker.rs`](../../services/mail-server/crates/worker-processors/src/bin/worker.rs);
+  the compose `worker` service description names it).
+  (3) *Progress bookkeeping* — `DedicatedIpProvider::tick_warmup()`
+  (interpolates `dedicated_ips.warmup_progress`,
   [`api-server/src/ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504))
-  and `SesProvider::sync_warmup_progress()` exists, but **no runtime component
-  in this tree calls either** — there is no warmup cron. Graduation/progress
-  only advances if an operator invokes it; do not assume a running cron will
-  do it.
+  and `SesProvider::sync_warmup_progress()` — **has no periodic caller**: it
+  is bookkeeping only, no send path reads `warmup_progress`, and an operator
+  must invoke it manually if the progress column matters.
 
 The single schedule lives in
 [`mail_common::warmup`](../../services/mail-server/crates/mail-common/src/warmup.rs)

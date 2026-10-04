@@ -1,6 +1,6 @@
 # Migration Rollback Strategy
 
-> **SCALE-M-07** | Owner: Platform Engineering | Last updated: 2026-05-17
+> **SCALE-M-07** | Owner: Platform Engineering | Last updated: 2026-10-02
 
 ## Overview
 
@@ -165,138 +165,54 @@ Each phase is independently deployable and revertible.
 
 ---
 
-## 2. Deployment Rollback in Kubernetes
+## 2. Deployment Rollback on the Compose Host
 
-### 2.1 Rollback Using kubectl
+ApexMail runs as a single Hetzner host with Docker Compose
+([`ARCHITECTURE.md`](../../ARCHITECTURE.md)) — there is no Kubernetes, Helm,
+Flux or ArgoCD in this deployment, so there is no `rollout undo`. The
+authoritative, tested procedure lives in [`deploy/rollback-plan.md`](../../deploy/rollback-plan.md);
+the shape of it:
 
-```bash
-# Roll back to the previous revision
-kubectl rollout undo deployment/api-server -n apexmail
+- Every image is built **locally on the host** and tagged with both `:<sha>`
+  (the rollback pins, newest ~5 kept per service) and `:latest` (what
+  `docker compose up` resolves). Nothing is pulled from a registry.
+- The pipeline records the last fully-deployed sha in `ci/.last-deployed-sha`,
+  and the verify stage **rolls back automatically** to it when the
+  post-deploy probes fail (`CI_ROLLBACK_ON_VERIFY_FAIL`, default on).
+- Manual rollback = retag the known-good `:<sha>` as `:latest` on the host,
+  then recreate:
 
-# Roll back to a specific revision
-kubectl rollout undo deployment/api-server -n apexmail --to-revision=3
+  ```bash
+  ssh <deploy-host>
+  cd /opt/apexmail
+  cat ci/.last-deployed-sha                     # previous green deploy
+  docker tag ghcr.io/sbelakho2/apexmail/api-server:<sha> \
+             ghcr.io/sbelakho2/apexmail/api-server:latest
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+  docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+  ```
 
-# Check rollout history
-kubectl rollout history deployment/api-server -n apexmail
-
-# View details of a specific revision
-kubectl rollout history deployment/api-server -n apexmail --revision=3
-```
-
-### 2.2 Helm Rollback
-
-```bash
-# Roll back to the previous release
-helm rollback apexmail ./deploy/helm/apexmail/ -n apexmail
-
-# Roll back to a specific revision
-helm rollback apexmail 5 -n apexmail
-
-# Check release history
-helm history apexmail -n apexmail
-```
-
-### 2.3 GitOps Rollback (Flux/ArgoCD)
-
-```bash
-# Flux: revert to previous image tag
-flux suspend deployment api-server
-kubectl set image deployment/api-server api-server=apexmail/api-server:v2.0.0 -n apexmail
-flux resume deployment api-server
-
-# ArgoCD: sync to a previous commit
-argocd app rollback apexmail --prune
-```
-
-### 2.4 Rollback Policy in Helm Values
-
-```yaml
-# deploy/helm/apexmail/values.yaml (excerpt)
-rollback:
-  # Max time to wait for rollback to complete
-  timeout: 300
-  # Clean up old revision resources
-  cleanupOnFail: true
-  # Number of revisions to keep
-  historyMax: 10
-
-# Deployment strategy
-deployment:
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0   # Zero-downtime deployments
-```
+- **Critical rule (unchanged):** always roll back the application **before**
+  touching the database — old code must never meet new schema. Migrations are
+  NOT reverted by the automated rollback; the `_sqlx_migrations` ledger only
+  moves forward (the migrate stage backs it up before every run).
 
 ---
 
 ## 3. Canary Deployment Strategy
 
-Canary deployments reduce risk by routing a small percentage of traffic to the new version before full rollout.
+> **Not applicable as written:** the Istio/ingress-canary mechanics below the
+> tables belonged to the retired multi-node topologies and have been removed.
+> On the single-host Compose deployment there is no traffic-splitting layer;
+> the deployment-level equivalent of a canary is the pipeline's own
+> build → migrate → deploy → **verify** ordering (a bad rollout is caught by
+> the verify-stage content smoke and auto-rolled back within one stage).
 
-### 3.1 Service Mesh Canary (Istio)
+The progression-gate discipline still applies to any partial rollout you
+perform by hand (e.g. `docker compose up -d api-server` alone, watch, then
+the rest):
 
-```yaml
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: apexmail-api
-spec:
-  hosts:
-    - api-server
-  http:
-    - route:
-        - destination:
-            host: api-server
-            subset: stable
-          weight: 90
-        - destination:
-            host: api-server
-            subset: canary
-          weight: 10
----
-apiVersion: networking.istio.io/v1beta1
-kind: DestinationRule
-metadata:
-  name: apexmail-api
-spec:
-  host: api-server
-  subsets:
-    - name: stable
-      labels:
-        version: v2.0.0
-    - name: canary
-      labels:
-        version: v2.1.0-rc.1
-```
-
-### 3.2 Ingress-Based Canary (nginx-ingress)
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: apexmail-api-canary
-  annotations:
-    nginx.ingress.kubernetes.io/canary: "true"
-    nginx.ingress.kubernetes.io/canary-weight: "10"  # 10% traffic
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: api.apexmail.ee
-      http:
-        paths:
-          - path: /v1
-            pathType: Prefix
-            backend:
-              service:
-                name: api-server-canary
-                port:
-                  number: 3000
-```
-
-### 3.3 Canary Progression Gates
+### 3.1 Progression Gates
 
 ```
 Stage 0: 0% traffic   → Smoke tests pass
@@ -306,7 +222,7 @@ Stage 3: 50% traffic  → Observe 15 min, error rate < 0.1%, p95 < 500ms
 Stage 4: 100% traffic → Full rollout
 ```
 
-### 3.4 Canary Rollback Triggers
+### 3.2 Rollback Triggers
 
 | Metric | Threshold | Action |
 |--------|-----------|--------|
@@ -321,72 +237,14 @@ Stage 4: 100% traffic → Full rollout
 
 ## 4. Blue/Green Deployment Notes
 
-### 4.1 Concept
-
-Blue/green deployments maintain two identical environments (blue = current, green = new). Traffic is switched instantly via a load balancer.
-
-```
-     ┌──────────┐        ┌──────────┐
-     │  Blue    │        │  Green   │
-     │ (v2.0.0) │◄──────►│ (v2.1.0) │
-     │  Active  │        │ Standby  │
-     └──────────┘        └──────────┘
-           │                    │
-           └────────┬───────────┘
-                    ▼
-           ┌────────────────┐
-           │  Load Balancer  │
-           │  (Switch: Blue  │
-           │   → Green)      │
-           └────────────────┘
-```
-
-### 4.2 Kubernetes Service Selector Switch
-
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: api-server
-spec:
-  selector:
-    app: api-server
-    version: blue   # → Switch to "green" during deployment
-  ports:
-    - port: 3000
-      targetPort: 3000
-```
-
-### 4.3 Blue/Green with Helm
-
-```bash
-# Deploy green environment (alongside blue)
-helm upgrade --install apexmail-green ./deploy/helm/apexmail/ \
-  -n apexmail-green \
-  --set deployment.version=green \
-  --set image.tag=v2.1.0
-
-# Validate green (smoke tests, health checks)
-k6 run load-tests/http/smoke-test.js --env K6_API_BASE=http://green.api.apexmail.ee
-
-# Switch traffic
-kubectl patch service api-server -p '{"spec":{"selector":{"version":"green"}}}'
-
-# Decommission blue
-helm uninstall apexmail-blue -n apexmail-blue
-```
-
-### 4.4 Rollback in Blue/Green
-
-Rollback in blue/green is as simple as switching the service selector back to the previous colour:
-
-```bash
-# Rollback: switch back to blue
-kubectl patch service api-server -p '{"spec":{"selector":{"version":"blue"}}}'
-
-# Keep green running for debugging, then tear down
-helm uninstall apexmail-green -n apexmail-green
-```
+> **Not applicable on this deployment:** a single host runs one stack; there
+> is no second environment to switch traffic to. Conceptually, blue/green
+> degrades to the retag-and-recreate rollback of §2 — the previous colour is
+> the previous `:<sha>` image set, kept on the host (~5 deep), and "switching
+> the load balancer" is `docker compose ... up -d` resolving `:latest`.
+> Preserving the historical concept here for design context: two identical
+> environments (blue = current, green = new) with instant traffic cutover —
+> this requires the multi-node topology ApexMail no longer runs.
 
 ---
 
@@ -394,33 +252,36 @@ helm uninstall apexmail-green -n apexmail-green
 
 | Scenario | Rollback Strategy | Downtime | Complexity |
 |----------|------------------|----------|------------|
-| Bug in application code (no schema change) | `kubectl rollout undo` | Seconds | Low |
-| Bug in application code (with DB migration) | Rollback app, then `sqlx revert` | Minutes | Medium |
-| Schema migration causes lock contention | `sqlx revert` immediately | Minutes | Medium |
+| Bug in application code (no schema change) | Retag previous `:<sha>` as `:latest`, `up -d` (§2) | Seconds | Low |
+| Bug in application code (with DB migration) | Rollback app first, then decide on the migration (§1) | Minutes | Medium |
+| Schema migration causes lock contention | Restore `_sqlx_migrations` backup + forward-fix (§1) | Minutes | Medium |
 | Corrupt data from bad migration | Restore from backup (point-in-time recovery) | Variable | High |
-| Failed canary (error rate spike) | Reduce canary weight to 0% | None | Low |
+| Failed partial rollout (service-level canary) | Retag + `up -d` that one service | None | Low |
 | Failed canary (silent data corruption) | Full rollback + PITR database restore | Variable | High |
-| Failed full rollout (blue/green) | Switch load balancer to previous colour | Seconds | Low |
+| Failed full rollout (auto-caught) | Verify-stage auto-rollback to `ci/.last-deployed-sha` | Seconds | Low |
 
 ---
 
 ## 6. Automation: CI/CD Rollback Hooks
 
-```yaml
-# ci/stages/images.sh (excerpt — the pipeline that replaced deploy.yml)
-deploy:
-  steps:
-    - name: Run smoke tests
-      run: k6 run load-tests/http/smoke-test.js
-      id: smoke-test
+The pipeline automates the rollback — no manual hook wiring required:
 
-    - name: Rollback on smoke test failure
-      if: failure() && steps.smoke-test.outcome == 'failure'
-      run: |
-        echo "❌ Smoke tests failed — initiating automatic rollback"
-        kubectl rollout undo deployment/api-server -n apexmail
-        sqlx migrate revert --database-url $DATABASE_URL --number 1
-        echo "✅ Rollback complete"
+- **`ci/stages/verify.sh`** runs post-deploy health probes and a content
+  smoke (pages render, forms present, 404s). On failure it calls
+  `rollback_to_previous_sha` — retagging every service to the sha recorded
+  in `ci/.last-deployed-sha` and `up -d`-ing the canonical stack
+  (`CI_ROLLBACK_ON_VERIFY_FAIL=1` by default; `=0` disables loudly).
+- **`ci/stages/migrate.sh`** backs up the `_sqlx_migrations` table into the
+  run dir before every migration run, so the migration ledger itself is
+  always restorable.
+- Migrations are **never** auto-reverted — a bad migration is fixed forward
+  (§1.5), because the ledger only moves forward.
+
+```bash
+# The automated path in essence (what verify.sh does on a failed rollout):
+# retag every service to the last deployed sha and recreate the stack.
+cd /opt/apexmail
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
 ---

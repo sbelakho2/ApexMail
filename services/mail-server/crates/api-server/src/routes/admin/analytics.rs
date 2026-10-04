@@ -405,7 +405,7 @@ mod adversarial_tests {
     ) {
         sqlx::query(
             "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
-             VALUES ($1, $2, $3, $4, $5, NOW())",
+             VALUES ($1, $2, $3, $4, $5, NOW() - INTERVAL '5 seconds')",
         )
         .bind(format!(
             "evt_{}",

@@ -1336,15 +1336,75 @@ mod adversarial_tests {
     }
 
     /// A per-CALL client address so the shared per-IP Redis bucket cannot
-    /// leak between test calls (each gets its own 12/min window).
+    /// leak between test calls (each gets its own 12/min window). The second
+    /// octet is PROCESS-unique (audit #12c): every nextest test runs in its
+    /// own process against the SHARED test Redis, and the counter below
+    /// restarts at 1 in each of them — without the pid seed the first exec
+    /// call of every parallel explorer test landed in the SAME
+    /// `explorer_rl:198.18.0.1` bucket and the 13th concurrent process was
+    /// rate-limited with a 429.
     fn unique_peer() -> Option<ConnectInfo<SocketAddr>> {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(1);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let addr: SocketAddr = format!("198.18.{}.{}:41234", (n / 250) % 250, n % 250 + 1)
+        let pid_octet = std::process::id() % 250;
+        let addr: SocketAddr = format!("198.18.{pid_octet}.{}:41234", n % 250 + 1)
             .parse()
             .unwrap();
         Some(ConnectInfo(addr))
+    }
+
+    /// An exclusive observation window over the SHARED sandbox row (external
+    /// audit 2026-10-02 #12c). Every api-server test process shares ONE
+    /// database (`<TEST_DATABASE_URL db>_api`, reused, never dropped between
+    /// processes) and one Redis publication, and the sandbox tenant id is a
+    /// fixed constant — so the single sandbox key row is GLOBAL state that
+    /// every concurrently running explorer test legitimately re-mints (that
+    /// is exactly what a replica sibling is). A multi-step assertion sequence
+    /// therefore races a sibling's `provision_sandbox` unless it holds the
+    /// production provision advisory key (`SANDBOX_PROVISION_LOCK`,
+    /// transaction-scoped — the same `pg_advisory_xact_lock` the provision
+    /// path itself takes) for the window's duration: sibling re-mints BLOCK
+    /// until the window closes, and the observations see one stable row.
+    ///
+    /// The window must NEVER cover a call that can itself provision —
+    /// `provision_sandbox` under the window would wait on its own held key
+    /// and hang. Calls inside a window are restricted to the cache probes,
+    /// the Redis publication seams and reads; see each sandbox test.
+    async fn provision_window(state: &AppState) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut tx = state
+            .db
+            .begin()
+            .await
+            .expect("sandbox provision window transaction");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(SANDBOX_PROVISION_LOCK)
+            .execute(&mut *tx)
+            .await
+            .expect("sandbox provision window advisory lock");
+        tx
+    }
+
+    /// Serializes the two tests that exercise the FIXED "unknown"
+    /// rate-limit bucket (requests with no peer address):
+    /// `exec_buckets_unknown_peers_and_enforces_the_ceiling_on_them`
+    /// fills/exhausts that bucket while `grader_without_connect_info_still_
+    /// validates_input` INCRs and DELs it — as parallel nextest processes
+    /// they were resetting each other's bucket mid-assertion (audit #12c).
+    /// The key is test-only; no production path takes it, so holding it
+    /// cannot deadlock anything.
+    async fn unknown_bucket_window(state: &AppState) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut tx = state
+            .db
+            .begin()
+            .await
+            .expect("unknown-bucket window transaction");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind("apexmail:test:explorer-unknown-bucket")
+            .execute(&mut *tx)
+            .await
+            .expect("unknown-bucket window advisory lock");
+        tx
     }
 
     async fn html(resp: Response) -> String {
@@ -1499,19 +1559,14 @@ mod adversarial_tests {
     /// reused across requests, and the sandbox tenant is capped at exactly
     /// ONE api_keys row — re-provisioning (what a restarted process does)
     /// reclaims the superseded row instead of stockpiling revoked ones.
+    ///
+    /// Audit #12c: the reuse assertion observes the shared row inside a
+    /// [`provision_window`] — a sibling process's legitimate re-mint between
+    /// the two calls would otherwise replace the cached key mid-assertion.
     #[test]
     fn sandbox_key_is_cached_per_process_and_capped_at_one_row() {
         with_dkim_env(|state| {
             Box::pin(async move {
-                // The per-process cache hands out the SAME credential on
-                // every call — no per-request inserts.
-                let first = sandbox(&state).await.expect("provision").api_key.clone();
-                let second = sandbox(&state).await.expect("cached").api_key.clone();
-                assert_eq!(
-                    first, second,
-                    "the process-wide cache must reuse the provisioned key"
-                );
-
                 let key_stats = |state: &AppState| {
                     let pool = state.db.clone();
                     async move {
@@ -1527,17 +1582,59 @@ mod adversarial_tests {
                     }
                 };
 
-                let (rows, live) = key_stats(&state).await;
-                assert_eq!(rows, 1, "the sandbox tenant carries exactly one key row");
-                assert_eq!(live, 1, "and that row is live");
+                // The per-process cache hands out the SAME credential on
+                // every call — no per-request inserts. The observation runs
+                // under the provision window: a sibling re-mint that slips
+                // in before the window is simply converged away by the retry.
+                for attempt in 0..5u32 {
+                    let first = sandbox(&state).await.expect("provision").api_key.clone();
+                    let window = provision_window(&state).await;
+                    let cached = SANDBOX.read().await.clone();
+                    let first_still_live = match cached.as_deref() {
+                        Some(cached) => {
+                            cached.api_key == first && sandbox_key_is_live(&state, cached).await
+                        }
+                        None => false,
+                    };
+                    if !first_still_live {
+                        // A sibling re-minted between the provision and the
+                        // window: release, let the sandbox state converge on
+                        // the sibling's row, and observe again.
+                        window.rollback().await.expect("window rollback");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    let second = sandbox(&state).await.expect("cached").api_key.clone();
+                    assert_eq!(
+                        first, second,
+                        "the process-wide cache must reuse the provisioned key"
+                    );
 
-                // A fresh provision (a restarted process's cold cache) must
-                // reclaim the old row: no unbounded growth across restarts,
-                // and the key ceiling the raw insert used to bypass holds.
-                provision_sandbox(&state).await.expect("re-provision");
-                let (rows, live) = key_stats(&state).await;
-                assert_eq!(rows, 1, "superseded rows are deleted on rotation");
-                assert_eq!(live, 1, "exactly one live key survives rotation");
+                    let (rows, live) = key_stats(&state).await;
+                    assert_eq!(rows, 1, "the sandbox tenant carries exactly one key row");
+                    assert_eq!(live, 1, "and that row is live");
+                    window.rollback().await.expect("window rollback");
+
+                    // A fresh provision (a restarted process's cold cache) must
+                    // reclaim the old row: no unbounded growth across restarts,
+                    // and the key ceiling the raw insert used to bypass holds.
+                    // OUTSIDE the window: this call itself takes the provision
+                    // key. Any interleaved sibling provision converges to the
+                    // same one-live-row state, so the final stats read is
+                    // interleaving-proof without a window.
+                    provision_sandbox(&state).await.expect("re-provision");
+                    let (rows, live) = key_stats(&state).await;
+                    assert_eq!(rows, 1, "superseded rows are deleted on rotation");
+                    assert_eq!(live, 1, "exactly one live key survives rotation");
+                    return;
+                }
+                panic!(
+                    "a sibling process kept re-minting the sandbox row before the \
+                     observation window could be established (5 attempts)"
+                );
             })
         });
     }
@@ -1548,42 +1645,95 @@ mod adversarial_tests {
     /// new one). The cache must notice via the liveness probe and hand back
     /// a key that matches the live row — not keep dispatching with the dead
     /// one until restart.
+    ///
+    /// Audit #12c: the heal observation runs inside [`provision_window`] —
+    /// the shared row is global state across parallel test PROCESSES, and an
+    /// uncontrolled sibling's re-mint between the heal and the assertions
+    /// made this test flake. The window covers only cache probes, the Redis
+    /// publication seams and reads: nothing in it can provision (which would
+    /// wait on the window's own advisory key).
     #[test]
     fn sandbox_cache_self_heals_when_a_sibling_re_mints_the_key_row() {
         with_dkim_env(|state| {
             Box::pin(async move {
-                let stale = sandbox(&state).await.expect("initial provision");
-                let stale_key = stale.api_key.clone();
+                for attempt in 0..5u32 {
+                    let stale = sandbox(&state).await.expect("initial provision");
+                    let stale_key = stale.api_key.clone();
 
-                // A sibling replica's cold cache DELETES + re-mints the row.
-                let sibling = provision_sandbox(&state)
-                    .await
-                    .expect("sibling re-provision");
-                assert_ne!(
-                    sibling.api_key, stale_key,
-                    "the sibling minted a fresh raw key"
-                );
-
-                // This process's NEXT sandbox() call must not serve the
-                // now-dead key: the liveness probe detects the invalidated
-                // row and re-provisions.
-                let healed = sandbox(&state).await.expect("healed provision");
-                assert_ne!(
-                    healed.api_key, stale_key,
-                    "the dead cached key must not be served"
-                );
-
-                let live_hash: String =
-                    sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
-                        .bind(SANDBOX_TENANT_ID)
-                        .fetch_one(&state.db)
+                    // A sibling replica's cold cache DELETES + re-mints the row.
+                    let sibling = provision_sandbox(&state)
                         .await
-                        .expect("the single live sandbox key row");
-                assert_eq!(healed.key_hash, live_hash, "the healed key IS the live row");
-                // And the cache converged: subsequent calls reuse the healed
-                // key instead of rotating again.
-                let again = sandbox(&state).await.expect("cached heal");
-                assert_eq!(again.api_key, healed.api_key, "the heal is memoized");
+                        .expect("sibling re-provision");
+                    assert_ne!(
+                        sibling.api_key, stale_key,
+                        "the sibling minted a fresh raw key"
+                    );
+
+                    // Exclusive observation window: hold the production provision
+                    // advisory key so no OTHER replica can re-mint the row until
+                    // the assertions below are done.
+                    let window = provision_window(&state).await;
+                    // The window was acquired AFTER the sibling's re-mint: a
+                    // rival provision that STARTED earlier but committed later
+                    // may own the row by now, which would make the injected
+                    // sibling's key stale. The scenario this test pins needs
+                    // the sibling's key to BE the live row under the window —
+                    // otherwise converge on the winner and re-mint again.
+                    if !sandbox_key_is_live(&state, &sibling).await {
+                        window
+                            .rollback()
+                            .await
+                            .expect("window rollback on stale sibling");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    // The in-window heal must resolve through the ADOPT path (a
+                    // provision here would wait on the window's own key). Re-publish
+                    // the sibling's key through the same production seam the
+                    // sibling's provision used, then require the publication to be
+                    // readable — a Redis outage fails loudly instead of deadlocking.
+                    publish_shared_sandbox(&state, &sibling).await;
+                    if adopted_shared_sandbox(&state).await.is_none() {
+                        window
+                            .rollback()
+                            .await
+                            .expect("window rollback after publication failure");
+                        panic!(
+                            "the sandbox key publication is unreadable — the self-heal \
+                             scenario requires a working TEST_REDIS_URL"
+                        );
+                    }
+
+                    // This process's NEXT sandbox() call must not serve the
+                    // now-dead key: the liveness probe detects the invalidated
+                    // row and the shared publication is adopted.
+                    let healed = sandbox(&state).await.expect("healed provision");
+                    assert_ne!(
+                        healed.api_key, stale_key,
+                        "the dead cached key must not be served"
+                    );
+
+                    let live_hash: String =
+                        sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
+                            .bind(SANDBOX_TENANT_ID)
+                            .fetch_one(&state.db)
+                            .await
+                            .expect("the single live sandbox key row");
+                    assert_eq!(healed.key_hash, live_hash, "the healed key IS the live row");
+                    // And the cache converged: subsequent calls reuse the healed
+                    // key instead of rotating again.
+                    let again = sandbox(&state).await.expect("cached heal");
+                    assert_eq!(again.api_key, healed.api_key, "the heal is memoized");
+                    window.rollback().await.expect("window rollback");
+                    return;
+                }
+                panic!(
+                    "a rival provision kept winning the row before the observation \
+                     window could be established (5 attempts)"
+                );
             })
         });
     }
@@ -1592,35 +1742,68 @@ mod adversarial_tests {
     /// DB + Redis, empty process cache) must ADOPT the live shared key via
     /// the Redis publication instead of rotating it out from under every
     /// other replica.
+    ///
+    /// Audit #12c: the cold-start observation runs inside a
+    /// [`provision_window`]; a sibling's re-mint + re-publication between
+    /// this process's provision and its adopt would otherwise replace the
+    /// key mid-assertion. The in-window re-publish goes through the same
+    /// production seam (`publish_shared_sandbox`) a real provision uses.
     #[test]
     fn sandbox_adopts_the_shared_key_across_processes_without_rotating() {
         with_dkim_env(|state| {
             Box::pin(async move {
-                let first = sandbox(&state).await.expect("initial provision");
-                let first_key = first.api_key.clone();
+                for attempt in 0..5u32 {
+                    let first = sandbox(&state).await.expect("initial provision");
+                    let first_key = first.api_key.clone();
 
-                // Simulate the sibling's cold start: same shared DB + Redis,
-                // an empty process cache.
-                *SANDBOX.write().await = None;
-                let adopted = sandbox(&state).await.expect("sibling adopts");
-                assert_eq!(
-                    adopted.api_key, first_key,
-                    "the cold process must adopt the live shared key, not rotate it"
+                    // Exclusive observation window over the shared row.
+                    let window = provision_window(&state).await;
+                    // `first` must still BE the live row (a sibling may have
+                    // re-minted between the provision and the window — then
+                    // converge on the sibling's row and observe again).
+                    if !sandbox_key_is_live(&state, &first).await {
+                        window.rollback().await.expect("window rollback");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    // Re-publish through the production seam so the cold-start
+                    // adopt observes exactly this key even when a sibling's
+                    // publication overwrote it (publishing takes no advisory
+                    // key, so this cannot deadlock the window).
+                    publish_shared_sandbox(&state, &first).await;
+
+                    // Simulate the sibling's cold start: same shared DB + Redis,
+                    // an empty process cache.
+                    *SANDBOX.write().await = None;
+                    let adopted = sandbox(&state).await.expect("sibling adopts");
+                    assert_eq!(
+                        adopted.api_key, first_key,
+                        "the cold process must adopt the live shared key, not rotate it"
+                    );
+
+                    // Adoption did not churn the row either.
+                    let rows: i64 =
+                        sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
+                            .bind(SANDBOX_TENANT_ID)
+                            .fetch_one(&state.db)
+                            .await
+                            .expect("sandbox key count");
+                    assert_eq!(rows, 1, "adoption rotates nothing");
+
+                    // A third cold process converges on the same key again.
+                    *SANDBOX.write().await = None;
+                    let third = sandbox(&state).await.expect("third process");
+                    assert_eq!(third.api_key, first_key);
+                    window.rollback().await.expect("window rollback");
+                    return;
+                }
+                panic!(
+                    "a sibling process kept re-minting the sandbox row before the \
+                     observation window could be established (5 attempts)"
                 );
-
-                // Adoption did not churn the row either.
-                let rows: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
-                        .bind(SANDBOX_TENANT_ID)
-                        .fetch_one(&state.db)
-                        .await
-                        .expect("sandbox key count");
-                assert_eq!(rows, 1, "adoption rotates nothing");
-
-                // A third cold process converges on the same key again.
-                *SANDBOX.write().await = None;
-                let third = sandbox(&state).await.expect("third process");
-                assert_eq!(third.api_key, first_key);
             })
         });
     }
@@ -1817,18 +2000,40 @@ mod adversarial_tests {
 
                 // Convergence: the process cache ends holding the LIVE row's
                 // credential (a served key from a superseded epoch must not
-                // be what the process keeps).
-                let cached = SANDBOX.read().await.clone().expect("cache populated");
-                let live_hash: Option<String> =
-                    sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
-                        .bind(SANDBOX_TENANT_ID)
-                        .fetch_optional(&state.db)
-                        .await
-                        .expect("sandbox key row");
-                assert_eq!(
-                    live_hash.as_deref(),
-                    Some(cached.key_hash.as_str()),
-                    "the process cache converges on the live row"
+                // be what the process keeps). Observed under the provision
+                // window (audit #12c): the shared row is global state across
+                // parallel test processes, and a sibling's re-mint between
+                // the cache read and the row read would fail the comparison.
+                for attempt in 0..5u32 {
+                    let window = provision_window(&state).await;
+                    let cached = SANDBOX.read().await.clone().expect("cache populated");
+                    if !sandbox_key_is_live(&state, &cached).await {
+                        // A sibling re-minted before the window: converge on
+                        // the sibling's row and observe again.
+                        window.rollback().await.expect("window rollback");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    let live_hash: Option<String> =
+                        sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE tenant_id = $1")
+                            .bind(SANDBOX_TENANT_ID)
+                            .fetch_optional(&state.db)
+                            .await
+                            .expect("sandbox key row");
+                    assert_eq!(
+                        live_hash.as_deref(),
+                        Some(cached.key_hash.as_str()),
+                        "the process cache converges on the live row"
+                    );
+                    window.rollback().await.expect("window rollback");
+                    return;
+                }
+                panic!(
+                    "a sibling process kept re-minting the sandbox row before the \
+                     observation window could be established (5 attempts)"
                 );
             })
         });
@@ -1999,35 +2204,61 @@ mod adversarial_tests {
                 assert!(dkim_enabled, "the real send path requires dkim_enabled");
 
                 // Second provision: the first left a live key, so this one
-                // rotates instead of minting blindly.
-                let second = provision_sandbox(&state).await.expect("second provision");
-                let live: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*)::bigint FROM api_keys
-                     WHERE tenant_id = $1 AND revoked_at IS NULL",
-                )
-                .bind(SANDBOX_TENANT_ID)
-                .fetch_one(&state.db)
-                .await
-                .expect("count live keys");
-                assert_eq!(live, 1, "rotation must leave exactly one live key");
-                let stored_hash: String = sqlx::query_scalar(
-                    "SELECT key_hash FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL",
-                )
-                .bind(SANDBOX_TENANT_ID)
-                .fetch_one(&state.db)
-                .await
-                .expect("live key hash");
-                assert_ne!(
-                    first.api_key, second.api_key,
-                    "rotation mints a fresh credential"
-                );
-                assert_eq!(
-                    apexmail_lib::hash_api_key_with_secret(
-                        &second.api_key,
-                        &state.config.api_key_hash_secret
-                    ),
-                    stored_hash,
-                    "the surviving live key must be the newest provision's"
+                // rotates instead of minting blindly. The rotation's SURVIVOR
+                // is then observed under the provision window (audit #12c):
+                // a sibling provision between this rotation and the hash
+                // comparison would otherwise replace the "newest provision"
+                // out from under the assertion. A rival that started earlier
+                // and committed later may still own the row when the window
+                // is acquired — then converge and rotate again.
+                for attempt in 0..5u32 {
+                    let second = provision_sandbox(&state).await.expect("second provision");
+                    assert_ne!(
+                        first.api_key, second.api_key,
+                        "rotation mints a fresh credential"
+                    );
+                    let window = provision_window(&state).await;
+                    if !sandbox_key_is_live(&state, &second).await {
+                        window
+                            .rollback()
+                            .await
+                            .expect("window rollback on stale rotation");
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            200 * u64::from(attempt + 1),
+                        ))
+                        .await;
+                        continue;
+                    }
+                    let live: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*)::bigint FROM api_keys
+                         WHERE tenant_id = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(SANDBOX_TENANT_ID)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("count live keys");
+                    assert_eq!(live, 1, "rotation must leave exactly one live key");
+                    let stored_hash: String = sqlx::query_scalar(
+                        "SELECT key_hash FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL",
+                    )
+                    .bind(SANDBOX_TENANT_ID)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("live key hash");
+                    assert_eq!(
+                        apexmail_lib::hash_api_key_with_secret(
+                            &second.api_key,
+                            &state.config.api_key_hash_secret
+                        ),
+                        stored_hash,
+                        "the surviving live key must be the newest provision's"
+                    );
+                    window.rollback().await.expect("window rollback");
+                    return;
+                }
+                panic!(
+                    "a rival provision kept winning the row before the observation \
+                     window could be established (5 attempts)"
                 );
             })
         });
@@ -2364,6 +2595,7 @@ mod adversarial_tests {
     fn exec_buckets_unknown_peers_and_enforces_the_ceiling_on_them() {
         with_dkim_env(|state| {
             Box::pin(async move {
+                let window = unknown_bucket_window(&state).await;
                 let no_peer = |state: &AppState| {
                     let state = state.clone();
                     async move {
@@ -2396,6 +2628,10 @@ mod adversarial_tests {
                 assert!(page.contains("200"), "{page}");
                 // Leave the shared bucket clean for sibling processes.
                 del_redis_key(&state, "explorer_rl:unknown").await;
+                window
+                    .rollback()
+                    .await
+                    .expect("unknown-bucket window rollback");
             })
         });
     }
@@ -2448,6 +2684,7 @@ mod adversarial_tests {
     fn grader_without_connect_info_still_validates_input() {
         with_dkim_env(|state| {
             Box::pin(async move {
+                let window = unknown_bucket_window(&state).await;
                 del_redis_key(&state, "explorer_rl:unknown").await;
                 let resp = grade_domain(
                     State(state.clone()),
@@ -2462,6 +2699,10 @@ mod adversarial_tests {
                 let page = html(resp).await;
                 assert!(page.contains("INVALID_INPUT"), "{page}");
                 del_redis_key(&state, "explorer_rl:unknown").await;
+                window
+                    .rollback()
+                    .await
+                    .expect("unknown-bucket window rollback");
             })
         });
     }

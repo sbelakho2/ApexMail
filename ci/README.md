@@ -177,6 +177,7 @@ via `CI_MARKETING_VALIDATION` (§2a).
 |---|---|---|---|
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
 | 2 | validate | 1800 s | 45–150 s + ~3 min marketing validation (zola build, pricing/legal gates, then the 9 required site-quality validators; broken-links alone walks 7,370 links in ~70 s) |
+| 2.5 | docs | 300 s | <1 s — documentation architecture-truth gates (`tools/check_docs_architecture_truth.py`, CI_DOCS_TRUTH_CHECK): production runbooks/operational docs must not teach Kubernetes operations (kubectl/helm/k9s/…) — the deployment is a single Hetzner host with Docker Compose; genuinely historical/roadmap docs carry an `ARCHITECTURE-TRUTH:` marker (audit EXT-E #11, 2026-10-02) |
 | 3 | test | 5400 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b) || 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
 | 5 | images | 10800 s | host-only (Rust docker build; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |
@@ -268,7 +269,7 @@ The substitutes, in enforcement order:
 | GitHub feature | Status | Substitute |
 |---|---|---|
 | PR status checks / check runs UI | gone with GitHub | §4: pre-push hook + `check-pr.sh` + host-enforced gating |
-| Branch protection rules | **ACTIVE on `main`** | the branch requires the commit-status context `woodpecker` (exact string; set via the GitHub API in the 24234a5e era) — the `.woodpecker.yml` `notify-github` steps post exactly that context (§12), and the fetch stage's pushed-HEAD guarantee plus the host gate cover what a status alone cannot |
+| Branch protection rules | **PARTIAL on `main`** | the branch requires the commit-status context `woodpecker` (exact string; set via the GitHub API in the 24234a5e era) — the `.woodpecker.yml` `notify-github` steps post exactly that context (§12). Required approvals, CODEOWNERS enforcement and direct-push restrictions are NOT (yet) configured — the live truth is one command away: `scripts/verify-branch-protection.sh` (§13, external audit 2026-10-02 item 13), which the `fetch` stage runs as a release gate. The fetch stage's pushed-HEAD guarantee plus the host gate cover what a status alone cannot |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
 | GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
 | Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; the retired GitHub workflows that used to trip `run-shell-injection` were removed from the tree on 2026-09-13). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
@@ -726,3 +727,68 @@ The host pipeline (`ci/pipeline.sh`) deliberately does NOT post statuses: it
 holds no GitHub token (GitHub-free by directive). Woodpecker is the
 push/PR-facing evidence carrier; the deploy-host timer remains the deploy
 gate (§4).
+
+---
+
+## 13. Branch protection as release evidence (external audit 2026-10-02 item 13)
+
+**Why.** A green pipeline only BLOCKS a merge if GitHub-side enforcement
+makes it blocking. Branch protection on `main` is therefore release
+evidence, and — like every other claim in this repo — it is verified
+mechanically, not assumed:
+
+```
+scripts/verify-branch-protection.sh            # [--repo OWNER/REPO] [--branch NAME]
+```
+
+One `gh api repos/<owner>/<repo>/branches/<branch>/protection` call, then a
+table of VERIFIED / MISSING / UNVERIFIABLE rows. It FAILS (exit 1) unless ALL
+of:
+
+| # | Requirement | API field consulted |
+|---|---|---|
+| 1 | required status check context `woodpecker` | `required_status_checks.contexts` / `.checks[].context` |
+| 2 | required approving reviews >= 1 | `required_pull_request_reviews.required_approving_review_count` |
+| 3 | CODEOWNERS enforced | `required_pull_request_reviews.require_code_owner_reviews == true` |
+| 4 | a direct-push restriction honestly present | `restrictions` set OR `required_pull_request_reviews.dismiss_stale_reviews == true` |
+
+Only fields the API actually returns are consulted — nothing is invented.
+Rows that cannot be checked (404 on the protection endpoint: branch not
+protected, or the token cannot read protection) are UNVERIFIABLE and the
+verdict is FAIL — unverifiable is never a pass. Informational rows
+(`enforce_admins`, `required_linear_history`, `required_signatures`,
+`allow_force_pushes`, `allow_deletions`) report the live value without
+affecting the verdict. Repo/branch resolution: `--repo` → `GH_REPO` → the
+`origin` remote; `--branch` → `VERIFY_BRANCH` → `main`.
+
+**Where it gates.** `ci/stages/fetch.sh` (stage 01) runs it BEFORE the
+skip-unchanged cheap-poll exit — the single chokepoint every pipeline run
+passes through, so a protection regression fails the release lane within one
+5-minute poll even when no new commits arrive. Missing-tool policy is
+`ci_have_tool`'s: `gh` absent under `CI_MISSING_TOOLS=fail` OR on the deploy
+host fails the stage closed; elsewhere it degrades to a loud skip (the
+script exits 75 for standalone runs under the same policy). `jq` is required
+to parse the response.
+
+**Operator prerequisites (one-time, per environment).**
+
+1. Install the gh CLI (`brew install gh` / apt) on any host that runs the
+   release lane — on the deploy host this is now REQUIRED for `fetch` to
+   pass (fail closed per the policy above).
+2. Authenticate: `GH_TOKEN`/`GITHUB_TOKEN` in the environment (a fine-grained
+   PAT with "Administration: read" on THIS repository, or a classic PAT with
+   `repo` — push access is the floor for reading branch protection; admin
+   always can). Without a readable token the gate fails honestly with
+   UNVERIFIABLE rows, by design.
+3. `CI_BRANCH_PROTECTION_BRANCH` (fetch-stage env) overrides the checked
+   branch if the release branch is ever renamed from `main`.
+
+**Known gaps this gate surfaced on its first run (2026-10-02, the audit's
+finding, not hidden):** the `woodpecker` status context IS required (with
+`strict`), but main has NO required approving reviews, NO CODEOWNERS
+enforcement and NO direct-push restriction (and `enforce_admins` is false,
+so admins bypass even the status requirement). Until those are configured in
+GitHub → Settings → Branches → Branch protection (or via the API), the fetch
+stage fails the release lane with exactly this table. That is the intended
+failure direction: an unverifiable gate blocks the release instead of lying
+about protection.

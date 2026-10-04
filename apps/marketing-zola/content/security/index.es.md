@@ -4,7 +4,7 @@ description = "Controles de seguridad de ApexMail: cifrado, autenticación, defe
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-02"
 +++
 
 ## Cifrado
@@ -65,22 +65,21 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 | Control | Qué se verifica | Frecuencia | Evidencia |
 |---|---|---|---|
-| **Artefactos de implementación firmados** | Todos los binarios de aplicación e imágenes de contenedor se firman criptográficamente en el momento de compilación. Las implementaciones validan las firmas antes del despliegue. | Cada compilación | Registros de atestación de compilación (inmutables, solo anexar) |
-| **Verificaciones de integridad de base de datos** | Validación de suma de verificación PostgreSQL en todas las páginas de datos; integridad de cadena hash en tablas de registro de auditoría mediante resúmenes SHA-256 encadenados. | Continuo (suma de verificación en lectura); escaneo completo nocturno | Alerta por corrupción; endpoint de verificación de cadena de registro de auditoría |
-| **Registros de implementación inmutables** | Cada evento de implementación (quién, qué, cuándo, commit git, hash de artefacto) se registra en un registro de solo anexar. | Cada implementación | Endpoint de historial de implementación; registro a prueba de manipulaciones |
-| **Monitoreo de integridad de archivos** | Los binarios del sistema, archivos de configuración y certificados TLS se monitorean para detectar modificaciones no autorizadas. | Continuo (basado en inotify) | Alerta por modificación fuera de ventanas de cambio aprobadas |
-| **Restauraciones de respaldo verificadas** | Pruebas de restauración automatizadas validan la integridad y recuperabilidad de las copias de seguridad. | Semanal | Registro de éxito/fracaso de restauración; comparación de datos de muestra |
-| **Integridad en tiempo de ejecución** | Los procesos de aplicación se monitorean para detectar cambios binarios inesperados o desviaciones de configuración respecto al estado declarado de infraestructura como código. | Continuo | Alerta de detección de desviación; informe de conciliación |
+| **Integridad de los artefactos de implementación** | Las imágenes de contenedor se verifican por digest, no se firman: cada ejecución del pipeline registra un manifiesto de release (digests SHA-256 por imagen, `SHA256SUMS.images`) y genera una anulación de compose con digests fijados; el despliegue se niega a levantar cualquier imagen cuyo digest no coincida con ese manifiesto. | Cada despliegue | Manifiesto de release + verificación de digest antes del rollout en la etapa de despliegue |
+| **Integridad del registro de auditoría** | Las tablas del registro de auditoría llevan una cadena hash: el resumen SHA-256 de cada fila se encadena a su predecesor. | Continuo (por escritura) | Cadena hash del registro de auditoría |
+| **Registros de despliegue** | Cada ejecución del pipeline registra un manifiesto (etapa, estado, código de salida, duración) más los registros por etapa. Son registros operativos, no un libro mayor a prueba de manipulaciones orientado al cliente. | Cada despliegue | Manifiestos de ejecución de CI (`ci/runs/<ts>/manifest.json`) |
+| **Verificación de copias de seguridad** | Cada copia de seguridad se descifra y valida estructuralmente de forma automática (`pg_restore --list`) antes de borrar la copia en claro — una copia ilegible nunca se cuenta como buena. Los ejercicios completos de restauración son manuales y siguen la cadencia trimestral documentada. | Cada copia (validación automática); trimestral (ejercicios manuales) | Validación de restaurabilidad al crear la copia; registros de ejercicios DR |
+| **Resiliencia en tiempo de ejecución** | Los servicios se ejecutan con healthchecks y reinicio automático; una sonda de contenido fallida tras el despliegue dispara la reversión automática a los pins de imagen anteriores. | Continuo | Healthchecks de contenedores; etapa de verificación + rollback |
 
 ## Seguridad de infraestructura
 
-- Hetzner Online GmbH para computación, almacenamiento y redes en la región de implementación configurada.
+- Hetzner Online GmbH para computación, almacenamiento y redes en la región de implementación configurada (un único host ejecuta la pila completa; no hay topología multirregión).
 - Sistemas operativos Debian/Ubuntu reforzados con CIS.
 - Parches de seguridad automatizados con implementación por etapas.
-- Infraestructura inmutable mediante infraestructura como código.
-- Segmentación de red entre planos de aplicación, datos y gestión.
-- Aislamiento de red: servidores de aplicaciones, servidores de bases de datos e interfaces de gestión en VLAN separadas.
-- Gestión de secretos mediante secretos sellados y aislamiento de entorno.
+- Despliegue declarativo y versionado: toda la pila está definida en archivos Docker Compose y se despliega mediante el pipeline de CI autoalojado.
+- Segmentación de red Docker entre redes de frontend, backend y base de datos en el host de despliegue.
+- Cortafuegos del host: acceso entrante limitado a los puertos de servicio de correo/web (25, 80, 443, 587, 993) más puertos de operación; las bases de datos no exponen puertos del host.
+- Gestión de secretos mediante Docker secrets montados desde archivos con permisos restringidos (0600); ningún secreto incrustado en imágenes o código fuente.
 
 ## Gestión de vulnerabilidades
 

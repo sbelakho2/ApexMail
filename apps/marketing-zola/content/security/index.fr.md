@@ -4,7 +4,7 @@ description = "Contrôles de sécurité ApexMail : chiffrement, authentification
 template = "prose.html"
 
 [extra]
-last_updated = "2026-07-29"
+last_updated = "2026-10-02"
 +++
 
 ## Chiffrement
@@ -65,22 +65,21 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 | Contrôle | Ce qui est vérifié | Fréquence | Preuve |
 |---|---|---|---|
-| **Artefacts de déploiement signés** | Tous les binaires d'application et images de conteneur sont signés cryptographiquement au moment de la construction. Les déploiements valident les signatures avant le déploiement. | Chaque build | Journaux d'attestation de build (immuables, en ajout seulement) |
-| **Contrôles d'intégrité de la base de données** | Validation de somme de contrôle PostgreSQL sur toutes les pages de données ; intégrité par chaîne de hachage dans les tables de journaux d'audit via des résumés SHA-256 chaînés. | Continu (somme de contrôle à la lecture) ; analyse complète nocturne | Alerte en cas de corruption ; point de terminaison de vérification de chaîne de journal d'audit |
-| **Journaux de déploiement immuables** | Chaque événement de déploiement (qui, quoi, quand, commit git, hachage d'artefact) est enregistré dans un journal en ajout seulement. | Chaque déploiement | Point de terminaison d'historique de déploiement ; journal inviolable |
-| **Surveillance de l'intégrité des fichiers** | Les binaires système, fichiers de configuration et certificats TLS sont surveillés pour détecter les modifications non autorisées. | Continu (basé sur inotify) | Alerte en cas de modification hors des fenêtres de changement approuvées |
-| **Restaurations de sauvegarde vérifiées** | Des tests de restauration automatisés valident l'intégrité et la récupérabilité des sauvegardes. | Hebdomadaire | Journal de succès/échec de restauration ; comparaison des données d'échantillon |
-| **Intégrité d'exécution** | Les processus d'application sont surveillés pour détecter les modifications binaires inattendues ou les dérives de configuration par rapport à l'état déclaré infrastructure-as-code. | Continu | Alerte de détection de dérive ; rapport de réconciliation |
+| **Intégrité des artefacts de déploiement** | Les images de conteneurs sont vérifiées par digest, pas signées : chaque exécution du pipeline enregistre un manifeste de release (digests SHA-256 par image, `SHA256SUMS.images`) et génère un override compose épinglé par digest ; le déploiement refuse de démarrer toute image dont le digest ne correspond pas à ce manifeste. | Chaque déploiement | Manifeste de release + vérification des digests avant le rollout dans l'étape de déploiement |
+| **Intégrité du journal d'audit** | Les tables du journal d'audit portent une chaîne de hachage : le résumé SHA-256 de chaque ligne est chaîné à son prédécesseur. | Continu (par écriture) | Chaîne de hachage du journal d'audit |
+| **Journaux de déploiement** | Chaque exécution du pipeline enregistre un manifeste (étape, statut, code de sortie, durée) plus les journaux par étape. Ce sont des enregistrements opérationnels, pas un registre inviolable orienté client. | Chaque déploiement | Manifestes d'exécution CI (`ci/runs/<ts>/manifest.json`) |
+| **Vérification des sauvegardes** | Chaque sauvegarde est automatiquement déchiffrée et validée structurellement (`pg_restore --list`) avant suppression de la copie en clair — une sauvegarde illisible n'est jamais comptée comme bonne. Les exercices complets de restauration sont manuels et suivent la cadence trimestrielle documentée. | Chaque sauvegarde (validation automatique) ; trimestriel (exercices manuels) | Validation de restaurabilité à la sauvegarde ; registres des exercices DR |
+| **Résilience à l'exécution** | Les services s'exécutent avec healthchecks et redémarrage automatique ; une sonde de contenu échouée après le déploiement déclenche le rollback automatique vers les épinglages d'images précédents. | Continu | Healthchecks de conteneurs ; étape de vérification + rollback |
 
 ## Sécurité de l'infrastructure
 
-- Hetzner Online GmbH pour le calcul, le stockage et le réseau dans la région de déploiement configurée.
+- Hetzner Online GmbH pour le calcul, le stockage et le réseau dans la région de déploiement configurée (un seul hôte exécute la pile complète ; il n'existe pas de topologie multirégion).
 - Systèmes d'exploitation Debian/Ubuntu renforcés CIS.
 - Correctifs de sécurité automatisés avec déploiement progressif.
-- Infrastructure immuable via infrastructure-as-code.
-- Segmentation réseau entre les plans d'application, de données et de gestion.
-- Isolation réseau : serveurs d'application, serveurs de base de données et interfaces de gestion sur des VLAN séparés.
-- Gestion des secrets via secrets scellés et isolation d'environnement.
+- Déploiement déclaratif et versionné : toute la pile est définie dans des fichiers Docker Compose et déployée par le pipeline CI auto-hébergé.
+- Segmentation réseau Docker entre les réseaux frontend, backend et base de données sur l'hôte de déploiement.
+- Pare-feu de l'hôte : accès entrant limité aux ports de service mail/web (25, 80, 443, 587, 993) plus les ports d'exploitation ; les bases de données n'exposent aucun port hôte.
+- Gestion des secrets via Docker secrets montés depuis des fichiers à permissions restreintes (0600) ; aucun secret intégré aux images ou au code source.
 
 ## Gestion des vulnérabilités
 

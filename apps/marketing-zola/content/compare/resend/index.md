@@ -29,8 +29,8 @@ comparison_sections = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "tie" },
     { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic geometric</span>', comp = '<span class="text-surface-600">Automatic (managed)</span>', winner = "tie" },
-    { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "ARC Signing", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
+    { feature = "BIMI Support", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "ARC Signing", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Reputation Circuit Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" }
   ]},
   { title = "COMPLIANCE", rows = [

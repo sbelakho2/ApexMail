@@ -19,8 +19,6 @@ queue-provider = { path = "../queue-provider" }
 worker-processors = { path = "../worker-processors" }
 
 tokio = { workspace = true, features = ["full", "test-util"] }
-rand = { workspace = true }
 chrono.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
-tracing = { workspace = true }

@@ -102,6 +102,36 @@ validate_compose() {
 }
 
 # --- 2.3 pipeline-config sanity -----------------------------------------------------
+# Audit SM14 F9: the executor-image contract for .woodpecker.yml, factored into
+# a function of ONE file argument so the meta-probe in validate_pipeline_config
+# can prove BOTH directions on synthetic copies (a checker that accepts
+# everything is the failure mode this gate exists to prevent — the same
+# pass/fail probe pattern as the image-pinning fixtures in 2.4). Contract:
+#   1. every apexmail-ci IMAGE REFERENCE line carries a @sha256:<64 hex> pin
+#   2. the &ci_image anchor exists and is digest-pinned
+#   3. the pinned digest is NOT the all-zero PLACEHOLDER — a HARD failure
+#      (external audit 2026-10-02 item 1: HEAD carrying the placeholder cannot
+#      prove itself green, and warn-only let that state ship silently).
+validate_ci_image_pins() {
+    _cip_file=$1
+    _cip_bad=$(grep -E '^[[:space:]]*(image:|- &ci_image)' "$_cip_file" \
+        | grep 'apexmail-ci' | grep -vE '@sha256:[0-9a-f]{64}' || true)
+    if [ -n "$_cip_bad" ]; then
+        ci_err ".woodpecker.yml ($_cip_file) references the executor image WITHOUT a @sha256:<digest> pin (audit SM14 F9) — build/push the image and pin the digest (ci/ci-image/Dockerfile header):"
+        printf '%s\n' "$_cip_bad" | sed 's/^/    /' >&2
+        return 1
+    fi
+    if ! grep -E '^[[:space:]]*- &ci_image' "$_cip_file" | grep -qE '@sha256:[0-9a-f]{64}'; then
+        ci_err ".woodpecker.yml ($_cip_file) lost the &ci_image digest anchor — every step must dereference ONE digest-pinned executor image (audit SM14 F9)"
+        return 1
+    fi
+    if grep -q 'apexmail-ci@sha256:0\{64\}' "$_cip_file"; then
+        ci_err ".woodpecker.yml ($_cip_file) pins the all-zero PLACEHOLDER digest — a run on it cannot prove itself green, so this is a HARD failure (external audit 2026-10-02 item 1, mechanical merge blocker). Operator action: build/push the image and record the real digest in the &ci_image anchor (ci/ci-image/Dockerfile header)"
+        return 1
+    fi
+    return 0
+}
+
 # The successor of "is the workflow YAML valid": the pipeline is only as good
 # as its own configuration, so validate stage contracts, timeouts, and that
 # the README replacement map covers EVERY file in .github/workflows/.
@@ -160,25 +190,36 @@ validate_pipeline_config() {
         # every tool bump, silently replacing every scanner/tool version CI
         # runs — with GITHUB_TOKEN mounted. The REAL digest is an operator
         # action (build + push + `docker buildx imagetools inspect`, see the
-        # ci/ci-image/Dockerfile header); THIS check enforces the contract
-        # mechanically: any IMAGE REFERENCE line (an `image:` key or the
-        # &ci_image anchor definition) naming apexmail-ci without a digest
+        # ci/ci-image/Dockerfile header); validate_ci_image_pins enforces the
+        # contract mechanically: any IMAGE REFERENCE line (an `image:` key or
+        # the &ci_image anchor definition) naming apexmail-ci without a digest
         # pin fails the run. Other lines merely MENTIONING the image name
         # (e.g. the toolchain step's `apexmail-ci-toolchain --assert`
-        # command) are not references and must not trip the check.
-        _ci_img_bad=$(grep -E '^[[:space:]]*(image:|- &ci_image)' "$_wp" \
-            | grep 'apexmail-ci' | grep -vE '@sha256:[0-9a-f]{64}' || true)
-        if [ -n "$_ci_img_bad" ]; then
-            ci_err ".woodpecker.yml references the executor image WITHOUT a @sha256:<digest> pin (audit SM14 F9) — build/push the image and pin the digest (ci/ci-image/Dockerfile header):"
-            printf '%s\n' "$_ci_img_bad" | sed 's/^/    /' >&2
-            _vp_err=1
-        elif ! grep -E '^[[:space:]]*- &ci_image' "$_wp" | grep -qE '@sha256:[0-9a-f]{64}'; then
-            ci_err ".woodpecker.yml lost the &ci_image digest anchor — every step must dereference ONE digest-pinned executor image (audit SM14 F9)"
+        # command) are not references and must not trip the check. The
+        # all-zero placeholder digest is likewise a HARD failure (external
+        # audit 2026-10-02 item 1: a mechanical merge blocker, not an
+        # operator convention).
+        validate_ci_image_pins "$_wp" || _vp_err=1
+        # Meta-probe (external audit 2026-10-02 item 1d): the gate must
+        # ACCEPT a real digest and REJECT the all-zero placeholder, proved
+        # here on synthetic copies of the real file — the check's own teeth
+        # are under test, exactly like the image-pinning pass/fail fixtures.
+        _cip_probe=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-f9probe.XXXXXX")
+        sed -E 's/(- &ci_image.*)@sha256:[0-9a-f]{64}/\1@sha256:1111111111111111111111111111111111111111111111111111111111111111/' \
+            "$_wp" >"$_cip_probe/pass-real-digest.yml"
+        sed -E 's/(- &ci_image.*)@sha256:[0-9a-f]{64}/\1@sha256:0000000000000000000000000000000000000000000000000000000000000000/' \
+            "$_wp" >"$_cip_probe/fail-all-zero.yml"
+        if validate_ci_image_pins "$_cip_probe/pass-real-digest.yml" >/dev/null 2>&1; then
+            :
+        else
+            ci_err "F9 meta-probe: the digest gate REJECTED a real-digest anchor — the SM14 F9 check itself is broken"
             _vp_err=1
         fi
-        if grep -q 'apexmail-ci@sha256:0\{64\}' "$_wp"; then
-            ci_warn "executor image pin is the all-zero PLACEHOLDER digest — build/push the image and record the real digest in the &ci_image anchor (operator action; ci/ci-image/Dockerfile header)"
+        if validate_ci_image_pins "$_cip_probe/fail-all-zero.yml" >/dev/null 2>&1; then
+            ci_err "F9 meta-probe: the digest gate ACCEPTED the all-zero placeholder — the placeholder merge blocker is not mechanical"
+            _vp_err=1
         fi
+        rm -rf "$_cip_probe"
     fi
     [ -f "$CI_ROOT/woodpecker/stage.sh" ] \
         || { ci_err "missing ci/woodpecker/stage.sh (the executor's stage wrapper)"; _vp_err=1; }

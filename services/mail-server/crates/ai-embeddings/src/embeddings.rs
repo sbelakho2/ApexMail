@@ -638,12 +638,9 @@ PmScTyfBMj4Ej4fcpQ==\n\
                 index: 0,
                 embedding: hostile.clone(),
             }];
-            let err = finalize_batch(1, data, 4)
-                .expect_err("an overflowing L2 norm must fail the batch");
-            assert!(
-                err.to_string().contains("non-finite"),
-                "{hostile:?}: {err}"
-            );
+            let err =
+                finalize_batch(1, data, 4).expect_err("an overflowing L2 norm must fail the batch");
+            assert!(err.to_string().contains("non-finite"), "{hostile:?}: {err}");
         }
     }
 

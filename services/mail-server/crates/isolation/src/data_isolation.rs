@@ -159,8 +159,7 @@ static QUALIFIED_TENANT_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(||
 /// smuggled inside ordinary literals are blanked away (audit SM5 F9
 /// repair).
 static RLS_BINDING_PREDICATE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r#"(?ix)current_setting\s*\(\s*'app\.(?:current_workspace_id|current_org_id)'"#)
-        .ok()
+    Regex::new(r#"(?ix)current_setting\s*\(\s*'app\.(?:current_workspace_id|current_org_id)'"#).ok()
 });
 
 /// Extract the (lowercased, unquoted) table names referenced by
@@ -427,8 +426,7 @@ fn strip_sql_comments(query: &str) -> String {
 fn ends_with_current_setting_call(out: &str) -> bool {
     const OPEN: &str = "current_setting(";
     let trimmed = out.trim_end();
-    trimmed.len() >= OPEN.len()
-        && trimmed[trimmed.len() - OPEN.len()..].eq_ignore_ascii_case(OPEN)
+    trimmed.len() >= OPEN.len() && trimmed[trimmed.len() - OPEN.len()..].eq_ignore_ascii_case(OPEN)
 }
 
 /// If a dollar-quote tag opens at `bytes[i] == b'$'`, return the byte
@@ -1611,7 +1609,10 @@ mod tests {
         // blanked (F9 repair) — only delimiters/tags remain.
         let stripped = strip_sql_comments("SELECT '$q$'$q$ FROM emails");
         assert!(stripped.contains("FROM emails"), "got: {stripped}");
-        assert!(!stripped.contains("'$q$'"), "content must be blanked: {stripped}");
+        assert!(
+            !stripped.contains("'$q$'"),
+            "content must be blanked: {stripped}"
+        );
     }
 
     #[test]
@@ -1701,10 +1702,7 @@ mod tests {
         // The ONLY "predicate" lives inside a dead string literal. The
         // old scans matched it and validated an unscoped query.
         assert!(
-            !svc.validate_query_access(
-                "SELECT * FROM emails WHERE note = 'workspace_id=$1'",
-                &ctx
-            ),
+            !svc.validate_query_access("SELECT * FROM emails WHERE note = 'workspace_id=$1'", &ctx),
             "a predicate smuggled inside a literal must not satisfy the guard"
         );
         // The same shape for the RLS binding form.

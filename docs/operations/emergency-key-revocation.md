@@ -258,7 +258,12 @@ Master encryption key rotation follows the envelope encryption pattern in [`isol
 3. **Deploy configuration change** to all services that load `SecurityConfig`:
 
    ```bash
-   kubectl rollout restart deployment/api-server deployment/tracking-service deployment/worker-processors
+   # Stage the new values in the host env file (/opt/apexmail/.env or the
+   # prod secrets, mode 0600), then recreate the consumers — single-host
+   # Docker Compose deployment, no orchestrator restart primitives
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d \
+     api-server tracking worker
    ```
 
 4. **Verify re-keying** — The system will:

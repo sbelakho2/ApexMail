@@ -323,11 +323,15 @@ providers. The canonical schedule is
 [`mail_common::warmup::limit_for_day`](../../services/mail-server/crates/mail-common/src/warmup.rs)
 (see [warmup-schedule.md](../operations/warmup-schedule.md)).
 
-[`tick_warmup()`](../../services/mail-server/crates/api-server/src/ip_provider.rs:505)
-updates `warmup_progress` and graduates IPs to `active`, but **nothing in this
-tree schedules it — there is no warmup cron**; run it manually if the
-progress/graduation bookkeeping matters. Send-time admission is gated by
-`dedicated_ips.warmup_started_at`, not by `warmup_progress`.
+Three warmup layers, three different schedulers: *send-volume admission* is
+automatic — gated by `dedicated_ips.warmup_started_at`, never by
+`warmup_progress`; *graduation* (`warming → active` after 60 days) is
+automatic — the worker daemon runs the warmup-graduation reconciler hourly
+([`graduation.rs`](../../services/mail-server/crates/worker-processors/src/common/graduation.rs));
+but `tick_warmup()`
+([`ip_provider.rs:505`](../../services/mail-server/crates/api-server/src/ip_provider.rs:505))
+— the `warmup_progress` interpolation — **has no periodic caller**; run it
+manually if the progress column matters.
 
 | Day Range | Daily Send Limit |
 |-----------|-----------------|
@@ -707,7 +711,7 @@ All events are:
 - [ ] Prometheus scraping configured on `apx-mon-1`
 - [ ] Grafana dashboards imported
 - [ ] DNSBL monitoring cron job configured (15-minute interval)
-- [ ] Operators know there is NO warmup cron: `tick_warmup()` only runs when invoked manually, and sending is gated by `warmup_started_at` (not by `warmup_progress`)
+- [ ] Operators know the three warmup layers: send admission is automatic (gated by `warmup_started_at`), graduation to `active` is automatic (the worker's hourly warmup-graduation reconciler), and `tick_warmup()` progress bookkeeping has no periodic caller — sending is gated by `warmup_started_at` (not by `warmup_progress`)
 
 ### 6.3 Environment Variables
 
@@ -759,7 +763,7 @@ All events are:
 | rDNS not updating | API token lacks write scope | Regenerate token with read/write permissions |
 | Tenant not routing via SMTP | `transport_routing_cache` stale | Cache refreshes every 30 seconds; or call [`invalidate_cache()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:202) |
 | IP showing as blacklisted | DNSBL listing | Check DNSBL monitoring alerts; initiate delisting process |
-| Warmup not progressing | Nothing schedules `tick_warmup()` — there is no cron | `warmup_progress` is bookkeeping only; sending is gated by `warmup_started_at`. Invoke `tick_warmup()` manually if the progress column matters |
+| Warmup label not progressing | `warmup_progress` bookkeeping has no periodic caller (graduation itself IS automatic via the worker reconciler) | `warmup_progress` is bookkeeping only; sending is gated by `warmup_started_at` and graduation to `active` runs hourly in the worker. Invoke `tick_warmup()` manually if the progress column matters |
 
 ### 7.3 Transport Routing Issues
 

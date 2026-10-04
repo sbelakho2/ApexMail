@@ -36,12 +36,9 @@ mod devex {
         // in one process). Same injection pattern the devex in-crate and
         // AI-module tests use.
         let mut state = AppState::from_config(DevExConfig::default()).expect("devex state");
-        state.service_auth = devex_service::auth::ServiceAuth::resolve(
-            Some("test-key"),
-            None,
-            false,
-        )
-        .expect("dedicated test credential resolves");
+        state.service_auth =
+            devex_service::auth::ServiceAuth::resolve(Some("test-key"), None, false)
+                .expect("dedicated test credential resolves");
         build_router(state)
     }
 
@@ -401,9 +398,7 @@ mod sales {
     async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
         let ready = INIT
             .get_or_init(|| async {
-                match migrator::test_support::provision_shared_canonical_db(SALES_ROUTES_DB)
-                    .await
-                {
+                match migrator::test_support::provision_shared_canonical_db(SALES_ROUTES_DB).await {
                     Some(db) => {
                         // Post-migration assertion: the canonical chain must
                         // have produced the sales schema this suite exercises.

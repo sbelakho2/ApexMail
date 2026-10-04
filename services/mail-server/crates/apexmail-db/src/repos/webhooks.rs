@@ -160,7 +160,7 @@ impl WebhooksRepo {
         .bind(offset)
         .fetch_all(pool)
         .await?;
-        Ok(mask_all(pool, rows).await?)
+        mask_all(pool, rows).await
     }
 
     /// List webhooks for a tenant using keyset (cursor-based) pagination.
@@ -204,7 +204,7 @@ impl WebhooksRepo {
                 .await?
                 }
             };
-        Ok(mask_all(pool, rows).await?)
+        mask_all(pool, rows).await
     }
 
     /// Update a webhook. The returned row's `secret` is masked.
@@ -259,7 +259,7 @@ impl WebhooksRepo {
         .bind(serde_json::json!([event_type]))
         .fetch_all(pool)
         .await?;
-        Ok(mask_all(pool, rows).await?)
+        mask_all(pool, rows).await
     }
 }
 

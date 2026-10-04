@@ -1235,8 +1235,10 @@ mod tests {
     #[test]
     fn test_paranoia_level_zero_is_rejected_not_disarming() {
         // WafConfig::validate must reject out-of-range levels…
-        let mut cfg = WafConfig::default();
-        cfg.paranoia_level = 0;
+        let mut cfg = WafConfig {
+            paranoia_level: 0,
+            ..WafConfig::default()
+        };
         assert!(cfg.validate().is_err(), "level 0 must be rejected");
         cfg.paranoia_level = 5;
         assert!(cfg.validate().is_err(), "level 5 must be rejected");

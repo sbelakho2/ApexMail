@@ -111,9 +111,7 @@ fn test_stress_queue_fair_dispatch_claim_loop() {
     while !pending.is_empty() {
         // "Dequeue" a batch (the scheduler consumes it — jobs are under
         // lease at this point, mirroring PostgresQueueProvider::dequeue).
-        let batch: Vec<Job> = pending
-            .drain(..BATCH_SIZE.min(pending.len()))
-            .collect();
+        let batch: Vec<Job> = pending.drain(..BATCH_SIZE.min(pending.len())).collect();
         let outcome = scheduler.schedule(batch, BATCH_SIZE);
         passes += 1;
 
@@ -255,9 +253,7 @@ fn test_stress_webhook_dispatch_logic() {
     }
     let elapsed = start.elapsed();
 
-    println!(
-        "webhook dispatch logic: 50,000 jobs (5,000 truncations) in {elapsed:?}"
-    );
+    println!("webhook dispatch logic: 50,000 jobs (5,000 truncations) in {elapsed:?}");
     assert!(
         elapsed < Duration::from_secs(30),
         "webhook dispatch logic stress took {elapsed:?} — collapsed"

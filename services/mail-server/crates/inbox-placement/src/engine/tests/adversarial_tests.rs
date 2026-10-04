@@ -28,6 +28,17 @@ use uuid::Uuid;
 
 // ── Fixture helpers ─────────────────────────────────────────────────────────
 
+/// A persisted `placement_results` row, projected to the classified outcome:
+/// `(seed_account_id, inbox_type, delivery_time_ms, spf_pass, dkim_pass, dmarc_pass)`.
+type PersistedResult = (
+    Uuid,
+    Option<String>,
+    Option<i32>,
+    Option<bool>,
+    Option<bool>,
+    Option<bool>,
+);
+
 async fn canonical_pool(test_name: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
         Ok(pool) => pool,
@@ -287,7 +298,6 @@ async fn execute_test_full_lifecycle_classifies_and_persists() {
             folders: vec!["INBOX".into(), "[Gmail]/Spam".into()],
             search: HashMap::from([("INBOX".to_string(), vec![1])]),
             fetch: HashMap::from([("INBOX".to_string(), passing_fetch())]),
-            ..Script::default()
         }),
     );
     scripts.lock().unwrap().insert(
@@ -302,7 +312,6 @@ async fn execute_test_full_lifecycle_classifies_and_persists() {
                     Some(Utc::now() - chrono::Duration::milliseconds(4_000)),
                 ),
             )]),
-            ..Script::default()
         }),
     );
     let connector = ScriptedConnector {
@@ -334,14 +343,7 @@ async fn execute_test_full_lifecycle_classifies_and_persists() {
     assert_eq!(completed, 2);
 
     // Persisted classifications + auth verdicts.
-    let rows: Vec<(
-        Uuid,
-        Option<String>,
-        Option<i32>,
-        Option<bool>,
-        Option<bool>,
-        Option<bool>,
-    )> = sqlx::query_as(
+    let rows: Vec<PersistedResult> = sqlx::query_as(
         "SELECT seed_account_id, inbox_type, delivery_time_ms, spf_pass, dkim_pass, dmarc_pass \
              FROM placement_results WHERE test_id = $1 ORDER BY seed_account_id",
     )
@@ -450,7 +452,6 @@ async fn execute_test_enqueues_jsonb_webhooks_for_subscribers() {
             folders: vec!["INBOX".into()],
             search: HashMap::from([("INBOX".to_string(), vec![1])]),
             fetch: HashMap::from([("INBOX".to_string(), passing_fetch())]),
-            ..Script::default()
         }),
     );
     let engine = PlacementEngine::new(test_config(smtp_port, false, None), db.clone())
@@ -661,7 +662,6 @@ async fn encrypted_password_is_decrypted_for_the_poll() {
             folders: vec!["INBOX".into()],
             search: HashMap::from([("INBOX".to_string(), vec![1])]),
             fetch: HashMap::from([("INBOX".to_string(), passing_fetch())]),
-            ..Script::default()
         }),
     );
     let recording: std::sync::Arc<Recording> = Default::default();
@@ -680,13 +680,19 @@ async fn encrypted_password_is_decrypted_for_the_poll() {
         .expect("create");
     engine.execute_test(test.id).await.expect("execute");
 
-    let passwords = recording.passwords.lock().unwrap();
-    let used = passwords
-        .iter()
-        .find(|(u, _)| u == &email)
-        .expect("connector saw the account login");
+    // Copy the captured password out of the mutex guard so the guard is
+    // dropped before the awaits below.
+    let used = {
+        let passwords = recording.passwords.lock().unwrap();
+        passwords
+            .iter()
+            .find(|(u, _)| u == &email)
+            .expect("connector saw the account login")
+            .1
+            .clone()
+    };
     assert_eq!(
-        used.1, "the-real-password",
+        used, "the-real-password",
         "the poll must use the DECRYPTED password"
     );
 

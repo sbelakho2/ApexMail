@@ -709,10 +709,7 @@ async fn register_post(
 /// The (structurally unreachable) error for a `Tx` whose inner transaction
 /// was already consumed — fail-closed instead of panicking.
 fn tx_consumed_error() -> sqlx::Error {
-    sqlx::Error::Io(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "transaction already consumed",
-    ))
+    sqlx::Error::Io(std::io::Error::other("transaction already consumed"))
 }
 
 // ─── Probe helpers ─────────────────────────────────────────
@@ -1141,6 +1138,14 @@ mod tests {
     use argon2::PasswordVerifier;
 
     /// Serializes env-mutating tests.
+    ///
+    /// In the async registration tests the guard is held across `.await` ON
+    /// PURPOSE: the handler under test reads the mutated env mid-test, so the
+    /// lock must outlive the awaits. It has to stay a `std::sync::Mutex`
+    /// because the sync `#[test]`s below share it (a `tokio::sync::Mutex`
+    /// cannot be locked from sync tests). No awaited future ever locks
+    /// ENV_LOCK itself, so the deadlock `clippy::await_holding_lock` guards
+    /// against cannot occur — hence the per-test allows.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fake_state() -> AppState {
@@ -1980,6 +1985,8 @@ mod tests {
         }
     }
 
+    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_rejects_duplicate_email_and_creates_a_real_account() {
         // register_post READS FREE_TENANT_LIMIT — hold the env lock for the
@@ -2071,6 +2078,8 @@ mod tests {
         assert!(response.headers().get(header::SET_COOKIE).is_none());
     }
 
+    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_refuses_when_free_plan_is_at_capacity() {
         // Hold the env lock across the WHOLE test (including the handler
@@ -2375,6 +2384,8 @@ mod tests {
     /// SELECT pre-check and must hit the CONFLICT branch on INSERT — not a
     /// 500 and not a fabricated success. Audit F7: the transaction must
     /// ROLL BACK the tenant insert, leaving NO orphaned tenant row.
+    // Deliberate: see ENV_LOCK — the guard must outlive the handler awaits.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn register_maps_case_fold_unique_collision_to_conflict_without_orphan_tenant() {
         // register_post READS FREE_TENANT_LIMIT — same env-lock discipline

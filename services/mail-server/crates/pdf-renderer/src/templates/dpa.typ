@@ -195,10 +195,10 @@ The Processor implements the following security measures:
 - Log retention: 90 days for operational logs, 365 days for audit logs.
 
 == Business Continuity
-- Automated daily backups with point-in-time recovery.
-- Multi-region failover capability.
-- Recovery Time Objective (RTO): 4 hours.
-- Recovery Point Objective (RPO): 1 hour.
+- Automated nightly encrypted backups; every backup is verified for restorability at backup time.
+- Single-host deployment: there is no multi-region failover; recovery is host rebuild plus backup restore.
+- Recovery Time Objective (RTO): hours (measured in the quarterly recovery drill).
+- Recovery Point Objective (RPO): 24 hours (the last nightly backup); point-in-time recovery is not implemented.
 
 // ---------------------------------------------------------------------------
 // 5. Sub-processors

@@ -998,6 +998,13 @@ mod tests {
     /// process env (or first-initialize the allowlist LazyLock) so their
     /// windows cannot interleave — see the isolation note on
     /// `ssrf_guard_rejects_literal_private_ip_host`.
+    ///
+    /// The async tests hold this guard across `.await` ON PURPOSE (the env /
+    /// allowlist window spans the awaited calls), and it must stay a
+    /// `std::sync::Mutex` because sync `#[test]`s share it — so those tests
+    /// carry `clippy::await_holding_lock` allows. No awaited future ever
+    /// locks this mutex, so the deadlock the lint guards against cannot
+    /// occur.
     fn ssrf_env_test_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -1301,6 +1308,8 @@ mod tests {
         assert_eq!(mask_destination_config(&plain), plain);
     }
 
+    // Deliberate: see ssrf_env_test_lock — the guard must outlive the awaits.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn ssrf_guard_reports_each_failure_shape() {
         // The allowlist is read once per process: set it before anything
@@ -1500,6 +1509,8 @@ mod tests {
         port
     }
 
+    // Deliberate: see ssrf_env_test_lock — the guard must outlive the awaits.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn verify_and_heartbeat_report_honest_delivery_failures() {
         let Some(pool) = migrator::test_support::fresh_canonical_pool(

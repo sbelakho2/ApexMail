@@ -69,7 +69,7 @@ pub(crate) fn opening_tags<'a>(html: &'a str, tag: &str) -> Vec<&'a str> {
 /// Complete `<form …>…</form>` elements as (opening tag, element) pairs.
 /// Forms cannot nest per the HTML grammar, so the first `</form>` closes the
 /// element.
-pub(crate) fn form_elements<'a>(html: &'a str) -> Vec<(&'a str, &'a str)> {
+pub(crate) fn form_elements(html: &str) -> Vec<(&str, &str)> {
     let mut out = Vec::new();
     for (start, open_end) in opening_tag_spans(html, "form") {
         let open_tag = &html[start..open_end];

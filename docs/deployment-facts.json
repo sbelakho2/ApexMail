@@ -1,0 +1,300 @@
+{
+  "$comment": "Deployment facts — the single machine-readable registry of deployment truth for ApexMail. External audit 2026-10-02 item #14: every claim surface (marketing, compliance templates, compare pages, docs prose) and both evidence gates (tools/check_capability_claims.py, tools/check_security_posture.py) consume THIS file as the shared authority, so two surfaces can never disagree about the same fact again. Every fact is DERIVED FROM the authoritative sources only — docs/operations/disaster-recovery.md (canonical DR), ci/README.md (supply chain), docker-compose.yml + docker-compose.prod.yml + .env.production.example (runtime), docs/development/capability-registry.json (implementation stages), deploy/ (monitoring reality) — never from marketing or compliance prose. When one of those sources changes, update the fact here IN THE SAME CHANGE; the checkers fail on drift.",
+  "$schema_comment": "Every entry in `facts` carries the audit schema: `value` (the fact itself), plus six per-audit-2026-10-02 fields — `implementation_stage` (ladder stage from docs/development/capability-registry.json: implemented | integration-tested | runtime-wired | deployed | monitored | advertised; 'absent' when nothing exists in the tree), `binary_default` (what the code/compose does absent an explicit operator decision), `managed_cloud_enabled` (whether the managed production baseline — .env.production.example + docker-compose.prod.yml — turns it ON), `enforcement_mode` (enforced | detection-only/tag | flag | monitor | not-applicable), `monitored` (an alert rule or dashboard in deploy/ covers it), `advertised` (a customer-facing surface claims it as active) — plus `evidence` (where the truth lives in the tree) and `source` (the authoritative document that owns the fact).",
+  "version": 1,
+  "updated": "2026-10-02",
+  "authorities": {
+    "disaster_recovery": "docs/operations/disaster-recovery.md",
+    "supply_chain": "ci/README.md",
+    "runtime": "docker-compose.yml + docker-compose.prod.yml + .env.production.example",
+    "implementation_stages": "docs/development/capability-registry.json",
+    "monitoring": "deploy/ (alerting-rules.yml, prometheus.yml, grafana/)"
+  },
+  "deployment": {
+    "topology": "single-host-compose",
+    "host": "one Hetzner host (Finland), full stack under Docker Compose",
+    "orchestration": "docker compose -f docker-compose.yml -f docker-compose.prod.yml (+ the generated per-run docker-compose.digest-override.yml from the release manifest)",
+    "canonical_deploy_invocation": "ci/pipeline.sh run (host timer) — deploy/scripts/deploy.sh is the manual fallback; a bare `docker compose up` without the digest override is unsupported for production",
+    "standby_regions": 0,
+    "failover": "none — host failure is an outage until the host is rebuilt; recovery = host rebuild + backup restore",
+    "source": "docs/operations/disaster-recovery.md + deploy/DEPLOYMENT.md"
+  },
+  "facts": {
+    "topology": {
+      "value": "single-host-compose",
+      "implementation_stage": "deployed",
+      "binary_default": null,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "not-applicable",
+      "monitored": true,
+      "advertised": false,
+      "evidence": "docker-compose.prod.yml (one host, all services); docs/operations/disaster-recovery.md reality table",
+      "source": "docs/operations/disaster-recovery.md"
+    },
+    "postgres_pitr": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "no archive_command / WAL-archive service in docker-compose*.yml; docs/operations/disaster-recovery.md: 'WAL archiving / PITR — Not implemented. Recovery point granularity is the last nightly backup (RPO up to ~24 h)'",
+      "source": "docs/operations/disaster-recovery.md"
+    },
+    "wal_archiving": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "docs/operations/disaster-recovery.md reality table; no archive_command in any compose file",
+      "source": "docs/operations/disaster-recovery.md"
+    },
+    "standby_regions": {
+      "value": 0,
+      "implementation_stage": "absent",
+      "binary_default": 0,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "docs/operations/disaster-recovery.md: 'Standby region — None. There is no second region, no replication, no region failover'",
+      "source": "docs/operations/disaster-recovery.md"
+    },
+    "artifact_digest_pin": {
+      "value": true,
+      "implementation_stage": "deployed",
+      "binary_default": "base compose carries logical :latest tags BY DESIGN; the canonical deploy ALWAYS layers the generated digest override",
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (ci/stages/deploy.sh refuses to bring up services whose live image digest differs from the release manifest; tools/check_image_pinning.py gates the rendered config)",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ci/stages/images.sh renders release-manifest.json + docker-compose.digest-override.yml per run (SHA256SUMS.images); ci/stages/deploy.sh applies the override and re-verifies digests; deploy/scripts/deploy.sh renders the same pair for the manual path",
+      "source": "ci/README.md §5 + deploy/DEPLOYMENT.md 'Immutable deployment artifacts'"
+    },
+    "artifact_signature": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ci/README.md §5: 'GHCR push + image provenance/SBOM attestation signatures — dropped (no registry by design)'; no cosign/provenance attestation anywhere in ci/",
+      "source": "ci/README.md"
+    },
+    "sbom": {
+      "value": "generated-unsigned",
+      "implementation_stage": "deployed",
+      "binary_default": "Trivy SPDX JSON per image, written into the CI run dir",
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "advisory (SBOM generation warns on failure; the separate Trivy vuln gate is blocking)",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ci/stages/security.sh _trivy_sbom (spdx-json into $RUN_DIR) + ci/stages/images.sh sbom_digest in release-manifest.json; nothing signs the SBOM",
+      "source": "ci/README.md §7b"
+    },
+    "image_signing": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "SHA256SUMS.images is a digest INTEGRITY manifest, not a signature; no signing key/cosign in ci/",
+      "source": "ci/README.md §5"
+    },
+    "dependabot": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ci/README.md §5: 'Dependabot + auto-merge — gone | manual cargo update → check-pr.sh full → push'; .github/dependabot.yml is vestigial (its own comments say so; auto-merge is archived) and must not be claimed as a control",
+      "source": "ci/README.md"
+    },
+    "firewall_inbound_ports": {
+      "value": [25, 80, 443, 587, 993],
+      "implementation_stage": "deployed",
+      "binary_default": null,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (UFW default-deny incoming; only these service ports plus the operator set below are allowed)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "deploy/scripts/hetzner-bootstrap.sh configure_ufw (allow 22, 80, 443, 25, 587, 465, 993, 2525, 2526); the customer-facing service subset is 25/80/443/587/993 (SMTP, HTTP/S, submission, IMAP)",
+      "source": "deploy/scripts/hetzner-bootstrap.sh + deploy/DEPLOYMENT.md"
+    },
+    "firewall_inbound_ports_operator": {
+      "value": [22, 465, 2525, 2526],
+      "implementation_stage": "deployed",
+      "binary_default": null,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (22 = SSH key-only admin; 465 = SMTPS; 2525/2526 = bounce/FBL feeds)",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "deploy/scripts/hetzner-bootstrap.sh configure_ufw",
+      "source": "deploy/scripts/hetzner-bootstrap.sh"
+    },
+    "fim_inotify": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "no file-integrity monitoring daemon (no AIDE/inotify watcher) in deploy/ or compose; the only file-watcher is the TLS-renewal restart path unit (deploy/hardening/apexmail-tls-renew-restart.path), which restarts containers — it is not FIM",
+      "source": "docs/operations/disaster-recovery.md (deployment reality) + deploy/"
+    },
+    "deployment_log_append_only": {
+      "value": false,
+      "implementation_stage": "deployed",
+      "binary_default": "every CI run writes ci/runs/<ts>/manifest.json (stage name/status/exit_code/duration) — records exist but the store is ordinary files, pruned to the newest CI_KEEP_RUNS",
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ci/README.md §1 (run manifest + pruning to newest 30 runs); NOT a tamper-evident, append-only customer-facing ledger",
+      "source": "ci/README.md"
+    },
+    "postgres_page_checksums": {
+      "value": false,
+      "implementation_stage": "absent",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "postgres runs without --data-checksums (no checksum init in docker-compose.yml / prod bootstrap); no nightly full-scan job exists. The REAL integrity control is the audit-log hash chain (chained SHA-256, crates/compliance + worker graduation writer)",
+      "source": "docker-compose.yml + docs/operations/disaster-recovery.md"
+    },
+    "backup_restore_automatic": {
+      "value": false,
+      "implementation_stage": "deployed",
+      "binary_default": "automated portion = decrypt + pg_restore --list (structure validation) after every backup, before the plaintext is deleted; FULL restore drills are MANUAL at the documented quarterly cadence",
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (a backup that cannot be decrypted and read is never counted as good)",
+      "monitored": true,
+      "advertised": false,
+      "evidence": "deploy/hardening/scripts/postgres-backup-encrypt.sh (verify-restorability step); backup container healthchecks (artifact newer than 25 h) in docker-compose.prod.yml; drills: docs/operations/disaster-recovery-testing.md (quarterly)",
+      "source": "docs/operations/disaster-recovery.md"
+    },
+    "data_loss_prevention": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (worker pre-send gate: medium-severity findings quarantine/defer the send, high severity refuse it; engine errors fail OPEN, detections fail CLOSED)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "WORKER_DLP_ENABLED=true in .env.production.example (managed baseline, compose ${VAR:?}-guarded); wired in worker-processors email/processor.rs + email/dlp.rs; the managed cloud advertises outbound DLP (compliance templates), the marketing security page does not name it",
+      "source": ".env.production.example + docs/development/capability-registry.json (data-loss-prevention)"
+    },
+    "web_application_firewall": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": "enabled, MONITOR mode (WAF_ENABLED=true, WAF_ENFORCE=false)",
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "enforced (managed baseline pins WAF_ENFORCE=true; would-block verdicts block)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "WAF_ENABLED=true + WAF_ENFORCE=true in .env.production.example (compose ${VAR:?}-guarded); api-server app.rs waf middleware mount",
+      "source": ".env.production.example + docs/development/capability-registry.json (web-application-firewall)"
+    },
+    "spam_phishing_filtering": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "detection-only/tag (MTA_SPAM_FILTER_ENABLED=true; REJECT-classified refusal is a separate explicit opt-in, MTA_SPAM_REJECT_ENABLED=false)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "MTA_SPAM_FILTER_ENABLED=true + MTA_SPAM_REJECT_ENABLED=false in .env.production.example; mta content_security.rs",
+      "source": ".env.production.example + docs/development/capability-registry.json (spam-phishing-filtering)"
+    },
+    "intrusion_detection_prevention": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "detection-only/tag (MTA_IDS_ENABLED=true; MTA_IDS_REFUSE=false, refusal is a separate explicit opt-in)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "MTA_IDS_ENABLED=true + MTA_IDS_REFUSE=false in .env.production.example; mta content_security.rs",
+      "source": ".env.production.example + docs/development/capability-registry.json (intrusion-detection-prevention)"
+    },
+    "attachment_sandboxing": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "flag (MTA_ATTACHMENT_SCAN_MODE=flag — static + content inspection tags mail; strip/reject are explicit operator modes)",
+      "monitored": false,
+      "advertised": true,
+      "evidence": "MTA_ATTACHMENT_SCAN_ENABLED=true + MTA_ATTACHMENT_SCAN_MODE=flag in .env.production.example; mta content_security.rs",
+      "source": ".env.production.example + docs/development/capability-registry.json (attachment-sandboxing)"
+    },
+    "arc_sealing": {
+      "value": false,
+      "gate": "SMTP_ARC_SEAL env / mta config arc_seal — config-gated, binary default FALSE; the production compose and the managed baseline do NOT set it, so the managed cloud does not seal",
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "services/mail-server/crates/mta/src/config.rs (arc_seal: parse_bool_env(\"SMTP_ARC_SEAL\", false); servers/inbound.rs seals only when config.arc_seal); SMTP_ARC_SEAL absent from docker-compose*.yml and .env.production.example",
+      "source": "docs/development/capability-registry.json (arc-sealing) + crates/mta config"
+    },
+    "bimi_delivery_verification": {
+      "value": false,
+      "implementation_stage": "implemented",
+      "binary_default": null,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "crates/mta/src/auth/bimi.rs verify_bimi is not consumed by the mail flow; the email grader performs an advisory BIMI DNS record CHECK only — not logo verification in delivery",
+      "source": "docs/development/capability-registry.json (bimi-logo-verification)"
+    },
+    "mta_sts_enforcement": {
+      "value": false,
+      "implementation_stage": "implemented",
+      "binary_default": null,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "crates/mta/src/auth/mta_sts.rs has no server-path consumer; no MTA-STS policy file or TLSRPT stream under deploy/ — neither policy publication nor outbound enforcement is part of the running topology",
+      "source": "docs/development/capability-registry.json (mta-sts-tlsrpt)"
+    },
+    "dane_tlsa_verification": {
+      "value": false,
+      "implementation_stage": "implemented",
+      "binary_default": null,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "crates/mta/src/auth/dane.rs consumers are limited to the crates/mta/src/auth re-exports; neither the inbound nor the outbound delivery path verifies DANE/TLSA",
+      "source": "docs/development/capability-registry.json (dane-tlsa-verification)"
+    },
+    "branch_protection_codeowners": {
+      "value": "operator-pending",
+      "implementation_stage": "absent",
+      "binary_default": null,
+      "managed_cloud_enabled": false,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "CODEOWNERS-based review enforcement is NOT yet proven: scripts/verify-branch-protection.sh (audit item #13) queries the live GitHub branch-protection API and fails closed, but no recorded PASS exists, so the fact stays operator-pending. Real gates that DO run today (ci/README.md §4): pre-push hook, ci/check-pr.sh, and the deploy-host pipeline that stops the line before images/deploy; branch protection on main requires the 'woodpecker' commit-status context (ci/README.md §12). Do NOT claim codeowner review until scripts/verify-branch-protection.sh returns PASS and this fact is flipped",
+      "source": "ci/README.md §4/§5/§12 + scripts/verify-branch-protection.sh"
+    }
+  }
+}

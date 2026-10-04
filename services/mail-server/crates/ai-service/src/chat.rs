@@ -126,6 +126,17 @@ pub struct ChatAuditRow {
     pub docs_version: String,
 }
 
+/// Outcome metadata for a finished chat turn — everything
+/// [`ChatService::build_response`] needs about *how* the answer was produced
+/// rather than the answer itself. Grouped so the helper stays under clippy's
+/// arity limit.
+struct ChatResponseContext<'a> {
+    escalated: bool,
+    passed_policy_verification: bool,
+    docs_version: &'a str,
+    retrieval_state: RetrievalState,
+}
+
 pub struct ChatService {
     client: Arc<LlmClient>,
     verifier: ResponseVerifier,
@@ -266,10 +277,12 @@ ApexMail — sending, domains, DNS, pricing or your account — I'm happy to hel
                 req,
                 answer,
                 Vec::new(),
-                true,
-                true,
-                "",
-                RetrievalState::Empty,
+                ChatResponseContext {
+                    escalated: true,
+                    passed_policy_verification: true,
+                    docs_version: "",
+                    retrieval_state: RetrievalState::Empty,
+                },
             ));
         }
         let question = check.sanitized;
@@ -319,10 +332,12 @@ been noted for the support team — you can also reach them at support@apexmail.
                 req,
                 answer,
                 chunks,
-                true,
-                true,
-                &docs_version,
-                retrieval_state,
+                ChatResponseContext {
+                    escalated: true,
+                    passed_policy_verification: true,
+                    docs_version: &docs_version,
+                    retrieval_state,
+                },
             ));
         }
 
@@ -444,10 +459,12 @@ support@apexmail.ee."
                 req,
                 answer,
                 chunks,
-                true,
-                false,
-                &docs_version,
-                retrieval_state,
+                ChatResponseContext {
+                    escalated: true,
+                    passed_policy_verification: false,
+                    docs_version: &docs_version,
+                    retrieval_state,
+                },
             ));
         }
 
@@ -462,10 +479,12 @@ support@apexmail.ee."
             req,
             answer,
             cited,
-            false,
-            true,
-            &docs_version,
-            retrieval_state,
+            ChatResponseContext {
+                escalated: false,
+                passed_policy_verification: true,
+                docs_version: &docs_version,
+                retrieval_state,
+            },
         ))
     }
 
@@ -478,10 +497,7 @@ support@apexmail.ee."
         req: &ChatRequest,
         answer: String,
         citations: Vec<RetrievedChunk>,
-        escalated: bool,
-        passed_policy_verification: bool,
-        docs_version: &str,
-        retrieval_state: RetrievalState,
+        ctx: ChatResponseContext<'_>,
     ) -> (ChatResponse, ChatAuditRow) {
         // SM9 #1: EVERY answer — model output and canned escalation alike —
         // runs through the ammonia allowlist BEFORE it reaches the HTTP
@@ -497,19 +513,19 @@ support@apexmail.ee."
             user_id: req.user_id.clone(),
             question: req.message.clone(),
             answer: answer.clone(),
-            escalated,
+            escalated: ctx.escalated,
             citations: citations.clone(),
-            docs_version: docs_version.to_string(),
+            docs_version: ctx.docs_version.to_string(),
         };
         let resp = ChatResponse {
             answer,
             citations,
-            escalated,
+            escalated: ctx.escalated,
             disclosure: AI_DISCLOSURE,
             docs_version: audit.docs_version.clone(),
             model_enabled: self.model_enabled,
-            retrieval_state,
-            passed_policy_verification,
+            retrieval_state: ctx.retrieval_state,
+            passed_policy_verification: ctx.passed_policy_verification,
         };
         (resp, audit)
     }
@@ -629,7 +645,7 @@ mod tests {
             score: 1.0,
         };
 
-        let available = passages_block(&[chunk.clone()], RetrievalState::Available);
+        let available = passages_block(std::slice::from_ref(&chunk), RetrievalState::Available);
         assert!(available.contains("[1]"), "available passages are citable");
 
         let empty = passages_block(&[], RetrievalState::Empty);
@@ -1017,10 +1033,12 @@ mod tests {
             &chat_request("q", vec![]),
             raw.to_string(),
             Vec::new(),
-            false,
-            true,
-            "",
-            RetrievalState::Empty,
+            ChatResponseContext {
+                escalated: false,
+                passed_policy_verification: true,
+                docs_version: "",
+                retrieval_state: RetrievalState::Empty,
+            },
         );
         assert!(!resp.answer.contains("<script"), "{}", resp.answer);
         assert!(!audit.answer.contains("<script"), "{}", audit.answer);

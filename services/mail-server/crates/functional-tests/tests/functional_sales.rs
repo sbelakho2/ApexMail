@@ -316,7 +316,7 @@ async fn campaign_lifecycle_draft_active_paused() {
 /// Every test pins the policy with `CalendarService::with_working_hours`
 /// (UTC 09:00–17:00, Monday–Friday) so no `SALES_CALENDAR_*` environment
 /// override can change what is being asserted.
-
+///
 /// Remove this test's calendar rows from the SHARED canonical test database
 /// (same convention as the sales-autopilot calendar unit tests): bookings
 /// are tenant-scoped, so deleting both rows of a unique tenant is exactly

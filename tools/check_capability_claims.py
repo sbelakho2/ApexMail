@@ -38,6 +38,20 @@ Checks (each prints PASS/FAIL/WARN; any FAIL exits 1):
   6. in_flight_wiring items stay honest: an item whose env gate is already
      greppable in the wiring crate's Rust sources has LANDED and FAILS in
      both modes — remove it and raise the entry's stage in the same change.
+  7. Deployment-facts authority (audit 2026-10-02 #14/#6):
+     docs/deployment-facts.json must exist; every fact carries the audit
+     schema (implementation_stage, binary_default, managed_cloud_enabled,
+     enforcement_mode, monitored, advertised) plus evidence/source; facts
+     with tree verifications must still be provable from the files that own
+     them; managed-baseline facts must agree with .env.production.example;
+     and every registry entry with a `deployment` block must MIRROR its
+     linked fact (the registry mirrors the facts file, it never overrides
+     it).
+  8. Matrix surfaces (audit 2026-10-02 #5): comparison grids and translated
+     feature grids under scan.matrix_surfaces are scanned — an alias in a
+     row's apex cell holding ✓ is a claim and requires stage >= runtime-
+     wired; an apex cell holding ✗ is a disclaimer and passes; prose lines
+     (descriptions, verdict points) claim like any other surface.
 
 Self-test: `check_capability_claims.py --self-test` builds a hermetic
 fixture tree in a temp dir, copies this checker into it, and proves the
@@ -62,11 +76,90 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "docs/development/capability-registry.json"
+FACTS_PATH = ROOT / "docs/deployment-facts.json"
 MANIFEST_PATH = ROOT / "docs/development/topology-manifest.json"
 DOCKERFILE_PATH = ROOT / "services/mail-server/Dockerfile"
 COMPOSE_DEV_PATH = ROOT / "docker-compose.yml"
 COMPOSE_PROD_PATH = ROOT / "docker-compose.prod.yml"
+ENV_PROD_PATH = ROOT / ".env.production.example"
 CRATES_DIR = ROOT / "services/mail-server/crates"
+
+# Audit 2026-10-02 #6: docs/deployment-facts.json is the SHARED authority for
+# deployment truth (what is ON in the managed baseline, what is absent). This
+# checker keeps its unique wiring/surface checks but sources every shared fact
+# from the registry and fails if the two drift apart.
+FACT_SCHEMA_FIELDS = (
+    "implementation_stage",
+    "binary_default",
+    "managed_cloud_enabled",
+    "enforcement_mode",
+    "monitored",
+    "advertised",
+)
+
+# fact id -> env var in .env.production.example whose value must AGREE with
+# facts[fact]["managed_cloud_enabled"] (true <-> =true). Overlapping truth the
+# security-posture checker also reads; both fail if the sides drift.
+FACT_ENV_VARS = {
+    "data_loss_prevention": "WORKER_DLP_ENABLED",
+    "web_application_firewall": "WAF_ENABLED",
+    "spam_phishing_filtering": "MTA_SPAM_FILTER_ENABLED",
+    "intrusion_detection_prevention": "MTA_IDS_ENABLED",
+    "attachment_sandboxing": "MTA_ATTACHMENT_SCAN_ENABLED",
+}
+
+# Tree-evidence verifications for individual facts. Each entry lists
+# (repo-relative path, needle, should_contain) triples: the needle must occur
+# in the file (or must NOT, when should_contain is False). A needle of None
+# asserts bare file existence (should_contain=True) or non-existence (False).
+# Facts without an entry here are evidence-only (their `evidence` string names
+# the authoritative file; no mechanical check exists).
+FACT_TREE_VERIFICATIONS = {
+    "artifact_digest_pin": [
+        ("ci/stages/images.sh", "docker-compose.digest-override.yml", True),
+        ("ci/stages/deploy.sh", "docker-compose.digest-override.yml", True),
+        ("ci/stages/images.sh", "SHA256SUMS.images", True),
+    ],
+    "dependabot": [
+        ("ci/README.md", "check-pr.sh", True),
+    ],
+    "postgres_pitr": [
+        ("docker-compose.yml", "archive_command", False),
+        ("docker-compose.prod.yml", "archive_command", False),
+    ],
+    "wal_archiving": [
+        ("docker-compose.yml", "archive_command", False),
+        ("docker-compose.prod.yml", "archive_command", False),
+    ],
+    "postgres_page_checksums": [
+        ("docker-compose.yml", "data-checksums", False),
+        ("docker-compose.prod.yml", "data-checksums", False),
+    ],
+    "fim_inotify": [
+        ("docker-compose.yml", "inotify", False),
+        ("docker-compose.prod.yml", "inotify", False),
+    ],
+    "backup_restore_automatic": [
+        ("deploy/hardening/scripts/postgres-backup-encrypt.sh", "pg_restore --list", True),
+    ],
+    "standby_regions": [
+        ("docs/operations/disaster-recovery.md", "no second region", True),
+    ],
+    "arc_sealing": [
+        ("docker-compose.yml", "SMTP_ARC_SEAL", False),
+        ("docker-compose.prod.yml", "SMTP_ARC_SEAL", False),
+        (".env.production.example", "SMTP_ARC_SEAL", False),
+    ],
+    "branch_protection_codeowners": [
+        ("scripts/verify-branch-protection.sh", None, True),
+    ],
+    "bimi_delivery_verification": [
+        ("services/mail-server/crates/mta/src/auth/bimi.rs", None, True),
+    ],
+    "mta_sts_enforcement": [
+        ("services/mail-server/crates/mta/src/auth/mta_sts.rs", None, True),
+    ],
+}
 
 STRICT = os.environ.get("CAPABILITY_GATE_STRICT", "0") == "1"
 
@@ -128,6 +221,7 @@ def _self_test() -> int:
                 ],
                 "marker": "[roadmap]",
                 "marker_close": "[/roadmap]",
+                "matrix_surfaces": ["apps/marketing-zola/content/compare/**/*.md"],
             },
             "in_flight_wiring": {"items": []},
             "capabilities": [
@@ -135,6 +229,15 @@ def _self_test() -> int:
                     "capability": "fixture-cap",
                     "crate": "crates/fixture",
                     "stage": "advertised",
+                    "deployment": {
+                        "fact": "fixture_fact",
+                        "implementation_stage": "advertised",
+                        "binary_default": None,
+                        "managed_cloud_enabled": True,
+                        "enforcement_mode": "enforced",
+                        "monitored": True,
+                        "advertised": True,
+                    },
                     "evidence": {
                         "docker_target": "mta",
                         "compose_service": "mta",
@@ -153,6 +256,34 @@ def _self_test() -> int:
             ],
         }
 
+    def fixture_facts() -> dict:
+        return {
+            "facts": {
+                "artifact_digest_pin": {
+                    "value": True,
+                    "implementation_stage": "deployed",
+                    "binary_default": None,
+                    "managed_cloud_enabled": True,
+                    "enforcement_mode": "enforced",
+                    "monitored": False,
+                    "advertised": False,
+                    "evidence": "fixture ci stubs render the digest override",
+                    "source": "ci/README.md",
+                },
+                "fixture_fact": {
+                    "value": True,
+                    "implementation_stage": "advertised",
+                    "binary_default": None,
+                    "managed_cloud_enabled": True,
+                    "enforcement_mode": "enforced",
+                    "monitored": True,
+                    "advertised": True,
+                    "evidence": "fixture",
+                    "source": "fixture",
+                },
+            }
+        }
+
     def build_sandbox(root: Path) -> Path:
         (root / "tools").mkdir(parents=True)
         (root / "tools" / "check_capability_claims.py").write_text(runner.read_text())
@@ -160,12 +291,15 @@ def _self_test() -> int:
             "docs/development",
             "services/mail-server/crates/fixture/src",
             "apps/marketing-zola/content/security",
+            "apps/marketing-zola/content/compare/postmark",
             "templates/compliance",
+            "ci/stages",
         ):
             (root / rel).mkdir(parents=True, exist_ok=True)
         (root / "docs/development/topology-manifest.json").write_text(
             json.dumps({"services": [{"name": "mta", "docker_target": "mta"}]})
         )
+        (root / "docs/deployment-facts.json").write_text(json.dumps(fixture_facts(), indent=2))
         (root / "services/mail-server/Dockerfile").write_text(
             "FROM scratch AS runtime-base\nFROM runtime-base AS mta\n"
         )
@@ -174,27 +308,47 @@ def _self_test() -> int:
         )
         (root / "docker-compose.yml").write_text("services:\n  mta:\n    image: fixture\n")
         (root / "docker-compose.prod.yml").write_text("services:\n  mta:\n    image: fixture\n")
+        # Stub CI stages carrying the artifact_digest_pin evidence needles.
+        (root / "ci/stages/images.sh").write_text(
+            "# fixture\ndocker-compose.digest-override.yml\nSHA256SUMS.images\n"
+        )
+        (root / "ci/stages/deploy.sh").write_text(
+            "# fixture\ndocker-compose.digest-override.yml\n"
+        )
         (root / "apps/marketing-zola/content/security/index.md").write_text(
             "# Security\n\n[roadmap] future plans only [/roadmap]\n"
             "The fixture widget ships in the running product.\n"
         )
         (root / "templates/compliance/trust-center.md").write_text("# Trust Center\n")
+        # A comparison-matrix fixture row: the ✓ apex cell is a CLAIM.
+        (root / "apps/marketing-zola/content/compare/postmark/index.md").write_text(
+            "+++\ntitle = \"fixture compare\"\n+++\n"
+            "{ feature = \"fixture widget\", apex = "
+            "'<span class=\"text-brand-600\">\u2713</span>', "
+            "comp = '<span class=\"text-surface-400\">\u2717</span>', winner = \"none\" }\n"
+            "{ feature = \"Other\", apex = "
+            "'<span class=\"text-surface-400\">\u2717</span>', "
+            "comp = '<span class=\"text-brand-600\">\u2713</span>', winner = \"competitor\" }\n"
+        )
         return root / "docs/development/capability-registry.json"
 
-    # (label, mutation or None, expected exit code, expected needle in output)
+    # (label, registry mutation or None, facts mutation or None, expected exit
+    #  code, expected needle in output)
     cases = [
-        ("unmutated fixture passes", None, 0, None),
+        ("unmutated fixture passes", None, None, 0, None),
         (
             "nonexistent docker target fails the gate",
             lambda reg: reg["capabilities"][0]["evidence"].__setitem__(
                 "docker_target", "ghost-target"
             ),
+            None,
             1,
             "docker-target:fixture-cap:ghost-target",
         ),
         (
             "advertised demoted to implemented while still claimed fails",
             lambda reg: reg["capabilities"][0].__setitem__("stage", "implemented"),
+            None,
             1,
             "claim-vs-stage:fixture-cap",
         ),
@@ -205,6 +359,7 @@ def _self_test() -> int:
                 reg["capabilities"][0]["evidence"]["explanation"]
                 + " The remaining work has not yet landed.",
             ),
+            None,
             1,
             "registry-lifecycle-language:fixture-cap",
         ),
@@ -218,6 +373,7 @@ def _self_test() -> int:
                     "has not landed.",
                 ),
             ),
+            None,
             1,
             "registry-stage-contradiction:fixture-cap",
         ),
@@ -231,19 +387,59 @@ def _self_test() -> int:
                     "status": "self-test fixture contract",
                 }
             ),
+            None,
             1,
             "in-flight-unlanded:fixture-cap",
+        ),
+        (
+            "registry deployment block drifting from the facts file fails",
+            lambda reg: reg["capabilities"][0]["deployment"].__setitem__(
+                "managed_cloud_enabled", False
+            ),
+            None,
+            1,
+            "facts-agreement:fixture-cap:managed_cloud_enabled",
+        ),
+        (
+            "deployment block linking an unknown fact fails",
+            lambda reg: reg["capabilities"][0]["deployment"].__setitem__(
+                "fact", "ghost_fact"
+            ),
+            None,
+            1,
+            "facts-link:fixture-cap",
+        ),
+        (
+            "sub-runtime-wired capability claimed in a matrix ✓ cell fails",
+            lambda reg: reg["capabilities"][0].__setitem__("stage", "implemented"),
+            None,
+            1,
+            "matrix-claim-vs-stage:fixture-cap",
+        ),
+        (
+            "deployment block removed while the fact still exists still passes",
+            lambda reg: reg["capabilities"][0].pop("deployment"),
+            None,
+            0,
+            None,
         ),
     ]
 
     with tempfile.TemporaryDirectory(prefix="capability-gate-selftest-") as tmp:
         registry_path = build_sandbox(Path(tmp))
+        facts_path = registry_path.parent.parent / "deployment-facts.json"
         env = dict(os.environ, CAPABILITY_GATE_STRICT="0")
-        for label, mutate, expected, needle in cases:
+        for label, mutate, mutate_facts, expected, needle in cases:
             reg = fixture_registry()
             if mutate is not None:
                 mutate(reg)
             registry_path.write_text(json.dumps(reg, indent=2))
+            if mutate_facts is not None:
+                facts = fixture_facts()
+                mutate_facts(facts)
+                facts_path.write_text(json.dumps(facts, indent=2))
+            else:
+                facts_path.write_text(json.dumps(fixture_facts(), indent=2))
             proc = subprocess.run(
                 [sys.executable, str(registry_path.parent.parent.parent / "tools" / "check_capability_claims.py")],
                 capture_output=True,
@@ -273,6 +469,13 @@ MANIFEST = json.loads(MANIFEST_PATH.read_text())
 DOCKERFILE = DOCKERFILE_PATH.read_text()
 COMPOSE_DEV = COMPOSE_DEV_PATH.read_text()
 COMPOSE_PROD = COMPOSE_PROD_PATH.read_text()
+
+if not FACTS_PATH.is_file():
+    print("FAIL deployment-facts:docs/deployment-facts.json — missing: the shared "
+          "authority for deployment truth must exist (audit 2026-10-02 #14)")
+    sys.exit(1)
+FACTS_DOC = json.loads(FACTS_PATH.read_text())
+FACTS = FACTS_DOC.get("facts") or {}
 
 LADDER = REGISTRY["lifecycle_ladder"]
 STAGE_INDEX = {stage: i for i, stage in enumerate(LADDER)}
@@ -366,6 +569,122 @@ for entry in CAPABILITIES:
             f"the wiring this stage claims has not landed ({gate_name})",
         )
 
+# ── 1b. Deployment-facts sanity, tree evidence, env agreement ────────────────
+def _env_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip().strip('"')
+    return values
+
+
+check("deployment-facts:nonempty", bool(FACTS), "docs/deployment-facts.json carries no facts")
+for fact_id, fact in sorted(FACTS.items()):
+    if not isinstance(fact, dict):
+        check(f"facts-schema:{fact_id}", False, "fact is not an object")
+        continue
+    missing = [f for f in FACT_SCHEMA_FIELDS if f not in fact]
+    ok = not missing and "value" in fact and "evidence" in fact and "source" in fact
+    check(f"facts-schema:{fact_id}", ok, f"missing audit-schema fields: {missing}" if missing else "")
+
+for fact_id, verifications in sorted(FACT_TREE_VERIFICATIONS.items()):
+    if fact_id not in FACTS:
+        continue  # fact retired from the registry — nothing to verify
+    for rel, needle, should in verifications:
+        fpath = ROOT / rel
+        if needle is None:
+            if should:
+                check(f"facts-tree:{fact_id}:{rel}", fpath.exists(), f"{rel} must exist")
+            else:
+                check(f"facts-tree:{fact_id}:{rel}", not fpath.exists(),
+                      f"{rel} exists — the recorded fact state is stale, re-triage docs/deployment-facts.json")
+            continue
+        if not fpath.is_file():
+            check(f"facts-tree:{fact_id}:{rel}", False, f"{rel} missing from the tree")
+            continue
+        text = fpath.read_text()
+        ok = (needle in text) if should else (needle not in text)
+        check(
+            f"facts-tree:{fact_id}:{needle}@{rel}", ok,
+            f"expected {needle!r} to {'appear' if should else 'be absent'} in {rel} — "
+            "update docs/deployment-facts.json in the same change",
+        )
+
+# Firewall ports: every recorded service port must be a UFW allowance in the
+# host bootstrap script (the authoritative firewall source).
+_fw = FACTS.get("firewall_inbound_ports")
+_bootstrap = ROOT / "deploy/scripts/hetzner-bootstrap.sh"
+if isinstance(_fw, dict) and isinstance(_fw.get("value"), list) and _bootstrap.is_file():
+    _fw_text = _bootstrap.read_text()
+    for port in _fw["value"]:
+        check(
+            f"facts-tree:firewall_inbound_ports:ufw-allow-{port}",
+            f"ufw allow {port}/" in _fw_text,
+            f"recorded port {port} has no `ufw allow {port}/` in deploy/scripts/hetzner-bootstrap.sh",
+        )
+
+# Managed-baseline agreement: a fact claiming the managed cloud turns the
+# control ON must agree with .env.production.example (and vice versa).
+_env_text = ENV_PROD_PATH.read_text() if ENV_PROD_PATH.is_file() else ""
+_env_values = _env_values(_env_text) if _env_text else {}
+for fact_id, var in sorted(FACT_ENV_VARS.items()):
+    if fact_id not in FACTS:
+        continue
+    if not _env_text:
+        check(f"facts-env:{fact_id}:{var}", False, ".env.production.example missing — cannot reconcile the managed baseline")
+        continue
+    env_true = _env_values.get(var) == "true"
+    fact_on = FACTS[fact_id].get("managed_cloud_enabled") is True
+    check(
+        f"facts-env:{fact_id}:{var}", fact_on == env_true,
+        f"deployment-facts managed_cloud_enabled={FACTS[fact_id].get('managed_cloud_enabled')} "
+        f"but .env.production.example has {var}={_env_values.get(var)!r} — reconcile the two "
+        "in the same change",
+    )
+
+# ── 1c. Registry entries ↔ deployment-facts agreement ───────────────────────
+for entry in CAPABILITIES:
+    dep = entry.get("deployment")
+    if not dep:
+        continue  # pre-refactor entry: the stage ladder alone still governs it
+    cap = entry.get("capability", "<unnamed>")
+    fact_id = dep.get("fact")
+    check(
+        f"facts-link:{cap}", fact_id in FACTS,
+        f"deployment block names unknown fact {fact_id!r} — add it to docs/deployment-facts.json",
+    )
+    if fact_id not in FACTS:
+        continue
+    fact = FACTS[fact_id]
+    check(
+        f"facts-agreement:{cap}:implementation_stage",
+        dep.get("implementation_stage") == entry.get("stage") == fact.get("implementation_stage"),
+        f"stage={entry.get('stage')!r}, deployment.implementation_stage={dep.get('implementation_stage')!r}, "
+        f"facts[{fact_id}].implementation_stage={fact.get('implementation_stage')!r} must all match",
+    )
+    for field in ("managed_cloud_enabled", "enforcement_mode", "monitored"):
+        check(
+            f"facts-agreement:{cap}:{field}",
+            dep.get(field) == fact.get(field),
+            f"deployment.{field}={dep.get(field)!r} != facts[{fact_id}].{field}={fact.get(field)!r} — "
+            "the registry mirrors the facts file, it does not override it",
+        )
+    if fact.get("advertised") is True:
+        check(
+            f"facts-advertised:{cap}",
+            STAGE_INDEX.get(entry.get("stage"), -1) >= RUNTIME_WIRED,
+            "the linked fact records the capability as ADVERTISED but the registry stage is "
+            "sub-runtime-wired — advertise only wired capabilities",
+        )
+    if entry.get("stage") == "advertised":
+        check(
+            f"facts-advertised-true:{cap}", fact.get("advertised") is True,
+            f"registry stage is `advertised` but facts[{fact_id}].advertised is not true",
+        )
+
 # ── 2. Claim surfaces: advertised implies runtime-wired ─────────────────────
 MARKER = REGISTRY["scan"]["marker"]
 MARKER_CLOSE = REGISTRY["scan"]["marker_close"]
@@ -434,6 +753,59 @@ for rel in surfaces:
                         f"claim surface names `{entry['scan_aliases']}` outside [roadmap] context "
                         f"but the registry stage is `{stage}` — implement and promote the entry, "
                         "or move the claim into [roadmap] context",
+                    )
+
+# ── 2b. Matrix surfaces: comparison grids + translated feature grids ────────
+# (audit 2026-10-02 #5: the ✓/✗ grids on the compare pages were invisible to
+# the alias scan; this closes the coverage hole in EVERY locale.)
+APEX_CELL_RE = re.compile(r"apex\s*=\s*(?:'([^']*)'|\"([^\"]*)\")")
+CHECK = "✓"
+CROSS = "✗"
+
+
+def apex_cell(line: str) -> str | None:
+    """The row's ApexMail cell, or None when the line is prose."""
+    m = APEX_CELL_RE.search(line)
+    if m is None:
+        return None
+    return m.group(1) if m.group(1) is not None else m.group(2)
+
+
+for pattern in REGISTRY["scan"].get("matrix_surfaces") or []:
+    for path in sorted(ROOT.glob(pattern)):
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            if line.strip().startswith("#"):
+                continue  # TOML/markdown comments render nothing; they do not claim
+            cell = apex_cell(line)
+            if cell is not None and CHECK not in cell:
+                continue  # an ✗ (or unmarked) apex cell is a disclaimer, not a claim
+            for entry, patterns in compiled:
+                stage = entry.get("stage")
+                if stage not in STAGE_INDEX:
+                    continue
+                if not any(p.search(line) for p in patterns):
+                    continue
+                if cell is not None and CROSS in cell:
+                    continue  # mixed ✓/✗ cell: ambiguous, not a clean claim
+                fact_id = (entry.get("deployment") or {}).get("fact")
+                fact = FACTS.get(fact_id) if fact_id else None
+                if STAGE_INDEX[stage] < RUNTIME_WIRED:
+                    check(
+                        f"matrix-claim-vs-stage:{entry['capability']}:{path.name}:{lineno}",
+                        False,
+                        f"comparison-matrix cell claims `{entry['scan_aliases']}` (apex ✓) but the "
+                        f"registry stage is `{stage}` — flip the cell to ✗ or promote the capability; "
+                        "deployment-facts.json is the authority",
+                    )
+                elif fact is not None and fact.get("managed_cloud_enabled") is not True:
+                    check(
+                        f"matrix-claim-vs-managed:{entry['capability']}:{path.name}:{lineno}",
+                        False,
+                        f"comparison-matrix cell claims `{entry['scan_aliases']}` (apex ✓) but "
+                        f"facts[{fact_id}].managed_cloud_enabled is not true — the managed cloud "
+                        "does not run this capability, so the grid may not claim it",
                     )
 
 # ── 3. README wiring-status lines match the registry stages ─────────────────

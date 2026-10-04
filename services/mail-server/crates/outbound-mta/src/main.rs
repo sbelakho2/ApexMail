@@ -763,8 +763,7 @@ mod tests {
         // Prometheus text: the sample line is `name value` after the HELP/TYPE
         // preamble; match the exact sample, not a HELP mention.
         body.lines()
-            .filter(|line| line.starts_with(name))
-            .next_back()
+            .rfind(|line| line.starts_with(name))
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|value| value.parse().ok())
     }
@@ -959,7 +958,7 @@ mod tests {
         let mut health = None;
         for _ in 0..150 {
             match http_get(addr, "/healthz").await {
-                Ok((status, body)) if status == 200 => {
+                Ok((200, body)) => {
                     health = Some(body);
                     break;
                 }

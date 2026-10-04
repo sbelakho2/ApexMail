@@ -19,7 +19,7 @@ verdict_points = [
   "Revues de déploiement personnalisées pour les besoins d’infrastructure dédiée",
   "Analytique avancée, diagnostics de contenu et recommandations sur le moment d’envoi",
   "Gestion du consentement, journaux d’audit et automatisation RGPD intégrés",
-  "Clés d’idempotence, signature ARC, BIMI et disjoncteur de réputation",
+  "Clés d’idempotence et disjoncteur de réputation",
   "SDK first-party pour Node.js, Python, Go, PHP, Ruby et Java ; SDK Resend pour Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET et Laravel",
 ]
 
@@ -32,8 +32,8 @@ comparison_sections = [
     { feature = "Taux de livraison", apex = '<span class="text-brand-600 font-semibold">Élevé</span>', comp = '<span class="text-surface-600">Élevé</span>', winner = "tie" },
     { feature = "IP dédiée", apex = '<span class="text-brand-600 font-semibold">Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Business</span>', comp = '<span class="text-surface-600">Voir les tarifs du fournisseur</span>', winner = "none" },
     { feature = "Réchauffement IP", apex = '<span class="text-brand-600 font-semibold">Géométrique automatique</span>', comp = '<span class="text-surface-600">Automatique (géré)</span>', winner = "tie" },
-    { feature = "Support BIMI", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "Signature ARC", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
+    { feature = "Support BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "Signature ARC", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Disjoncteur de réputation", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" }
   ]},
   { title = "CONFORMITÉ", rows = [

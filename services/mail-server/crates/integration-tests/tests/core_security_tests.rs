@@ -467,14 +467,20 @@ mod ssrf_protection {
             "192.168.0.1",
             "192.168.255.255",
         ] {
-            assert!(is_private_ip(&ip(ip_str)), "{ip_str} must be blocked as private");
+            assert!(
+                is_private_ip(&ip(ip_str)),
+                "{ip_str} must be blocked as private"
+            );
         }
     }
 
     #[test]
     fn blocks_loopback() {
         for ip_str in ["127.0.0.1", "127.0.0.2", "127.255.255.254", "::1"] {
-            assert!(is_private_ip(&ip(ip_str)), "{ip_str} must be blocked as loopback");
+            assert!(
+                is_private_ip(&ip(ip_str)),
+                "{ip_str} must be blocked as loopback"
+            );
         }
     }
 

@@ -2,6 +2,12 @@
 
 **Severity:** SEV1–SEV2 (depending on delivery impact)
 
+> **Architecture truth:** ApexMail runs as a single Hetzner host with Docker
+> Compose (see [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)). Every command in
+> this runbook is a Compose command (or a host command) executed on the deploy
+> host at `/opt/apexmail`. There is no Kubernetes or Helm anywhere in this
+> deployment.
+
 ## Table of Contents
 - [Architecture Context](#architecture-context)
 - [Symptoms](#symptoms)
@@ -25,12 +31,18 @@ ApexMail's MTA handles outbound email delivery via:
 - **Queue management:** PostgreSQL-backed email queue with dead letter queue for failed deliveries
 - **IP rotation:** Automatic warm-up of new dedicated IPs (60-day schedule in [`mail-common/src/warmup.rs`](../../../services/mail-server/crates/mail-common/src/warmup.rs); admission enforced by the worker in [`worker-processors/src/email/processor.rs`](../../../services/mail-server/crates/worker-processors/src/email/processor.rs))
 
+**Command conventions (all commands run on the deploy host):** the compose
+prefix is `docker compose -f docker-compose.yml -f docker-compose.prod.yml`
+from `/opt/apexmail`. SQL runs inside the `postgres` container; Redis
+commands authenticate with the `redis_password` compose secret (the `rc`
+helper defined in the [Redis failure runbook](./redis-failure.md)).
+
 ## Symptoms
 
 - Alerts: `ApiErrorRateSpike` (SMTP errors), `ApiThroughputDrop` (delivery stalled), `HighBounceRate`
 - Metrics: bounce rate > 5%, deferred queue growing, delivery latency increasing
 - Users: email delivery delays, "sent but not received" complaints
-- Infrastructure: MTA pod resource usage, SMTP connection pool exhaustion
+- Infrastructure: MTA container resource usage, SMTP connection pool exhaustion
 
 ## Severity Classification
 
@@ -44,13 +56,14 @@ ApexMail's MTA handles outbound email delivery via:
 
 1. **Check delivery queue status:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT status, count(*) FROM email_queue GROUP BY status;"
    ```
 
 2. **Check dead letter queue:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT count(*), reason FROM dead_letter_queue
       WHERE created_at > now() - interval '1 hour'
       GROUP BY reason
@@ -60,7 +73,7 @@ ApexMail's MTA handles outbound email delivery via:
 
 3. **Check bounce rate by domain:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT recipient_domain, count(*) AS count,
              SUM(CASE WHEN status = 'bounced' THEN 1 ELSE 0 END) * 100.0 / count(*) AS bounce_pct
       FROM email_delivery_log
@@ -79,7 +92,7 @@ ApexMail's MTA handles outbound email delivery via:
 5. **Check ISP feedback loops:**
    ```bash
    # Check for FBL (Feedback Loop) complaints
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT provider, count(*) FROM bounce_feedback
       WHERE received_at > now() - interval '24 hours'
       GROUP BY provider
@@ -94,7 +107,7 @@ ApexMail's MTA handles outbound email delivery via:
 
 1. **Identify high-bounce sending domains:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT tenant_id, sending_domain, sum(delivered) AS delivered,
              sum(bounced) AS bounced,
              sum(bounced) * 100.0 / NULLIF(sum(delivered) + sum(bounced), 0) AS bounce_rate
@@ -108,7 +121,7 @@ ApexMail's MTA handles outbound email delivery via:
 2. **Pause sending for high-bounce domains:**
    ```bash
    # Add domain to suppression list
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "INSERT INTO suppression_list (domain, reason, created_by)
       VALUES ('high-bounce-domain.com', 'auto: bounce rate > 10%', 'mta-runbook')
       ON CONFLICT (domain) DO NOTHING;"
@@ -123,32 +136,34 @@ ApexMail's MTA handles outbound email delivery via:
 
 **When:** MTA cannot establish SMTP connections to recipient mail servers.
 
+Run the DNS/SMTP probes from the **host** — the host's public address is the
+sending identity, so what it sees is exactly what remote MXes see.
+
 1. **Check DNS resolution of recipient MX:**
    ```bash
-   kubectl exec -n apexmail deploy/mta -- dig MX gmail.com
-   kubectl exec -n apexmail deploy/mta -- dig MX outlook.com
+   dig +short MX gmail.com
+   dig +short MX outlook.com
    ```
 
 2. **Test SMTP connectivity:**
    ```bash
-   kubectl exec -n apexmail deploy/mta -- bash -c \
-     'echo -e "EHLO apexmail.ee\nQUIT" | openssl s_client -starttls smtp -connect gmail-smtp-in.l.google.com:25 -timeout 10'
+   echo -e "EHLO apexmail.ee\nQUIT" | \
+     openssl s_client -starttls smtp -connect gmail-smtp-in.l.google.com:25 -timeout 10 2>/dev/null | grep -E "250|220"
    ```
 
 3. **Check if IP is blocklisted:**
    ```bash
-   # Common DNSBL checks
-   kubectl exec -n apexmail deploy/mta -- bash -c \
-     'dig +short <mta-ip>.zen.spamhaus.org'
-   kubectl exec -n apexmail deploy/mta -- bash -c \
-     'dig +short <mta-ip>.bl.spamcop.net'
+   # Common DNSBL checks (substitute the sending IP, reversed)
+   dig +short <reversed-mta-ip>.zen.spamhaus.org
+   dig +short <reversed-mta-ip>.bl.spamcop.net
    ```
 
 4. **Rotate to different sending IP or SES:**
    ```bash
    # Force SES routing for affected tenants
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "tenant:sending-channel:<tenant-id>" "ses"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "tenant:sending-channel:<tenant-id>" "ses"'
    ```
 
 ### Procedure 3: Queue Backlog
@@ -157,21 +172,26 @@ ApexMail's MTA handles outbound email delivery via:
 
 1. **Check queue depth and age:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT status, count(*),
              ROUND(EXTRACT(EPOCH FROM MAX(created_at) - MIN(created_at))/60, 1) AS age_minutes
       FROM email_queue
       GROUP BY status;"
    ```
 
-2. **Scale MTA workers:**
+2. **Increase drain throughput:** this deployment runs a **single** MTA and
+   worker by design (one host) — there is no replica scaling. Raise the
+   worker's processing concurrency and recreate it:
    ```bash
-   kubectl scale deployment mta -n apexmail --replicas=15
+   # In /opt/apexmail/.env (or the prod env file): WORKER_CONCURRENCY=<higher value>
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d worker
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml restart mta
    ```
 
 3. **Prioritize time-sensitive emails:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "UPDATE email_queue SET priority = 100
       WHERE status = 'queued' AND created_at > now() - interval '5 minutes'
       AND (headers->>'X-Priority' IN ('urgent', '1', '2'));"
@@ -179,7 +199,7 @@ ApexMail's MTA handles outbound email delivery via:
 
 4. **Move stalled deliveries to retry:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "UPDATE email_queue SET status = 'queued', updated_at = now()
       WHERE status = 'sending' AND updated_at < now() - interval '30 minutes'
       AND attempts < max_attempts;"
@@ -192,7 +212,7 @@ ApexMail's MTA handles outbound email delivery via:
 1. **Identify affected IPs:**
    ```bash
    # Check reputation metrics
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT ip_address, reputation_score, bounce_rate, complaint_rate
       FROM dedicated_ip_reputation
       ORDER BY reputation_score ASC
@@ -202,17 +222,20 @@ ApexMail's MTA handles outbound email delivery via:
 2. **Pause sending on degraded IPs:**
    ```bash
    # Mark IP as paused in rotation
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "ip-rotation:paused:<ip-address>" "true"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     EXPIRE "ip-rotation:paused:<ip-address>" 86400
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "ip-rotation:paused:<ip-address>" "true"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        EXPIRE "ip-rotation:paused:<ip-address>" 86400'
    ```
 
 3. **Redirect traffic to healthy IPs:**
    ```bash
    # Shift tenants from affected IP
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "tenant:assigned-ip:<tenant-id>" "<healthy-ip>"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "tenant:assigned-ip:<tenant-id>" "<healthy-ip>"'
    ```
 
 4. **Submit delisting requests:**
@@ -228,7 +251,7 @@ ApexMail's MTA handles outbound email delivery via:
 
 1. **Check authentication results:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT recipient_domain,
              COUNT(*) FILTER (WHERE dkim = 'pass') AS dkim_pass,
              COUNT(*) FILTER (WHERE spf = 'pass') AS spf_pass,
@@ -257,7 +280,7 @@ ApexMail's MTA handles outbound email delivery via:
    - Rotated keys have a 48-hour overlap window
    ```bash
    # Check key age
-   kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
      "SELECT key_selector, created_at, active FROM dkim_keys ORDER BY created_at DESC LIMIT 5;"
    ```
 
@@ -272,12 +295,12 @@ ApexMail's MTA handles outbound email delivery via:
 
 ```bash
 # 1. Verify delivery pipeline
-kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
   "SELECT count(*) FROM email_queue WHERE status = 'queued';"
 # Should be decreasing
 
 # 2. Verify dead letter queue is not growing
-kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
   "SELECT count(*) FROM dead_letter_queue
    WHERE created_at > now() - interval '30 minutes';"
 
@@ -288,7 +311,7 @@ curl -sf -X POST https://api.apexmail.ee/v1/messages \
   -d '{"to":"test-recovery@example.com","subject":"MTA Recovery Test","text":"This is a recovery test"}'
 
 # 4. Check delivery log for the test email
-kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -d apexmail -c \
   "SELECT status, delivery_status, smtp_code
    FROM email_delivery_log
    WHERE recipient = 'test-recovery@example.com'

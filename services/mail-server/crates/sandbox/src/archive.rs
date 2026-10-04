@@ -185,8 +185,8 @@ fn sweep_zip(
             if !encrypted_already_scored {
                 outcome.findings.push(InspectionFinding {
                     id: "ARCHIVE_ENTRY_UNREADABLE",
-                    description: "archive container could not be parsed — inner contents uninspected"
-                        .into(),
+                    description:
+                        "archive container could not be parsed — inner contents uninspected".into(),
                     risk: 3.0,
                 });
             }

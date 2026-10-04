@@ -86,8 +86,10 @@
 
 1. **Identify the compromised key:**
    ```bash
-   # Check key usage anomaly alerts
-   kubectl logs -l app=ids-engine --tail=100 | grep -i "key.*anomaly"
+   # Check service logs for key-usage anomalies (all commands run on the
+   # deploy host, /opt/apexmail — single-host Docker Compose deployment)
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=2000 \
+     api-server worker mta | grep -iE "key.*(anomal|reject|fail)"
    
    # Check audit logs for suspicious key usage
    curl -s "https://api.apexmail.ee/v1/admin/audit-logs?filter=action:key.*&since=1h" \
@@ -146,12 +148,12 @@
    ```bash
    # Generate new master encryption key
    openssl rand -base64 32 > new-master-key.b64
-   
-   # Deploy to all services
-   kubectl create secret generic encryption-key \
-     --from-literal=key="$(cat new-master-key.b64)" \
-     --dry-run=client -o yaml | kubectl apply -f -
-   kubectl rollout restart deployment/api-server deployment/tracking-service
+
+   # Provision to the services: update the value in the host env/secrets
+   # (/opt/apexmail/.env or secrets/, mode 0600), then recreate the
+   # consumers so they pick up the new material
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d api-server tracking
    ```
 
 9. **Issue new credentials** to affected tenants.
@@ -203,12 +205,14 @@
    systemctl status haveged
    ```
 
-2. **Mitigate container entropy issues:**
+2. **Mitigate entropy issues:**
    ```bash
-   # Ensure containers have adequate entropy
-   kubectl set env deployment/api-server -e RUST_MIN_STACK=8388608
-   
-   # For container runtimes, ensure --privileged or haveged sidecar
+   # Containers share the host kernel's entropy pool — check it on the host
+   cat /proc/sys/kernel/random/entropy_avail
+   # Linux 5.6+ kernels (incl. the Hetzner host): getrandom() never blocks
+   # once seeded, so exhaustion is historical; verify with
+   cat /proc/sys/kernel/random/uuid | cmp - /proc/sys/kernel/random/uuid \
+     && echo "SUSPICIOUS: identical UUIDs" || echo "entropy OK"
    ```
 
 3. **Reset affected state:**
@@ -328,13 +332,13 @@ ApexMail OU hereby notifies the following personal data breach:
 
 | Data Source | Collection Method | Retention |
 |-------------|-------------------|-----------|
-| Application logs (key usage) | `kubectl logs --since=24h` | Preserve for 90 days |
+| Application logs (key usage) | `docker compose logs --since 24h <service>` | Preserve for 90 days |
 | Audit logs (auth events) | API query `/v1/admin/audit-logs` | Preserve for 90 days |
 | Redis state (sessions) | `redis-cli --rdb dump.rdb` | Snapshot immediately |
 | Database state (keys) | `pg_dump -t api_keys -t encryption_keys` | Snapshot immediately |
 | Network logs | From reverse proxy / WAF | Preserve for 90 days |
-| Container images | `docker commit` for pod snapshots | Preserve for 90 days |
-| Key material metadata | `kubectl get secrets -o yaml` | Redact sensitive values |
+| Container images | `docker commit` for container snapshots | Preserve for 90 days |
+| Key material metadata | Env-var/secrets NAME listing from the compose files (never values) | Redact sensitive values |
 
 ### Collection Script
 
@@ -349,13 +353,17 @@ INCIDENT_ID="${1:-unknown}"
 COLLECT_DIR="/tmp/forensic-${INCIDENT_ID}-$(date +%s)"
 mkdir -p "${COLLECT_DIR}"
 
+# Run from the deploy checkout so compose and the env file resolve
+cd /opt/apexmail
+
 echo "Collecting forensic data for incident ${INCIDENT_ID}..."
 echo "Output directory: ${COLLECT_DIR}"
 
 # 1. Application logs (last 24 hours)
 echo "1. Collecting application logs..."
-for pod in $(kubectl get pods -o name | head -20); do
-    kubectl logs "${pod}" --since=24h > "${COLLECT_DIR}/logs-$(echo ${pod} | tr '/' '-').txt" 2>/dev/null || true
+COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+for svc in api-server worker mta outbound-mta imap-server mailstore tracking enterprise compliance; do
+    $COMPOSE logs --since 24h "${svc}" > "${COLLECT_DIR}/logs-${svc}.txt" 2>/dev/null || true
 done
 
 # 2. Audit log export
@@ -363,14 +371,14 @@ echo "2. Exporting audit logs..."
 curl -s "https://api.apexmail.ee/v1/admin/audit-logs?since=24h" \
   -H "Authorization: Bearer <admin-token>" > "${COLLECT_DIR}/audit-logs.json"
 
-# 3. Key metadata (redacted)
+# 3. Key metadata (redacted — NAMES only, never values)
 echo "3. Collecting key metadata..."
-kubectl get secrets -o json | jq '.items[] | {name: .metadata.name, keys: .data | keys}' \
-  > "${COLLECT_DIR}/secret-metadata.json"
+grep -oE '^[A-Z_]+(=_FILE|=' .env | sed 's/=.*//' | sort -u \
+  > "${COLLECT_DIR}/secret-metadata.txt"
 
 # 4. Database key table snapshot
 echo "4. Snapshotting key tables..."
-kubectl exec deployment/postgres -- pg_dump -U apexmail \
+$COMPOSE exec postgres pg_dump -U apexmail \
   -t api_keys -t encryption_keys -t admin_users \
   --data-only --column-inserts \
   > "${COLLECT_DIR}/key-tables.sql"

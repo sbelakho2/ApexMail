@@ -19,7 +19,7 @@ verdict_points = [
   "Individuelle Bereitstellungsprüfungen für dedizierte Infrastrukturanforderungen",
   "Erweiterte Analytik, Inhaltsdiagnosen und Sendezeit-Empfehlungen",
   "Integriertes Einwilligungsmanagement, Audit-Logs und DSGVO-Automatisierung",
-  "Idempotenzschlüssel, ARC-Signierung, BIMI und Reputations-Circuit-Breaker",
+  "Idempotenzschlüssel und Reputations-Circuit-Breaker",
   "First-Party-SDKs für Node.js, Python, Go, PHP, Ruby und Java; Resend-SDKs für Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET und Laravel",
 ]
 
@@ -32,8 +32,8 @@ comparison_sections = [
     { feature = "Zustellrate", apex = '<span class="text-brand-600 font-semibold">Hoch</span>', comp = '<span class="text-surface-600">Hoch</span>', winner = "tie" },
     { feature = "Dedizierte IP", apex = '<span class="text-brand-600 font-semibold">Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Business</span>', comp = '<span class="text-surface-600">Siehe Anbieter-Preise</span>', winner = "none" },
     { feature = "IP-Warm-up", apex = '<span class="text-brand-600 font-semibold">Automatisch, geometrisch</span>', comp = '<span class="text-surface-600">Automatisch (verwaltet)</span>', winner = "tie" },
-    { feature = "BIMI-Unterstützung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "ARC-Signierung", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
+    { feature = "BIMI-Unterstützung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "ARC-Signierung", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Reputations-Circuit-Breaker", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" }
   ]},
   { title = "COMPLIANCE", rows = [

@@ -90,7 +90,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **204 `*.sql` files**, latest `232_enterprise_sso_session_authority.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **206 `*.sql` files**, latest `234_auth_sessions.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

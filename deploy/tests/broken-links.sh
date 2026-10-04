@@ -42,14 +42,21 @@ trap 'rm -f "$CHECK_CACHE" "$RESULTS_JSONL" "$ROUTES_FILE"' EXIT
 
 # fetch_url_meta <url> — print "code|effective_url|redirect_count".
 fetch_url_meta() {
-    local url="$1" output
-    output="$(curl -sS -o /dev/null -w '%{http_code}|%{url_effective}|%{num_redirects}' \
-        --connect-timeout "$TIMEOUT" --max-time "$TIMEOUT" \
-        -L --max-redirs "$MAX_REDIRECTS" \
-        "$url" 2>/dev/null)" || {
-        printf '000|%s|0' "$url"; return 0
-    }
-    printf '%s' "$output"
+    local url="$1" output attempt
+    # Bounded retries: on a vantage with intermittent DNS/route loss the same
+    # URL flaps 000<->200 within seconds (observed repeatedly on this host).
+    # A transient network error is not a broken link; retry before verdict.
+    for attempt in 1 2 3; do
+        output="$(curl -sS -o /dev/null -w '%{http_code}|%{url_effective}|%{num_redirects}' \
+            --connect-timeout "$TIMEOUT" --max-time "$TIMEOUT" \
+            -L --max-redirs "$MAX_REDIRECTS" \
+            "$url" 2>/dev/null)" && {
+            printf '%s' "$output"
+            return 0
+        }
+        [ "$attempt" -lt 3 ] && sleep 2
+    done
+    printf '000|%s|0' "$url"; return 0
 }
 
 # record_for_meta <url> <source> <element> <meta> — classify "code|eff|red"

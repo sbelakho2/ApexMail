@@ -1175,8 +1175,7 @@ mod tests {
     /// closed for email bodies).
     #[test]
     fn sanitize_output_strips_case_folded_payloads() {
-        let result =
-            sanitize_llm_output("<SCRIPT>alert(1)</SCRIPT><img SRC=x ONERROR=alert(2)>");
+        let result = sanitize_llm_output("<SCRIPT>alert(1)</SCRIPT><img SRC=x ONERROR=alert(2)>");
         assert!(
             result.was_modified,
             "uppercase markup must be stripped: {}",

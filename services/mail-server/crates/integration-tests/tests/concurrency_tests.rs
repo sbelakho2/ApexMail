@@ -284,12 +284,10 @@ async fn require_reachable_redis(test_name: &str) -> () {
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("redis pool");
     let reachable = match tokio::time::timeout(Duration::from_secs(2), probe.get()).await {
-        Ok(Ok(mut conn)) => {
-            deadpool_redis::redis::cmd("PING")
-                .query_async::<String>(&mut *conn)
-                .await
-                .is_ok()
-        }
+        Ok(Ok(mut conn)) => deadpool_redis::redis::cmd("PING")
+            .query_async::<String>(&mut *conn)
+            .await
+            .is_ok(),
         _ => false,
     };
     assert!(
@@ -347,7 +345,8 @@ async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
     require_reachable_redis("rc01_admin_wallet_credit").await;
     let app = build_test_app(pool.clone()).await;
     let admin_key = seed_system_admin_key(&pool).await;
-    let (tenant_id, _customer_key) = seed_tenant_with_key(&pool, "starter", &["billing:read"]).await;
+    let (tenant_id, _customer_key) =
+        seed_tenant_with_key(&pool, "starter", &["billing:read"]).await;
 
     let credit = |key: String| {
         let app = app.clone();
@@ -381,13 +380,12 @@ async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
         "a replayed request must be answered idempotently (cached or claimed), \
          got {status_replay}: {body_replay}"
     );
-    let (key1_rows,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1",
-    )
-    .bind(&key1)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (key1_rows,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1")
+            .bind(&key1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         key1_rows, 1,
         "a replayed credit must not mint a second ledger row"
@@ -411,21 +409,19 @@ async fn rc01_admin_wallet_credit_idempotency_replay_and_race() {
 
     // ── Ledger + balance: each key applied EXACTLY once ──
     for key in [&key1, &key2] {
-        let (rows,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1",
-        )
-        .bind(key)
+        let (rows,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM wallet_transactions WHERE reference = $1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 1, "reference {key} must have exactly one ledger row");
+    }
+    let (balance,): (i64,) = sqlx::query_as("SELECT balance FROM wallets WHERE tenant_id = $1")
+        .bind(&tenant_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(rows, 1, "reference {key} must have exactly one ledger row");
-    }
-    let (balance,): (i64,) =
-        sqlx::query_as("SELECT balance FROM wallets WHERE tenant_id = $1")
-            .bind(&tenant_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
     assert_eq!(
         balance, 200,
         "wallet balance must be credited exactly once per accepted key"
@@ -501,12 +497,11 @@ async fn rc02_concurrent_webhook_creation_same_url_is_unique() {
         async {}
     );
     let (_t, other_webhook_id) = c.expect("the other tenant's create must succeed");
-    let (cross_rows,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
-            .bind(&url)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (cross_rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
+        .bind(&url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         cross_rows, 2,
         "the same URL must be registrable by DIFFERENT tenants"
@@ -562,10 +557,7 @@ async fn rc03_subscription_status_override_concurrent_is_serialized() {
         }
     };
 
-    let ((sa, ba), (sb, bb)) = tokio::join!(
-        force("canceled"),
-        force("suspended"),
-    );
+    let ((sa, ba), (sb, bb)) = tokio::join!(force("canceled"), force("suspended"),);
     assert!(
         sa.is_success() && sb.is_success(),
         "both racing overrides must commit (row-lock serialization), got {sa} {ba:?} / {sb} {bb:?}"
@@ -643,12 +635,11 @@ async fn rc04_webhook_deletion_is_tenant_scoped() {
     .execute(&pool)
     .await
     .expect("seed webhook");
-    let (webhook_id,): (String,) =
-        sqlx::query_as("SELECT id FROM webhooks WHERE url = $1")
-            .bind(&webhook_url)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (webhook_id,): (String,) = sqlx::query_as("SELECT id FROM webhooks WHERE url = $1")
+        .bind(&webhook_url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     // A foreign tenant CANNOT delete it — the tenant-scoped WHERE holds.
     let (status_foreign, body_foreign) = dispatch(
@@ -682,12 +673,11 @@ async fn rc04_webhook_deletion_is_tenant_scoped() {
         StatusCode::NO_CONTENT,
         "the owning tenant's delete must succeed"
     );
-    let (remaining,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE id = $1")
-            .bind(&webhook_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (remaining,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE id = $1")
+        .bind(&webhook_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(remaining, 0, "the webhook row must be gone after delete");
     let _ = attacker_tenant;
 }
@@ -747,12 +737,15 @@ async fn rc05_concurrent_domain_delete_is_serialized_and_tenant_scoped() {
     let (a, b) = tokio::join!(delete(key.clone()), delete(key));
     let statuses = [a, b];
     assert_eq!(
-        statuses.iter().filter(|s| **s == StatusCode::NO_CONTENT).count(),
+        statuses
+            .iter()
+            .filter(|s| **s == StatusCode::NO_CONTENT)
+            .count(),
         1,
         "exactly one concurrent delete may report 204, got {statuses:?}"
     );
     assert!(
-        statuses.iter().any(|s| *s == StatusCode::NOT_FOUND),
+        statuses.contains(&StatusCode::NOT_FOUND),
         "the losing delete must report 404 (row already gone), got {statuses:?}"
     );
     let (remaining,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM domains WHERE id = $1")
@@ -822,13 +815,12 @@ async fn rc06_plan_override_last_committer_value_wins() {
     assert!(s1.is_success(), "first override must succeed: {b1:?}");
     let (s2, b2) = override_plan("enterprise", "rc06-second").await;
     assert!(s2.is_success(), "second override must succeed: {b2:?}");
-    let (plan_id, reason, admin_id): (String, String, String) = sqlx::query_as(
-        "SELECT plan_id, reason, admin_id FROM plan_overrides WHERE tenant_id = $1",
-    )
-    .bind(&tenant_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (plan_id, reason, admin_id): (String, String, String) =
+        sqlx::query_as("SELECT plan_id, reason, admin_id FROM plan_overrides WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         plan_id, "enterprise",
         "the LAST committed override must be the stored plan"
@@ -868,17 +860,13 @@ async fn rc06_plan_override_last_committer_value_wins() {
         "both racing overrides must commit, got {sa} {ba:?} / {sb} {bb:?}"
     );
 
-    let (plan_id, reason): (String, String) = sqlx::query_as(
-        "SELECT plan_id, reason FROM plan_overrides WHERE tenant_id = $1",
-    )
-    .bind(&tenant_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let consistent_pairs = [
-        ("pro", "rc06-race-pro"),
-        ("enterprise", "rc06-race-ent"),
-    ];
+    let (plan_id, reason): (String, String) =
+        sqlx::query_as("SELECT plan_id, reason FROM plan_overrides WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let consistent_pairs = [("pro", "rc06-race-pro"), ("enterprise", "rc06-race-ent")];
     assert!(
         consistent_pairs.contains(&(plan_id.as_str(), reason.as_str())),
         "the stored override must be one request's CONSISTENT (plan, reason) pair, \
@@ -899,8 +887,7 @@ async fn rc06_plan_override_last_committer_value_wins() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    let audited_plans: Vec<String> =
-        audited_plans.into_iter().map(|(plan,)| plan).collect();
+    let audited_plans: Vec<String> = audited_plans.into_iter().map(|(plan,)| plan).collect();
     assert_eq!(
         audited_plans.len(),
         4,
@@ -968,15 +955,15 @@ async fn rc07_idempotency_middleware_claim_is_atomic() {
         "the replay must serve the cached response"
     );
     assert_eq!(
-        replay_body.get("id"), first_body.get("id"),
+        replay_body.get("id"),
+        first_body.get("id"),
         "the replay must be the SAME resource, not a second create"
     );
-    let (rows,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
-            .bind(&webhook_url)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
+        .bind(&webhook_url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(
         rows, 1,
         "the idempotency middleware must let the handler execute exactly once"
@@ -1005,7 +992,10 @@ async fn rc07_idempotency_middleware_claim_is_atomic() {
         tokio::join!(race(fresh_key.clone()), race(fresh_key.clone()));
     let executed = sa.is_success();
     assert_eq!(
-        [sa.is_success(), sb.is_success()].iter().filter(|ok| **ok).count(),
+        [sa.is_success(), sb.is_success()]
+            .iter()
+            .filter(|ok| **ok)
+            .count(),
         1,
         "exactly one racing duplicate may execute: {sa} {sa_body:?} / {sb} {sb_body:?}"
     );
@@ -1019,13 +1009,15 @@ async fn rc07_idempotency_middleware_claim_is_atomic() {
         StatusCode::CONFLICT,
         "the racing duplicate must be refused while the original is in flight: {conflict_body:?}"
     );
-    let (rows,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
-            .bind(&fresh_url)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(rows, 1, "the concurrent duplicate must not create a second webhook");
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM webhooks WHERE url = $1")
+        .bind(&fresh_url)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "the concurrent duplicate must not create a second webhook"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1039,7 +1031,10 @@ async fn rc07_idempotency_middleware_claim_is_atomic() {
 async fn f16b_admin_invoice_creation_is_deduplicated_per_period() {
     // TEMP DIAGNOSTIC.
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_test_writer()
         .try_init();
     let Some(pool) = optional_canonical_pool("f16b_invoice_dedupe").await else {

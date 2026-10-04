@@ -159,7 +159,7 @@ pub fn vat_amount_half_up(amount_cents: i64, rate_percent: f64) -> i64 {
     };
     // Only a nonsense rate × near-i64-bound amount can leave the i64 range;
     // clamp instead of wrapping the tax.
-    i64::try_from(vat).unwrap_or_else(|_| if vat < 0 { i64::MIN } else { i64::MAX })
+    i64::try_from(vat).unwrap_or(if vat < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// Format a VAT rate for display: `24` renders as "24", `25.5` as "25.5".

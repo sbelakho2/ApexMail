@@ -87,7 +87,10 @@ mod rate_limiter_real_tests {
         let before = counter.current_count();
         for _ in 0..10 {
             let peeked = counter.peek();
-            assert!(peeked.is_allowed(), "one admitted event must leave headroom");
+            assert!(
+                peeked.is_allowed(),
+                "one admitted event must leave headroom"
+            );
         }
         assert_eq!(
             counter.current_count(),
@@ -133,7 +136,10 @@ mod rate_limiter_contention_tests {
     fn concurrent_admissions_never_exceed_the_limit() {
         // A 60 s window cannot rotate during the burst, so the admission
         // count is deterministic: exactly `limit` of 1_000 racing attempts.
-        let counter = Arc::new(SlidingWindowCounter::from_params(Duration::from_secs(60), 50));
+        let counter = Arc::new(SlidingWindowCounter::from_params(
+            Duration::from_secs(60),
+            50,
+        ));
 
         let handles: Vec<_> = (0..10)
             .map(|_| {
@@ -209,11 +215,18 @@ mod circuit_breaker_real_tests {
         assert_eq!(cb.state(), CircuitState::Open);
 
         std::thread::sleep(Duration::from_millis(35));
-        assert!(cb.is_allowed(), "probe after open_duration must be admitted");
+        assert!(
+            cb.is_allowed(),
+            "probe after open_duration must be admitted"
+        );
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         cb.record_success();
-        assert_eq!(cb.state(), CircuitState::HalfOpen, "one success is not enough");
+        assert_eq!(
+            cb.state(),
+            CircuitState::HalfOpen,
+            "one success is not enough"
+        );
         cb.record_success();
         assert_eq!(
             cb.state(),
@@ -232,7 +245,11 @@ mod circuit_breaker_real_tests {
         assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         cb.record_failure();
-        assert_eq!(cb.state(), CircuitState::Open, "half-open failure must re-open");
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "half-open failure must re-open"
+        );
         assert!(
             !cb.is_allowed(),
             "a re-opened circuit blocks again for a full open_duration"
@@ -289,9 +306,8 @@ mod circuit_breaker_real_tests {
 #[cfg(test)]
 mod crypto_real_tests {
     use apexmail_lib::crypto::{
-        create_hmac_signature, detect_api_key_hash_version, hash_api_key,
-        hash_api_key_argon2, hash_api_key_with_secret, timing_safe_compare,
-        verify_api_key_hash, ApiKeyHashVersion,
+        create_hmac_signature, detect_api_key_hash_version, hash_api_key, hash_api_key_argon2,
+        hash_api_key_with_secret, timing_safe_compare, verify_api_key_hash, ApiKeyHashVersion,
     };
 
     #[test]
@@ -344,21 +360,18 @@ mod crypto_real_tests {
             hash_api_key_argon2(key).expect("second hash"),
             "each hash must carry a fresh random salt"
         );
-        assert_eq!(
+        assert!(
             verify_api_key_hash(key, &hash).expect("verify runs"),
-            true,
             "the right key must verify"
         );
-        assert_eq!(
-            verify_api_key_hash("am_wrong_key", &hash).expect("verify runs"),
-            false,
+        assert!(
+            !verify_api_key_hash("am_wrong_key", &hash).expect("verify runs"),
             "a wrong key must NOT verify"
         );
         // A tampered PHC body must not verify as true either.
         let tampered = format!("{}X", &hash[..hash.len() - 1]);
-        assert_eq!(
-            verify_api_key_hash(key, &tampered).unwrap_or(false),
-            false,
+        assert!(
+            !verify_api_key_hash(key, &tampered).unwrap_or(false),
             "a corrupted hash must never verify"
         );
     }
@@ -389,7 +402,10 @@ mod crypto_real_tests {
     fn timing_safe_compare_accepts_only_exact_matches() {
         assert!(timing_safe_compare("same", "same"));
         assert!(!timing_safe_compare("same", "same "));
-        assert!(!timing_safe_compare("same", "sane"), "one byte must flip it");
+        assert!(
+            !timing_safe_compare("same", "sane"),
+            "one byte must flip it"
+        );
         assert!(!timing_safe_compare("short", "shorter-than-short"));
         assert!(!timing_safe_compare("", "nonempty"));
     }
@@ -404,7 +420,9 @@ mod crypto_real_tests {
 /// header-injection refusals.
 #[cfg(test)]
 mod validation_real_tests {
-    use apexmail_lib::validation::{has_null_bytes, is_valid_domain, is_valid_email, sanitize_string};
+    use apexmail_lib::validation::{
+        has_null_bytes, is_valid_domain, is_valid_email, sanitize_string,
+    };
 
     #[test]
     fn email_validator_accepts_documented_valid_shapes() {
@@ -463,7 +481,10 @@ mod validation_real_tests {
 
         assert_eq!(sanitize_string("hello\0world"), "helloworld");
         assert_eq!(sanitize_string("clean"), "clean");
-        assert!(!has_null_bytes(&sanitize_string("a\0b")), "sanitized output is NUL-free");
+        assert!(
+            !has_null_bytes(&sanitize_string("a\0b")),
+            "sanitized output is NUL-free"
+        );
     }
 }
 

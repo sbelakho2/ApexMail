@@ -155,11 +155,7 @@ fn noisy_neighbour_tenant_b_stays_within_documented_bounds() {
             // Maximum-rate loop on A's OWN drained key: the limiter must
             // deny — that denial is the isolation proof.
             let _ = noisy_limiter.check(TENANT_A);
-            noisy_collector.record_counter(
-                &format!("isolation::{TENANT_A}"),
-                1.0,
-                "noisy tenant",
-            );
+            noisy_collector.record_counter(&format!("isolation::{TENANT_A}"), 1.0, "noisy tenant");
             ops += 1;
         }
         ops

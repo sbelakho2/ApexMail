@@ -1,5 +1,12 @@
 # Redis Cluster Migration Strategy
 
+> **ARCHITECTURE-TRUTH: ROADMAP** — This document is an *evaluation/roadmap*
+> for a possible future clustered Redis topology. The Kubernetes/Helm
+> mechanics it contains are NOT how ApexMail runs: production is a single
+> Hetzner host with Docker Compose (see [`ARCHITECTURE.md`](../../ARCHITECTURE.md))
+> running **one** Redis instance. Preserved for design value — do not execute
+> it as an operational runbook.
+
 > **Document Owner:** Infrastructure Team
 > **Last Updated:** 2026-05-11
 > **Related:** [`docker-compose.yml` Redis service](../../docker-compose.yml), [`rate-limiter/src/redis_limiter.rs`](../../services/mail-server/crates/rate-limiter/src/redis_limiter.rs)

@@ -520,19 +520,16 @@ pub(crate) mod test_support {
         use crate::processor::REDIS_WAL_KEY;
         use std::time::Duration;
         for _ in 0..16u32 {
-            match pool.get().await {
-                Ok(mut conn) => {
-                    if let Ok(entries) = redis::cmd("LRANGE")
-                        .arg(REDIS_WAL_KEY)
-                        .arg(0)
-                        .arg(-1)
-                        .query_async::<Vec<String>>(&mut *conn)
-                        .await
-                    {
-                        return entries.into_iter().filter(|e| e.contains(needle)).collect();
-                    }
+            if let Ok(mut conn) = pool.get().await {
+                if let Ok(entries) = redis::cmd("LRANGE")
+                    .arg(REDIS_WAL_KEY)
+                    .arg(0)
+                    .arg(-1)
+                    .query_async::<Vec<String>>(&mut *conn)
+                    .await
+                {
+                    return entries.into_iter().filter(|e| e.contains(needle)).collect();
                 }
-                Err(_) => {}
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

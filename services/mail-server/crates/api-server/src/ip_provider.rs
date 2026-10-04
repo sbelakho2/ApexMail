@@ -3778,6 +3778,10 @@ mod db_tests {
 
             // Warmup day is derived from the anchor, and the schedule follows it.
             let ten_days_ago = Uuid::new_v4();
+            // Anchor 30 minutes beyond the exact 10-day boundary: the warmup
+            // day floors elapsed time, and a few seconds of host-vs-DB clock
+            // skew would otherwise truncate day 10 to 9 (observed on a
+            // Docker-VM runner with drifting clock).
             seed_ip_row(
                 &pool,
                 &tenant,
@@ -3785,7 +3789,7 @@ mod db_tests {
                 "203.0.113.33",
                 "warming",
                 None,
-                Some(Utc::now() - TimeDelta::days(10)),
+                Some(Utc::now() - TimeDelta::days(10) - TimeDelta::minutes(30)),
                 None,
                 None,
                 None,

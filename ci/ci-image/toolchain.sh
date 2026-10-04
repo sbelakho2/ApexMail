@@ -89,13 +89,18 @@ assert() {
         fail=$((fail + 1))
         return 0
     fi
-    # 2>&1 already folded above; take the first line of the output.
+    # 2>&1 already folded above; DISPLAY the first line, but match the pin
+    # across the WHOLE output: some tools print a warning banner to stderr
+    # before the version (composer, when run non-interactively as root),
+    # and first-line-only matching made the assert fail on a correctly
+    # pinned tool (found by the first real image build — external audit
+    # 2026-10-02 item 1).
     _a_got=$(printf '%s' "$_a_out" | head -n 1)
     if [ "$_a_want" = "-" ]; then
         echo "toolchain: $_a_name — ${_a_got:-(no version output)} (presence pin)"
         return 0
     fi
-    if printf '%s' "$_a_got" | grep -qF -- "$_a_want"; then
+    if printf '%s' "$_a_out" | grep -qF -- "$_a_want"; then
         echo "toolchain: $_a_name — $_a_got (pin $_a_want)"
     else
         echo "FAIL toolchain: $_a_name reports '$_a_got' — does not carry the pinned \
@@ -117,15 +122,27 @@ assert sqlx           'sqlx --version'           "${SQLX_VERSION:-}"
 # Security + supply chain (exact pins).
 assert gitleaks    'gitleaks version'  "${GITLEAKS_VERSION:-}"
 assert trivy       'trivy --version'   "${TRIVY_VERSION:-}"
-assert semgrep     'semgrep --version' "${SEMGREP_VERSION:-}"
+# semgrep's python wrapper execs the OCaml core with the version flag and
+# misroutes it on some emulated builders (core answers "unknown option
+# '--version'") — the hermeticity contract is "the pinned package is
+# installed", which pip's own metadata proves deterministically on every
+# builder. The wrapper's runtime behaviour is exercised for real by the
+# security stage's semgrep lane (ci_have_tool + semgrep scan) on the
+# executor host.
+assert semgrep     'pip3 show semgrep' "${SEMGREP_VERSION:-}"
 assert pre-commit  'pre-commit --version' "${PRE_COMMIT_VERSION:-}"
 assert hadolint    'hadolint --version' "${HADOLINT_VERSION:-}"
 
 # docker CLI + compose plugin (audit SM14 F5): CLIENT-SIDE only — the
 # compose-contract gate renders `docker compose config` without a daemon.
 # Presence pins: both track their vendor repo's bookworm security updates.
-assert docker          'docker --version'
-assert docker-compose  'docker compose version'
+# The NAME is 'docker compose' (space!) so the helper's presence check
+# resolves the `docker` binary; invoked as 'docker-compose' it looked for a
+# `docker-compose` executable the plugin never ships and the assert could
+# never pass (found by the first real image build — external audit
+# 2026-10-02 item 1).
+assert docker           'docker --version'
+assert 'docker compose' 'docker compose version'
 
 # Languages / site tooling.
 assert composer 'composer --version' "${COMPOSER_VERSION:-}"

@@ -1080,7 +1080,7 @@ mod tests {
             "a sub-material drop must not fail the refresh"
         );
         assert!(
-            feed_entries_rejected_total() >= rejected_before + 1,
+            feed_entries_rejected_total() > rejected_before,
             "the dropped entry must still be counted"
         );
         assert_eq!(

@@ -27,10 +27,19 @@
 #   * ci/stages/verify.sh rolls back to the previous :<sha> pins when
 #     post-deploy probes fail (see deploy/rollback-plan.md — rollback is
 #     local retagging, NOT a registry pull).
-# TODO(audit): render immutable digest pins (`image: ghcr.io/...@sha256:...`)
-# from the images-stage manifest into this file at deploy time so the
-# running stack is provably byte-identical to what CI gated — until then,
-# the digest-verify in ci/stages/deploy.sh is the tamper guard.
+# ── Digest pinning (read this before running compose by hand) ───────────────
+# The base + prod compose files carry LOGICAL `:latest` tags BY DESIGN: the
+# canonical deployment always layers a GENERATED digest override on top of
+# them. ci/stages/images.sh renders docker-compose.digest-override.yml (plus
+# release-manifest.json, signed together in SHA256SUMS.images) into its run
+# dir, and ci/stages/deploy.sh applies that override to every compose call
+# and re-verifies each live image digest against the manifest before `up`.
+# A direct `docker compose -f docker-compose.yml -f docker-compose.prod.yml
+# up` WITHOUT the override resolves whatever `:latest` currently points at
+# and is UNSUPPORTED for production. The only documented manual invocation is
+# deploy/scripts/deploy.sh, which renders the same override pair into
+# ci/runs/<ts>_manual/ and appends it to its own compose calls
+# (see deploy/DEPLOYMENT.md, "Immutable deployment artifacts").
 #
 # Audit O — shared log rotation anchor: attach `logging: *default-logging` to
 # every service defined in this overlay so no container can grow an
@@ -915,6 +924,15 @@ services:
       # must never be auto-promoted). Chaos engineering stays OFF.
       FAILBACK_ENABLED: "false"
       CHAOS_ENABLED: "false"
+      # External audit 2026-10-02 #9: mechanical failover↔fencing coupling.
+      # With FAILOVER_ENABLED=true (the default) AND a non-empty
+      # DB_REPLICA_HOSTS, ha-server REFUSES TO START unless
+      # APEXMAIL_HA_FENCING=true — without data-plane fence enforcement a
+      # failover-fenced old primary keeps accepting writes (split brain).
+      # See the APEXMAIL_HA_FENCING block in .env.production.example.
+      FAILOVER_ENABLED: ${FAILOVER_ENABLED:-true}
+      DB_REPLICA_HOSTS: ${DB_REPLICA_HOSTS:-}
+      APEXMAIL_HA_FENCING: ${APEXMAIL_HA_FENCING:-false}
     secrets:
       - postgres_password
       - redis_password

@@ -367,6 +367,11 @@ impl<'a> Input<'a> {
         // parsed by accident, and which made `autocomplete` a class token
         // instead of an attribute). Every attribute now sits where it
         // belongs: classes in class=, the rest as real attributes.
+        let classes = format!(
+            "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
+            input_variant_class(resolved_variant),
+            input_size_class(self.size),
+        );
         let input_markup = format!(
             "<input type=\"{input_type}\"{name}{id} value=\"{value}\" placeholder=\"{placeholder}\" class=\"{classes}\"{disabled}{aria_error}{autocomplete_attr}{required_attr} data-variant=\"{variant}\" data-size=\"{size}\" />",
             input_type = self.input_type,
@@ -374,11 +379,7 @@ impl<'a> Input<'a> {
             id = id_attr,
             value = self.value,
             placeholder = self.placeholder,
-            classes = format!(
-                "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
-                input_variant_class(resolved_variant),
-                input_size_class(self.size),
-            ),
+            classes = classes,
             disabled = disabled,
             aria_error = aria_error,
             autocomplete_attr = autocomplete_attr,

@@ -368,8 +368,8 @@ fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("APEX_EXPORT_ALL_UI_ROUTES").as_deref() == Ok("1") {
         export_full_route_fixtures(out_dir, &mut manifest)?;
     } else {
-        export_auth_fixtures(&out_dir, &mut manifest)?;
-        export_marketing_fixtures(&out_dir, &mut manifest)?;
+        export_auth_fixtures(out_dir, &mut manifest)?;
+        export_marketing_fixtures(out_dir, &mut manifest)?;
     }
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;

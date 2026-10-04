@@ -26,8 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use apexmail_lib::validation::is_valid_email;
 use apexmail_lib::create_hmac_signature;
+use apexmail_lib::validation::is_valid_email;
 use apexmail_rate_limiter::KeyedRateLimiter;
 use chrono::Utc;
 use observability_service::metrics_collector::MetricsCollector;
@@ -221,8 +221,7 @@ async fn test_queue_scheduler_soak() {
             if retry_queue.is_empty() {
                 break; // channel closed and nothing deferred
             }
-            let batch: Vec<Job> =
-                retry_queue.drain(..BATCH.min(retry_queue.len())).collect();
+            let batch: Vec<Job> = retry_queue.drain(..BATCH.min(retry_queue.len())).collect();
             let outcome = scheduler_dispatcher.schedule(batch, BATCH);
             // Dispatch the selected (in-memory processing = counting).
             processed_dispatcher.fetch_add(outcome.selected.len() as u64, Ordering::Relaxed);
@@ -247,9 +246,7 @@ async fn test_queue_scheduler_soak() {
         "soak processed {done} of {TOTAL_JOBS} jobs — the claim loop lost work"
     );
     let jobs_per_sec = TOTAL_JOBS as f64 / elapsed.as_secs_f64();
-    println!(
-        "queue soak: {TOTAL_JOBS} jobs in {elapsed:?} ({jobs_per_sec:.0} jobs/s)"
-    );
+    println!("queue soak: {TOTAL_JOBS} jobs in {elapsed:?} ({jobs_per_sec:.0} jobs/s)");
     assert!(
         elapsed < Duration::from_secs(30),
         "50k-job soak took {elapsed:?}"
@@ -259,7 +256,6 @@ async fn test_queue_scheduler_soak() {
         "soak throughput {jobs_per_sec:.0} jobs/s below the 5k/s floor"
     );
 }
-
 
 // ===========================================================================
 // 3. Mixed workload — real in-memory production calls under contention
@@ -307,7 +303,7 @@ async fn test_mixed_workload_under_load() {
                     local_max = took;
                 }
                 // Yield every 64 ops so workers interleave on the runtime.
-                if local_ops % 64 == 0 {
+                if local_ops.is_multiple_of(64) {
                     tokio::task::yield_now().await;
                 }
             }

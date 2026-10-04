@@ -1242,7 +1242,7 @@ mod tests {
                 sqlx::query(
                     "INSERT INTO events (id, tenant_id, message_id, event_type, recipient,
                                          recipient_provider, provider_source, timestamp)
-                     VALUES ($1, $2, $3, 'sent', $4, $5, $6, NOW())",
+                     VALUES ($1, $2, $3, 'sent', $4, $5, $6, NOW() - INTERVAL '5 seconds')",
                 )
                 .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
                 .bind(&tenant)
@@ -1385,7 +1385,7 @@ mod tests {
             async move {
                 sqlx::query(
                     "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
-                     VALUES ($1, $2, $3, 'sent', $4, NOW())",
+                     VALUES ($1, $2, $3, 'sent', $4, NOW() - INTERVAL '5 seconds')",
                 )
                 .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
                 .bind(&tenant)

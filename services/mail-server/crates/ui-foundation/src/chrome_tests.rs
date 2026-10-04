@@ -94,7 +94,7 @@ fn chrome_nav(html: &str) -> Option<String> {
 fn chrome_footer(html: &str) -> String {
     element_blocks(html, "footer")
         .into_iter()
-        .map(|block| strip_class_attributes(block))
+        .map(strip_class_attributes)
         .next()
         .unwrap_or("(no <footer> element)".to_string())
 }

@@ -256,7 +256,7 @@ mod tests {
         // an open before the send is not an outcome of it).
         sqlx::query(
             "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
-             VALUES ($1, $2, $3, 'sent', 'user@example.com', NOW())",
+             VALUES ($1, $2, $3, 'sent', 'user@example.com', NOW() - INTERVAL '5 seconds')",
         )
         .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
         .bind(&tenant)
@@ -267,7 +267,7 @@ mod tests {
         for _ in 0..3 {
             sqlx::query(
                 "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
-                 VALUES ($1, $2, $3, 'opened', 'user@example.com', NOW())",
+                 VALUES ($1, $2, $3, 'opened', 'user@example.com', NOW() - INTERVAL '5 seconds')",
             )
             .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
             .bind(&tenant)

@@ -1009,7 +1009,9 @@ async fn isolation_migrate(
     ) {
         return (
             StatusCode::BAD_REQUEST,
-            err_json(&format!("Unsupported migration path: {current} -> {target}")),
+            err_json(&format!(
+                "Unsupported migration path: {current} -> {target}"
+            )),
         );
     }
 

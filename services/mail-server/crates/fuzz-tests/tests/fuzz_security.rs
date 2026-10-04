@@ -731,7 +731,11 @@ mod stix_fuzz {
     fn fuzz_stix_extract_finds_embedded_observables() {
         let mut rng = fuzz_tests::fuzz_rng();
         for i in 0..2_000 {
-            let ip = format!("10.{i}.{}.{}", rng.random_range(0..256), rng.random_range(0..256));
+            let ip = format!(
+                "10.{i}.{}.{}",
+                rng.random_range(0..256),
+                rng.random_range(0..256)
+            );
             let domain = format!("evil-{i}.example.test");
             let email = format!("bad{i}@evil-{i}.example.test");
             let url = format!("http://{domain}/payload{i}");

@@ -1869,6 +1869,10 @@ impl ActionHandler for SequenceStepHandler {
 /// above any legitimate hold while staying short enough that a retry backoff
 /// meets a requeued step.
 pub const STEP_EXECUTION_LEASE_SECS: i64 = 300;
+// Positivity is the liveness contract: a zero or negative lease would make
+// the reaper re-queue steps the instant they are claimed.
+const _: () = assert!(STEP_EXECUTION_LEASE_SECS > 0);
+const _: () = assert!(STEP_EXECUTION_LEASE_SECS <= 3600);
 
 /// Reaper (audit SM7 F2): return step executions whose `executing` lease
 /// expired to the queue, so a transient failure — or a crash — between the
@@ -3601,10 +3605,14 @@ mod tests {
 
     #[test]
     fn executing_lease_is_bounded_and_the_reaper_requeues_only_expired_claims() {
-        // The lease must be positive and short enough to recover within a
-        // few worker ticks — the constant IS the liveness contract.
-        assert!(STEP_EXECUTION_LEASE_SECS > 0);
-        assert!(STEP_EXECUTION_LEASE_SECS <= 3600);
+        // The lease must be short enough to recover within a few worker
+        // ticks — the constant IS the liveness contract. Both invariants
+        // (positivity AND the 1h ceiling) are const-asserted next to the
+        // constant's definition; clippy::assertions_on_constants rightly
+        // rejects runtime asserts on consts, so this test pins the compile
+        // checks exist by consuming the constant.
+        assert_eq!(STEP_EXECUTION_LEASE_SECS, 300);
+        const _: () = assert!(STEP_EXECUTION_LEASE_SECS <= 3600);
     }
 
     /// A transient failure AFTER the claim (the step is stranded in

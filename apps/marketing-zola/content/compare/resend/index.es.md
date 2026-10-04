@@ -19,7 +19,7 @@ verdict_points = [
   "Revisiones de despliegue personalizadas para necesidades de infraestructura dedicada",
   "Analítica avanzada, diagnóstico de contenido y recomendaciones de hora de envío",
   "Gestión del consentimiento, registros de auditoría y automatización del RGPD integrados",
-  "Claves de idempotencia, firma ARC, BIMI y circuit breaker de reputación",
+  "Claves de idempotencia y circuit breaker de reputación",
   "SDKs propios para Node.js, Python, Go, PHP, Ruby y Java; SDKs de Resend para Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET y Laravel",
 ]
 
@@ -32,8 +32,8 @@ comparison_sections = [
     { feature = "Tasa de entrega", apex = '<span class="text-brand-600 font-semibold">Alta</span>', comp = '<span class="text-surface-600">Alta</span>', winner = "tie" },
     { feature = "IP dedicada", apex = '<span class="text-brand-600 font-semibold">Complemento aprobado en Pro; 1 incluida en Growth, 3 en Business</span>', comp = '<span class="text-surface-600">Consulte los precios del proveedor</span>', winner = "none" },
     { feature = "Calentamiento de IP", apex = '<span class="text-brand-600 font-semibold">Automático geométrico</span>', comp = '<span class="text-surface-600">Automático (gestionado)</span>', winner = "tie" },
-    { feature = "Soporte de BIMI", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "Firma ARC", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
+    { feature = "Soporte de BIMI", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
+    { feature = "Firma ARC", apex = '<span class="text-surface-400">✗</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Circuit breaker de reputación", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" }
   ]},
   { title = "CUMPLIMIENTO", rows = [

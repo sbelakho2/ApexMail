@@ -28,7 +28,7 @@ impl Tx {
     /// transaction (a bare `&mut Transaction` is NOT an `Executor`).
     /// Returns `None` once the transaction was committed or rolled back.
     pub fn conn(&mut self) -> Option<&mut sqlx::PgConnection> {
-        self.inner.as_mut().map(|tx| &mut **tx)
+        self.inner.as_deref_mut()
     }
 
     /// Commit the transaction.

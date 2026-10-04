@@ -2112,7 +2112,10 @@ async fn fetch_skips_a_message_expunged_between_view_refresh_and_listing() {
         !out.contains("* 2 FETCH"),
         "the vanished uid must be skipped, not fabricated: {out:?}"
     );
-    assert!(out.contains("OK FETCH completed"), "clean completion: {out:?}");
+    assert!(
+        out.contains("OK FETCH completed"),
+        "clean completion: {out:?}"
+    );
     h.shutdown().await;
 }
 

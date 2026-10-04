@@ -20,7 +20,7 @@ use ha::config::{Config, RoutingMode};
 use ha::failover::FailoverService;
 use ha::health_check::HealthCheckService;
 use ha::multi_region::MultiRegionService;
-use ha::replication::ReplicationService;
+use ha::replication::{ReplicationService, SetSyncModeError, SyncModeRefusal};
 use ha::routes::{build_router, AppState};
 use ha::types::*;
 use sqlx::PgPool;
@@ -235,6 +235,122 @@ async fn redis_conn(config: &Config) -> redis::aio::MultiplexedConnection {
         .get_multiplexed_async_connection()
         .await
         .expect("redis connection")
+}
+
+// ── Sync-mode test helpers (external audits #2/#7/#10) ──────────────────
+
+/// The live `synchronous_standby_names` on the test server.
+async fn sync_standby_setting(db: &sqlx::PgPool) -> String {
+    let (value,): (String,) =
+        sqlx::query_as("SELECT setting FROM pg_settings WHERE name = 'synchronous_standby_names'")
+            .fetch_one(db)
+            .await
+            .expect("read synchronous_standby_names");
+    value
+}
+
+/// pg_reload_conf() returns before the postmaster has processed the
+/// reload, so the live setting is observed with a small bounded wait
+/// instead of an immediate (racy) read.
+async fn wait_for_setting(db: &sqlx::PgPool, expected: &str) -> String {
+    let mut current = sync_standby_setting(db).await;
+    for _ in 0..40 {
+        if current == expected {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        current = sync_standby_setting(db).await;
+    }
+    current
+}
+
+/// External audit #2: a REAL `pg_stat_replication` row cannot exist in the
+/// single-node test topology, so the guard's success path shadows the view
+/// with a same-named table in a private schema — the service pool's
+/// `search_path` resolves the unqualified view to the shadow (a DB test
+/// seam, not a code seam). Returns the shadow-configured pool and the
+/// schema to drop afterwards.
+async fn provision_shadow_pg_stat_replication() -> Option<(PgPool, String)> {
+    let server_url = std::env::var("TEST_DATABASE_URL").ok()?;
+    let (server_part, source_db) = server_url.rsplit_once('/')?;
+    let schema = format!("ha_shadow_{}", Uuid::new_v4().simple());
+    let mut admin = None;
+    for candidate in [
+        format!("{server_part}/postgres"),
+        format!("{server_part}/{source_db}"),
+    ] {
+        if let Ok(pool) = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&candidate)
+            .await
+        {
+            admin = Some(pool);
+            break;
+        }
+    }
+    let admin = admin?;
+    let create = async {
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE {schema}.pg_stat_replication (
+                pid integer PRIMARY KEY,
+                application_name text,
+                client_addr inet,
+                state text,
+                sent_lsn pg_lsn,
+                write_lsn pg_lsn,
+                flush_lsn pg_lsn,
+                replay_lsn pg_lsn,
+                sync_state text,
+                replay_lag interval
+            )"
+        ))
+        .execute(&admin)
+        .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {schema}.pg_stat_replication
+             VALUES (1, 'shadow-standby', NULL, 'streaming',
+                     '0/1000000', '0/1000000', '0/1000000', '0/1000000', 'sync', '0')"
+        ))
+        .execute(&admin)
+        .await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    admin.close().await;
+    create.ok()?;
+    // The SERVICE pool: its search_path resolves the unqualified
+    // pg_stat_replication to the shadow table (pg_catalog stays reachable —
+    // nothing in the shadow schema overrides it).
+    let shadow_url =
+        format!("{server_part}/postgres?options=-c%20search_path%3D{schema}%2Cpg_catalog");
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_lazy(&shadow_url)
+        .ok()
+        .map(|pool| (pool, schema))
+}
+
+async fn drop_shadow_schema(schema: &str) {
+    if let Ok(server_url) = std::env::var("TEST_DATABASE_URL") {
+        if let Some((server_part, source_db)) = server_url.rsplit_once('/') {
+            let candidates = [
+                format!("{server_part}/postgres"),
+                format!("{server_part}/{source_db}"),
+            ];
+            for candidate in candidates {
+                if let Ok(admin) = sqlx::PgPool::connect(&candidate).await {
+                    let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                        .execute(&admin)
+                        .await;
+                    admin.close().await;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 // ── Route gates ─────────────────────────────────────────────────────────
@@ -1222,62 +1338,70 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
 
         // Promotion on a non-standby / insufficient role is an error.
         assert!(replication.promote_standby().await.is_err());
-        // Sync-mode switching needs superuser. The canonical TEST_DATABASE_URL
-        // role IS a superuser on the shared dev cluster (ALTER SYSTEM is
-        // granted), while a locked-down deployment role must see a loud
-        // refusal — assert the honest outcome FOR THE ROLE WE ACTUALLY HAVE,
-        // and never leave the shared server forced into synchronous commit.
-        let superuser: bool = sqlx::query_scalar(
-            "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
-        )
-        .fetch_one(&h.db)
-        .await
-        .unwrap();
-        if superuser {
-            // pg_reload_conf() returns before the postmaster has processed
-            // the reload, so the live setting is observed with a small
-            // bounded wait instead of an immediate (racy) read.
-            async fn sync_standby_setting(db: &sqlx::PgPool) -> String {
-                let (value,): (String,) = sqlx::query_as(
-                    "SELECT setting FROM pg_settings WHERE name = 'synchronous_standby_names'",
-                )
-                .fetch_one(db)
+
+        // Sync-mode transitions (external audits #2/#10): the '*' wildcard
+        // form is refused outright, and synchronous=true needs a NAMED
+        // standby that is configured AND currently streaming. Both
+        // refusals below are DETERMINISTIC — the guard runs before any
+        // SQL/Redis mutation — so they hold for every role.
+        let wildcard = replication
+            .set_sync_mode(true, vec![])
+            .await
+            .expect_err("the unnamed ('*' wildcard) form must be refused");
+        assert_eq!(
+            wildcard,
+            SetSyncModeError::Refused(SyncModeRefusal::WildcardFormRefused),
+            "{wildcard}"
+        );
+        let unconfigured = replication
+            .set_sync_mode(true, vec!["never-configured".into()])
+            .await
+            .expect_err("no standby is configured in the bare harness topology");
+        assert_eq!(
+            unconfigured,
+            SetSyncModeError::Refused(SyncModeRefusal::NoStandbyConfigured),
+            "{unconfigured}"
+        );
+
+        // A configured standby with NO streaming connection is refused too
+        // (pg_stat_replication is empty on this single-node test DB).
+        let replica_cfg = config_with(|config| {
+            config.database.replica_hosts = vec!["w6c-not-streaming".into()];
+        })
+        .await;
+        let guarded = ReplicationService::new(h.db.clone(), replica_cfg);
+        let not_streaming = guarded
+            .set_sync_mode(true, vec!["w6c-not-streaming".into()])
+            .await
+            .expect_err("a configured but non-streaming standby must be refused");
+        assert_eq!(
+            not_streaming,
+            SetSyncModeError::Refused(SyncModeRefusal::NotStreaming(vec![
+                "w6c-not-streaming".into()
+            ])),
+            "{not_streaming}"
+        );
+
+        // The async direction carries no standby requirement, but applying
+        // it needs ALTER SYSTEM privilege — assert the honest outcome FOR
+        // THE ROLE WE ACTUALLY HAVE, and never leave the shared server
+        // with a non-empty synchronous_standby_names.
+        let superuser: bool =
+            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                .fetch_one(&h.db)
                 .await
                 .unwrap();
-                value
-            }
-            async fn wait_for_setting(db: &sqlx::PgPool, expected: &str) -> String {
-                let mut current = sync_standby_setting(db).await;
-                for _ in 0..40 {
-                    if current == expected {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    current = sync_standby_setting(db).await;
-                }
-                current
-            }
-            replication
-                .set_sync_mode(true)
-                .await
-                .expect("a superuser toggles sync mode");
-            let applied = wait_for_setting(&h.db, "*").await;
-            assert_eq!(
-                applied, "*",
-                "the toggle must reach the live (reloaded) setting"
-            );
-            // Restore the shared server's async default — a test must never
-            // leave the cluster requiring a synchronous standby.
-            replication
-                .set_sync_mode(false)
-                .await
-                .expect("a superuser restores the async default");
+        let applied_async = guarded.set_sync_mode(false, vec![]).await;
+        if superuser {
+            applied_async.expect("a superuser applies the async default");
             let restored = wait_for_setting(&h.db, "").await;
             assert_eq!(restored, "", "the shared server must end async");
         } else {
+            let error = applied_async.expect_err("a non-superuser role must be refused loudly");
             assert!(
-                replication.set_sync_mode(true).await.is_err(),
-                "a non-superuser role must be refused loudly"
+                matches!(error, SetSyncModeError::Failed(_)),
+                "async carries no standby requirement — the refusal must be the \
+                 honest privilege error, not a policy refusal: {error}"
             );
         }
 
@@ -1328,15 +1452,9 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
         )
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        // The sync-mode route mirrors the service's privilege contract:
-        // a superuser test role toggles (200, back to async), a locked-down
-        // role is refused with a loud server error.
-        let superuser: bool = sqlx::query_scalar(
-            "SELECT rolsuper FROM pg_roles WHERE rolname = current_user",
-        )
-        .fetch_one(&h.db)
-        .await
-        .unwrap();
+        // The sync-mode route is ADMIN-only (external audit #2): the
+        // universal internal key is 401 — the same privilege class as
+        // promote.
         let (status, _) = call(
             &app,
             "PUT",
@@ -1345,18 +1463,11 @@ fn replication_reports_empty_topology_honestly_and_guards_slot_names() {
             Some(serde_json::json!({"synchronous": false})),
         )
         .await;
-        if superuser {
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "a superuser toggles sync mode (and this call restores async)"
-            );
-        } else {
-            assert!(
-                status.is_server_error(),
-                "a non-superuser role must be refused loudly: got {status}"
-            );
-        }
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "sync-mode is a topology change: the internal key must not reach the handler"
+        );
     });
 }
 
@@ -2189,14 +2300,14 @@ use chrono::Utc;
 
 /// Records method+path pairs and replies with a per-path configurable status
 /// and body. A path of "*" matches everything not otherwise configured.
-async fn spawn_storage_mock(
-    config: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
-    log: Arc<std::sync::Mutex<Vec<String>>>,
-) -> String {
+type StorageMockConfig = Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>;
+type StorageMockLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+async fn spawn_storage_mock(config: StorageMockConfig, log: StorageMockLog) -> String {
     async fn handler(
         axum::extract::State((config, log)): axum::extract::State<(
-            Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
-            Arc<std::sync::Mutex<Vec<String>>>,
+            StorageMockConfig,
+            StorageMockLog,
         )>,
         request: axum::http::Request<axum::body::Body>,
     ) -> axum::response::Response {
@@ -2527,24 +2638,20 @@ fn backup_download_gates_and_storage_schemes() {
         backup.delete_backup(created.id).await.unwrap();
         let _ = tokio::fs::remove_file(&payload_path).await;
         let _ = tokio::fs::remove_file(&staging).await;
-        match (previous_base, previous_allow, previous_endpoint) {
-            (b, a, e) => {
-                if let Some(value) = b {
-                    std::env::set_var("BACKUP_PRESIGNED_URL_BASE", value);
-                } else {
-                    std::env::remove_var("BACKUP_PRESIGNED_URL_BASE");
-                }
-                if let Some(value) = a {
-                    std::env::set_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD", value);
-                } else {
-                    std::env::remove_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD");
-                }
-                if let Some(value) = e {
-                    std::env::set_var("S3_ENDPOINT", value);
-                } else {
-                    std::env::remove_var("S3_ENDPOINT");
-                }
-            }
+        if let Some(value) = previous_base {
+            std::env::set_var("BACKUP_PRESIGNED_URL_BASE", value);
+        } else {
+            std::env::remove_var("BACKUP_PRESIGNED_URL_BASE");
+        }
+        if let Some(value) = previous_allow {
+            std::env::set_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD", value);
+        } else {
+            std::env::remove_var("ALLOW_UNAUTHENTICATED_S3_DOWNLOAD");
+        }
+        if let Some(value) = previous_endpoint {
+            std::env::set_var("S3_ENDPOINT", value);
+        } else {
+            std::env::remove_var("S3_ENDPOINT");
         }
     });
 }
@@ -2673,7 +2780,7 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
         assert!(deleted >= 1, "expired rows are deleted");
         let remaining: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
-                .bind(&[one])
+                .bind([one])
                 .fetch_one(&h.db)
                 .await
                 .expect("rows");
@@ -2694,7 +2801,7 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
         assert!(deleted >= 1);
         let remaining: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
-                .bind(&[two])
+                .bind([two])
                 .fetch_one(&h.db)
                 .await
                 .expect("rows");
@@ -2709,7 +2816,7 @@ fn retention_removes_storage_objects_and_tolerates_storage_errors() {
         backup.enforce_retention().await.expect("retention");
         let remaining: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM ha_backups WHERE id = ANY($1)")
-                .bind(&[three])
+                .bind([three])
                 .fetch_one(&h.db)
                 .await
                 .expect("rows");
@@ -2831,8 +2938,16 @@ fn routes_exercise_every_authorized_mutating_surface() {
                 "/api/v1/failover/initiate",
                 Some(serde_json::json!({"reason": "w6c route coverage"})),
             ),
-            ("POST", "/api/v1/failover/failback", Some(serde_json::json!({}))),
-            ("POST", "/api/v1/replication/promote", Some(serde_json::json!({}))),
+            (
+                "POST",
+                "/api/v1/failover/failback",
+                Some(serde_json::json!({})),
+            ),
+            (
+                "POST",
+                "/api/v1/replication/promote",
+                Some(serde_json::json!({})),
+            ),
         ] {
             let (status, _) = call(&app, method, path, Some(INTERNAL_KEY), body.clone()).await;
             assert_eq!(
@@ -3040,9 +3155,11 @@ fn routes_exercise_every_authorized_mutating_surface() {
             Some(serde_json::json!({"synchronous": false})),
         )
         .await;
-        assert!(
-            status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR,
-            "{status}"
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "sync-mode is ADMIN-only (external audit #2): the internal key must not \
+             reach the handler"
         );
         let (status, _) = call(
             &app,
@@ -3091,5 +3208,351 @@ fn routes_exercise_every_authorized_mutating_surface() {
         .await;
         assert_eq!(status, StatusCode::OK, "{deleted}");
         assert_eq!(deleted["deleted"], false);
+    });
+}
+
+// ── External audit 2026-10-02 #2/#7/#8/#10: sync-mode privilege matrix,
+//    effective-state observability, topology-aware health and the durable
+//    desired mode ─────────────────────────────────────────────────────────
+
+/// The HTTP privilege matrix joining the SM10 F11 destructive family:
+/// `PUT /api/v1/replication/sync-mode` is ADMIN-only, the guard refuses
+/// every standby-unrealistic synchronous=true form with a deterministic
+/// 409/422, and the status endpoint exposes BOTH configured and effective
+/// state.
+#[test]
+fn sync_mode_route_privilege_matrix_matches_standby_reality() {
+    run(async {
+        let Some(h) = harness().await else { return };
+        // Explicitly empty topology: the status assertions below describe a
+        // genuine standalone regardless of the ambient environment.
+        let cfg = config_with(|config| {
+            config.database.replica_hosts = vec![];
+            config.database.replica_host = None;
+            config.database.standby_host = None;
+        })
+        .await;
+        let app = build_router(h.state_with(cfg));
+        let path = "/api/v1/replication/sync-mode";
+
+        // The universal internal key (and no key at all) must NOT authorize
+        // a commit-durability change — 401 regardless of direction.
+        for body in [
+            serde_json::json!({"synchronous": false}),
+            serde_json::json!({"synchronous": true, "standbys": ["db-replica-1"]}),
+        ] {
+            let (status, _) = call(&app, "PUT", path, Some(INTERNAL_KEY), Some(body.clone())).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "the internal key must not reach the sync-mode handler: {body}"
+            );
+            let (status, _) = call(&app, "PUT", path, None, Some(body)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "no key at all");
+        }
+
+        // ADMIN + the '*' wildcard form (no named standbys) → 422.
+        let (status, body) = call(
+            &app,
+            "PUT",
+            path,
+            Some(ADMIN_KEY),
+            Some(serde_json::json!({"synchronous": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("NAME"),
+            "the wildcard refusal must state the named-standby policy: {body}"
+        );
+
+        // ADMIN + a named standby with NOTHING configured → 409.
+        let (status, body) = call(
+            &app,
+            "PUT",
+            path,
+            Some(ADMIN_KEY),
+            Some(serde_json::json!({
+                "synchronous": true,
+                "standbys": ["db-replica-1"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("DB_REPLICA_HOSTS"),
+            "{body}"
+        );
+
+        // ADMIN + a configured standby that is NOT streaming → 409 (the
+        // guard queried the live pg_stat_replication and found nothing).
+        let replica_cfg = config_with(|config| {
+            config.database.replica_hosts = vec!["matrix-not-streaming".into()];
+        })
+        .await;
+        let guarded_app = build_router(h.state_with(replica_cfg));
+        let (status, body) = call(
+            &guarded_app,
+            "PUT",
+            path,
+            Some(ADMIN_KEY),
+            Some(serde_json::json!({
+                "synchronous": true,
+                "standbys": ["matrix-not-streaming"]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("streaming"),
+            "{body}"
+        );
+
+        // Status observability (audits #7/#8/#10): readable with the
+        // internal key, carrying BOTH the configured and the effective
+        // state, the raw runtime settings, the durable desired mode and
+        // the topology classification.
+        let (status, stats) = call(
+            &app,
+            "GET",
+            "/api/v1/replication/status",
+            Some(INTERNAL_KEY),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stats["configured_mode"], "async", "{stats}");
+        assert_eq!(stats["mode"], "async", "the bare test DB is async");
+        assert!(stats["effective_sync_standby_names"].is_string(), "{stats}");
+        assert!(stats["effective_synchronous_commit"].is_string(), "{stats}");
+        assert_eq!(stats["expected_replicas"], 0, "{stats}");
+        assert_eq!(stats["topology_status"], "standalone", "{stats}");
+        assert_eq!(stats["is_healthy"], true, "{stats}");
+    });
+}
+
+/// Audit #2's success path: admin credentials + a standby that is
+/// configured AND currently streaming → the named synchronous list is
+/// applied (never '*'), and the status read reflects the mutation in BOTH
+/// directions (audit #7). The connected standby is a shadowed
+/// pg_stat_replication table (the DB seam above); a locked-down role gets
+/// PAST the guard and hits only the honest ALTER SYSTEM privilege refusal.
+#[test]
+fn admin_key_with_connected_standby_enables_named_synchronous_commit() {
+    run(async {
+        if harness().await.is_none() {
+            return;
+        }
+        let Some((shadow_pool, schema)) = provision_shadow_pg_stat_replication().await else {
+            eprintln!("skipping: TEST_DATABASE_URL unavailable for the shadow seam");
+            return;
+        };
+
+        let cfg = config_with(|config| {
+            config.database.replica_hosts = vec!["shadow-standby".into()];
+            config.multi_region.cluster_id = format!("shadow-{}", Uuid::new_v4().simple());
+        })
+        .await;
+        let replication = ReplicationService::new(shadow_pool.clone(), Arc::clone(&cfg));
+
+        let superuser: bool =
+            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                .fetch_one(&shadow_pool)
+                .await
+                .unwrap_or(false);
+
+        if superuser {
+            // Normalize the shared server to the async default first — the
+            // suite must never start from (or end in) a leaked sync state.
+            if sync_standby_setting(&shadow_pool).await.is_empty() {
+                // already async — nothing to do
+            } else {
+                sqlx::query("ALTER SYSTEM SET synchronous_standby_names = ''")
+                    .execute(&shadow_pool)
+                    .await
+                    .expect("normalize the leaked sync setting");
+                sqlx::query("SELECT pg_reload_conf()")
+                    .execute(&shadow_pool)
+                    .await
+                    .expect("reload after normalization");
+                wait_for_setting(&shadow_pool, "").await;
+            }
+        }
+
+        // Audit #2: admin + named, configured, STREAMING standby succeeds.
+        let outcome = replication
+            .set_sync_mode(true, vec!["shadow-standby".into()])
+            .await;
+        if superuser {
+            outcome.expect("admin + a valid streaming standby enables synchronous commit");
+            // The applied value is the NAMED list — never the '*' wildcard.
+            let applied = wait_for_setting(&shadow_pool, "FIRST 1 (\"shadow-standby\")").await;
+            assert_eq!(applied, "FIRST 1 (\"shadow-standby\")");
+
+            // Audit #7: the status read reflects the mutation…
+            let stats = replication.get_stats().await.expect("stats while sync");
+            assert_eq!(stats.mode, "sync", "{stats:?}");
+            assert_eq!(
+                stats.effective_sync_standby_names,
+                "FIRST 1 (\"shadow-standby\")"
+            );
+            assert_eq!(stats.desired_sync_mode.as_deref(), Some("sync"));
+            assert!(
+                !stats.desired_drift,
+                "the durable intent is applied — no drift: {stats:?}"
+            );
+            // …and the topology is healthy: the shadow standby counts.
+            assert_eq!(stats.expected_replicas, 1);
+            assert_eq!(stats.replicas.len(), 1);
+            assert_eq!(stats.topology_status, "healthy");
+            assert!(stats.is_healthy);
+
+            // Audit #7 (the reverse) + audit #10 (rollback restores the
+            // recorded previous value): disable reflects async again.
+            replication
+                .set_sync_mode(false, vec![])
+                .await
+                .expect("disable synchronous commit");
+            let restored = wait_for_setting(&shadow_pool, "").await;
+            assert_eq!(restored, "", "rollback restores the recorded async default");
+            let stats = replication.get_stats().await.expect("stats while async");
+            assert_eq!(stats.mode, "async");
+            assert_eq!(stats.desired_sync_mode.as_deref(), Some("async"));
+            assert!(!stats.desired_drift);
+        } else {
+            // The guard PASSED (the standby was proven streaming in the
+            // shadow view) — the error is the honest ALTER SYSTEM
+            // privilege refusal, never a policy refusal, and it leaves no
+            // durable intent behind.
+            let error = outcome.expect_err("a non-superuser role is refused loudly");
+            assert!(
+                matches!(error, SetSyncModeError::Failed(_)),
+                "the transition must get PAST the standby guard, got: {error}"
+            );
+            assert!(
+                replication
+                    .read_desired_state()
+                    .await
+                    .expect("read desired state")
+                    .is_none(),
+                "an apply failure leaves no durable desired state"
+            );
+        }
+
+        let _ = replication.clear_desired_state().await;
+        drop_shadow_schema(&schema).await;
+    });
+}
+
+/// Audit #10: the desired mode is durable configuration — it survives a
+/// simulated restart of the service object, the status endpoint exposes
+/// drift, the reconcile loop repairs it, and the rollback is idempotent.
+/// The apply-dependent halves need ALTER SYSTEM privilege (the canonical
+/// TEST_DATABASE_URL role is a superuser on the shared dev cluster).
+#[test]
+fn desired_mode_persists_across_restart_reconciles_drift_and_rolls_back() {
+    run(async {
+        if harness().await.is_none() {
+            return;
+        }
+        let Some((shadow_pool, schema)) = provision_shadow_pg_stat_replication().await else {
+            eprintln!("skipping: TEST_DATABASE_URL unavailable for the shadow seam");
+            return;
+        };
+
+        let cfg = config_with(|config| {
+            config.database.replica_hosts = vec!["shadow-standby".into()];
+            config.multi_region.cluster_id = format!("durable-{}", Uuid::new_v4().simple());
+        })
+        .await;
+        let superuser: bool =
+            sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+                .fetch_one(&shadow_pool)
+                .await
+                .unwrap_or(false);
+        if !superuser {
+            eprintln!("reduced run: ALTER SYSTEM privilege unavailable");
+            drop_shadow_schema(&schema).await;
+            return;
+        }
+
+        let first = ReplicationService::new(shadow_pool.clone(), Arc::clone(&cfg));
+        first
+            .set_sync_mode(true, vec!["shadow-standby".into()])
+            .await
+            .expect("enable the named synchronous list");
+
+        // Simulated restart: a FRESH service object over the same cluster
+        // config reads the same durable desired state.
+        let restarted = ReplicationService::new(shadow_pool.clone(), Arc::clone(&cfg));
+        let stats = restarted.get_stats().await.expect("stats after restart");
+        assert_eq!(
+            stats.desired_sync_mode.as_deref(),
+            Some("sync"),
+            "the desired mode survives the service object: {stats:?}"
+        );
+        assert!(!stats.desired_drift);
+
+        // Drift: an out-of-band reset of the live setting is VISIBLE on
+        // the status endpoint.
+        sqlx::query("ALTER SYSTEM SET synchronous_standby_names = ''")
+            .execute(&shadow_pool)
+            .await
+            .expect("inject drift");
+        sqlx::query("SELECT pg_reload_conf()")
+            .execute(&shadow_pool)
+            .await
+            .expect("reload after drift injection");
+        wait_for_setting(&shadow_pool, "").await;
+        let stats = restarted.get_stats().await.expect("stats while drifted");
+        assert!(
+            stats.desired_drift,
+            "the un-applied desired mode must surface as drift: {stats:?}"
+        );
+
+        // The bounded reconcile loop's repair: drift is fixed from the
+        // durable desired state.
+        let repaired = restarted.reconcile_sync_mode().await.expect("reconcile");
+        assert!(repaired, "detected drift must be repaired");
+        let applied = wait_for_setting(&shadow_pool, "FIRST 1 (\"shadow-standby\")").await;
+        assert_eq!(applied, "FIRST 1 (\"shadow-standby\")");
+
+        // And a reconcile with no drift is a no-op.
+        assert!(
+            !restarted
+                .reconcile_sync_mode()
+                .await
+                .expect("idempotent reconcile"),
+            "desired == actual → nothing to repair"
+        );
+
+        // Rollback: disable restores the RECORDED previous value, and a
+        // SECOND disable is idempotent.
+        restarted
+            .set_sync_mode(false, vec![])
+            .await
+            .expect("disable");
+        assert_eq!(wait_for_setting(&shadow_pool, "").await, "");
+        restarted
+            .set_sync_mode(false, vec![])
+            .await
+            .expect("disable again");
+        assert_eq!(
+            wait_for_setting(&shadow_pool, "").await,
+            "",
+            "the rollback is idempotent"
+        );
+
+        restarted
+            .clear_desired_state()
+            .await
+            .expect("cleanup the desired state");
+        drop_shadow_schema(&schema).await;
     });
 }

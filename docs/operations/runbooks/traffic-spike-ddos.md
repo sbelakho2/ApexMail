@@ -2,6 +2,14 @@
 
 **Severity:** SEV1–SEV3 (depending on impact on tenants)
 
+> **Architecture truth:** ApexMail runs as a single Hetzner host with Docker
+> Compose (see [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)). Every command in
+> this runbook is a Compose command (or a host command) executed on the deploy
+> host at `/opt/apexmail`. There is no Kubernetes ingress, HPA, or cluster
+> anywhere in this deployment — rate limiting lives in the host nginx
+> ([`deploy/nginx/nginx.conf`](../../../deploy/nginx/nginx.conf)) and in the
+> application.
+
 ## Table of Contents
 - [Architecture Context](#architecture-context)
 - [Symptoms](#symptoms)
@@ -9,9 +17,9 @@
 - [Initial Diagnosis](#initial-diagnosis)
 - [Mitigation Procedures](#mitigation-procedures)
   - [Procedure 1: Traffic Analysis](#procedure-1-traffic-analysis)
-  - - [Procedure 2: Rate Limiting Tuning](#procedure-2-rate-limiting-tuning)
-  - [Procedure 3: IP Blocking via Web Application Firewall (WAF)](#procedure-3-ip-blocking-via-web-application-firewall-waf)
-  - [Procedure 4: Auto-scaling and Resource Tuning](#procedure-4-auto-scaling-and-resource-tuning)
+  - [Procedure 2: Rate Limiting Tuning](#procedure-2-rate-limiting-tuning)
+  - [Procedure 3: IP Blocking via the Edge and Hetzner Firewall](#procedure-3-ip-blocking-via-the-edge-and-hetzner-firewall)
+  - [Procedure 4: Resource Tuning](#procedure-4-resource-tuning)
   - [Procedure 5: Emergency Mitigation (Circuit Breakers)](#procedure-5-emergency-mitigation-circuit-breakers)
   - [Procedure 6: Abuse Detection and Tenant Isolation](#procedure-6-abuse-detection-and-tenant-isolation)
 - [Post-Incident Actions](#post-incident-actions)
@@ -20,18 +28,24 @@
 ## Architecture Context
 
 ApexMail is rate-limited at multiple layers:
-- **Ingress (nginx):** `nginx.ingress.kubernetes.io/rate-limit: "100"` per second at ingress level
+- **Edge (nginx):** `limit_req` zones in [`deploy/nginx/nginx.conf`](../../../deploy/nginx/nginx.conf) — `global` 30 r/s, `login` 10 r/m, `signup` 5 r/m, `admin` 10 r/s, each applied per-location with burst
 - **Application:** Token bucket rate limiters per tenant (configurable burst/tier)
 - **Circuit breakers:** Redis-backed state machine (CLOSED → OPEN → HALF-OPEN)
-- **HPA:** Auto-scales API server (2–10 pods) based on CPU/memory
+- **Capacity:** single host — there is **no autoscaler**; headroom is tuned via the compose resource limits (`deploy.resources.limits` in [`docker-compose.prod.yml`](../../../docker-compose.prod.yml)) and recreated with `docker compose up -d <service>`
 - **Connection budget:** total DB connections = SUM of per-service `DATABASE_POOL_MAX` (see [`docker-compose.yml`](../../../docker-compose.yml))
+
+**Command conventions (all commands run on the deploy host):** the compose
+prefix is `docker compose -f docker-compose.yml -f docker-compose.prod.yml`
+from `/opt/apexmail`. Redis commands authenticate with the `redis_password`
+compose secret via the `rc` helper defined in the
+[Redis failure runbook](./redis-failure.md).
 
 ## Symptoms
 
 - Alerts: `ApiRateLimitThrottling`, `ApiRateLimitExhaustion`, `ApiErrorRateSpike`, `ApiHighLatencyP99`
 - Metrics: request rate > 2× normal baseline, p95 latency > 5s, error rate > 5%
 - Users: 429 Too Many Requests, 503 Service Unavailable, timeouts
-- Infrastructure: HPA scaling to max, connection pool exhaustion, CPU/memory saturation
+- Infrastructure: worker/MTA saturation, connection pool exhaustion, CPU/memory saturation
 
 ## Severity Classification
 
@@ -43,33 +57,31 @@ ApexMail is rate-limited at multiple layers:
 
 ## Initial Diagnosis
 
-1. **Check traffic volume vs baseline:**
+1. **Check traffic volume vs baseline** (nginx access log; the edge container
+   writes `/var/log/nginx/access.log`):
    ```bash
-   # PromQL in Grafana Explore
-   # Current request rate
-   sum(rate(nginx_ingress_controller_requests{ingress="apexmail"}[5m]))
-   #
-   # Compare to last week
-   sum(rate(nginx_ingress_controller_requests{ingress="apexmail"}[5m]))
-   /
-   sum(rate(nginx_ingress_controller_requests{ingress="apexmail"}[5m] offset 1w))
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx sh -c \
+     'tail -20000 /var/log/nginx/access.log' | awk '{print $4}' | cut -d: -f1-2 | sort | uniq -c
+   # Requests per minute for the recent window — compare to the Grafana
+   # baseline panels (observability stack, --profile monitoring).
    ```
 
 2. **Identify top IPs:**
    ```bash
-   kubectl logs -n apexmail -l app.kubernetes.io/name=ingress-nginx \
-     --tail=10000 | awk '{print $1}' | sort | uniq -c | sort -rn | head -20
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx sh -c \
+     'tail -10000 /var/log/nginx/access.log' | awk '{print $1}' | sort | uniq -c | sort -rn | head -20
    ```
 
 3. **Identify top endpoints:**
    ```bash
-   kubectl logs -n apexmail -l app.kubernetes.io/name=ingress-nginx \
-     --tail=10000 | awk '{print $7}' | sort | uniq -c | sort -rn | head -20
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx sh -c \
+     'tail -10000 /var/log/nginx/access.log' | awk '{print $7}' | sort | uniq -c | sort -rn | head -20
    ```
 
 4. **Check rate limiter metrics:**
    ```bash
-   # PromQL
+   # PromQL in Grafana Explore
    # Rate limit hits by tenant
    rate(apexmail_rate_limiter_blocked_requests_total[5m])
    #
@@ -103,42 +115,45 @@ ApexMail is rate-limited at multiple layers:
 
 ### Procedure 2: Rate Limiting Tuning
 
-1. **Tighten ingress rate limit:**
+1. **Tighten the edge rate limit** (edit the zone rates, then hot-reload nginx):
    ```bash
-   kubectl annotate ingress apexmail -n apexmail \
-     nginx.ingress.kubernetes.io/rate-limit="50" \
-     nginx.ingress.kubernetes.io/rate-limit-burst="100"
+   # In deploy/nginx/nginx.conf (lines ~132-136): lower the zone rates, e.g.
+   #   limit_req_zone $binary_remote_addr zone=global:10m rate=10r/s;
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx nginx -s reload
+   # (deploy/scripts/deploy.sh uses a retried variant of this same reload)
    ```
 
-2. **Enable connection limit per IP:**
-   ```bash
-   kubectl annotate ingress apexmail -n apexmail \
-     nginx.ingress.kubernetes.io/limit-connections="10"
-   ```
+2. **Enable connection limit per IP** (add/raise `limit_conn` in the same
+   `nginx.conf`, then `nginx -s reload` as above).
 
 3. **Tighten per-tenant rate limits:**
    ```bash
    # Temporarily lower the offending tenant's rate limit
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "rate-limit:tenant:<tenant-id>:limit" "50"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "rate-limit:tenant:<tenant-id>:burst" "75"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "rate-limit:tenant:<tenant-id>:limit" "50"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "rate-limit:tenant:<tenant-id>:burst" "75"'
    ```
 
-### Procedure 3: IP Blocking via Web Application Firewall (WAF)
+### Procedure 3: IP Blocking via the Edge and Hetzner Firewall
 
-1. **Block specific IPs at ingress:**
-   ```bash
-   kubectl annotate ingress apexmail -n apexmail \
-     nginx.ingress.kubernetes.io/whitelist-source-range="10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
-   # This reverses: blocks everything except RFC1918
-   #
-   # Or use server-snippet to block specific IPs:
-   kubectl annotate ingress apexmail -n apexmail \
-     nginx.ingress.kubernetes.io/server-snippet='if ($remote_addr ~ "^(1.2.3.4|5.6.7.8)$") { return 403; }'
+1. **Block specific IPs at the nginx edge** (add a `deny` list in
+   `deploy/nginx/nginx.conf`, then reload — same `nginx -s reload` as
+   Procedure 2):
+   ```nginx
+   # http{} block of deploy/nginx/nginx.conf:
+   geo $blocked_client {
+       default 0;
+       1.2.3.4 1;
+       5.6.7.8 1;
+   }
+   # server{}: if ($blocked_client) { return 403; }
    ```
 
-2. **Rate-limit at Hetzner Cloud Firewall level:**
+2. **Rate-limit or block upstream at the Hetzner Cloud Firewall level:**
    ```bash
    # Add rate limiting rule via Hetzner Cloud API
    curl -X POST https://api.hetzner.cloud/v1/firewalls/<id>/actions/set_rules \
@@ -146,32 +161,36 @@ ApexMail is rate-limited at multiple layers:
      -d '{"rules": [{"direction": "in", "protocol": "tcp", "port": "443", "source_ips": ["0.0.0.0/0"], "rate_limit": {"packets_per_second": 1000}}]}'
    ```
 
-### Procedure 4: Auto-scaling and Resource Tuning
+### Procedure 4: Resource Tuning
 
-1. **Increase HPA max replicas temporarily:**
+1. **Raise api-server headroom** (single host — adjust the compose limits and
+   recreate; there is no autoscaler):
+   ```yaml
+   # docker-compose.prod.yml, api-server service:
+   deploy:
+     resources:
+       limits: { cpus: '2.0', memory: 2G }
+   ```
    ```bash
-   kubectl patch hpa api-server -n apexmail -p \
-     '{"spec":{"maxReplicas":20}}'
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d api-server
    ```
 
-2. **Increase pod resources:**
+2. **Scale out worker queue consumers:** one worker service runs per host —
+   raise its processing concurrency and recreate it:
    ```bash
-   kubectl patch deployment api-server -n apexmail -p \
-     '{"spec":{"template":{"spec":{"containers":[{"name":"api-server","resources":{"limits":{"cpu":"2","memory":"2Gi"},"requests":{"cpu":"500m","memory":"512Mi"}}}]}}}}'
+   # In /opt/apexmail/.env (or the prod env file): WORKER_CONCURRENCY=<higher value>
+   cd /opt/apexmail
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d worker
    ```
 
-3. **Scale out worker queue consumers:**
-   ```bash
-   kubectl scale deployment worker -n apexmail --replicas=30
-   ```
-
-4. **If DB connection pool is bottleneck:**
+3. **If DB connection pool is bottleneck:**
    ```bash
    # Check current connection count
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U apexmail -c \
      "SELECT count(*) FROM pg_stat_activity;"
-   # Temporarily increase (if within node resources)
-   kubectl exec -n apexmail deploy/postgres -- psql -U postgres -c \
+   # Temporarily increase (if within host resources)
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres psql -U postgres -c \
      "ALTER SYSTEM SET max_connections = 400; SELECT pg_reload_conf();"
    ```
 
@@ -181,65 +200,70 @@ If the API server is overwhelmed and needs to shed load:
 
 1. **Enable global rate limiter override:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "circuit-breaker:global-rate-limit" "OPEN"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "circuit-breaker:global-rate-limit:threshold" "200"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "circuit-breaker:global-rate-limit" "OPEN"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" \
+        SET "circuit-breaker:global-rate-limit:threshold" "200"'
    # All requests beyond 200/s are rejected with 503
    ```
 
 2. **Disable non-critical endpoints:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "feature:analytics-api" "disabled"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "feature:webhook-delivery" "disabled"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" SET "feature:analytics-api" "disabled"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" SET "feature:webhook-delivery" "disabled"'
    ```
 
-3. **Enable maintenance page** for non-critical services:
-   ```bash
-   kubectl annotate ingress tracking-service -n apexmail \
-     nginx.ingress.kubernetes.io/server-snippet='return 503 "Down for maintenance";'
-   ```
+3. **Serve a maintenance page** for non-critical services (add a catch-all
+   `return 503` location for the affected host in `deploy/nginx/nginx.conf`,
+   then `nginx -s reload` as in Procedure 2).
 
 ### Procedure 6: Abuse Detection and Tenant Isolation
 
 1. **Identify abusive tenant:**
    ```bash
    # From rate limiter metrics
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli KEYS "rate-limit:*"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli GET "rate-limit:tenant:<id>:counter"
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" --scan --pattern "rate-limit:*"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" GET "rate-limit:tenant:<id>:counter"'
    ```
 
 2. **Suspend abusive tenant (temporary):**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "tenant:suspended:<tenant-id>" "true"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     EXPIRE "tenant:suspended:<tenant-id>" 3600  # Auto-expire in 1 hour
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" SET "tenant:suspended:<tenant-id>" "true"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" EXPIRE "tenant:suspended:<tenant-id>" 3600'
+   # Auto-expire in 1 hour
    ```
 
 3. **Move abusive tenant to isolated queue:**
    ```bash
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     SET "tenant:isolated-queue:<tenant-id>" "true"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli \
-     EXPIRE "tenant:isolated-queue:<tenant-id>" 86400
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" SET "tenant:isolated-queue:<tenant-id>" "true"'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec redis sh -c \
+     'redis-cli --no-auth-warning -a "$(cat /run/secrets/redis_password)" EXPIRE "tenant:isolated-queue:<tenant-id>" 86400'
    ```
 
 ## Post-Incident Actions
 
 1. **Analyze traffic pattern:**
    ```bash
-   k9s -n apexmail  # Check pod resource usage over time
-   # Export nginx logs to S3 for offline analysis
-   kubectl logs -n apexmail -l app.kubernetes.io/name=ingress-nginx > /tmp/nginx-logs.txt
+   docker stats --no-stream   # per-container CPU/memory over the incident
+   # Export the nginx access log for offline analysis
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx \
+     cat /var/log/nginx/access.log > /tmp/nginx-logs.txt
    ```
 
-2. **Update rate limits** based on observed patterns:
+2. **Update rate limits** based on observed patterns (permanent changes go in
+   the checked-in files, not runtime state):
    ```bash
-   # Adjust permanent rate limits in Helm values
-   # deploy/helm/apexmail/values.yaml -> ingress annotations
+   # deploy/nginx/nginx.conf -> limit_req_zone rates
+   # docker-compose.prod.yml -> deploy.resources.limits per service
    ```
 
 3. **Implement any new DDoS protection rules.**
@@ -254,7 +278,7 @@ If the API server is overwhelmed and needs to shed load:
 
 | Role | Contact | When |
 |------|---------|------|
-| Infrastructure lead | @oncall-infra | Rate limiting tuning, ingress config |
+| Infrastructure lead | @oncall-infra | Rate limiting tuning, edge config |
 | Security lead | @oncall-security | Suspected DDoS or abuse |
 | Engineering lead | @oncall-eng | Feature disable decisions |
 | Abuse team | @abuse | Tenant suspension decisions |

@@ -690,8 +690,10 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// FOR UPDATE serialization on audit_logs.
     #[tokio::test]
     async fn concurrent_appends_produce_a_verifiable_chain() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
+        {
+            let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+            std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
+        }
         let Some(pool) = audit_chain_test_pool("concurrency").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
@@ -734,8 +736,10 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// the pre-existing newest row instead of starting a NULL-rooted chain.
     #[tokio::test]
     async fn head_backfill_links_new_appends_onto_legacy_history() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
+        {
+            let _env = AUDIT_ENV_MUTEX.lock().unwrap();
+            std::env::set_var("AUDIT_SIGNING_KEY", "audit-chain-test-key-0123456789");
+        }
         let Some(pool) = audit_chain_test_pool("backfill").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
@@ -826,15 +830,15 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
 
     #[test]
     fn audit_signature_fails_closed_in_production_and_binds_the_chain_link() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
         std::env::remove_var("AUDIT_SIGNING_KEY");
 
         // Production without a key must FAIL, never sign with a guessable
         // fallback (every signature would be forgeable).
         let err = audit_log_signature("hash-a", "hash-b", true)
-            .err()
-            .expect("production append without AUDIT_SIGNING_KEY must fail closed");
+            .expect_err("production append without AUDIT_SIGNING_KEY must fail closed");
         assert!(
             err.to_string().contains("AUDIT_SIGNING_KEY"),
             "unexpected error: {err}"
@@ -1021,9 +1025,12 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// BEFORE the signature step).
     #[tokio::test]
     async fn production_append_without_key_fails_closed_without_partial_state() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
-        std::env::remove_var("AUDIT_SIGNING_KEY");
+        {
+            {
+                let _restore = EnvGuard::take_signing_key();
+            }
+            std::env::remove_var("AUDIT_SIGNING_KEY");
+        }
 
         let Some(pool) = audit_chain_test_pool("w6a-failclosed").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
@@ -1087,8 +1094,9 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
 
     #[tokio::test]
     async fn best_effort_writer_swallows_failures_and_writes_on_success() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
 
         let Some(pool) = audit_chain_test_pool("w6a-besteffort").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
@@ -1146,8 +1154,9 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// by re-hashing; rewriting a signature must be detectable by re-signing.
     #[tokio::test]
     async fn tampered_rows_fail_hash_and_signature_verification() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
 
         let Some(pool) = audit_chain_test_pool("w6a-tamper").await else {
@@ -1245,8 +1254,9 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// advance — the head must never point at a hash that was never appended.
     #[tokio::test]
     async fn caller_rollback_undoes_the_chain_head_advance() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
 
         let Some(pool) = audit_chain_test_pool("w6a-rollback").await else {
@@ -1328,8 +1338,9 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// Two sequential legacy-wrapper appends must chain head → next.
     #[tokio::test]
     async fn legacy_in_tx_wrapper_chains_sequential_appends() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
         let prior_env = std::env::var("ENVIRONMENT").ok();
         std::env::remove_var("ENVIRONMENT");
@@ -1360,8 +1371,9 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
     /// `fts_vector` when the column exists — appended rows must be searchable.
     #[tokio::test]
     async fn fts_vector_is_maintained_when_the_column_exists() {
-        let _env = AUDIT_ENV_MUTEX.lock().unwrap();
-        let _restore = EnvGuard::take_signing_key();
+        {
+            let _restore = EnvGuard::take_signing_key();
+        }
         std::env::set_var("AUDIT_SIGNING_KEY", "w6a-signing-key-0123456789");
 
         let Some(pool) = audit_chain_test_pool("w6a-fts").await else {

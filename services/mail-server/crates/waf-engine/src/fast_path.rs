@@ -293,8 +293,7 @@ fn has_digit_adjacent_comparison(input: &str) -> bool {
     if len < 3 {
         return false;
     }
-    let is_operand =
-        |c: char| c.is_ascii_alphanumeric() || c == '\'' || c == '"';
+    let is_operand = |c: char| c.is_ascii_alphanumeric() || c == '\'' || c == '"';
     let is_op = |c: char| c == '<' || c == '>' || c == '=';
     for i in 0..len {
         if !is_op(chars[i]) {
@@ -927,7 +926,10 @@ mod tests {
             "JSON \\u0000-obfuscated handler must reach the analyzer, matches={:?}",
             info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
         );
-        assert!(matches!(info.decision, crate::engine::WafDecision::Block(_)));
+        assert!(matches!(
+            info.decision,
+            crate::engine::WafDecision::Block(_)
+        ));
 
         // (2) whitespace-collapsed javascript: in a query param.
         let req = crate::engine::HttpRequest {
@@ -944,7 +946,10 @@ mod tests {
             "whitespace-collapsed javascript: must reach the analyzer, matches={:?}",
             info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
         );
-        assert!(matches!(info.decision, crate::engine::WafDecision::Block(_)));
+        assert!(matches!(
+            info.decision,
+            crate::engine::WafDecision::Block(_)
+        ));
 
         // (3) NBSP tautology in a query param (942100, score 5).
         let req = crate::engine::HttpRequest {
@@ -961,7 +966,10 @@ mod tests {
             "NBSP-tautology must reach the analyzer, matches={:?}",
             info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
         );
-        assert!(matches!(info.decision, crate::engine::WafDecision::Block(_)));
+        assert!(matches!(
+            info.decision,
+            crate::engine::WafDecision::Block(_)
+        ));
 
         // (4) NBSP handler in a body (941200).
         let req = crate::engine::HttpRequest {
@@ -981,6 +989,9 @@ mod tests {
             "NBSP handler must reach the analyzer, matches={:?}",
             info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
         );
-        assert!(matches!(info.decision, crate::engine::WafDecision::Block(_)));
+        assert!(matches!(
+            info.decision,
+            crate::engine::WafDecision::Block(_)
+        ));
     }
 }

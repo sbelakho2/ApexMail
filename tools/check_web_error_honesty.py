@@ -462,12 +462,28 @@ for needle, label in [
     )
 
 # The converted helpers must keep Result-returning signatures (no silent
-# re-widening back to Option/bool).
+# re-widening back to Option/bool). Matched with whitespace collapsed so
+# rustfmt's line-wrapping cannot false-fail the pin (external audit
+# 2026-10-02 follow-up: the campaign's cargo fmt pass reflowed these
+# signatures and the exact single-line needles went red).
+def _ws_normalized(text: str) -> str:
+    # Compare signatures as whitespace-free token streams (rustfmt reflows
+    # argument lists — line breaks, the space after '(' and the trailing
+    # comma must not false-fail the pin), folding rustfmt's multi-line
+    # trailing comma (`&str,\n)` -> `&str)`) first.
+    folded = "".join(text.split()).replace(",)", ")")
+    return folded
+
+
 for needle, label in [
     ("async fn find_user_by_email(state: &AppState, email: &str) -> Result<Option<WebUserRow>, sqlx::Error>", "find_user_by_email"),
     ("pub(crate) async fn is_system_tenant(state: &AppState, tenant_id: &str) -> Result<bool, sqlx::Error>", "is_system_tenant"),
 ]:
-    check(f"result-signature:{label}", needle in WEB, f"{label} must keep its Result-returning signature")
+    check(
+        f"result-signature:{label}",
+        _ws_normalized(needle) in _ws_normalized(WEB),
+        f"{label} must keep its Result-returning signature",
+    )
 
 DATA = raw_source.get("data.rs", "")
 for needle, label in [

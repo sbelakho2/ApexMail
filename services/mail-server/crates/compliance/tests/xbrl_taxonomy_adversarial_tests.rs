@@ -1251,10 +1251,8 @@ fn duplicate_element_ids_and_duplicate_concepts_are_refused() {
     // Same element id in two documents.
     let entry = schema(
         Some(NS),
-        &format!(
-            "<xs:import namespace=\"urn:d1\" schemaLocation=\"d1.xsd\"/>\
-             <xs:import namespace=\"urn:d2\" schemaLocation=\"d2.xsd\"/>"
-        ),
+        "<xs:import namespace=\"urn:d1\" schemaLocation=\"d1.xsd\"/>\
+             <xs:import namespace=\"urn:d2\" schemaLocation=\"d2.xsd\"/>",
     );
     let item_decl = |ns: &str, name: &str| {
         format!(
@@ -1679,8 +1677,7 @@ fn parse_instance_survives_hostile_but_wellformed_shapes() {
     // measures, instant+duration together (instant wins), a tuple fact whose
     // subtree is dropped, a self-closing fact, a schemaRef without href, and
     // other-namespaced children at the root.
-    let xml = instance(&format!(
-        "<xbrli:context id=\"c1\">\
+    let xml = instance("<xbrli:context id=\"c1\">\
            <xbrli:identifier scheme=\"http://reg.test\">1234</xbrli:identifier>\
            <xbrli:period>\
              <xbrli:instant>2025-12-31</xbrli:instant>\
@@ -1708,8 +1705,7 @@ fn parse_instance_survives_hostile_but_wellformed_shapes() {
          <link:schemaRef/>\
          <ee:TupleThing contextRef=\"c1\"><ee:Assets contextRef=\"c1\">1</ee:Assets></ee:TupleThing>\
          <ee:Empty contextRef=\"c1\"/>\
-         <ee:Assets contextRef=\"c1\" unitRef=\"u1\" decimals=\"2\"><![CDATA[42.50]]></ee:Assets>"
-    ));
+         <ee:Assets contextRef=\"c1\" unitRef=\"u1\" decimals=\"2\"><![CDATA[42.50]]></ee:Assets>");
     let document = parse_instance(&xml).expect("hostile-but-wellformed parses");
     assert_eq!(document.contexts.len(), 3);
     assert_eq!(

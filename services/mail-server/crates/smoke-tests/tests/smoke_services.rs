@@ -595,8 +595,10 @@ mod mta_tests {
         // Existence (audit F13) plus one REAL behavior assertion: the
         // default configuration must pass its own validator, and the
         // production decision must follow the NODE_ENV aliases.
-        let mut cfg = mta::MtaConfig::default();
-        cfg.node_env = "development".into();
+        let mut cfg = mta::MtaConfig {
+            node_env: "development".into(),
+            ..mta::MtaConfig::default()
+        };
         assert!(
             cfg.validate().is_ok(),
             "the default MTA configuration must validate: {:?}",
@@ -736,7 +738,7 @@ mod dns_resolver_tests {
     #[test]
     fn test_dns_resolver_parses_records_and_caches() {
         use apexmail_dns_resolver::cache::CachedResult;
-        use apexmail_dns_resolver::{DnsCache, DnsConfig, DmarcPolicy, SpfRecord};
+        use apexmail_dns_resolver::{DmarcPolicy, DnsCache, DnsConfig, SpfRecord};
 
         // SPF: a well-formed record parses with its `all` qualifier; a
         // look-alike version prefix ("v=spf1evil") is NOT an SPF record

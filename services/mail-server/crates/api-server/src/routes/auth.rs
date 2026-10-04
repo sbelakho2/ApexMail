@@ -2496,7 +2496,7 @@ async fn login(
         }
         PasswordLoginVerdict::SsoRequired => {
             return Err(ApiError::Forbidden(
-                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled"
+                "SSO_REQUIRED: this organization requires single sign-on; password login is disabled."
                     .into(),
             ));
         }

@@ -57,7 +57,7 @@ impl AppState {
         let dedicated = std::env::var(crate::auth::DEDICATED_TOKEN_ENV).ok();
         let universal = std::env::var("INTERNAL_SERVICE_TOKEN").ok();
         let service_auth = ServiceAuth::resolve(dedicated.as_deref(), universal.as_deref(), false)
-            .map_err(|reason| crate::types::DevExError::Validation(reason))?;
+            .map_err(crate::types::DevExError::Validation)?;
         Ok(Self {
             config: Arc::new(cfg),
             versions: Arc::new(VersionRegistry::new()),

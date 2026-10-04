@@ -26,6 +26,22 @@ pub async fn canonical_pool(test_name: &str, suffix: &str) -> Option<PgPool> {
     }
 }
 
+/// A private canonical database PLUS the non-superuser hostile-role pairing
+/// (audit 2026-10-02 #12a): seed and REVOKE via [`migrator::test_support::HostileDb::owner`],
+/// run the machinery under test as the unprivileged role via
+/// [`migrator::test_support::HostileDb::hostile`]. `None` only when no
+/// hostile identity is provisionable (soft-skip contract); a configured
+/// failure panics with the F01 message.
+pub async fn hostile_canonical_pair(
+    test_name: &str,
+    suffix: &str,
+) -> Option<migrator::test_support::HostileDb> {
+    match migrator::test_support::fresh_hostile_canonical_pool(test_name, suffix).await {
+        Ok(pair) => pair,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
+}
+
 /// The real broker when `TEST_REDIS_URL` is configured (workspace convention);
 /// `None` means the test must soft-skip. Used only by tests that exercise
 /// Redis-backed flows (DSR enqueue), never by tests that merely need the type.

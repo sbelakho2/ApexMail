@@ -4,9 +4,32 @@
 
 The ApexMail Trust Center provides inspectable evidence of our security and compliance posture. This page is public and continuously updated.
 
+## How to Read This Page (statement taxonomy)
+
+Every control statement on this page belongs to exactly one of five classes. Present-tense statements are used ONLY for the first two classes:
+
+| Label | Meaning |
+|---|---|
+| **[Implemented in platform]** | Ships in the running ApexMail platform today and is verifiable in the tree (deployment facts: `docs/deployment-facts.json`; capability wiring: `docs/development/capability-registry.json`). |
+| **[Implemented by provider]** | A control delivered by the infrastructure provider (e.g., Hetzner) under the deployment configuration. |
+| **[Operator policy]** | A commitment about how humans operate the platform; it is a policy, not a code-verified platform behavior. |
+| **[Roadmap]** | Planned; not live. Marked explicitly, never stated in the present tense. |
+| **[Not currently implemented]** | Named so it cannot be mistaken for a live control. |
+
+| Section | Classification |
+|---|---|
+| Encryption in Transit / Encryption at Rest | Implemented in the platform (LUKS block-volume encryption: implemented by provider) |
+| Authentication / Authorization | Implemented in the platform; administrative-access and review-cadence rules are operator policy |
+| Software Security / Infrastructure Security | Labeled per bullet |
+| Monitoring | Implemented in the platform (alert rules in `deploy/alerting-rules.yml`) |
+| Backups and Recovery / Business Continuity | Labeled per bullet |
+| Data Deletion | Operator policy, enforced by platform retention jobs |
+| Certifications / Penetration Tests | Status tables (roadmap / not currently available) |
+| Vulnerability Disclosure | Operator policy |
+
 ## Security Overview
 
-ApexMail provides transactional email infrastructure with EU/EEA-oriented deployment configurations and security designed for regulated industries. Active data and telemetry locations are deployment-specific and confirmed under the applicable agreement.
+ApexMail provides transactional email infrastructure with EU/EEA-oriented deployment configurations and security designed for regulated industries. Active data and telemetry locations are deployment-specific and confirmed under the applicable agreement. The production topology is a single Hetzner host (Finland) running the full stack under Docker Compose; statements below are scoped to that reality.
 
 ### Encryption in Transit
 
@@ -46,28 +69,27 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 ### Software Security
 
-- **Code review**: All changes require at least one approving review from a team member who is not the author. Protected branches (main, production) require passing CI checks before merge. Security-sensitive changes require an additional review from a security-designated reviewer.
-- **Branch protection**: The `main` and `production` branches are protected. Direct pushes are disabled. Linear history is enforced. Status checks (lint, test, build, SAST, secret scan) must pass before merge.
-- **Dependency scanning**: Dependabot and cargo-audit run daily against all dependencies. Critical and high-severity vulnerabilities trigger an alert and block deployment. Dependency update PRs are auto-created with changelog references.
-- **Static analysis**: SAST via Semgrep and Clippy (Rust) runs on every PR. Rules cover OWASP Top 10, injection, hardcoded secrets, and unsafe patterns. SAST failures block the CI pipeline.
-- **Secret scanning**: Gitleaks runs on every commit and PR. Repository secret scanning (GitHub secret scanning) is enabled. Pre-commit hooks block accidental secret commits. Detected secrets trigger automatic key revocation.
-- **Deployment approval**: Production deployments require explicit approval from a designated release manager. Canary deployments proceed automatically to 5% of traffic, then pause for manual approval before full rollout. Rollback is one-click and automated for canary health-check failures.
-- **Environment separation**: Development, staging, and production environments are fully isolated (separate clusters, separate databases, separate credentials). No production data is used in staging. Staging uses synthetic data and test domains only. Access credentials differ across environments.
+- **[Implemented in platform]** Static analysis: SAST via Semgrep and Clippy (Rust) runs in the self-hosted pipeline on every run and fails closed on the deploy host. Rules cover OWASP Top 10 classes, injection, hardcoded secrets, and unsafe patterns; a SAST failure blocks the pipeline.
+- **[Implemented in platform]** Secret scanning: Gitleaks over the full git history plus Trivy filesystem secret scanning run in the pipeline's security stage. Pre-commit hooks are available; detected secrets are triaged in-tree or rotated.
+- **[Implemented in platform]** Dependency vulnerability scanning: cargo-audit (with a reviewed advisory ignore list), cargo-deny (advisories, bans, sources, licenses) and a Trivy CRITICAL/HIGH gate on images run on every pipeline run.
+- **[Operator policy]** Dependency updates: manual `cargo update` → full `ci/check-pr.sh` gate → push; the host pipeline deploys only green trees. There is **no Dependabot** — GitHub-based automation was retired with the self-hosted CI cutover, and no dependency-update PRs are auto-created.
+- **[Not currently implemented — operator-pending]** Codeowner review enforcement: we do NOT claim required CODEOWNERS review. Branch protection on `main` requires the `woodpecker` commit-status context, and `scripts/verify-branch-protection.sh` (which verifies required approvals and CODEOWNERS enforcement against the live GitHub API, failing closed) has not recorded a PASS. Until it does, review enforcement is operator-pending. The enforced substitutes today: the pre-push validate hook, `ci/check-pr.sh` for pre-merge verification, and the deploy-host pipeline that stops the line before images or deploy on any red stage.
+- **[Implemented in platform]** Deployment control: the pipeline builds, gates, migrates, deploys and verifies in one ordered run; a red stage stops the line before deploy. **[Not currently implemented]** Canary percentages and automatic canary rollback — rollback is the documented manual retag procedure (`deploy/rollback-plan.md`).
+- **[Implemented in platform]** Environment separation: production is a single Hetzner host under Docker Compose; development runs on developer machines against ephemeral containers. There are no separate staging clusters or environments — production data never leaves the production host, and CI test lanes use throwaway databases.
 
 ### Infrastructure Security
 
-- **Network boundaries**: Production network is segmented into public-facing (API, SMTP, dashboard), internal (message queue, workers, database), and management (monitoring, logging, CI/CD) subnets. Traffic between subnets is controlled by firewall rules.
-- **Firewalling**: Host-based firewalls (iptables/nftables) allow only required ports. Network-level firewall restricts inbound traffic to ports 80, 443, and 587. All other ports are blocked from public internet. Outbound traffic is restricted to required services only.
-- **Private networking**: Internal service communication occurs over private network interfaces (not public IPs). Database instances are not exposed to the public internet. Internal DNS resolves only within the private network.
-- **Administrative access**: SSH access is restricted to bastion hosts with IP allowlisting. No direct SSH from the internet to any production host. Session recording is enabled on bastion hosts.
-- **Host hardening**: Minimal base images (distroless or Alpine where possible). Unused packages and services are removed. SSH is configured with key-only authentication, no root login, and a limited user set. Kernel hardening: ASLR, DEP/NX, seccomp profiles, read-only filesystems where applicable.
-- **Patch management**: Operating system packages are patched within 7 days of release for non-critical updates and within 24 hours for critical security patches. Patch status is monitored via automated scanning. Container images are rebuilt and redeployed weekly.
-- **Container isolation**: Application services run in isolated containers (Docker). Containers run as non-root users with dropped capabilities. Read-only root filesystems are used where practical. Resource limits (CPU, memory) are enforced per container. Container runtime security is monitored.
+- **[Implemented in platform]** Network boundaries: one production host; Docker networks segment frontend, backend and data-plane traffic; database services have no host port binding and are reachable only on the internal Docker networks.
+- **[Implemented in platform]** Firewalling: UFW default-deny incoming; inbound is limited to the service ports 25, 80, 443, 587 and 993 plus operator ports (22 SSH, 465 SMTPS, 2525/2526 bounce/FBL). Outbound is default-allow.
+- **[Implemented in platform]** Host hardening: `deploy/scripts/hetzner-bootstrap.sh` installs Docker, configures UFW, hardens sshd (key-only authentication, no password auth) and adds fail2ban.
+- **[Operator policy]** Administrative access: SSH with key-based authentication to the single production host by named operators. **[Not currently implemented]** Bastion hosts and session recording — there is no bastion tier to record.
+- **[Implemented in platform]** Container isolation: services run as non-root users with dropped capabilities, `no-new-privileges`, read-only root filesystems plus tmpfs mounts where practical, and per-container CPU/memory limits (`docker-compose.prod.yml`).
+- **[Operator policy]** Patch management: OS packages are patched promptly after release (critical security patches urgently); container images are rebuilt and redeployed on every pipeline deploy of the changed services.
 
 ### Monitoring
 
 - **Application monitoring**: Prometheus metrics for all services, including request rates, error rates, latency percentiles, queue depth, and connection counts. Custom application metrics for business operations (messages processed, delivery attempts, bounce rates).
-- **Infrastructure monitoring**: Host-level metrics (CPU, memory, disk, network) collected via node_exporter. Database metrics (connections, query performance, replication lag) via postgres_exporter. Probe-based external monitoring from multiple geographic locations via blackbox_exporter.
+- **Infrastructure monitoring**: Host-level metrics (CPU, memory, disk, network) collected via node_exporter. Database metrics (connections, query performance) via postgres_exporter. Probe-based external monitoring via blackbox_exporter.
 - **Security alerting**: Alerts for failed-authentication anomalies, service health (service-down, queue-backlog), and certificate expiry. [roadmap] Security-event alerting for request-screening (WAF) verdicts and IDS/IPS signals is planned; those engines are not active blocking controls today (see Security Measures).
 - **Log retention**: Application and access logs retained per the retention registry (30 days by default, up to 365 days for Enterprise). Security audit logs retained for 365 days minimum (configurable via `AUDIT_RETENTION_DAYS`). Logs are immutable once written. Log archives are encrypted at rest.
 - **On-call process**: 24/7/365 on-call rotation with primary and secondary responders. Alerts are routed via Alertmanager to PagerDuty. On-call handoff occurs at 09:00 UTC daily with documented status transfer.
@@ -75,12 +97,14 @@ ApexMail provides transactional email infrastructure with EU/EEA-oriented deploy
 
 ### Backups and Recovery
 
-- **Backup frequency**: Weekly full backups (Sundays 02:00 UTC) with daily incremental backups and continuous WAL archiving. Configuration backups on every change via infrastructure-as-code repository commits. Backups retained for the configured window (default 90 days).
-- **Backup retention**: Backups are retained for a configured window (`BACKUP_RETENTION_DAYS`, default 90 days) and purged by an automated daily cleanup; analytics-store backups default to 30 days. WAL archives retained for 7 days. No backup tier is kept beyond the configured retention window.
-- **Restore testing**: Full database restore tested monthly in an isolated environment. Backup integrity verified automatically after each backup completes (checksum validation). Restore test results are logged and reviewed.
-- **Recovery Point Objective (RPO)**: 24 hours for full database restore from daily backups. Point-in-time recovery available within the 7-day WAL archive window (near-real-time).
-- **Recovery Time Objective (RTO)**: 4 hours for critical services (API, SMTP, queue). 8 hours for non-critical services (dashboard, analytics). [roadmap] Cross-region failover is a planned Dedicated Tenant capability — not live; recovery is restore-based on the current single-host topology.
-- **Geographic separation**: Primary and backup locations are selected by the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
+- **[Implemented in platform]** Backup frequency: nightly encrypted PostgreSQL `pg_dump` backups and nightly per-table ClickHouse dumps run as dedicated compose services (`postgres-backup`, `clickhouse-backup`). **[Not currently implemented]** WAL archiving — there is no continuous archiving and no point-in-time recovery; the recovery point is the last nightly backup.
+- **[Implemented in platform]** Backup encryption: AES-256 with a PBKDF2-derived key from the `backup_encryption_key` Docker secret; encryption keys are separate from production data keys.
+- **[Implemented in platform]** Backup retention: PostgreSQL keeps 14 daily / 8 weekly / 6 monthly generations (bounded to the newest 30); ClickHouse keeps 14 days / 14 artifacts; pruning is automatic. **[Operator policy]** Offsite mirroring (`BACKUP_TARGET`, rsync over SSH with pinned host keys) — recommended and monitored via backup healthchecks, but its configuration is an operator decision.
+- **[Implemented in platform]** Restore verification: every backup is automatically decrypted and structurally validated (`pg_restore --list`, or the ClickHouse equivalent) before the plaintext is deleted — a backup that cannot be read is never counted as good, and each backup container's healthcheck requires a fresh artifact (< 25 h old).
+- **[Not currently implemented]** Fully automated restore DRILLS: full-restore exercises are manual, at the documented quarterly cadence (`docs/operations/disaster-recovery-testing.md`), on a scratch host.
+- **[Implemented in platform]** Recovery Point Objective (RPO): up to 24 hours — the last nightly backup. There is no near-real-time recovery point.
+- **[Operator policy]** Recovery Time Objective (RTO): hours, not minutes (host rebuild + backup restore); the real number is measured and recorded in the quarterly drill. [roadmap] Cross-region failover is a planned Dedicated Tenant capability — not live; recovery is restore-based on the current single-host topology.
+- **[Operator policy]** Geographic separation: backup locations follow the active deployment configuration and applicable agreement. Cross-region disaster recovery, where offered, is contract-specific and not a public-plan entitlement.
 
 ### Data Deletion
 
@@ -141,11 +165,11 @@ ApexMail operates a responsible disclosure program with safe harbor for security
 
 ### Business Continuity and Disaster Recovery
 
-- **Backup frequency**: Daily automated backups with the configured retention window (default 90 days).
-- **Recovery Time Objective (RTO)**: 4 hours for critical services.
-- **Recovery Point Objective (RPO)**: 24 hours for transactional data; point-in-time recovery within the WAL archive window.
-- **Failover**: Service-level failover on the current single-host topology — health-checked services with automatic restart; queue and message persistence to disk (PostgreSQL WAL). [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
-- **Testing**: Disaster recovery tested annually (Enterprise: semi-annually).
+- **Backup frequency**: Nightly automated encrypted backups (PostgreSQL and ClickHouse) with the documented retention generations (14 days / 8 weeks / 6 months for PostgreSQL; 14 days for ClickHouse).
+- **Recovery Time Objective (RTO)**: hours, not minutes — measured in the quarterly rebuild drill (operator policy target).
+- **Recovery Point Objective (RPO)**: up to 24 hours for transactional data (the last nightly backup); point-in-time recovery is not implemented.
+- **Failover**: Service-level resilience on the current single-host topology — health-checked services with automatic restart; queue and message persistence to disk. [roadmap] Multi-AZ and cross-region failover are planned Dedicated Tenant capabilities, not live.
+- **Testing**: Automated restorability validation on every backup (decrypt + structural check); full disaster-recovery drills are manual at the documented quarterly cadence.
 
 ### Incident Response
 

@@ -115,7 +115,11 @@ fn test_payg_cost_calculation_throughput() {
         "PAYG cost calculation throughput: {} ops in {:?} ({:.0} ops/sec)",
         iterations, elapsed, ops_per_sec
     );
-    budget::emit_baseline_metric("billing_calculations", "throughput_ops_per_sec", ops_per_sec);
+    budget::emit_baseline_metric(
+        "billing_calculations",
+        "throughput_ops_per_sec",
+        ops_per_sec,
+    );
     assert!(
         elapsed < budget::from_millis(500),
         "100,000 cost calculations took {:?}, expected < 500ms",
@@ -185,7 +189,9 @@ fn test_quota_check_throughput() {
         // Alternate an in-limit request (Ok) with an over-limit one (Err):
         // both verdicts are real work the enforcement path produces.
         let amount = if i % 2 == 0 { 1 } else { i64::MAX };
-        let verdict = black_box(snapshot.require_capacity(black_box(CapacityKey::SendingDomains), black_box(amount)));
+        let verdict = black_box(
+            snapshot.require_capacity(black_box(CapacityKey::SendingDomains), black_box(amount)),
+        );
         let entitled = black_box(snapshot.require_feature(black_box(FeatureKey::ApiAccess)));
         black_box((plan, verdict.is_err(), entitled.is_ok()));
     }
@@ -212,7 +218,9 @@ fn test_quota_check_throughput() {
             "plan {plan} must grant api_access"
         );
         assert!(
-            snapshot.require_capacity(CapacityKey::SendingDomains, 1).is_ok(),
+            snapshot
+                .require_capacity(CapacityKey::SendingDomains, 1)
+                .is_ok(),
             "plan {plan} must admit an in-limit capacity request"
         );
         let sending_limit = snapshot.capacity(CapacityKey::SendingDomains);

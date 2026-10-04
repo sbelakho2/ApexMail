@@ -1630,9 +1630,16 @@ mod adversarial_tests {
     }
 
     async fn seed_event(pool: &sqlx::PgPool, tenant: &str, event_type: &str, hours_ago: i64) {
+        // CURRENT_DATE + 1 minute: explicitly TODAY. The previous
+        // "NOW() - N hours" stamp crossed UTC midnight on late-evening runs
+        // (the 'today' metrics count `timestamp >= CURRENT_DATE`), flipping
+        // activeTenantsToday to 0 — a midnight-boundary flake, not a
+        // product bug. hours_ago is kept for relative-order assertions.
         sqlx::query(
             "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
-             VALUES ($1, $2, $3, 'growth@example.com', NOW() - ($4 || ' hours')::interval)",
+             VALUES ($1, $2, $3, 'growth@example.com',
+                     GREATEST(CURRENT_DATE + INTERVAL '1 minute',
+                              NOW() - ($4 || ' hours')::interval))",
         )
         .bind(format!(
             "evt_{}",

@@ -21,12 +21,24 @@ weaker than the words. This gate makes that class return impossible:
      response) present as ACTIVE controls must be `true` in the profile.
      A template claiming an Intrusion Detection System while
      MTA_IDS_ENABLED=false is a legal-artifact contradiction — FAIL.
+  4. DEPLOYMENT-FACTS RECONCILIATION (audit 2026-10-02 #6):
+     docs/deployment-facts.json is the shared authority for what the managed
+     baseline turns ON; for every managed-baseline control this checker owns,
+     the linked fact's managed_cloud_enabled must agree with the env value —
+     two checkers, one truth.
+  5. MARKETING INTEGRITY-CLAIM CORPUS (audit 2026-10-02 #3): the localized
+     marketing security pages must not carry the five unverifiable
+     supply-chain/backup/monitoring claims (build-time signing, inotify FIM,
+     append-only deployment logs, PostgreSQL page checksums + nightly scan,
+     automated weekly restore tests) while the linked deployment fact is
+     false. Flip the fact in the same change that ships a capability.
 
 Self-test: `check_security_posture.py --self-test` mutates fixtures and
 asserts this gate fails on every class it exists to catch.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -34,11 +46,88 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE = ROOT / ".env.production.example"
 COMPOSE = ROOT / "docker-compose.prod.yml"
+FACTS_PATH = ROOT / "docs/deployment-facts.json"
 TEMPLATES = [
     ROOT / "templates/compliance/security-measures.md",
     ROOT / "templates/compliance/trust-center.md",
     ROOT / "templates/legal/dpa.md",
     ROOT / "templates/compliance/incident-response.md",
+]
+
+# Audit 2026-10-02 #3: the MARKETING security page (all locales) belongs to
+# the posture corpus too — its supply-chain/backup/monitoring claims must
+# match docs/deployment-facts.json, the shared authority.
+MARKETING_SURFACES = [
+    ROOT / "apps/marketing-zola/content/security/index.md",
+    ROOT / "apps/marketing-zola/content/security/index.de.md",
+    ROOT / "apps/marketing-zola/content/security/index.es.md",
+    ROOT / "apps/marketing-zola/content/security/index.fr.md",
+]
+
+# deployment-facts id -> managed-baseline env var this checker already owns.
+FACT_ENV_VARS = {
+    "WAF_ENABLED": "web_application_firewall",
+    "MTA_SPAM_FILTER_ENABLED": "spam_phishing_filtering",
+    "MTA_ATTACHMENT_SCAN_ENABLED": "attachment_sandboxing",
+    "MTA_IDS_ENABLED": "intrusion_detection_prevention",
+    "WORKER_DLP_ENABLED": "data_loss_prevention",
+}
+
+# Audit 2026-10-02 #3 — the five unverifiable integrity-table claims. Each
+# entry maps a deployment-facts id to claim patterns (EN + de/es/fr); while
+# the fact's value is not true, a pattern hit on a marketing security surface
+# is an advertisement of a control that does not exist — FAIL. When the
+# capability genuinely ships, flip the fact IN THE SAME CHANGE and the gate
+# relaxes.
+INTEGRITY_CLAIM_PATTERNS = [
+    ("artifact_signature", [
+        r"cryptographically signed",
+        r"kryptografisch signiert",
+        r"firman criptográficamente",
+        r"signés cryptographiquement",
+        r"validate signatures before rollout",
+        r"validieren signaturen vor dem rollout",
+        r"validan las firmas antes del despliegue",
+        r"valident les signatures avant le déploiement",
+    ]),
+    ("fim_inotify", [
+        r"inotify",
+        r"file-integrity monitoring",
+        r"dateiintegritätsüberwachung",
+        r"monitoreo de integridad de archivos",
+        r"surveillance de l'intégrité des fichiers",
+    ]),
+    ("deployment_log_append_only", [
+        r"append-only",
+        r"nur-anhängen",
+        r"solo anexar",
+        r"en ajout seulement",
+        r"tamper-evident",
+        r"manipulationssichere\w* protokoll",
+        r"registro a prueba de manipulaciones",
+        r"journal inviolable",
+    ]),
+    ("postgres_page_checksums", [
+        r"page checksums?",
+        r"checksum validation on all data pages",
+        r"prüfsummenvalidierung auf allen datenseiten",
+        r"suma de verificación postgresql en todas las páginas",
+        r"somme de contrôle postgresql sur toutes les pages",
+        r"nightly full scan",
+        r"nächtlicher vollständiger scan",
+        r"escaneo completo nocturno",
+        r"analyse complète nocturne",
+    ]),
+    ("backup_restore_automatic", [
+        r"automated (weekly )?restore tests?",
+        r"automatisierte wiederherstellungstests",
+        r"pruebas de restauración automatizadas",
+        r"tests de restauration automatisés",
+        r"sample data comparison",
+        r"vergleich von beispieldaten",
+        r"comparación de datos de muestra",
+        r"comparaison des données d'échantillon",
+    ]),
 ]
 
 
@@ -100,13 +189,18 @@ def evaluate(
     templates: dict[str, str],
     quiet: bool = False,
     live: bool = False,
+    facts: dict | None = None,
+    marketing: dict[str, str] | None = None,
 ) -> list[str]:
     """Run every gate rule against the given texts; return the failure names.
 
     `templates` maps file name -> text. The main entry point feeds the real
     .env/compose/template files; `--self-test` feeds mutated FIXTURE copies
     so the gate can be pointed at injected breakage without ever touching
-    the real files.
+    the real files. `facts` (docs/deployment-facts.json's `facts` object) and
+    `marketing` (the localized marketing security pages) enable the
+    deployment-facts reconciliation and the integrity-claim corpus; both are
+    None in the live-config path and the legacy self-test cases.
     """
     failures: list[str] = []
 
@@ -187,6 +281,43 @@ def evaluate(
             elif claimed and profile_true:
                 check(f"template-claim:{claim}:{tpl_name}", True)
 
+    # Deployment-facts reconciliation: the shared authority must agree with
+    # the managed profile (audit 2026-10-02 #6 — one truth, two checkers).
+    if facts is not None:
+        for var, fact_id in sorted(FACT_ENV_VARS.items()):
+            fact = facts.get(fact_id)
+            if fact is None:
+                check(f"facts-present:{fact_id}", False,
+                      f"docs/deployment-facts.json has no {fact_id!r} fact — "
+                      "the managed-baseline reconciliation is blind")
+                continue
+            fact_on = fact.get("managed_cloud_enabled") is True
+            env_on = values.get(var) == "true"
+            check(
+                f"facts-env:{fact_id}:{var}", fact_on == env_on,
+                f"deployment-facts managed_cloud_enabled={fact.get('managed_cloud_enabled')} "
+                f"but .env.production.example has {var}={values.get(var)!r} — "
+                "reconcile both in the same change",
+            )
+
+    # Marketing integrity-claim corpus: while a fact is not true, the five
+    # unverifiable supply-chain/backup/monitoring claims must not appear on
+    # any localized marketing security page (audit 2026-10-02 #3).
+    if marketing is not None and facts is not None:
+        for fact_id, patterns in INTEGRITY_CLAIM_PATTERNS:
+            fact = facts.get(fact_id) or {}
+            if fact.get("value") is True:
+                continue  # capability shipped: the claim is legal again
+            for surface_name, text in marketing.items():
+                for pattern in patterns:
+                    if re.search(pattern, text, re.IGNORECASE):
+                        check(
+                            f"marketing-claim:{fact_id}:{surface_name}", False,
+                            f"surface claims a control that deployment-facts records as "
+                            f"not true (pattern /{pattern}/i) — rewrite the claim to the "
+                            f"honest statement or ship the capability and flip the fact",
+                        )
+
     return failures
 
 
@@ -199,7 +330,6 @@ def main(argv: list[str]) -> int:
     # before `up`). Every control must be explicitly present and the
     # managed baseline active — no implicit false defaults, ever.
     if "--resolved-json" in argv:
-        import json
         path = Path(argv[argv.index("--resolved-json") + 1])
         cfg = json.loads(path.read_text())
         values: dict[str, str] = {}
@@ -223,7 +353,13 @@ def main(argv: list[str]) -> int:
     env_text = ENV_EXAMPLE.read_text() if ENV_EXAMPLE.exists() else ""
     compose_text = COMPOSE.read_text()
     templates = {tpl.name: tpl.read_text() for tpl in TEMPLATES if tpl.exists()}
-    failures = evaluate(env_text, compose_text, templates)
+    if not FACTS_PATH.is_file():
+        print("FAIL deployment-facts:docs/deployment-facts.json — missing: the shared "
+              "authority for deployment truth must exist (audit 2026-10-02 #14)")
+        return 1
+    facts = (json.loads(FACTS_PATH.read_text()).get("facts")) or {}
+    marketing = {p.name: p.read_text() for p in MARKETING_SURFACES if p.exists()}
+    failures = evaluate(env_text, compose_text, templates, facts=facts, marketing=marketing)
 
     print()
     if failures:
@@ -311,6 +447,72 @@ def self_test() -> int:
         else:
             ok = False
             print(f"SELF-TEST FAIL {label}: failures={failures}")
+
+    # Deployment-facts classes (audit 2026-10-02 #3/#6): the facts file and
+    # the marketing integrity corpus, exercised on in-memory fixtures.
+    def base_facts() -> dict:
+        return {
+            fact_id: {
+                "value": True,
+                "managed_cloud_enabled": True,
+                "enforcement_mode": "enforced",
+                "monitored": False,
+                "advertised": False,
+                "implementation_stage": "runtime-wired",
+                "binary_default": False,
+                "evidence": "fixture",
+                "source": "fixture",
+            }
+            for fact_id in FACT_ENV_VARS.values()
+        }
+
+    marketing_fixture = {
+        "security/index.md": (
+            "# Security\n\nSystem integrity is verified:\n\n"
+            "| Control | What Is Verified |\n|---|---|\n"
+            "| Deployment artifacts | Images are digest-pinned and verified "
+            "before rollout; the release manifest records every digest. |\n"
+            "| Backups | Every backup is decrypt-validated automatically; "
+            "full restore drills are manual. |\n"
+        )
+    }
+    facts_cases: list[tuple[str, dict, dict[str, str], str | None]] = [
+        ("facts fixture passes", base_facts(), marketing_fixture, None),
+        (
+            "facts-env class: managed-baseline fact disagrees with the profile",
+            {**base_facts(), "data_loss_prevention": {**base_facts()["data_loss_prevention"], "managed_cloud_enabled": False}},
+            marketing_fixture,
+            "facts-env:data_loss_prevention:WORKER_DLP_ENABLED",
+        ),
+        (
+            "marketing-claim class: signed-artifact claim while the fact is false",
+            {**base_facts(), "artifact_signature": {"value": False, "managed_cloud_enabled": False}},
+            {"security/index.md": "Images are cryptographically signed at build time."},
+            "marketing-claim:artifact_signature:security/index.md",
+        ),
+        (
+            "marketing corpus clean when the control is honestly described",
+            base_facts(),
+            marketing_fixture,
+            None,
+        ),
+    ]
+    fixture_facts_env = base_env()
+    for label, facts, marketing, needle in facts_cases:
+        failures = evaluate(
+            fixture_facts_env, fixture_compose, templates, quiet=True,
+            facts=facts, marketing=marketing,
+        )
+        if needle is None:
+            passed = not failures
+        else:
+            passed = needle in failures
+        if passed:
+            print(f"SELF-TEST PASS {label}")
+        else:
+            ok = False
+            print(f"SELF-TEST FAIL {label}: failures={failures}")
+
     print(f"self-test: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 

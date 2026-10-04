@@ -459,6 +459,10 @@ impl Config {
                         .into(),
                 });
             }
+            // External audit #9: the failover↔fencing coupling is MECHANICAL
+            // — failover with replicas but without data-plane fencing is a
+            // startup-rejected deployment, not a warning.
+            self.validate_failover_fencing_coupling()?;
         } else {
             // Development/test: ephemeral runtime keys are acceptable (every
             // restart rotates them) but must be loud.
@@ -474,6 +478,35 @@ impl Config {
                     "SECURITY: ADMIN_API_KEY missing in development; generated an ephemeral runtime key (redacted)"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// External audit #9 — mechanical failover↔fencing coupling.
+    ///
+    /// The automatic-failover coordinator FENCES the old primary (Redis
+    /// `ha:fenced:{node}`, `crate::failover::fence_node`) before promoting
+    /// the target. That fence only prevents a split brain if the data plane
+    /// ENFORCES it (`APEXMAIL_HA_FENCING=true` — api-server mutating routes,
+    /// worker claim loops and mta inbound MAIL refuse work while fenced).
+    /// With failover enabled, replicas configured and enforcement off, a
+    /// fenced old primary keeps accepting writes during and after the
+    /// failover — exactly the split-brain window the machinery exists to
+    /// close. Production therefore REJECTS the combination, naming the fix.
+    pub fn validate_failover_fencing_coupling(&self) -> Result<(), ConfigError> {
+        let fencing_enabled = matches!(
+            std::env::var("APEXMAIL_HA_FENCING").as_deref(),
+            Ok("true") | Ok("1")
+        );
+        if self.failover.enabled && !self.database.replica_hosts.is_empty() && !fencing_enabled {
+            return Err(ConfigError::SecurityCheck(
+                "FAILOVER_ENABLED=true with DB_REPLICA_HOSTS configured requires \
+                 APEXMAIL_HA_FENCING=true — without data-plane fence enforcement a \
+                 failover-fenced old primary keeps accepting writes (split brain). Fix \
+                 ONE of: set APEXMAIL_HA_FENCING=true, or set FAILOVER_ENABLED=false, or \
+                 clear DB_REPLICA_HOSTS."
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -677,6 +710,7 @@ mod tests {
     #[test]
     fn test_production_missing_internal_api_key_is_refused() {
         production_env_with(None, Some("prod-admin-key"), Some("prod-db-password"));
+        unset_env("DB_REPLICA_HOSTS"); // keep the failover↔fencing gate out of scope here
 
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::MissingVar(_)));
@@ -690,6 +724,7 @@ mod tests {
     #[test]
     fn test_production_missing_admin_api_key_is_refused() {
         production_env_with(Some("prod-internal-key"), None, Some("prod-db-password"));
+        unset_env("DB_REPLICA_HOSTS");
 
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::MissingVar(_)));
@@ -704,6 +739,7 @@ mod tests {
     #[test]
     fn test_production_missing_db_password_is_refused() {
         production_env_with(Some("prod-internal-key"), Some("prod-admin-key"), None);
+        unset_env("DB_REPLICA_HOSTS");
 
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::MissingVar(_)));
@@ -723,6 +759,7 @@ mod tests {
             Some("prod-admin-key"),
             Some("apexmail"),
         );
+        unset_env("DB_REPLICA_HOSTS");
 
         let err = Config::from_env().unwrap_err();
         assert!(matches!(err, ConfigError::Invalid { .. }));
@@ -742,6 +779,7 @@ mod tests {
             Some("prod-admin-key"),
             Some("prod-db-password"),
         );
+        unset_env("DB_REPLICA_HOSTS"); // the credential assertions below are orthogonal to the failover↔fencing gate
 
         let cfg =
             Config::from_env().expect("production config with explicit credentials must load");
@@ -763,6 +801,7 @@ mod tests {
             Some("probe-admin-key"),
             Some("probe-db-password"),
         );
+        unset_env("DB_REPLICA_HOSTS");
         let mut cfg =
             Config::from_env().expect("production config with explicit credentials must load");
 
@@ -834,5 +873,144 @@ mod tests {
             prod_err.to_string().contains("INTERNAL_API_KEY"),
             "production refuses the first missing variable, got: {prod_err}"
         );
+    }
+
+    // ── External audit #9: mechanical failover↔fencing coupling ────────
+
+    /// Production + FAILOVER_ENABLED=true + DB_REPLICA_HOSTS + no
+    /// APEXMAIL_HA_FENCING → startup REFUSED with an error naming the exact
+    /// fix (failover fences the old primary, but the fence only prevents a
+    /// split brain when the data plane enforces it).
+    #[test]
+    fn test_production_failover_with_replicas_requires_fencing() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("prod-db-password"),
+        );
+        set_env("FAILOVER_ENABLED", "true");
+        set_env("DB_REPLICA_HOSTS", "db-replica-1,db-replica-2");
+        unset_env("APEXMAIL_HA_FENCING");
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::SecurityCheck(_)));
+        let message = err.to_string();
+        for required in [
+            "FAILOVER_ENABLED",
+            "DB_REPLICA_HOSTS",
+            "APEXMAIL_HA_FENCING=true",
+            "FAILOVER_ENABLED=false",
+        ] {
+            assert!(
+                message.contains(required),
+                "the refusal must name the exact fix `{required}`, got: {message}"
+            );
+        }
+    }
+
+    /// `APEXMAIL_HA_FENCING=true` unblocks the exact same deployment.
+    #[test]
+    fn test_production_failover_with_replicas_and_fencing_loads() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("prod-db-password"),
+        );
+        set_env("FAILOVER_ENABLED", "true");
+        set_env("DB_REPLICA_HOSTS", "db-replica-1");
+        set_env("APEXMAIL_HA_FENCING", "true");
+
+        let cfg = Config::from_env().expect("fencing enforcement satisfies the coupling gate");
+        assert_eq!(cfg.database.replica_hosts, vec!["db-replica-1".to_string()]);
+    }
+
+    /// `APEXMAIL_HA_FENCING=1` — the same truthy spelling the data-plane
+    /// fence gates accept — satisfies the coupling too.
+    #[test]
+    fn test_production_fencing_accepts_the_same_truthy_spellings_as_the_data_plane() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("prod-db-password"),
+        );
+        set_env("FAILOVER_ENABLED", "true");
+        set_env("DB_REPLICA_HOSTS", "db-replica-1");
+        set_env("APEXMAIL_HA_FENCING", "1");
+        let cfg = Config::from_env().expect("APEXMAIL_HA_FENCING=1 must satisfy the gate");
+        assert!(!cfg.database.replica_hosts.is_empty());
+
+        set_env("APEXMAIL_HA_FENCING", "false");
+        assert!(
+            Config::from_env().is_err(),
+            "APEXMAIL_HA_FENCING=false must NOT satisfy the gate"
+        );
+    }
+
+    /// The gate is scoped to the real coupling: disabling failover OR
+    /// removing the replica topology leaves nothing to fence, and the
+    /// deployment loads.
+    #[test]
+    fn test_production_coupling_gate_only_binds_failover_plus_replicas() {
+        production_env_with(
+            Some("prod-internal-key"),
+            Some("prod-admin-key"),
+            Some("prod-db-password"),
+        );
+        set_env("DB_REPLICA_HOSTS", "db-replica-1");
+        unset_env("APEXMAIL_HA_FENCING");
+
+        set_env("FAILOVER_ENABLED", "false");
+        let cfg = Config::from_env().expect("failover disabled — no fencing prerequisite");
+        assert!(!cfg.failover.enabled);
+
+        set_env("FAILOVER_ENABLED", "true");
+        set_env("DB_REPLICA_HOSTS", "");
+        let cfg = Config::from_env().expect("no replicas — no fencing prerequisite");
+        assert!(cfg.database.replica_hosts.is_empty());
+    }
+
+    /// The validator, directly: all four combinations of the coupling
+    /// matrix, independent of `from_env`.
+    #[test]
+    fn test_validate_failover_fencing_coupling_matrix() {
+        fn coupling_config(failover_enabled: bool, replicas: usize) -> Config {
+            let mut cfg = Config::from_env().expect("HA config must load in development");
+            cfg.failover.enabled = failover_enabled;
+            cfg.database.replica_hosts = (0..replicas).map(|i| format!("replica-{i}")).collect();
+            cfg
+        }
+
+        set_env("APEXMAIL_HA_FENCING", "true");
+        assert!(coupling_config(true, 2)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+        assert!(coupling_config(false, 2)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+        assert!(coupling_config(true, 0)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+        assert!(coupling_config(false, 0)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+
+        unset_env("APEXMAIL_HA_FENCING");
+        let err = coupling_config(true, 2)
+            .validate_failover_fencing_coupling()
+            .expect_err("unfenced failover with replicas is refused");
+        assert!(
+            err.to_string().contains("APEXMAIL_HA_FENCING=true"),
+            "{err}"
+        );
+        assert!(coupling_config(false, 2)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+        assert!(coupling_config(true, 0)
+            .validate_failover_fencing_coupling()
+            .is_ok());
+
+        // Cleanup: never leak the coupling variables into sibling tests.
+        unset_env("DB_REPLICA_HOSTS");
+        set_env("FAILOVER_ENABLED", "true");
     }
 }

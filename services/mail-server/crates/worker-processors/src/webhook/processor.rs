@@ -1688,7 +1688,11 @@ mod adversarial_tests {
             {
                 let mut mac = HmacSha256::new_from_slice(envelope.as_bytes()).unwrap();
                 mac.update(format!("{}.{}", timestamp, r#"{"hello":"world"}"#).as_bytes());
-                format!("{}{}", SIGNATURE_VERSION, hex::encode(mac.finalize().into_bytes()))
+                format!(
+                    "{}{}",
+                    SIGNATURE_VERSION,
+                    hex::encode(mac.finalize().into_bytes())
+                )
             },
             "the envelope STRING must never be the signing material"
         );
@@ -1727,7 +1731,10 @@ mod adversarial_tests {
         let result = processor
             .deliver_webhook(&job, r#"{"hello":"world"}"#, &ip_target(&stub))
             .await;
-        assert!(result.success, "a legacy row must still deliver: {result:?}");
+        assert!(
+            result.success,
+            "a legacy row must still deliver: {result:?}"
+        );
 
         // The stub saw a delivery signed with the plaintext secret.
         let requests = stub

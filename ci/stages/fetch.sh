@@ -43,8 +43,20 @@ stage_main() {
 
     _fetch_remote=${CI_REPO_URL:-origin}
     ci_info "fetching $_fetch_remote/$CI_REF"
-    if ! ci_run_logged git -C "$REPO_ROOT" fetch --no-tags "$_fetch_remote" "$CI_REF"; then
-        ci_die "git fetch failed — check network/deploy key (ci/README.md § deploy key)"
+    # Bounded retries: on hosts with intermittent DNS (observed: "Could not
+    # resolve host" transiently resolving fine seconds later), a single
+    # attempt fails the whole pipeline on infrastructure noise. External
+    # audit 2026-10-02 follow-up.
+    _fetch_ok=""
+    for _fetch_attempt in 1 2 3 4; do
+        if ci_run_logged git -C "$REPO_ROOT" fetch --no-tags "$_fetch_remote" "$CI_REF"; then
+            _fetch_ok="1"
+            break
+        fi
+        [ "$_fetch_attempt" -lt 4 ] && ci_warn "git fetch attempt $_fetch_attempt failed — retrying" && sleep 5
+    done
+    if [ -z "$_fetch_ok" ]; then
+        ci_die "git fetch failed after 4 attempts — check network/deploy key (ci/README.md § deploy key)"
     fi
 
     _head=$(git -C "$REPO_ROOT" rev-parse HEAD)
@@ -57,6 +69,45 @@ stage_main() {
         ci_err "HEAD $_head is NOT pushed to $_fetch_remote/$CI_REF"
         ci_err "the pipeline refuses to build/deploy unpushed commits — push first"
         return "$CI_EXIT_FAIL"
+    fi
+
+    # External audit (2026-10-02) item 13: branch protection IS release
+    # evidence — the required `woodpecker` status context, required approvals
+    # and CODEOWNERS enforcement are what make a green run a mechanical merge
+    # blocker instead of a convention. Stage 01 is THE single chokepoint: it
+    # runs on EVERY pipeline run (including --skip-unchanged polls, so a
+    # protection regression is caught within one 5-minute poll even with no
+    # new commits), and it is checked BEFORE the cheap-poll exit below.
+    # Missing-tool policy is ci_have_tool's (ci/lib.sh): gh absent under
+    # CI_MISSING_TOOLS=fail OR on the deploy host fails the stage closed;
+    # elsewhere it degrades to a loud skip. scripts/verify-branch-protection.sh
+    # implements the same policy for standalone runs. Dry-run (selftest)
+    # logs the check and skips it, exactly like every ci_check under ci_dry.
+    if ci_dry; then
+        ci_info "check (dry-run): branch protection on main (woodpecker status, approvals, CODEOWNERS, push restriction)"
+    elif [ ! -f "$REPO_ROOT/scripts/verify-branch-protection.sh" ]; then
+        ci_err "scripts/verify-branch-protection.sh missing — the branch-protection gate cannot be verified (external audit 2026-10-02 item 13)"
+        return "$CI_EXIT_FAIL"
+    elif ! command -v gh >/dev/null 2>&1; then
+        if [ "${CI_MISSING_TOOLS:-auto}" = fail ] || ci_on_deploy_host; then
+            ci_err "gh missing — branch protection cannot be verified and the CI_MISSING_TOOLS policy is fail-closed here (external audit 2026-10-02 item 13). Install gh + a token with push access (GITHUB_TOKEN), see ci/README.md §13"
+            return "$CI_EXIT_FAIL"
+        fi
+        ci_warn "gh missing — branch-protection verification skipped (install gh + GITHUB_TOKEN for the release gate; ci/README.md §13)"
+    else
+        _bp_rc=0
+        # bash, not sh: the script is bash (its own shebang AND a re-exec
+        # guard make `sh` invocation safe too, but invoke it as what it is).
+        bash "$REPO_ROOT/scripts/verify-branch-protection.sh" \
+            --branch "${CI_BRANCH_PROTECTION_BRANCH:-main}" || _bp_rc=$?
+        case $_bp_rc in
+            0) ci_info "PASS: branch protection on main verified (woodpecker status, approvals, CODEOWNERS, push restriction)" ;;
+            "$CI_EXIT_SKIP")
+                ci_warn "branch-protection verification SKIP (gh absent per the script's policy) — the release gate is degraded" ;;
+            *)
+                ci_err "branch protection on main does not meet the release requirements (see the script's table above) — external audit 2026-10-02 item 13"
+                return "$CI_EXIT_FAIL" ;;
+        esac
     fi
 
     # Cheap-poll support: with CI_SKIP_UNCHANGED=1 (the systemd timer), a

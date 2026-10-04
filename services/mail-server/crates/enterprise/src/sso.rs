@@ -1555,9 +1555,7 @@ impl SSOService {
                             if matches!(&error, sqlx::Error::Database(db_error)
                                 if db_error.code().as_deref() == Some("23505"))
                             {
-                                format!(
-                                    "SSO provisioning refused: an account with the asserted email already exists in another organization"
-                                )
+                                "SSO provisioning refused: an account with the asserted email already exists in another organization".to_string()
                             } else {
                                 format!("Provision SSO user: {error}")
                             }
@@ -4550,7 +4548,7 @@ pub(crate) mod tests {
         // Mutate ONLY the RESPONSE Issuer (assertion Issuer stays correct).
         let response_mutated = deconflation_fixture().unsigned_document().replacen(
             &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
-            &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+            "<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>",
             1,
         );
         let error = validate_saml_document_claims(&response_mutated, &deconflation_ctx())
@@ -4565,11 +4563,11 @@ pub(crate) mod tests {
             .unsigned_document()
             .replacen(
                 &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
-                &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+                "<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>",
                 2,
             )
             .replacen(
-                &format!("<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>"),
+                &"<saml:Issuer>https://evil.example.com/metadata</saml:Issuer>".to_string(),
                 &format!("<saml:Issuer>{DECONFL_IDP}</saml:Issuer>"),
                 1,
             );
@@ -5072,8 +5070,7 @@ pub(crate) mod tests {
         // The same assertion id may never be consumed twice for the tenant.
         let replay = parse_fixture(&service, domain, &fixture)
             .await
-            .err()
-            .expect("the second use of an assertion id is a replay");
+            .expect_err("the second use of an assertion id is a replay");
         assert!(
             replay.contains("replay rejected"),
             "unexpected error: {replay}"
@@ -5098,8 +5095,7 @@ pub(crate) mod tests {
         let replay_other =
             parse_fixture(&service, "signed-ok2.coverage.example.com", &other_fixture)
                 .await
-                .err()
-                .expect("second use for the other tenant is also a replay");
+                .expect_err("second use for the other tenant is also a replay");
         assert!(replay_other.contains("replay rejected"));
     }
 
@@ -5210,8 +5206,7 @@ pub(crate) mod tests {
         fixture.include_signature = false;
         let unsigned_error = parse_fixture(&service, domain, &fixture)
             .await
-            .err()
-            .expect("unsigned must be refused");
+            .expect_err("unsigned must be refused");
         assert!(
             unsigned_error.contains("signature"),
             "unsigned must be refused at the signature gate: {unsigned_error}"
@@ -5238,8 +5233,7 @@ pub(crate) mod tests {
         let tampered_error = service
             .parse_and_validate_saml_response(&tampered, domain)
             .await
-            .err()
-            .expect("tampered digest must be refused");
+            .expect_err("tampered digest must be refused");
         assert!(
             tampered_error.contains("signature verification failed"),
             "tampered digest must be Invalid: {tampered_error}"
@@ -5264,8 +5258,7 @@ pub(crate) mod tests {
         let malformed_error = service
             .parse_and_validate_saml_response("<not-xml", domain)
             .await
-            .err()
-            .expect("malformed XML must be refused");
+            .expect_err("malformed XML must be refused");
         assert!(
             malformed_error.contains("signature") || malformed_error.contains("parse"),
             "malformed XML: {malformed_error}"
@@ -5284,8 +5277,7 @@ pub(crate) mod tests {
         let fixture = SamlFixture::valid(&idp_entity_id, &sp_entity_id, &acs_url);
         let error = parse_fixture(&service, domain, &fixture)
             .await
-            .err()
-            .expect("a signed response without a configured cert must be refused");
+            .expect_err("a signed response without a configured cert must be refused");
         assert!(
             error.contains("certificate is not configured"),
             "unexpected: {error}"
@@ -5307,8 +5299,7 @@ pub(crate) mod tests {
         unsolicited.in_response_to = None;
         let error = parse_fixture(&service, domain, &unsolicited)
             .await
-            .err()
-            .expect("unsolicited response refused");
+            .expect_err("unsolicited response refused");
         assert!(error.contains("unsolicited"), "unexpected: {error}");
 
         // 2. A response correlating against a staged request validates, and
@@ -5335,8 +5326,7 @@ pub(crate) mod tests {
         replayed_request.assertion_id = format!("_assertion_{}", Uuid::new_v4());
         let error = parse_fixture_unstaged(&service, domain, &replayed_request)
             .await
-            .err()
-            .expect("a consumed InResponseTo is refused");
+            .expect_err("a consumed InResponseTo is refused");
         assert!(
             error.contains("does not match an outstanding request"),
             "unexpected: {error}"
@@ -5357,8 +5347,7 @@ pub(crate) mod tests {
         .expect("stage expired request");
         let error = parse_fixture(&service, domain, &late)
             .await
-            .err()
-            .expect("an expired stage is refused");
+            .expect_err("an expired stage is refused");
         assert!(
             error.contains("does not match an outstanding request"),
             "unexpected: {error}"
@@ -5375,8 +5364,7 @@ pub(crate) mod tests {
         stage_saml_authn_request(&service, domain, &cross_request_id).await;
         let error = parse_fixture(&service, other_domain, &cross_tenant)
             .await
-            .err()
-            .expect("a foreign-tenant stage is refused");
+            .expect_err("a foreign-tenant stage is refused");
         assert!(
             error.contains("does not match an outstanding request")
                 || error.contains("does not belong to this domain"),

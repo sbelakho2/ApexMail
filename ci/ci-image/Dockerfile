@@ -119,16 +119,20 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # TARGETARCH is amd64/arm64 while gitleaks' release assets are named x64.
 # (The previous `${TARGETARCH/x86_64/x64}` substitution was BOTH a bashism —
 # /bin/sh is dash, "Bad substitution" at build time — and matched the wrong
-# value.) The remaining assets are the x86_64 release builds, matching the
-# executor host.
+# value.) gitleaks stopped shipping bare binaries (the old
+# `gitleaks_<v>_linux_x64` URL now 404s): the release ships a .tar.gz with the
+# binary at its root, extracted here like the other archives. The remaining
+# assets are the x86_64 release builds, matching the executor host.
+# External audit 2026-10-02 item 1: the dead gitleaks URL made the committed
+# Dockerfile unbuildable from source (found by the first real build).
 ARG TARGETARCH
 RUN case "$TARGETARCH" in \
         amd64) GL_ARCH=x64 ;; \
         arm64) GL_ARCH=arm64 ;; \
         *)     GL_ARCH="$TARGETARCH" ;; \
     esac \
-    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}" \
-        -o /usr/local/bin/gitleaks && chmod +x /usr/local/bin/gitleaks \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
+        -o /tmp/gitleaks.tgz && tar xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks && rm -f /tmp/gitleaks.tgz \
     && curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
         -o /tmp/trivy.tgz && tar xzf /tmp/trivy.tgz -C /usr/local/bin trivy && rm -f /tmp/trivy.tgz \
     && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64" \
@@ -140,13 +144,19 @@ RUN case "$TARGETARCH" in \
     && ln -s /usr/local/go/bin/go /usr/local/bin/go
 
 # --- cargo tooling (pinned) ---------------------------------------------------
-RUN cargo install --locked \
-        cargo-nextest@${NEXTEST_VERSION} \
-        cargo-llvm-cov@${LLVMCOV_VERSION} \
-        cargo-deny@${DENY_VERSION} \
-        cargo-machete@${MACHETE_VERSION} \
-        cargo-audit@${AUDIT_VERSION} \
-        sqlx-cli@${SQLX_VERSION}
+# One RUN per tool: each success caches independently, so a build retry (any
+# constrained or emulated builder, network flap, upstream hiccough) resumes at
+# tool granularity instead of recompiling everything. External audit
+# 2026-10-02 item 1: the first real build of this image was pushed through an
+# emulated amd64 builder where a single all-tools layer is all-or-nothing.
+# Same tools, same pins, same resulting image contents — only the layer
+# boundaries moved.
+RUN cargo install --locked cargo-llvm-cov@${LLVMCOV_VERSION}
+RUN cargo install --locked cargo-machete@${MACHETE_VERSION}
+RUN cargo install --locked sqlx-cli@${SQLX_VERSION}
+RUN cargo install --locked cargo-deny@${DENY_VERSION}
+RUN cargo install --locked cargo-audit@${AUDIT_VERSION}
+RUN cargo install --locked cargo-nextest@${NEXTEST_VERSION}
 
 # Playwright chromium for the contrast/layout pixel gates: provisioned at
 # image build so CI never downloads browsers mid-run. The playwright version

@@ -514,10 +514,13 @@ and `check_warmup_limit` reserves that IP's daily capacity.
 
 #### Step 5: Warmup Admission Begins
 
-The `DedicatedIpProvider` exposes `tick_warmup()` (it graduates IPs after 60
-days), but **no runtime component schedules it** — there is no warmup cron in
-this tree; progress only advances when an operator invokes it
-([`ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504)).
+Warmup lifecycle: graduation to `active` after 60 days is AUTOMATIC — the
+worker daemon runs the warmup-graduation reconciler hourly
+([`graduation.rs`](../../services/mail-server/crates/worker-processors/src/common/graduation.rs)).
+`DedicatedIpProvider::tick_warmup()`
+([`ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504))
+only interpolates the `warmup_progress` bookkeeping column and has no
+periodic caller — invoke it manually if that column matters.
 
 The worker's [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:2337)
 enforces the daily limit per source IP:

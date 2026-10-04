@@ -103,7 +103,7 @@ mod rate_limiter_properties {
                 let decision = counter.check_and_increment();
                 if decision.is_allowed() {
                     prop_assert!(
-                        decision.remaining() <= limit - 1,
+                        decision.remaining() < limit,
                         "allowed decision reported remaining {} > limit-1 {}",
                         decision.remaining(),
                         limit - 1
@@ -204,13 +204,19 @@ mod rate_limiter_properties {
 mod circuit_breaker_props {
     use super::*;
     use std::time::Duration;
-    use worker_processors::common::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+    use worker_processors::common::circuit_breaker::{
+        CircuitBreaker, CircuitBreakerConfig, CircuitState,
+    };
 
     /// Failure-window long enough that sequential in-test failures never
     /// roll over (the breaker resets its count only across a window gap).
     const NO_WINDOW_RESET: Duration = Duration::from_secs(3600);
 
-    fn breaker(failure_threshold: u32, success_threshold: u32, open_duration: Duration) -> CircuitBreaker {
+    fn breaker(
+        failure_threshold: u32,
+        success_threshold: u32,
+        open_duration: Duration,
+    ) -> CircuitBreaker {
         CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold,
             success_threshold,
@@ -560,8 +566,7 @@ mod aead_properties {
             let tampered = format!("enc:v1:{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
 
             let err = apexmail_lib::secret_at_rest::decrypt_at_rest(&tampered, &aad)
-                .err()
-                .expect("a tampered envelope must NOT decrypt");
+                .expect_err("a tampered envelope must NOT decrypt");
             // Every failure shape is TYPED and fail-closed: a flipped
             // version byte is InvalidEnvelope, a mangled payload/tag is
             // DecryptionFailed, corrupted base64 is Base64 — never silent
@@ -594,8 +599,7 @@ mod aead_properties {
             let envelope = apexmail_lib::secret_at_rest::encrypt_at_rest(&plaintext, &aad_good)
                 .expect("encryption with the pinned key");
             let err = apexmail_lib::secret_at_rest::decrypt_at_rest(&envelope, &aad_bad)
-                .err()
-                .expect("a different AAD scope must not decrypt");
+                .expect_err("a different AAD scope must not decrypt");
             prop_assert!(
                 matches!(
                     err,
@@ -613,7 +617,9 @@ mod aead_properties {
 
 mod validation_properties {
     use super::*;
-    use apexmail_lib::validation::{has_null_bytes, is_valid_domain, is_valid_email, is_valid_uuid, sanitize_string};
+    use apexmail_lib::validation::{
+        has_null_bytes, is_valid_domain, is_valid_email, is_valid_uuid, sanitize_string,
+    };
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]

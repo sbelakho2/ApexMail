@@ -4762,13 +4762,10 @@ mod hostile_db_tests {
         assert!(completed.is_some());
 
         // Tenant-owned resources are listed without being queried.
-        assert_eq!(
-            manifest["stores"]["api_keys"]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("tenant-owned"),
-            true
-        );
+        assert!(manifest["stores"]["api_keys"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("tenant-owned"));
         assert_eq!(
             manifest["stores"]["clickhouse_events"]["included"],
             serde_json::json!(false)
@@ -4779,20 +4776,34 @@ mod hostile_db_tests {
 
     #[tokio::test]
     async fn required_invoice_failure_retries_then_fails_honestly() {
-        let Some(pool) = hostile_db("invoice_required").await else {
+        // Audit 2026-10-02 #12a: the permission failure must be REAL. The
+        // machinery runs AS the unprivileged hostile role, and the owner
+        // revokes invoices from THAT role — a superuser's
+        // `REVOKE ... FROM CURRENT_USER` would be a silent no-op.
+        let Some(pair) = test_support::hostile_canonical_pair(
+            "gdpr_hostile_invoice_required",
+            "gdpr_hostile_invoice_required",
+        )
+        .await
+        else {
             return;
         };
+        let (owner, pool) = (pair.owner, pair.hostile);
         let gdpr = GdprAutomation::new(pool.clone(), broker(), config());
         let tenant = test_support::unique_tenant();
         let email = format!("inv-{}@example.test", Uuid::new_v4().simple());
-        seed_request(&pool, "REQ-inv", &tenant, &email, "access").await;
+        seed_request(&owner, "REQ-inv", &tenant, &email, "access").await;
 
-        // Invoices are a REQUIRED canonical store: revoke access to simulate
-        // a schema/permission outage. The export must FAIL (not skip).
-        sqlx::query("REVOKE SELECT ON invoices FROM CURRENT_USER")
-            .execute(&pool)
-            .await
-            .expect("revoke");
+        // Invoices are a REQUIRED canonical store: revoke the hostile role's
+        // read access to simulate a schema/permission outage. The export must
+        // FAIL (not skip).
+        sqlx::query(&format!(
+            r#"REVOKE SELECT ON invoices FROM "{}""#,
+            pair.role
+        ))
+        .execute(&owner)
+        .await
+        .expect("revoke");
 
         let first = gdpr.process_request("REQ-inv").await;
         if redis_configured() {
@@ -4802,7 +4813,7 @@ mod hostile_db_tests {
                 outcome.data.as_ref().unwrap()["retry_attempt"],
                 serde_json::json!(1)
             );
-            let (status, _, _) = request_row(&pool, "REQ-inv").await;
+            let (status, _, _) = request_row(&owner, "REQ-inv").await;
             assert_eq!(status, "retrying");
             let error = outcome.data.as_ref().unwrap()["error"].as_str().unwrap();
             assert!(error.contains("invoices"), "{error}");
@@ -4810,13 +4821,13 @@ mod hostile_db_tests {
             // Without a broker the requeue fails after the retry state was
             // recorded — an explicit error, never a fake success.
             assert!(first.is_err());
-            let (status, _, _) = request_row(&pool, "REQ-inv").await;
+            let (status, _, _) = request_row(&owner, "REQ-inv").await;
             assert_eq!(status, "retrying");
         }
 
         let _ = gdpr.process_request("REQ-inv").await;
         let _ = gdpr.process_request("REQ-inv").await;
-        let (status, result, completed) = request_row(&pool, "REQ-inv").await;
+        let (status, result, completed) = request_row(&owner, "REQ-inv").await;
         assert_eq!(status, "failed", "the third failure is terminal");
         assert!(completed.is_some());
         let result = result.expect("failure reason recorded");
@@ -5030,17 +5041,26 @@ mod hostile_db_tests {
 
     #[tokio::test]
     async fn ai_chat_delete_failure_is_best_effort_not_silent() {
-        let Some(pool) = hostile_db("chat_locked").await else {
+        // Audit 2026-10-02 #12a: run the erasure AS the unprivileged hostile
+        // role so the revoked DELETE fails with 42501 for real (a superuser
+        // `REVOKE ... FROM CURRENT_USER` is a silent no-op).
+        let Some(pair) = test_support::hostile_canonical_pair(
+            "gdpr_hostile_chat_locked",
+            "gdpr_hostile_chat_locked",
+        )
+        .await
+        else {
             return;
         };
+        let (owner, pool) = (pair.owner, pair.hostile);
         let gdpr = automation_with(pool.clone(), config());
         let email = format!("chat-{}@example.test", Uuid::new_v4().simple());
-        seed_tenant(&pool, "t-chat").await;
+        seed_tenant(&owner, "t-chat").await;
         sqlx::query(
             "INSERT INTO users (tenant_id, email, password_hash) VALUES ('t-chat', $1, 'x')",
         )
         .bind(&email)
-        .execute(&pool)
+        .execute(&owner)
         .await
         .expect("user");
         let request = DataSubjectRequest {
@@ -5064,10 +5084,13 @@ mod hostile_db_tests {
             extension_reason: None,
             extension_notified_at: None,
         };
-        sqlx::query("REVOKE DELETE ON ai_chat_messages FROM CURRENT_USER")
-            .execute(&pool)
-            .await
-            .expect("revoke delete");
+        sqlx::query(&format!(
+            r#"REVOKE DELETE ON ai_chat_messages FROM "{}""#,
+            pair.role
+        ))
+        .execute(&owner)
+        .await
+        .expect("revoke delete");
         let outcome = gdpr
             .erase_store(&request, ErasureStore::AiChatByUserEmail)
             .await;

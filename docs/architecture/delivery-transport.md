@@ -257,8 +257,10 @@ is not persisted to the events tables.
 - No ISP/provider-specific warmup cap (see section 2).
 - No warmup progress cron: `DedicatedIpProvider::tick_warmup()` and
   `SesProvider::sync_warmup_progress()` exist, but no runtime component in this
-  tree calls them. Graduation/progress only advances if an operator invokes it
-  (`services/mail-server/crates/api-server/src/ip_provider.rs:504-515`).
+  tree calls them — `warmup_progress` is bookkeeping only. (Graduation itself
+  IS automatic: the worker's hourly warmup-graduation reconciler,
+  `worker-processors/src/common/graduation.rs`; send admission is gated by
+  `warmup_started_at`.)
 
 ## Related Documents
 

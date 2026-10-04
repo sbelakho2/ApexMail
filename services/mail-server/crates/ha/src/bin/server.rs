@@ -188,6 +188,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
+    // Background cron:replication sync-mode reconciliation (external audit
+    // #10). The desired mode persisted by set_sync_mode is durable
+    // configuration — this bounded loop repairs drift between that intent
+    // and the live synchronous_standby_names (e.g. after a crash between
+    // persisting the intent and applying it).
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            s.replication
+                .run_sync_mode_reconcile_loop(std::time::Duration::from_secs(30))
+                .await;
+        });
+    }
+
     // Background cron:primary claim refresh (fix #12). Without a refresh,
     // PRIMARY_CLAIM_TTL (300s) expired and split-brain detection went blind
     // after five minutes on a perfectly healthy primary.

@@ -365,7 +365,33 @@ pub struct ReplicationSlot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationStats {
+    /// EFFECTIVE runtime mode (external audit #7): derived from the live
+    /// `synchronous_standby_names` setting, not the immutable startup
+    /// config. `"sync"` when a standby list (or quorum form) is set,
+    /// `"async"` when empty.
     pub mode: String,
+    /// The mode the startup config intends (`config.replication
+    /// .sync_replication`) — exposed next to `mode` for drift visibility.
+    pub configured_mode: String,
+    /// `configured_mode != mode`: the startup config disagrees with the
+    /// PostgreSQL runtime (external audit #7).
+    pub config_drift: bool,
+    /// Raw live `SHOW synchronous_standby_names` value (external audit #7).
+    pub effective_sync_standby_names: String,
+    /// Raw live `SHOW synchronous_commit` value (external audit #7).
+    pub effective_synchronous_commit: String,
+    /// The durable desired mode persisted by `set_sync_mode` (external
+    /// audit #10); `None` when no explicit mode change is recorded (or the
+    /// Redis desired-state is temporarily unreadable).
+    pub desired_sync_mode: Option<String>,
+    /// A desired mode IS recorded but not applied to the live setting —
+    /// the reconcile loop repairs this (external audit #10).
+    pub desired_drift: bool,
+    /// Standbys the configured topology intends to run (external audit #8).
+    pub expected_replicas: usize,
+    /// Topology classification (external audit #8): `standalone`,
+    /// `healthy`, `degraded` or `unhealthy`.
+    pub topology_status: String,
     pub primary_node: String,
     pub replicas: Vec<ReplicaInfo>,
     pub slots: Vec<ReplicationSlot>,
