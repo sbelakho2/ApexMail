@@ -266,3 +266,174 @@ Vendor: salescloser.ai ( /, /pricing/, /demo/, /industry/, /alternatives/*, /bui
 **Reply pipeline:** `worker-processors/src/reply_handler/{classifier,policy,processor}.rs` (0.7 gate `policy.rs:29-38`; claim `processor.rs:64-98`; transactional lock `:479-713`); `ai.rs:17-49,201-204,278-346` (`/reply/classify` contract — unimplemented); worker wiring `bin/worker.rs:175-177,580-587` (llm disabled); ingestion gap: `mta/src/servers/inbound.rs:1801-1827` vs claim requirement (migration 114 note).
 **Objection machinery:** `account_coordination.rs:53,212-222,459-481` (strong objection); `personalization.rs:95-104,262-299,336-668` (strategy, bans, validation); `knowledge.rs:127-144,298-489,516-593` (facts, validate_claim, external-copy rule); `sequence_worker.rs:870-965,1249-1302` (claims gate); `reply_handler/types.rs:96-108` (11 dispositions; `not_interested` non-suppressing).
 **Instant response rails:** `email_queue.priority` (migration 001:46; index 001:53; claim `email/processor.rs:510-535`); all producers at 5 (`system_sender.rs:167-176`); poll cadence `bin/worker.rs:184-198`; contact forms `contact.rs:25-27,328-592` (write only); demo substrate `explorer.rs:34-41,74-300,958-960`, `ui-foundation/src/explorer.rs:129-433`, `compliance/src/feature_registry.rs:124`.
+
+
+---
+
+# PART II — FULL IMPLEMENTATION PLAN
+
+## 5. Completing what exists but does not run, then the four capabilities
+
+Three capabilities are *half-built*: the chat engine runs with no UI, the mailbot is unwired code, the instant-response rail is blind to its own input. The plan's first act is completing them, then extending to the adopted four.
+
+### 5.1 Completion matrix (what exists → what completes it)
+
+| Existing but incomplete | Today | Completion work |
+|---|---|---|
+| Chatbot engine (`ai-service` ChatService/verifier/retrieval, `/v1/ai/chat` proxy) | No UI consumer; client-supplied history; stale canonical facts | §5.2 — console chat surface + server-side sessions + knowledge unification |
+| Mailbot (`ai-service/src/email_agent.rs` + `admin/ai_drafts.rs`) | Draft-only code, no runtime owner, policy-only verifier, ungrounded prompt | §5.3 — runtime loop, grounded verification, drafts review UI, classification link |
+| Instant reply pipeline (`worker-processors/src/reply_handler`) | Polls rows the MTA never populates; deterministic-only; no first-response generation | §5.4 — ingestion fix, AI classifier route, first-response requests, priority lane, triggers |
+
+### 5.2 Chat — files to change and what to do
+
+| File | Change | Tests |
+|---|---|---|
+| `services/mail-server/crates/billing-service/src/plans.rs` (catalog) + new shared source | Extract the plan catalog (names, prices, limits) into a single canonical source consumed by billing, ai-service knowledge/verifier tables, sales KB, and `docs/pricing.md` generation | drift test (new) |
+| `crates/ai-service/src/knowledge.rs`, `verifier.rs` | Replace hardcoded PLANS/limit tables with the canonical source (build-time include or generated const); keep the existing equality assertions, now against the canonical source | update existing equality tests; new drift regression |
+| `crates/ai-service/src/routes.rs` | (unchanged for chat) + new `/reply/classify` (§5.4) | header/tenant tests extend |
+| `crates/api-server/src/routes/ai_chat.rs` | Add `ai_chat_sessions`-backed endpoints: create/list session, post turn, read window; keep the 4,000-char cap, Redis limiter, account-context assembly | session lifecycle, tenant scoping, hostile history |
+| new migration `233_ai_chat_sessions.sql` | `ai_chat_sessions(id, tenant_id, user_id, created_at, updated_at)` + `ai_chat_session_turns(session_id, role, content, created_at)`; retention aligned with `AI_CHAT_RETENTION_DAYS` | migration applies on canonical chain |
+| `crates/api-server/src/routes/web.rs` + `crates/ui-foundation/src/leptos_views.rs` (`web_assistant_page*`), `axum_router.rs` (route arm), `routing.rs` + `docs/development/ui-baseline-manifest.json` | New **console assistant page** `/assistant`: SSR conversation (history from session), input form → PRG, answer rendered with its sanitized HTML and citations as `<details>`; escalation and model-disabled states rendered explicitly; nav entry under Account | console flow test; goldens regenerated; a11y/contrast/link gates |
+| `crates/ui-foundation/src/view_data.rs` + `api-server/src/routes/web/data.rs` | `AssistantPageData` loader (session + last N turns) with the unavailable contract on DB failure | loader fault tests |
+
+### 5.3 Mailbot — files to change and what to do
+
+| File | Change | Tests |
+|---|---|---|
+| `crates/ai-service/src/email_agent.rs` | Runtime loop owned by a unit: spawn from `ai-service` main behind `AI_EMAIL_AGENT_ENABLED` (the process already owns the DB pool, LLM client, governor); upgrade `assess_draft` to `verify_grounded` with the canonical facts block + sales KB facts; attach the reply pipeline's classification (join by message id) to each draft for objection labels | loop lifecycle (start/stop), grounded rejection cases, join correctness |
+| `crates/ai-service/src/inference.rs` / `governor.rs` | No change; the mailbot reuses them (one LLM client instance, one governor budget) | — |
+| `crates/api-server/src/routes/web.rs` + views/routing/manifest (as §5.2) | **AI drafts review page** `/reviews/ai-drafts` (and a `/sales` exceptions link): pending drafts table, draft + evidence + classification, approve/reject via the existing `/v1/admin/ai/drafts` mutations wrapped in SSR forms (CSRF, PRG, audit) | approve/reject flows through the browser; exactly-one-winner concurrency through the UI path |
+| `docker-compose.yml` / `docker-compose.prod.yml` / `.env.production.example` | `AI_EMAIL_AGENT_ENABLED=true` in the managed baseline (draft-only; approval required); document `AI_REPLY_FROM`, poll cadence | compose posture gate (new env becomes an explicit security-adjacent decision in the posture checker's control list if it can send) |
+| `deploy/DEPLOYMENT.md` | Mailbot runtime section | — |
+
+### 5.4 Instant response — files to change and what to do
+
+| File | Change | Tests |
+|---|---|---|
+| `crates/mta/src/servers/inbound.rs` | At accept time, parse the raw message once (mail_parser, the mailbot's pattern) and populate the existing mirror columns (`from_email`, `to_email`, `subject`, `body_text`, `body_html`, `headers`, `received_at`) in the same insert; replace the unconsumed Redis notification with either a real consumer or remove it | inbound tests extended: columns populated for real messages; DSN rows keep their shape |
+| `crates/ai-service/src/reply_classify.rs` (new) + `routes.rs` | Implement `POST /reply/classify` (service-token domain): prompt `reply-classifier-v1`, the 11-disposition taxonomy + objection sub-labels (§5.5), JSON contract exactly as `reply_handler/ai.rs` expects; errors keep the no-guess fallback | contract tests against the exact client shape; outage fallback |
+| `crates/worker-processors/src/bin/worker.rs`, `common/config.rs` | Enable the AI classifier layer: `WORKER_REPLY_CLASSIFIER_AI_ENABLED` + base URL env (deterministic layer stays first; 0.7 gate unchanged) | classification integration with the real route |
+| new migration `234_first_response_requests.sql` | `first_response_requests(id, kind contact_form|inbound_email|chat_lead, subject_ref, payload jsonb, state, created_at, due_at, lease)` | migration applies |
+| `crates/ai-service/src/email_agent.rs` | Claim first-response requests alongside inbound rows; produce a first-response draft (grounded, same chain, `pending_approval=true`) | draft for each trigger kind |
+| `crates/api-server/src/routes/contact.rs` | After the transactional lead write, enqueue a `first_response_requests` row (kind=contact_form) in the same transaction | trigger row committed with the lead |
+| `crates/api-server/src/routes/ai_chat.rs` | Chat→CRM: when a tenant-scoped, verifier-gated answer identifies a contact intent, create the lead via the existing contact machinery (deterministic extraction only; no free-form writes) | lead created once; no writes on ordinary questions |
+| `crates/api-server/src/routes/system_sender.rs` + `crates/sales-autopilot/src/dispatcher.rs` | `queue_system_email_in_transaction` gains a `priority` parameter; first-response sends use 100, everything else keeps 5; sales dispatch keeps 5 | worker claim order test (priority lane beats backlog); existing producers unchanged |
+| `crates/worker-processors/src/email/processor.rs` (metrics) | `first_response_latency_seconds` histogram (accept→enqueue) on first responses | metric emitted |
+| `deploy/alerting-rules.yml` | `FirstResponseSloBurn` alert on the histogram (p95 target published in docs) | rule lint (topology gate) |
+| first-response SLO page | `docs/operations/first-response-slo.md`: methodology, target, measurement | — |
+
+### 5.5 Objection handling — files to change and what to do
+
+| File | Change | Tests |
+|---|---|---|
+| new crate `crates/sales-knowledge` (workspace member) | Extract `SalesKnowledgeFact` + `validate_claim` + the claim verdict ladder from `sales-autopilot/src/knowledge.rs` so **both** sales-autopilot and ai-service (mailbot/classifier) share one claim validator; sales-autopilot re-exports (no behavior change) | extraction regression: every existing claim test passes against the shared crate |
+| `sales-autopilot/src/knowledge.rs` + new migration `235_objection_library.sql` | Objection taxonomy (price, timing, competitor, authority, trust, need) + approved-response library seeded as knowledge facts: each entry carries evidence ids, validity window, `allowed_in_external_copy`, and the objection class; owner/counsel approval recorded the way legal policies are | library gate: no external-copy-eligible entry without evidence |
+| `crates/ai-service/src/reply_classify.rs` + `worker-processors/src/reply_handler/types.rs` | Objection sub-labels under `not_interested`/`question` (extend the canonical disposition enum with `objection_class: Option<ObjectionClass>`); deterministic keyword families as the fallback layer | taxonomy tests; fallback classification; 0.7 gate unchanged; `not_interested` behaviors preserved |
+| `crates/ai-service/src/email_agent.rs` (+ ChatService for chat) | Objection response generation: strategy selection (reuse `MessageStrategy` shape) → grounded draft with the library entry's evidence → `verify_grounded` + shared `validate_claim` | claim-bypass corpus (forbidden prices/roadmap/SLA must not leave) |
+| `crates/api-server/src/routes/admin/ai_drafts.rs` | No change (the same approval chain carries objection replies); drafts list gains the classification/objection fields | echo fields pinned |
+| `crates/sales-autopilot/src/experiments.rs` + a new internal route `POST /experiments/:key/arms` (owner-token) | Arms authoring for objection classes; objection class joins the contextual bucket dimensions; reward ladder unchanged (replies → meetings → revenue; opens/clicks excluded) | arm creation validation; bucketing determinism; reward idempotency |
+| `crates/sales-autopilot/src/personalization.rs` | `compose_objection_response` path reusing banned-phrase and evidence rules | banned-phrase coverage |
+
+### 5.6 Screen-share demos — files to change and what to do
+
+| File | Change | Tests |
+|---|---|---|
+| new migration `236_demo_sessions.sql` | `demo_sessions(id, token_hash, script_key, state, created_by, expires_at)` + `demo_session_steps(session_id, idx, kind, input jsonb, result jsonb, ran_at)` | migration applies |
+| `crates/api-server/src/routes/admin/demos.rs` (new, owner-gated like sales) | Presenter API: create session from a script, advance steps, read results; tokens returned once and stored hashed | token hashing; owner gate; expiry |
+| `crates/api-server/src/routes/web.rs` + views/routing/manifest | **Presenter page** (CP: `/demos` — create, step through, live results) and **viewer page** (public-with-token `/demo/:token`: SSR step list, live-executed results, replay of a completed session) | SSR goldens; a11y/contrast/links; token tamper/expiry refused |
+| Demo runtime module `crates/api-server/src/routes/demos/runtime.rs` (new) | Step kinds executing REAL machinery in-process: `render_page` (axum_router render for a seeded demo tenant), `explorer_exec` (reuse the explorer sandbox lane), `grader`, `calculator`, `chat_narrate` (ChatService call; narration verified) | per-kind execution against the sandbox; rate limits inherited; hostile script input refused |
+| Demo script + fixtures | `docs/demos/demo-script.md` (script drawn from the feature registry + KB facts; no unverified claims) + a seeded `demo` tenant fixture (cargo-managed fixture, not production data) | script lint: every claim cites a registry/KB fact |
+| Chat `ChatResponse` extension (ai-service `chat.rs`) | Minimal structured step descriptor so the viewer can render narration + live results without a view protocol invention | serialization pinned |
+
+## 6. Training plan (knowledge, model, operators, corpus)
+
+1. **Knowledge/CAG (context-augmented generation)**: unify the canonical fact source (§5.2); re-run the docs corpus index (`POST /admin/reindex` on ai-service) after every content change; every new surface's content (objection library, demo script) lives as KB facts / docs under the indexed tree so retrieval, chat, drafts, and demos read the same truth. Prompt prefix stays byte-stable (CAG efficiency: shared prefix + cached prompt).
+2. **Model evaluation corpus and runs**: build `docs/eval/` corpora — chat Q&A goldens (question → must-contain / must-not-contain), reply-classification cases (message → disposition + objection class), objection-rebuttal cases (objection → required evidence + forbidden claims) — and run them through the existing `POST /evaluate` (AI_ADMIN_TOKEN) on each model/prompt change; record results as release evidence. Prompt registry versions: `reply-classifier-v1` (existing), add `objection-response-v1`, `assistant-v2` after knowledge unification.
+3. **Retrieval quality**: keep hybrid lexical + trigram (no new deps); measure retrieval hit-rate on the eval corpus; `ai-embeddings` stays unwired unless hit-rate targets demand it (explicit decision point, not silent).
+4. **Operator training**: runbooks — drafts review queue (SLA, what to check), demo presenter guide (script + live sandbox etiquette), objection library maintenance (author → evidence → counsel approval), first-response SLO monitoring; all as `docs/operations/*` and referenced from the console pages' help text.
+5. **Sales team training**: objection taxonomy and library usage, when automation escalates to human, latency expectations per channel.
+
+## 7. UI/UX specification — globally compliant, beautiful, interactive, smooth
+
+**Foundations (non-negotiable, already gated):** the Apex design system (tokens in `ui-foundation/assets/globals.css`; brand, spacing, motion, radius; light/dark via `prefers-color-scheme`); zero-JS SSR (CSP `script-src 'none'` except the existing nonce'd KiwiCaptcha island precedent); WCAG 2.2 AA enforced by the existing required gates (contrast pixel gate, a11y static checker: lang/alt/labels/one-h1/viewport/autocomplete/button-type, layout-spill, 44px targets, focus-visible, reduced-motion, no color-only status, skip links).
+
+**Global compliance:**
+- **GDPR**: chat sessions store minimal data (message + answer + citations; account context is read at request time, not persisted); 90-day retention prune already exists — extend to session rows; no PII in prompts beyond the sanitized account context; data-residency note in the assistant page footer.
+- **EU AI Act**: the existing disclosure constant is rendered on every assistant/draft/demo narration surface; drafts and demo narrations are visibly marked as AI-generated with the review path named.
+- **Accessibility beyond the gates**: conversation tables get row headers; citation `<details>` are keyboard-operable; the demo viewer's step list is an ordered list with `aria-current`; latency/status indicators pair color with text.
+- **i18n readiness**: all new strings enter the strings catalog (`tools/extract_ui_strings.py`); `lang="en"` pinned; no concatenated sentences.
+
+**Interactivity and smoothness within the architecture:**
+- Phase 1 (ships with §5.2): pure SSR — chat turns post → PRG → the response renders server-side; the conversation window scrolls to the newest turn via an `#latest` anchor; a CSS-only "pending" shimmer uses the existing motion tokens on the submit control; slow answers (>600 ms guidance) show the existing busy affordances. The live-refresh pattern (allowlisted `<meta http-equiv="refresh">`, already used for live-metrics pages) renders the drafts queue and first-response KPIs updating without JS.
+- Phase 2 (optional, precedent-gated): a nonce'd CSP JavaScript island — exactly like the KiwiCaptcha widget exception — for the assistant's streaming scroll and the demo viewer's step auto-advance, only if usability testing shows the SSR loop insufficient; it must pass the no-inline-handler and CSP gates and add zero external dependencies.
+- **Graphic quality**: charts from `ui-foundation/src/charts.rs` (latency percentiles on the SLO panel; decision-stream sparklines already exist) rendered as SSR SVG; the demo viewer uses the same chart primitives for live results; all new pages follow the Spiral-Lock visual language and enter the golden set.
+
+**Per-surface specification:**
+
+| Surface | Layout | States | Gates |
+|---|---|---|---|
+| `/assistant` (console) | nav column + conversation column (turns as definition-style blocks), input form with char counter, citations `<details>` under each answer, disclosure footer | empty (prompt starters), pending, model-disabled (explicit), escalated-to-human, rate-limited (friendly 429), unavailable (DB/AI down, honest copy) | goldens, a11y, contrast, link, form-hygiene, flash-copy canon |
+| `/reviews/ai-drafts` | table (age, sender, classification + objection class, excerpt), expandable draft with evidence list, approve/reject buttons through the signed-confirm pattern | empty, pending-only, approve-refused (revalidation), audit-linked success | as above + confirm-signature tests |
+| `/sales` additions | first-response KPI tile (p50/p95 vs target), drafts-pending tile linking to reviews | unavailable contract on query failure | goldens regen |
+| `/demos` (CP presenter) | script steps list with live result panes; "next step" form; session token copy chip (reveal-once pattern) | pre-create, running, expired, tampered token | goldens; token tests |
+| `/demo/:token` (viewer) | ordered step list, each step's live result (page render, send receipt, grade meters, price table), replay banner when completed | invalid/expired token page; completed session replay | public-page contract; marketing-shell consistent |
+
+## 8. Extremely adversarial test plan
+
+**Cross-cutting (every new feature):**
+1. **Truthfulness corpora**: for each generative surface (chat answer, objection rebuttal, first-response draft, demo narration), a corpus of prompts engineered to extract unverified claims (fake prices, roadmap items, SLAs, invented features, "ignore your instructions" injections, role-marker forgeries, homoglyph/unicode tricks). Pass = the verifier rejects or escalates; fail = any unverified claim rendered. Runs under `cargo nextest` in the new suites and as an eval-corpus battery.
+2. **Knowledge-drift test**: the canonical fact source vs billing vs docs vs chat/verifier tables — equality asserted; the new CI gate re-checks on every build.
+3. **Tenant isolation**: chat sessions, drafts, first-response requests, demo sessions — cross-tenant probes at both API and SSR layers; machine-credential probes on owner surfaces.
+4. **Race and kill windows**: mailbot claim races (two workers, one draft), first-response double-send under retry (idempotency key), draft approval exactly-one-winner (exists — extend through the new UI path), demo step execution being replayed after crash (idempotent step ids), priority-lane starvation (backlog test), session-consume races.
+5. **Fault injection**: LLM down (draft declines, chat escalates — never a crash, never a fabricated answer), Redis down (rate limits fail closed where security-relevant; chat limiter), DB down (every new loader renders unavailable, never zero/absent-confusable), MTA parse failure (message still accepted; no skip), reindex failure (old index served; version pinned).
+6. **Injection and rendering**: XSS corpus against answer HTML (sanitizer allowlist), citation spoofing (fake `[n]` with no chunk), markdown/HTML smuggling in drafts, CSV/link integrity for any new table exports.
+7. **Rate/abuse**: per-user/per-tenant chat limits, first-response burst cap, demo viewer token brute-force, contact-form spam routing.
+8. **SLO tests**: first-response latency histogram asserted under a seeded burst (bounded, deterministic in CI with the fault proxy as the clock source where possible).
+9. **Existing gates carried over**: a11y, contrast, layout, links, goldens, form hygiene, flash-copy, terminology, capability-claims (registry entries added for chatbot/mailbot/objection/demo/first-response with their stages), release-mode soft-skip.
+
+**Per capability:** chat (session retention expiry, history forgery, unicode/empty/4k+ input bounds, disconnected AI service 5xx mapping), mailbot (loop guards: self-mail, auto-submitted, per-sender cap, quarantine; grounded rejection of stale prices), instant response (ingestion columns for real MIME shapes incl. multipart/DSN; trigger transactional commit; priority ordering; latency), objection (taxonomy boundary cases, sub-label precision corpus, library evidence gate, claims gate on generated text), demos (script with an unverified claim refused at load; step execution against sandbox constraints; replay determinism).
+
+## 9. CI plan
+
+- **validate stage**: `check_knowledge_consistency.py` (new; facts vs billing vs verifier tables) wired as a required `ci_check`; capability-claims registry gains the five new capability entries (stages raised as each lands); repo-map regenerated; posture gate picks up any new env (mailbot enable) as explicit; objection-library evidence lint (extends the existing claims gate).
+- **test stage**: all new suites ride the existing nextest lane (junit + coverage ratchet raised by the same PRs); release mode (`APEXMAIL_RELEASE_TEST_MODE=1`) is already enforced, so no new suite can soft-skip.
+- **ui stage** (already required): goldens for every new page; a11y/contrast/link/terminology/flash-copy cover the new surfaces' copy; strings catalog regenerated.
+- **security stage**: unchanged gates; semgrep/toolchain already fail-closed.
+- **New perf smoke**: `first-response latency` test asserting the p95 bound on a seeded burst; starts advisory for two runs, then required (the platform's standard flips).
+- **Meta-tests**: the new checker gets its `--self-test` (mutated knowledge fixtures must fail); the SLO test gets an intentionally-slow fixture proving it fails.
+- **Release evidence**: Woodpecker posts the sha-bound status (already wired); the release manifest carries the eval-corpus results as an artifact.
+- **Woodpecker**: no new services needed; the mailbot runtime is in-process.
+
+## 10. Dogfooding plan (run the four capabilities on ApexMail itself)
+
+Follow the campaign's DF pattern (parallel DF agents, scratch reports, fix-and-verify loops):
+
+- **DF-1 Assistant**: operators ask the platform's real questions (pricing, deliverability, compliance, API) against the console assistant for a week; every answer is scored against the eval corpus + human review; gaps become KB/docs edits + reindex; defects fixed in the same loop. Exit: ≥95% answers fully grounded, zero stale-price answers.
+- **DF-2 Objection handling**: take real inbound replies (contact form + support) — classify, generate rebuttal drafts, human-review every draft, record accept/edit/reject with reasons; accepted edits seed the library; measure precision of the objection classifier and the draft acceptance rate. Exit: classifier precision published; ≥80% drafts accepted-or-lightly-edited before any auto-send policy is considered.
+- **DF-3 Instant response**: wire the contact form and inbound sales inbox end-to-end; measure p50/p95 first-response latency over ≥100 real inquiries; fault-inject LLM/DB/Redis outages during the window and record degradation behavior; fix everything found. Exit: SLO met or the target re-derived from data, with the measurement page updated.
+- **DF-4 Demos**: run prospect-style demos (internal + friendly external) through the presenter/viewer flow; collect friction notes per step; iterate the script and the sandbox fixtures; verify every narration claim against the registry. Exit: a demo runs end-to-end in ≤15 minutes with zero unverified claims and zero manual fixes.
+- **DF-5 Gates on our own surfaces**: run the full gate battery (a11y/contrast/layout/links/goldens/copy) over the new pages in release mode; the dogfood reports land in `docs/dogfood/` with defect lists and resolutions.
+
+## 11. Deliverables
+
+1. **Code** (per capability, one PR each with migrations 233–236, tests, and gate updates): chat sessions + console assistant; mailbot runtime + grounded verification + drafts UI; ingestion fix + first-response requests + priority lane + triggers + SLO metric/alert; objection taxonomy/library + classifier sub-labels + generation + arm authoring; demo sessions + runtime + presenter/viewer pages + fixtures.
+2. **Canonical knowledge source** + the drift gate; regenerated docs/pricing consistency.
+3. **Corpora**: `docs/eval/` (chat Q&A, classification, rebuttal), objection library content pack, demo script pack.
+4. **UI artifacts**: new pages with goldens, strings catalog, a11y evidence; the phase-2 JS-island decision recorded.
+5. **CI**: new gates wired and meta-tested; ratchet raised; release evidence including eval results.
+6. **Docs**: operator runbooks, first-response SLO methodology, demo presenter guide, objection library maintenance guide, deployment updates for the mailbot env.
+7. **Dogfood reports** (`docs/dogfood/df-1..df-5`) with defect lists and resolutions.
+8. **Acceptance criteria** (all must hold before any of this is called shipped):
+
+| # | Criterion |
+|---|---|
+| 1 | Zero stale-fact answers: knowledge drift gate green; eval corpus passes on every prompt/model change |
+| 2 | Every generative surface verifier-gated; adversarial corpora green in CI |
+| 3 | Chat usable from the console (SSR), sessions persistent, GDPR retention enforced |
+| 4 | Mailbot runs in production draft-only; every draft grounded and human-approved; review UI live |
+| 5 | First response: measured p50/p95 published; SLO met or re-derived with data; fault behavior recorded |
+| 6 | Objection classifier precision published; drafts accepted before any auto-send is enabled; auto-send only via policy-gated, legally-allowed, fully-verified classes |
+| 7 | Demo runs end-to-end with live sandbox actions and zero unverified narration claims; replayable sessions |
+| 8 | All new surfaces pass the required UI gates and enter the goldens/strings catalogs |
+| 9 | Release-mode CI green with all new gates required; no soft skips; ratchet raised |
+| 10 | Dogfood reports closed with zero open defects above P2 |
