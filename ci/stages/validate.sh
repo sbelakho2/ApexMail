@@ -299,6 +299,26 @@ validate_repo_gates() {
             python3 docs/marketing/check_pricing_parity.py
             python3 docs/marketing/check_comparison_freshness.py
         '
+        # docs-lint (adopted from the KiwiCaptcha product): prose ratchet over
+        # docs/ + the product root files. Baseline enforced; the integrity
+        # check runs against the parent-commit baseline when available so a
+        # merged baseline can only move toward zero.
+        if [ -f "$REPO_ROOT/tools/docs-lint-baseline.txt" ]; then
+            parent_baseline=""
+            if command -v git >/dev/null 2>&1; then
+                parent_baseline="$(mktemp "${TMPDIR:-/tmp}/docs-lint-parent.XXXXXX")"
+                git show "HEAD~1:tools/docs-lint-baseline.txt" > "$parent_baseline" 2>/dev/null \
+                    || { rm -f "$parent_baseline"; parent_baseline=""; }
+            fi
+            if [ -n "$parent_baseline" ] && [ -f "$parent_baseline" ]; then
+                ci_check "docs-lint ratchet + integrity" \
+                    sh "$REPO_ROOT/tools/docs-lint.sh" --baseline "$REPO_ROOT/tools/docs-lint-baseline.txt" --integrity "$parent_baseline"
+                rm -f "$parent_baseline"
+            else
+                ci_check "docs-lint ratchet" \
+                    sh "$REPO_ROOT/tools/docs-lint.sh" --baseline "$REPO_ROOT/tools/docs-lint-baseline.txt"
+            fi
+        fi
         # Repo-map drift guard (the coverage-catalog pattern):
         # tools/repo-map.md is GENERATED from the source manifests (workspace
         # members, Dockerfile targets, compose services, capability stages,

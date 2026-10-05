@@ -1,0 +1,26 @@
+# Adoption manifest for the docs-lint prose baseline.
+#
+# A path brought under the ratchet by a broadened scan (present in the
+# committed baseline but absent from the base baseline of the comparison
+# base) is allowed exactly once, by being listed here. The manifest is
+# one-shot: the baseline-integrity step consumes an entry once its
+# adoption has landed (the path carries a row in the committed baseline
+# being checked, or already in the comparison base baseline) by removing
+# the entry from this manifest automatically (atomic tmp+mv; comments
+# and blank lines are preserved). Run with --no-write-adopted for a
+# read-only/CI check: the consumed entry still counts as adopted for
+# that run, and a later writable run removes it. Once adopted the path
+# is a tracked allowance: its row may only decrease in later
+# regenerations, and a path dropped from the baseline and reintroduced
+# later needs a FRESH adoption entry — a stale entry cannot re-adopt it
+# (the removal guarantees the entry is gone by then), and until the
+# fresh adoption the path's implicit baseline row is zero. Nothing is
+# added here to absorb an increase of an already-tracked path; that
+# requires a rewrite.
+#
+# Adoption (one-shot): the new scanned paths below are brought under
+# the ratchet with 0-violation rows in docs-lint-baseline.txt (the
+# runtime authority guard kernels, the versioned asset controller and
+# its tests, the HA doctor kernels, and the browser asset-mode spec).
+# The baseline-integrity step consumes these entries once the rows
+# land; a later writable run removes them.
