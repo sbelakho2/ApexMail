@@ -252,6 +252,25 @@ fn verify_saml_document_signature(saml_xml: &str, cert_pem: &str) -> Result<(), 
     Ok(())
 }
 
+/// Configure-time half of the federation guard: an OIDC issuer the tenant
+/// configures must be HTTPS unless its host is explicitly allowlisted
+/// (`SSO_FEDERATION_ALLOWLIST`) — the same predicate the resolving guard
+/// enforces at login begin (`federation_guard_resolved`), minus DNS.
+/// Validating here turns a misconfigured issuer into an honest 400 at
+/// configure time instead of a 500 every time a user opens the login page.
+pub fn validate_federation_issuer_url(url_str: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url_str).map_err(|e| format!("Invalid oidc_issuer URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "oidc_issuer URL has no host".to_string())?
+        .trim_matches(['[', ']']);
+    if parsed.scheme() != "https" && !federation_allowlisted(host) {
+        return Err(format!("oidc_issuer must use HTTPS: {url_str}"));
+    }
+    Ok(())
+}
+
 fn encrypt_optional_oidc_secret(
     secret: Option<&str>,
     config: &Config,

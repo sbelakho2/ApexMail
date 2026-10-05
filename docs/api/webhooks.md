@@ -287,8 +287,9 @@ require 'base64'
 
 def verify_webhook_signature(payload:, signature:, timestamp:, secret:)
   signed_payload = "#{timestamp}.#{payload}"
-  # Webhook secrets are Base64-encoded; decode before use as HMAC key
-  key = Base64.decode64(secret)
+  # The secret is used exactly as issued (the full `whsec_…` string,
+  # ASCII bytes) — it is NOT Base64 and must not be decoded.
+  key = secret
   expected = OpenSSL::HMAC.hexdigest('SHA256', key, signed_payload)
   actual = signature.delete_prefix('sha256=')
 
@@ -306,11 +307,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HexFormat;
 
-// Webhook secrets are Base64-encoded; decode before use as HMAC key
-byte[] decodedKey = Base64.getDecoder().decode(secret);
+// The secret is used exactly as issued (the full `whsec_…` string,
+// ASCII bytes) — it is NOT Base64 and must not be decoded.
+byte[] key = secret.getBytes(StandardCharsets.US_ASCII);
 String signedPayload = timestamp + "." + payload;
 Mac mac = Mac.getInstance("HmacSHA256");
-mac.init(new SecretKeySpec(decodedKey, "HmacSHA256"));
+mac.init(new SecretKeySpec(key, "HmacSHA256"));
 String expected = HexFormat.of().formatHex(mac.doFinal(signedPayload.getBytes(StandardCharsets.UTF_8)));
 String actual = signature.replaceFirst("^sha256=", "");
 
@@ -322,7 +324,6 @@ if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.get
 #### Manual Verification Reference
 
 ```python
-import base64
 import hashlib
 import hmac
 import time
@@ -334,15 +335,15 @@ def verify_webhook_signature(
     timestamp: str,
     secret: str,
 ) -> bool:
-    timestamp_ms = int(timestamp) * 1000
-    if abs((time.time() * 1000) - timestamp_ms) > 5 * 60 * 1000:
+    # `X-ApexMail-Timestamp` is already in milliseconds — compare as-is.
+    if abs(time.time() * 1000 - int(timestamp)) > 5 * 60 * 1000:
         return False
 
-    # Webhook secrets are Base64-encoded; decode before use as HMAC key
-    decoded_key = base64.b64decode(secret)
+    # The secret is used exactly as issued (the full `whsec_…` string,
+    # ASCII bytes) — it is NOT Base64 and must not be decoded.
     signed_payload = f"{timestamp}.{payload}".encode()
     expected = hmac.new(
-        decoded_key,
+        secret.encode(),
         signed_payload,
         hashlib.sha256,
     ).hexdigest()

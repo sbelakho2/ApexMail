@@ -823,6 +823,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sub-accounts/:id", delete(sub_account_delete))
         .route("/sub-accounts/parent/:parent_id", get(sub_account_list))
         .route("/sub-accounts/:id/suspend", post(sub_account_suspend))
+        .route("/sub-accounts/:id/resume", post(sub_account_resume))
         .route("/sub-accounts/stats/:parent_id", get(sub_account_stats))
         .route("/sub-accounts/:id/api-keys", post(sub_account_api_key))
         // Fix J-4: list/revoke endpoints for sub-account API keys
@@ -1772,6 +1773,34 @@ async fn sso_configure(
     }
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
+    }
+    // Configure-time validation of the tenant-supplied federation inputs:
+    // without it, an issuer the egress guard will refuse (plain-HTTP and
+    // not allowlisted) is stored happily and then 500s on EVERY unauthenticated
+    // login-begin for the domain. Refuse it here with an honest 400.
+    // (The resolving half of the guard — private/reserved-address checks —
+    // still runs at begin, where DNS can be pinned.)
+    if body.provider_type.eq_ignore_ascii_case("oidc") {
+        if let Some(issuer) = body.oidc_issuer.as_deref().filter(|s| !s.trim().is_empty()) {
+            if let Err(reason) = crate::sso::validate_federation_issuer_url(issuer) {
+                return err_json(StatusCode::BAD_REQUEST, &reason);
+            }
+        }
+        // Storing an OIDC client secret requires the deployment's at-rest
+        // encryption key. Without it the service errors deep inside secret
+        // handling (a raw crypto-error string as a 500); pre-flight it as
+        // the deployment-misconfiguration shape instead.
+        if body
+            .oidc_client_secret
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && state.config.sso.encryption_key.is_empty()
+        {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SSO secret encryption is not configured on this deployment (SSO_ENCRYPTION_KEY is unset); an OIDC client secret cannot be stored",
+            );
+        }
     }
     // The response is sanitized: secrets (encrypted private key / client
     // secret, SAML certificate) never leave the server.
@@ -3349,6 +3378,27 @@ async fn sub_account_suspend(
     service_result(state.sub_accounts.suspend(id, body.reason.as_deref()).await)
 }
 
+async fn sub_account_resume(
+    State(state): State<S>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    // Mirror the suspend handler's parent-tenant ownership check.
+    match state.sub_accounts.get(id).await {
+        Ok(api_result) => {
+            if let Some(ref sub) = api_result.data {
+                if let Err(e) = verify_tenant_access(&auth, &sub.parent_id) {
+                    return e;
+                }
+            } else {
+                return service_result::<SubAccount>(Ok(api_result));
+            }
+        }
+        Err(e) => return service_result::<SubAccount>(Err(e)),
+    }
+    service_result(state.sub_accounts.resume(id).await)
+}
+
 async fn sub_account_stats(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
@@ -4342,6 +4392,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sub_account_resume_route_exists_and_requires_auth() {
+        // T1 dogfood: suspend had no inverse — POST /sub-accounts/:id/resume
+        // must be routed (401 before auth, not 404/405). Sub-account routes
+        // live on the main router only (like suspend itself): the
+        // /api/enterprise nest carries contract_routes, not these.
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let config = Config::from_env().unwrap();
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let app = router(Arc::new(AppState::new(pool, config, recorder.handle())));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sub-accounts/00000000-0000-0000-0000-000000000001/resume")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

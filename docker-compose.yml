@@ -412,9 +412,11 @@ services:
       RATE_LIMIT_MAX_PER_MINUTE: ${RATE_LIMIT_MAX_PER_MINUTE:-1000}
       # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
       # Disabled in development. Set KIWI_ENABLED=true to enforce CAPTCHA
-      # challenges on login/signup.
+      # challenges on login/signup. The dev secret MUST satisfy the crate's
+      # HMAC minimum (16 bytes): a short secret makes EVERY challenge
+      # issuance fail (kiwicaptcha SignError::WeakSecret).
       KIWI_ENABLED: "false"
-      KIWI_SECRET_KEY: dev
+      KIWI_SECRET_KEY: ${KIWI_SECRET_KEY:-dev-kiwi-secret-not-for-production}
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
@@ -659,6 +661,16 @@ services:
       # ── Customer automation executor (moved from sales-autopilot) ────────
       WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
       AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
+    healthcheck:
+      # The worker binary serves /health on HEALTH_PORT — which resolves
+      # HEALTH_PORT, then METRICS_PORT (9093 above), then 9090. A stale
+      # healthcheck here once probed a retired 3006 port and kept the
+      # service permanently "unhealthy" while fully functional.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 $${METRICS_PORT:-9093}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - apexmail_backend
       - apexmail_data_internal

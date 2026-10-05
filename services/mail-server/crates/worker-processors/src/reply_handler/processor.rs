@@ -68,6 +68,15 @@ const FETCH_MESSAGES_SQL: &str = r#"
                 SELECT id
                 FROM inbound_messages
                 WHERE processed_at IS NULL
+                  -- inbound_messages is SHARED with the MTA delivery ledger
+                  -- (inbound.rs writes mail_from/rcpt_to/raw_message rows with
+                  -- NULL from_email). Those rows are not reply-pipeline work:
+                  -- claiming them decoded NULL into a hard fetch error that
+                  -- tripped the email processor's circuit breaker on EVERY
+                  -- tick and starved all 583 queued sends. Only reply-shaped
+                  -- rows (from_email populated, per the handler's own
+                  -- fixtures) are claimable.
+                  AND from_email IS NOT NULL
                   AND (
                       processing = false
                       OR processing_at < NOW() - {claim_staleness}
@@ -2310,6 +2319,73 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    /// Dogfood R-cluster (2026-10-04): inbound_messages is SHARED with the
+    /// MTA delivery ledger, whose rows carry mail_from/raw_message and a
+    /// NULL from_email. The claim loop used to claim those rows and die
+    /// decoding `fromEmail: unexpected null` — tripping the email
+    /// processor's circuit breaker every tick and starving every queued
+    /// send. The claim must take only reply-shaped rows and leave ledger
+    /// rows untouched (never claimed, never marked processed).
+    #[tokio::test]
+    async fn live_claim_skips_mta_delivery_ledger_rows() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_skip_ledger_rows").await else { return Ok(()) };
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+
+        // MTA delivery-ledger row: the production inbound.rs insert shape.
+        let ledger_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, mail_from, rcpt_to, raw_message, disposition) \
+             VALUES ($1, $2, 'external@r3test.invalid', ARRAY['team@example.dev'], \
+                     'MIME-bytes-here', 'accept')",
+        )
+        .bind(&ledger_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Reply-pipeline row: the shape this handler owns.
+        let reply_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &reply_id,
+            &tenant,
+            "replier@example.com",
+            "Re: proposal",
+            "A genuine reply.",
+            serde_json::json!({}),
+        )
+        .await;
+
+        let handler = scripted_handler(pool.clone(), ReplyDisposition::Positive, 0.9);
+        let claimed = handler.fetch_messages(10).await?;
+        let claimed_ids: Vec<_> = claimed.iter().map(|m| m.id.as_str()).collect();
+        assert!(
+            claimed_ids.contains(&reply_id.as_str()),
+            "reply row must be claimed, got {claimed_ids:?}"
+        );
+        assert!(
+            !claimed_ids.contains(&ledger_id.as_str()),
+            "delivery-ledger row must NOT be claimed"
+        );
+
+        // The ledger row is untouched: still unprocessed, never claimed.
+        let (processed, processing): (Option<chrono::DateTime<chrono::Utc>>, bool) =
+            sqlx::query_as(
+                "SELECT processed_at, COALESCE(processing, false) FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&ledger_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(processed.is_none(), "ledger row must stay unprocessed");
+        assert!(!processing, "ledger row must not be left claimed");
+
+        Ok(())
     }
 
     /// §21 RELEASE GATE: a reply racing a queued send cancels the action, and

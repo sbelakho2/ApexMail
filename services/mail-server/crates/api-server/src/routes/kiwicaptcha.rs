@@ -322,9 +322,26 @@ async fn issue_challenge_handler(
     // auto-tuning (when enabled via config) always sees an idle deployment.
     // request_binding = None: no application transaction is correlated with
     // the challenge at issuance.
-    let issued =
-        kiwicaptcha::issue_challenge(&kc_config, scope, &client_ip, now_unix, now_ns, 0, None)
-            .map_err(|_| ApiError::Internal("failed to issue KiwiCaptcha challenge".into()))?;
+    // Issuance failures are CONFIGURATION problems, not transient faults:
+    // the crate deterministically refuses HMAC secrets < 16 bytes
+    // (SignError::WeakSecret), invalid difficulty params, or disallowed
+    // scopes. A 500 would read as a server fault and hide the cause — log
+    // the specific error and answer with the deployment-misconfiguration
+    // shape (503) clients already handle for this endpoint.
+    let issued = match kiwicaptcha::issue_challenge(
+        &kc_config, scope, &client_ip, now_unix, now_ns, 0, None,
+    ) {
+        Ok(issued) => issued,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "KiwiCaptcha issuance failed — check KIWI_SECRET_KEY length (>=16 bytes) and difficulty settings"
+            );
+            return Err(ApiError::ServiceUnavailable(
+                "captcha challenge issuance failed — the deployment's KiwiCaptcha configuration is invalid; please retry shortly".into(),
+            ));
+        }
+    };
 
     // Store the challenge record in Redis, keyed by nonce, with TTL.
     let record_json = serde_json::to_string(&issued.record)
@@ -547,6 +564,39 @@ mod adversarial_tests {
             .post("/api/kcaptcha/challenge", r#"{"scope":"login","extra":1}"#)
             .await;
         assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A deployment that enables the captcha with a secret below the crate's
+    /// HMAC minimum (16 bytes — e.g. the historical compose default `dev`)
+    /// must get an honest 503-shaped refusal, never a raw 500 that hides the
+    /// cause.
+    #[tokio::test]
+    async fn short_secret_issuance_is_a_503_not_a_500() {
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_short_secret").await else {
+            return;
+        };
+        // "dev" is 3 bytes: the old compose default. Debug builds short-circuit
+        // into the dev bypass, so use a non-dev secret that is still too short.
+        let env = AdvEnv::over_with_config(pool, kiwi_config(true, "short"), "unused".into()).await;
+        let (status, body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        // Where the harness has a live Redis the failure arm is specifically
+        // the issuance/configuration one; without Redis the fail-closed
+        // rate-limit precheck answers first. Both are honest 503s — the
+        // property pinned here is that a configuration error never surfaces
+        // as a 500.
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("configuration is invalid") || message.contains("store unavailable"),
+            "unexpected 503 body: {body}"
+        );
+        assert!(!message.contains("internal"), "no internal leak: {body}");
     }
 
     #[tokio::test]

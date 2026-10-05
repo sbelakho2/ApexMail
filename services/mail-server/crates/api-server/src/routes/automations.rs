@@ -193,6 +193,12 @@ pub struct ListAutomationsQuery {
     /// `offset`.
     #[serde(default)]
     pub cursor: Option<String>,
+    /// Documented status filter (`GET /v1/automations?status=enabled`).
+    /// `automations.status` is VARCHAR(20) (live schema), so longer values
+    /// can never match a row — reject them up front instead of silently
+    /// returning an empty page.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 fn default_limit() -> i64 {
@@ -257,6 +263,17 @@ async fn list_automations(
 
     let limit = clamp_limit(params.limit, 100);
 
+    // Documented status filter: `automations.status` is VARCHAR(20), so a
+    // longer value can never match — a 4xx up front beats a silently empty
+    // page that reads as "no automations".
+    if let Some(status) = params.status.as_deref() {
+        if status.is_empty() || status.len() > 20 {
+            return Err(ApiError::Validation(vec![
+                "status filter must be 1-20 characters".into(),
+            ]));
+        }
+    }
+
     // Real keyset pagination on (created_at, id): decode and validate the
     // cursor BEFORE binding, and page with a total-ordering tuple
     // comparison instead of the numeric offset this endpoint used to
@@ -267,23 +284,28 @@ async fn list_automations(
     };
 
     let total: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1",
+        "SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2)",
     )
     .bind(&auth.tenant_id)
+    .bind(params.status.as_deref())
     .fetch_one(&state.db)
     .await?;
 
     // Fetch limit + 1 rows so we can detect whether another page exists.
+    // The documented status filter binds as an Option so one SQL shape
+    // serves both the filtered and unfiltered paths.
     let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
         sqlx::query_as::<_, AutomationRow>(
             "SELECT id::text, name, trigger_config, actions, conditions, status, created_at, updated_at
              FROM automations WHERE tenant_id = $1
+               AND ($4::text IS NULL OR status = $4)
                AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))
-             ORDER BY created_at DESC, id DESC LIMIT $4",
+             ORDER BY created_at DESC, id DESC LIMIT $5",
         )
         .bind(&auth.tenant_id)
         .bind(cursor_ts)
         .bind(cursor_id)
+        .bind(params.status.as_deref())
         .bind(limit + 1)
         .fetch_all(&state.db)
         .await?
@@ -291,10 +313,13 @@ async fn list_automations(
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, AutomationRow>(
             "SELECT id::text, name, trigger_config, actions, conditions, status, created_at, updated_at
-             FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
+             FROM automations WHERE tenant_id = $1
+               AND ($3::text IS NULL OR status = $3)
+             ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $4",
         )
         .bind(&auth.tenant_id)
         .bind(limit + 1)
+        .bind(params.status.as_deref())
         .bind(offset)
         .fetch_all(&state.db)
         .await?
@@ -868,6 +893,7 @@ mod adversarial_tests {
                 limit: 2,
                 offset: 0,
                 cursor: None,
+                status: None,
             }),
         )
         .await
@@ -888,12 +914,71 @@ mod adversarial_tests {
                 limit: 2,
                 offset: 0,
                 cursor: Some(cursor),
+                status: None,
             }),
         )
         .await
         .expect("page 2 must accept the server's own cursor");
         assert_eq!(page2["data"].as_array().unwrap().len(), 1);
         assert_eq!(page2["meta"]["hasMore"], false);
+
+        // The documented ?status= filter narrows both the rows AND the
+        // reported total (the executor's vocabulary is 'enabled'/'disabled').
+        sqlx::query("UPDATE automations SET status = 'enabled' WHERE tenant_id = $1 AND name = $2")
+            .bind(&tenant)
+            .bind(format!("Page flow 0 {tag}"))
+            .execute(&pool)
+            .await
+            .expect("enable one row");
+        let Json(enabled_page) = list_automations(
+            State(state.clone()),
+            auth.clone(),
+            Query(ListAutomationsQuery {
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                status: Some("enabled".into()),
+            }),
+        )
+        .await
+        .expect("status-filtered list");
+        assert_eq!(
+            enabled_page["meta"]["total"], 1,
+            "total respects the filter"
+        );
+        let rows = enabled_page["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], format!("Page flow 0 {tag}"));
+        // A status with no rows is an honest empty page, not an error.
+        let Json(empty) = list_automations(
+            State(state.clone()),
+            auth.clone(),
+            Query(ListAutomationsQuery {
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                status: Some("nonexistent".into()),
+            }),
+        )
+        .await
+        .expect("empty filtered list");
+        assert_eq!(empty["meta"]["total"], 0);
+        assert_eq!(empty["data"].as_array().unwrap().len(), 0);
+        // Longer than the VARCHAR(20) column can never match — rejected.
+        assert!(matches!(
+            list_automations(
+                State(state.clone()),
+                auth.clone(),
+                Query(ListAutomationsQuery {
+                    limit: 50,
+                    offset: 0,
+                    cursor: None,
+                    status: Some("x".repeat(21)),
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
 
         // Clamps and malformed cursors.
         for (limit, offset) in [(0i64, -3i64), (i64::MAX, 0)] {
@@ -904,6 +989,7 @@ mod adversarial_tests {
                     limit,
                     offset,
                     cursor: None,
+                    status: None,
                 }),
             )
             .await
@@ -917,7 +1003,8 @@ mod adversarial_tests {
                 Query(ListAutomationsQuery {
                     limit: 2,
                     offset: 0,
-                    cursor: Some("garbage".into())
+                    cursor: Some("garbage".into()),
+                    status: None,
                 })
             )
             .await,

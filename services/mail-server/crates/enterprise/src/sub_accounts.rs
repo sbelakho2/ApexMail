@@ -194,6 +194,28 @@ impl SubAccountService {
         }
     }
 
+    /// Resume a suspended sub-account — the inverse of [`Self::suspend`].
+    /// Without this route suspension was a one-way door: `update()` cannot
+    /// change `status` and the only remaining exits were deletion (losing
+    /// the sub-account's keys and volume allocation).
+    pub async fn resume(&self, id: Uuid) -> Result<ApiResult<SubAccount>, String> {
+        let row = sqlx::query_as::<_, SubAccount>(
+            "UPDATE ent_sub_accounts SET status = 'active', updated_at = NOW() WHERE id = $1 RETURNING *"
+        )
+        .bind(id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| format!("Resume sub-account: {e}"))?;
+
+        match row {
+            Some(r) => {
+                info!(id = %id, "Sub-account resumed");
+                Ok(ApiResult::ok(r))
+            }
+            None => Ok(ApiResult::err("Sub-account not found", "NOT_FOUND")),
+        }
+    }
+
     /// Delete a sub-account
     pub async fn delete(&self, id: Uuid) -> Result<ApiResult<serde_json::Value>, String> {
         let result = sqlx::query("DELETE FROM ent_sub_accounts WHERE id = $1")

@@ -163,19 +163,21 @@ never silently becomes an email address).
 
 ### SCIM Provisioning
 
-For advanced user lifecycle management, enable SCIM:
+For advanced user lifecycle management, enable SCIM against the API
+service's SCIM 2.0 endpoints (there is no separate `/scim/config` bootstrap
+on the enterprise service — provisioning talks to the API directly):
 
-```bash
-# Get SCIM endpoint
-curl https://enterprise.apexmail.ee/scim/config
-
-# Response
-{
-  "scimBaseUrl": "https://enterprise.apexmail.ee/scim",
-  "authMethod": "api_key",
-  "token": "scim_xxx"
-}
+```http
+Base URL: https://api.apexmail.ee/v1/scim
+Auth:     X-API-Key: <an API key holding the admin `*` scope>
+Media:    application/scim+json (any JSON media type is accepted)
 ```
+
+See `docs/api/endpoints/scim.md` for the full `/v1/scim/Users` and
+`/v1/scim/Groups` CRUD surface (create/replace/patch/delete, `filter`
+lookups, `ServiceProviderConfig`). SCIM-created users authenticate through
+SSO: their local password hash is a placeholder that no password form
+accepts.
 
 ## Authentication Flow
 

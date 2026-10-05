@@ -198,6 +198,14 @@ async fn require_inbound_event_entitlement(
 /// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true`), and rejects private/reserved
 /// hosts unless that same explicit override is set for a loopback target.
 fn validate_webhook_url_with(url_str: &str, allow_localhost: bool) -> Result<(), String> {
+    // `webhooks.url` is VARCHAR(2048) (migration 075) — reject oversized URLs
+    // here so the caller gets a clean 400 instead of a raw insert failure (500).
+    if url_str.len() > MAX_WEBHOOK_URL_LEN {
+        return Err(format!(
+            "webhook URL must be at most {MAX_WEBHOOK_URL_LEN} characters"
+        ));
+    }
+
     let url = Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
 
     let scheme = url.scheme();
@@ -288,6 +296,11 @@ fn webhook_delivery_client(
 /// Per-tenant webhook ceiling, enforced by BOTH the JSON create handler
 /// and the form twin.
 pub(crate) const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
+
+/// Endpoint-URL length ceiling — mirrors the `webhooks.url` VARCHAR(2048)
+/// column (migration 075). Validating here turns an oversized URL into a
+/// clean 400 instead of a raw insert failure surfacing as a 500.
+pub(crate) const MAX_WEBHOOK_URL_LEN: usize = 2048;
 
 /// Does `error` carry the `uq_webhooks_tenant_url` unique violation? Used to
 /// map an endpoint-URL collision onto `409 Conflict` instead of a raw 500.
@@ -1000,6 +1013,22 @@ mod tests {
     fn test_validate_webhook_url_blocks_ipv6_link_local_targets() {
         let error = validate_webhook_url("https://[fe80::1]/hook").unwrap_err();
         assert!(error.contains("private or reserved addresses"));
+    }
+
+    #[test]
+    fn test_validate_webhook_url_rejects_urls_over_column_limit() {
+        // `webhooks.url` is VARCHAR(2048) — a URL one byte past the column
+        // width must surface as a validation error, never a 500 insert failure.
+        let at_limit = format!(
+            "https://a.example/{}",
+            "p".repeat(2048 - "https://a.example/".len())
+        );
+        assert_eq!(at_limit.len(), MAX_WEBHOOK_URL_LEN);
+        assert!(validate_webhook_url_with(&at_limit, false).is_ok());
+        let over_limit = format!("{at_limit}x");
+        assert!(over_limit.len() > MAX_WEBHOOK_URL_LEN);
+        let error = validate_webhook_url_with(&over_limit, false).unwrap_err();
+        assert!(error.contains("at most 2048"), "unexpected error: {error}");
     }
 
     #[test]

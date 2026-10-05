@@ -92,16 +92,22 @@ Content-Type: application/json
 
 ```json
 {
-  "id": "auto_abc123",
+  "id": "06421410-58ae-443a-9412-8b356956f454",
   "name": "Welcome Series",
-  "status": "draft",
   "trigger": {
     "type": "event",
     "event": "contact.created"
   },
-  "action_count": 2,
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-15T10:30:00Z"
+  "actions": [
+    {
+      "type": "send_email",
+      "config": {"template_id": "tmpl_welcome_001", "delay_minutes": 0}
+    }
+  ],
+  "conditions": null,
+  "status": "disabled",
+  "created_at": "2026-01-15T10:30:00.123456789+00:00",
+  "updated_at": "2026-01-15T10:30:00.123456789+00:00"
 }
 ```
 
@@ -109,11 +115,12 @@ Content-Type: application/json
 
 | Status | Description |
 |--------|-------------|
-| `draft` | Automation created but not active |
-| `active` | Automation is running and processing triggers |
-| `paused` | Automation paused (manually disabled) |
-| `completed` | Automation finished (one-time) |
-| `archived` | Automation archived |
+| `disabled` | Automation created but not running (the initial state) |
+| `enabled` | Automation is running and processing triggers |
+
+The `automations.status` column is `VARCHAR(20)`; the executor only claims
+`enabled` rows. `POST .../enable` and `POST .../disable` are the only
+transitions.
 
 ---
 
@@ -132,25 +139,32 @@ X-API-Key: {{api_key}}
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `status` | string | | Filter by status |
-| `limit` | number | 20 | Results per page (max: 100) |
-| `offset` | number | 0 | Pagination offset |
+| `status` | string | | Filter by status (`enabled` / `disabled`); 1-20 characters. Also narrows the reported `meta.total` |
+| `limit` | number | 50 | Results per page (max: 100) |
+| `offset` | number | 0 | Pagination offset (ignored when `cursor` is provided) |
+| `cursor` | string | | Opaque keyset cursor (`meta.nextCursor` of the previous page) |
 
 ### Response
+
+List responses use the standard `{data, error, meta}` envelope with
+pagination metadata:
 
 ```json
 {
   "data": [
     {
-      "id": "auto_abc123",
+      "id": "06421410-58ae-443a-9412-8b356956f454",
       "name": "Welcome Series",
-      "status": "active",
       "trigger": {"type": "event", "event": "contact.created"},
-      "action_count": 3,
-      "total_processed": 15420,
-      "created_at": "2024-01-15T10:30:00Z"
+      "actions": [{"type": "send_email", "config": {"template_id": "tmpl_welcome_001"}}],
+      "conditions": null,
+      "status": "enabled",
+      "created_at": "2026-01-15T10:30:00.123456789+00:00",
+      "updated_at": "2026-01-15T10:30:00.123456789+00:00"
     }
-  ]
+  ],
+  "error": null,
+  "meta": {"total": 1, "hasMore": false, "nextCursor": null}
 }
 ```
 
@@ -171,9 +185,9 @@ X-API-Key: {{api_key}}
 
 ```json
 {
-  "id": "auto_abc123",
+  "id": "06421410-58ae-443a-9412-8b356956f454",
   "name": "Welcome Series",
-  "status": "active",
+  "status": "enabled",
   "trigger": {
     "type": "event",
     "event": "contact.created",
@@ -189,21 +203,21 @@ X-API-Key: {{api_key}}
     }
   ],
   "conditions": {"all": [{"field": "tags", "operator": "contains", "value": "active"}]},
-  "stats": {
-    "total_triggered": 15420,
-    "total_completed": 15200,
-    "total_failed": 20
-  },
-  "created_at": "2024-01-15T10:30:00Z",
-  "updated_at": "2024-01-20T14:00:00Z"
+  "created_at": "2026-01-15T10:30:00.123456789+00:00",
+  "updated_at": "2026-01-20T14:00:00.123456789+00:00"
 }
 ```
+
+Per-run execution outcomes (triggered / completed / failed counts) live in
+the worker-side run log (`automation_runs`); they are not part of this
+resource's wire shape.
 
 ---
 
 ## Update Automation
 
-Update an existing automation. Active automations are paused during update.
+Update an existing automation. The automation's `status` is preserved —
+updating an enabled automation does not pause it.
 
 ### Request
 
@@ -232,14 +246,8 @@ Content-Type: application/json
 
 ### Response
 
-```json
-{
-  "id": "auto_abc123",
-  "name": "Welcome Series v2",
-  "status": "draft",
-  "updated_at": "2024-01-20T15:00:00Z"
-}
-```
+The full updated automation resource (same shape as Get Automation), with
+the current `status` preserved.
 
 ---
 
@@ -280,12 +288,18 @@ X-API-Key: {{api_key}}
 
 ### Response
 
+The full automation resource with the new `status` (`enabled` / `disabled`):
+
 ```json
 {
-  "id": "auto_abc123",
+  "id": "06421410-58ae-443a-9412-8b356956f454",
   "name": "Welcome Series",
-  "status": "active",
-  "enabled_at": "2024-01-20T16:00:00Z"
+  "trigger": {"type": "event", "event": "contact.created"},
+  "actions": [{"type": "send_email", "config": {"template_id": "tmpl_welcome_001"}}],
+  "conditions": null,
+  "status": "enabled",
+  "created_at": "2026-01-15T10:30:00.123456789+00:00",
+  "updated_at": "2026-01-20T16:00:00.123456789+00:00"
 }
 ```
 

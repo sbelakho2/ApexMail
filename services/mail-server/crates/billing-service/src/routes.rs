@@ -1262,6 +1262,33 @@ fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
 // platform chain. `insert_audit_log` computes the canonical api-server hash
 // shape inline.
 
+/// The canonical audit row-hash payload: `tenant|user|action|resource|
+/// resource_id|details|timestamp` — byte-for-byte the input the api-server's
+/// `audit_log::compute_hash` hashes (its `user_id.unwrap_or_default()` makes
+/// the `user` segment EMPTY, never absent, for machine-context writers).
+/// Kept pure so a unit test can pin the exact 7-segment shape; the live
+/// failure this guards against is a hash no verifier can re-derive from the
+/// stored row (DF-7c: the metering writer dropped the whole segment).
+fn audit_hash_payload(
+    tenant_id: &str,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    metadata: &serde_json::Value,
+    timestamp: &chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        tenant_id,
+        "", // user segment: machine context, same as api-server's machine rows
+        action,
+        resource_type,
+        resource_id.unwrap_or_default(),
+        metadata,
+        timestamp.to_rfc3339(),
+    )
+}
+
 async fn insert_audit_log(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -1288,14 +1315,20 @@ async fn insert_audit_log(
     // `previous_hash` inside the hash) forked the platform chain: two writers
     // linked different children onto the same parent, and the metering writer
     // never advanced the shared `audit_chain_head` sequencer.
-    let hash_payload = format!(
-        "{}|{}|{}|{}|{}|{}",
+    //
+    // The `user` segment MUST be present even though this writer is machine
+    // context (no user): api-server contributes `user_id.unwrap_or_default()`
+    // — the empty string — for the same case, and omitting the SEGMENT
+    // (rather than the value) produces a 6-field payload no canonical
+    // verifier can re-derive (live dogfood DF-7c: a billing row's hash did
+    // not match its own columns while api-server rows on the same chain did).
+    let hash_payload = audit_hash_payload(
         tenant_id,
         action,
         resource_type,
-        resource_id.unwrap_or_default(),
-        metadata,
-        timestamp.to_rfc3339(),
+        resource_id,
+        &metadata,
+        &timestamp,
     );
     let hash = format!("{:x}", Sha256::digest(hash_payload.as_bytes()));
 
@@ -2545,6 +2578,81 @@ mod tests {
     use deadpool_redis::Config as RedisConfig;
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
+
+    /// The audit row hash payload must be the canonical 7-segment
+    /// `tenant|user|action|resource|resource_id|details|timestamp` shape —
+    /// byte-identical to api-server `audit_log::compute_hash`'s input with
+    /// `user_id = None`. The regression: the metering writer dropped the
+    /// (empty) user SEGMENT entirely, so its rows hashed to a value no
+    /// verifier could re-derive from the stored columns (DF-7c live finding).
+    #[test]
+    fn audit_hash_payload_is_the_canonical_seven_segment_shape() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-10-04T23:00:53.250028Z")
+            .expect("fixed timestamp")
+            .with_timezone(&chrono::Utc);
+        let metadata = serde_json::json!({"quantity": 1});
+
+        let payload = audit_hash_payload(
+            "ten_test26chars123456789ab",
+            "billing.metering_event_recorded",
+            "metering_event",
+            None,
+            &metadata,
+            &ts,
+        );
+        let segments: Vec<&str> = payload.split('|').collect();
+        assert_eq!(
+            segments.len(),
+            7,
+            "exactly 7 segments; dropping the empty user segment made rows unverifiable"
+        );
+        assert_eq!(segments[0], "ten_test26chars123456789ab");
+        assert_eq!(
+            segments[1], "",
+            "user segment empty (machine writer), never absent"
+        );
+        assert_eq!(segments[2], "billing.metering_event_recorded");
+        assert_eq!(segments[3], "metering_event");
+        assert_eq!(segments[4], "");
+        assert_eq!(segments[5], "{\"quantity\":1}");
+        assert_eq!(segments[6], "2026-10-04T23:00:53.250028+00:00");
+
+        // Hash parity with the api-server formula computed independently.
+        use sha2::{Digest, Sha256};
+        let expected = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{}|{}|{}|{}|{}|{}|{}",
+                    "ten_test26chars123456789ab",
+                    "",
+                    "billing.metering_event_recorded",
+                    "metering_event",
+                    "",
+                    "{\"quantity\":1}",
+                    "2026-10-04T23:00:53.250028+00:00",
+                )
+                .as_bytes()
+            )
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(payload.as_bytes())),
+            expected
+        );
+
+        // A resource_id present lands in segment 5 (never merged into
+        // neighbours).
+        let with_id = audit_hash_payload(
+            "ten_test26chars123456789ab",
+            "action",
+            "resource",
+            Some("res_123"),
+            &metadata,
+            &ts,
+        );
+        let segments: Vec<&str> = with_id.split('|').collect();
+        assert_eq!((segments.len(), segments[4]), (7, "res_123"));
+    }
 
     async fn response_json(resp: Response) -> (StatusCode, serde_json::Value) {
         let status = resp.status();

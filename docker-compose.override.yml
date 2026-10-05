@@ -94,6 +94,16 @@ services:
   enterprise:
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-not-for-production-use-change-me-1234567890abcdef}
+      # SSO_ENCRYPTION_KEY pins the at-rest key for tenant OIDC client
+      # secrets (config.rs `sso_encryption`). Without it, EVERY
+      # POST /sso/configure carrying an oidc_client_secret fails with a raw
+      # 500 "Encrypt OIDC client secret: key derivation error" — the same
+      # dev-parity rationale as the api-server's MFA_SECRET_ENCRYPTION_KEY
+      # pin above (docs/enterprise/sso.md:130-132 declares the requirement).
+      SSO_ENCRYPTION_KEY: ${SSO_ENCRYPTION_KEY:-local-dev-sso-encryption-key-32chars-min}
+      # Dev parity with the router-test loopback OP (routes.rs MockOidcIdp):
+      # the federation egress guard demands HTTPS otherwise.
+      SSO_FEDERATION_ALLOWLIST: ${SSO_FEDERATION_ALLOWLIST:-127.0.0.1,localhost,host.docker.internal}
     profiles:
       - full-stack
 
@@ -157,6 +167,12 @@ services:
       TLS_ENABLED: "true"
       TLS_CERT_PATH: /run/tls/cert.pem
       TLS_KEY_PATH: /run/tls/key.pem
+      # Dev transport is SMTP (mailpit sink), matching the worker override
+      # below. Without it the MTA's sender-readiness predicate treats the
+      # unset EMAIL_TRANSPORT_TYPE as SES and demands ses_verified on every
+      # sending domain — submission rejected every tenant message with
+      # "sender domain is not verified and ready for delivery".
+      EMAIL_TRANSPORT_TYPE: "smtp"
       # Shared dev token for the mailstore gRPC hop (inbound mailbox
       # delivery). Mailstore only exists in the prod overlay otherwise.
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me-01}
