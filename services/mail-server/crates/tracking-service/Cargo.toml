@@ -75,7 +75,7 @@ ipnetwork.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v5"] }
 
 # Error handling
 anyhow.workspace = true

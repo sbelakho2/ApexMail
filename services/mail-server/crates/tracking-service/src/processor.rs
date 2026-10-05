@@ -209,6 +209,10 @@ pub struct TrackingEvent {
     pub tenant_id: String,
     pub message_id: String,
     pub recipient: String,
+    /// Resolved at write time from `email_queue` (message → campaign).
+    /// Optional so WAL entries written before this field decode unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -505,6 +509,7 @@ impl EventProcessor {
             tenant_id,
             message_id,
             recipient,
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
@@ -561,6 +566,7 @@ impl EventProcessor {
             tenant_id,
             message_id,
             recipient,
+            campaign_id: None,
             link_id: Some(link_id),
             link_url: Some(link_url),
             unsubscribe_reason: None,
@@ -616,6 +622,7 @@ impl EventProcessor {
             tenant_id,
             message_id,
             recipient,
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: Some(reason.unwrap_or_else(|| "one-click".into())),
@@ -1090,10 +1097,40 @@ impl EventProcessor {
             return Ok(());
         }
 
-        // Max PG params ≈ 65535; 10 columns per event → max chunk 6500
-        const PARAMS_PER_EVENT: usize = 10;
+        // Max PG params ≈ 65535; 11 columns per event → max chunk 5900
+        const PARAMS_PER_EVENT: usize = 11;
         const MAX_PER_CHUNK: usize = 65000 / PARAMS_PER_EVENT;
 
+        // Resolve campaign attribution in ONE batch query: the tracking
+        // token wire format carries no campaign field, but `email_queue`
+        // maps message → campaign. Campaign-scoped analytics (A/B arm
+        // metrics, per-campaign device stats) join on events.campaign_id,
+        // which was previously always NULL for tracking events.
+        let mut campaign_by_message: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        {
+            let message_ids: Vec<String> = events
+                .iter()
+                .map(|e| e.message_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            if !message_ids.is_empty() {
+                if let Ok(rows) = sqlx::query_as::<_, (String, String)>(
+                    "SELECT DISTINCT message_id::text, campaign_id::text \
+                     FROM email_queue WHERE message_id = ANY($1::uuid[]) \
+                       AND campaign_id IS NOT NULL",
+                )
+                .bind(&message_ids)
+                .fetch_all(&self.db)
+                .await
+                {
+                    for (message_id, campaign_id) in rows {
+                        campaign_by_message.insert(message_id, campaign_id);
+                    }
+                }
+            }
+        }
         let mut tx = self.db.begin().await.context("begin transaction")?;
 
         for chunk in events.chunks(MAX_PER_CHUNK) {
@@ -1104,9 +1141,13 @@ impl EventProcessor {
             // The full IP lives only in transient paths (Redis WAL between
             // flushes, rate limiting, SSE Pub/Sub).
             let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp) ",
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp, campaign_id) ",
             );
             builder.push_values(chunk, |mut b, ev| {
+                let campaign_id = ev
+                    .campaign_id
+                    .clone()
+                    .or_else(|| campaign_by_message.get(&ev.message_id).cloned());
                 b.push_bind(ev.id.clone())
                     .push_bind(ev.tenant_id.clone())
                     .push_bind(ev.message_id.clone())
@@ -1116,7 +1157,8 @@ impl EventProcessor {
                     .push_bind(ev.link_url.clone())
                     .push_bind(ev.user_agent.clone())
                     .push_bind(analytics::ip_mask::mask_ip_opt(ev.ip_address.as_deref()))
-                    .push_bind(ev.timestamp);
+                    .push_bind(ev.timestamp)
+                    .push_bind(campaign_id);
             });
             builder.push(" ON CONFLICT (id) DO NOTHING");
             builder
@@ -1224,6 +1266,34 @@ impl EventProcessor {
                     .map(|json| (ev.tenant_id.clone(), json))
             })
             .collect();
+
+        // ── Webhook producers: message.opened / message.clicked ──────────
+        // Subscribers of the tracking events get one delivery per recorded
+        // event. The queue id is a deterministic v5 UUID of
+        // (event id, webhook id): a redelivered/duplicate event collapses
+        // onto the same queue row via ON CONFLICT DO NOTHING, so webhook
+        // consumers inherit the events table's dedup semantics exactly.
+        {
+            let db = self.db.clone();
+            let deliverable: Vec<(String, String, String, Option<String>, Option<String>)> = events
+                .iter()
+                .filter(|ev| matches!(ev.event_type, EventType::Opened | EventType::Clicked))
+                .map(|ev| {
+                    (
+                        ev.id.clone(),
+                        ev.tenant_id.clone(),
+                        ev.event_type.to_string(),
+                        Some(ev.message_id.clone()),
+                        ev.recipient.clone().into(),
+                    )
+                })
+                .collect();
+            if !deliverable.is_empty() {
+                tokio::spawn(async move {
+                    enqueue_tracking_event_webhooks(&db, &deliverable).await;
+                });
+            }
+        }
 
         tokio::spawn(async move {
             if let Ok(mut conn) = redis.get().await {
@@ -1958,6 +2028,122 @@ fn bump_suppression_retry(raw: &str) -> Option<String> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// One delivery per (event, subscribed webhook) for tracking events. The
+// queue id is deterministic — `v5(event id, webhook id)` — so a duplicate
+/// event (ON CONFLICT DO NOTHING upstream) can never enqueue a second
+/// delivery; a genuine event always does. Best-effort: a failure logs and
+/// the events remain the source of truth.
+async fn enqueue_tracking_event_webhooks(
+    db: &sqlx::PgPool,
+    events: &[(String, String, String, Option<String>, Option<String>)],
+) {
+    use std::collections::HashMap;
+    let mut by_tenant: HashMap<
+        &str,
+        Vec<&(String, String, String, Option<String>, Option<String>)>,
+    > = HashMap::new();
+    for event in events {
+        by_tenant.entry(event.1.as_str()).or_default().push(event);
+    }
+
+    const NAMESPACE: Uuid = Uuid::from_bytes([
+        0x6b, 0x5f, 0x2b, 0x60, 0x43, 0x1c, 0x4f, 0xc2, 0x9e, 0x77, 0x0f, 0x2f, 0x0d, 0x75, 0x9a,
+        0x31,
+    ]);
+
+    for (tenant_id, tenant_events) in by_tenant {
+        // Fetch the tenant's subscribed webhooks once per batch.
+        let webhooks: Vec<(String,)> = match sqlx::query_as(
+            "SELECT id FROM webhooks \
+             WHERE tenant_id = $1 AND enabled = true",
+        )
+        .bind(tenant_id)
+        .fetch_all(db)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(error = %error, tenant_id, "tracking webhook subscription lookup failed");
+                continue;
+            }
+        };
+        if webhooks.is_empty() {
+            continue;
+        }
+        // Which event types does each webhook subscribe to?
+        let mut wanted_events: HashMap<String, Vec<String>> = HashMap::new();
+        if let Ok(rows) = sqlx::query_as::<_, (String, serde_json::Value)>(
+            "SELECT id, events FROM webhooks WHERE tenant_id = $1 AND enabled = true",
+        )
+        .bind(tenant_id)
+        .fetch_all(db)
+        .await
+        {
+            for (id, events_json) in rows {
+                let mut targets: Vec<String> = Vec::new();
+                if let Some(items) = events_json.as_array() {
+                    for item in items {
+                        if let Some(name) = item.as_str() {
+                            match name {
+                                "message.opened" => targets.push("opened".to_string()),
+                                "message.clicked" => targets.push("clicked".to_string()),
+                                "*" => {
+                                    targets.push("opened".to_string());
+                                    targets.push("clicked".to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                wanted_events.insert(id, targets);
+            }
+        }
+
+        for event in tenant_events {
+            let (event_id, _tenant, event_type, message_id, recipient) = event;
+            for (webhook_id,) in &webhooks {
+                let targets = wanted_events.get(webhook_id);
+                let subscribed = targets.is_some_and(|t| t.iter().any(|v| v == event_type));
+                if !subscribed {
+                    continue;
+                }
+                let queue_id = format!(
+                    "whj_{}",
+                    Uuid::new_v5(&NAMESPACE, format!("{event_id}:{webhook_id}").as_bytes())
+                        .simple()
+                );
+                let payload = serde_json::json!({
+                    "id": format!("evt_{event_id}"),
+                    "type": format!("message.{event_type}"),
+                    "tenantId": event.1,
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "data": {
+                        "message_id": message_id,
+                        "recipient": recipient,
+                    },
+                });
+                if let Err(error) = sqlx::query(
+                    "INSERT INTO webhook_queue \
+                     (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(&queue_id)
+                .bind(webhook_id)
+                .bind(&event.1)
+                .bind(format!("message.{event_type}"))
+                .bind(&payload)
+                .execute(db)
+                .await
+                {
+                    tracing::warn!(error = %error, event_id, "tracking webhook enqueue failed");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2018,6 +2204,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "a@b.com".into(),
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
@@ -2105,6 +2292,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "a@b.com".into(),
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
@@ -2137,6 +2325,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "a@b.com".into(),
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
@@ -2186,6 +2375,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "User@Example.com".into(),
+            campaign_id: None,
             link_id: Some("lnk_1".into()),
             link_url: Some("https://example.com/x".into()),
             unsubscribe_reason: None,
@@ -2231,6 +2421,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "u@example.com".into(),
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: Some("spam".into()),
@@ -2260,6 +2451,7 @@ mod tests {
             tenant_id: "t1".into(),
             message_id: "m1".into(),
             recipient: "u@example.com".into(),
+            campaign_id: None,
             link_id: None,
             link_url: None,
             unsubscribe_reason: None,
@@ -2382,6 +2574,7 @@ mod tests {
             tenant_id: tenant.clone(),
             message_id: format!("msg_{id}"),
             recipient: recipient.into(),
+            campaign_id: None,
             link_id: Some(format!("link_{id}")),
             link_url: Some(format!("https://example.com/{id}")),
             unsubscribe_reason: Some("spam".into()),

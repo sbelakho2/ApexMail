@@ -214,6 +214,34 @@ pub struct CampaignEditData {
     pub scheduled_at: String,
 }
 
+/// The campaign editor's live option sources plus optional prefilled values.
+/// Lists and segments are the TENANT's own rows (id, display name) — the old
+/// placeholder select values ('vip', 'newsletter') were never persisted.
+#[derive(Debug, Clone, Default)]
+pub struct CampaignEditorData {
+    pub lists: Vec<(String, String)>,
+    pub segments: Vec<(String, String)>,
+    pub edit: Option<CampaignEditData>,
+    /// Prefilled audience/segment/content/sender/tracking/UTM/settings
+    /// values for the EDIT mode; empty strings in create mode.
+    pub from_email: String,
+    pub from_name: String,
+    pub reply_to: String,
+    pub preview_text: String,
+    pub list_ids: Vec<String>,
+    pub segment_id: String,
+    pub track_opens: bool,
+    pub track_clicks: bool,
+    pub utm_source: String,
+    pub utm_medium: String,
+    pub utm_campaign: String,
+    pub throttle_rate: String,
+    pub ip_pool: String,
+    pub timezone: String,
+    pub send_time_optimization: bool,
+    pub variables: String,
+}
+
 /// Prefilled list editor state for `/lists/{id}/edit` (loaded server-side
 /// from the lists row). Mirrors [`CampaignEditData`]: the view emits the
 /// hidden `id` plus the prefilled name so `POST /web/lists/update` can

@@ -516,6 +516,79 @@ impl Checkbox {
     }
 }
 
+/// A NATIVE `<select>` styled with the shared form-control classes.
+///
+/// The combobox [`Select`] above requires the hydration script; plain
+/// server-posted forms (the campaign editor, settings pages) need a control
+/// that serializes without JavaScript. Use this for every no-JS form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSelect<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub options: Vec<SelectOption<'a>>,
+    pub required: bool,
+    /// `true` renders a multi-select (`listIds`-style arrays); the shared
+    /// classes and label contract stay identical.
+    pub multiple: bool,
+    /// Rendered size for a multi-select (rows visible).
+    pub size: Option<usize>,
+}
+
+impl NativeSelect<'_> {
+    pub fn render_html(&self) -> String {
+        let multiple_attrs = if self.multiple {
+            format!(" multiple size=\"{}\"", self.size.unwrap_or(6).max(2))
+        } else {
+            String::new()
+        };
+        let required_attr = if self.required { " required" } else { "" };
+        let options = self
+            .options
+            .iter()
+            .map(|option| {
+                let selected = if option.selected { " selected" } else { "" };
+                let disabled = if option.disabled { " disabled" } else { "" };
+                format!(
+                    "<option value=\"{}\"{}{}>{}</option>",
+                    option.value, selected, disabled, option.label
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            "<select id=\"{}\" name=\"{}\" class=\"flex w-full rounded-[8px_8px_7px_7px] border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary{}\"{}{}>{}</select>",
+            self.id,
+            self.name,
+            if self.multiple { " min-h-12 py-2" } else { " h-12" },
+            required_attr,
+            multiple_attrs,
+            options,
+        )
+    }
+}
+
+/// A NATIVE `<input type="checkbox">` styled with the shared control
+/// classes — the no-JS sibling of the combobox-family [`Checkbox`] button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCheckbox<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub checked: bool,
+    pub label: &'a str,
+}
+
+impl NativeCheckbox<'_> {
+    pub fn render_html(&self) -> String {
+        let checked = if self.checked { " checked" } else { "" };
+        format!(
+            "<label class=\"flex items-center gap-3 text-sm font-medium text-surface-950 min-h-[44px]\" for=\"{}\"\
+><input id=\"{}\" name=\"{}\" type=\"checkbox\" value=\"true\"{} class=\"h-4 w-4 rounded-sm border border-surface-300 text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20\" />\
+<span>{}</span></label>",
+            self.id, self.id, self.name, checked, self.label
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectOption<'a> {
     pub value: &'a str,

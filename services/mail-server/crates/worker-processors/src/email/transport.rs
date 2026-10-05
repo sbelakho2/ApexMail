@@ -192,6 +192,21 @@ const VERP_MESSAGE_ID_HEADER: &str = apexmail_lib::email_headers::HEADER_MESSAGE
 /// 0.3.2's `From<&str>` wraps the WHOLE string in ONE angle-bracket
 /// mailbox (`<a@x, b@y>`), so a comma-joined To/Cc string can never be
 /// handed to `MessageBuilder::to/cc` — only structured lists.
+/// The MIME `From:` mailbox for one prepared email: the display name
+/// (when present) is attached here ONLY — the envelope sender stays the
+/// bare `email.from` address (see `PreparedEmail::from_name`).
+fn from_mailbox(email: &PreparedEmail) -> Address<'_> {
+    match email
+        .from_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        Some(name) => Address::new_address(Some(name), email.from.as_str()),
+        None => Address::new_address(None::<&str>, email.from.as_str()),
+    }
+}
+
 fn mailbox_list(mailboxes: &[Mailbox]) -> Address<'_> {
     Address::new_list(
         mailboxes
@@ -644,7 +659,7 @@ impl SmtpTransport {
         // the caller (VERP path / mail-send's header derivation). Reply-To
         // uses the same structured model.
         let mut builder = MessageBuilder::new()
-            .from(email.from.as_str())
+            .from(from_mailbox(email))
             .subject(email.subject.as_str());
         if email.mime_to.is_empty() {
             builder = builder.to(single_mailbox(email.to.as_str()));
@@ -776,15 +791,20 @@ impl EmailTransport for SmtpTransport {
         email: &PreparedEmail,
         route: &DeliveryRoute,
     ) -> ProcessorResult<DeliveryReceipt> {
-        // The relay carries the DEDICATED route only. A shared-pool send must
-        // ride SES (reputation isolation): silently accepting it here would
-        // put shared-pool mail on a dedicated IP — or, in a worker without
-        // SES, hide a misconfigured dispatcher. Refuse BEFORE connecting.
-        if !matches!(route, DeliveryRoute::Dedicated { .. }) {
-            return Err(ProcessorError::Transport(format!(
-                "the SMTP relay transport only carries the dedicated delivery route; \
-                 route {route} belongs to the shared SES pool — refusing before DATA"
-            )));
+        // Route admissibility. The relay serves:
+        //  * `Dedicated` — its original role. It cannot VERIFY a source
+        //    binding (`supports_source_binding() == false`), and the
+        //    processor's pre-flight defers such routes before submission, so
+        //    arriving here means the caller accepted the unverifiable path.
+        //  * `SesShared` — in SMTP mode (`EMAIL_TRANSPORT_TYPE=smtp`) the
+        //    deployment explicitly binds the shared route to this relay
+        //    (Mailpit in dev, an operator relay in production); a plain
+        //    relay delivering shared mail is exactly the configured
+        //    behaviour, NOT a silent SES fallback. In SES mode this transport
+        //    is never selected for shared routes (the hybrid binds the SES
+        //    client), so the reputation-isolation concern cannot arise.
+        match route {
+            DeliveryRoute::Dedicated { .. } | DeliveryRoute::SesShared => {}
         }
 
         // DKIM signer (when signing) is built BEFORE connecting so a key
@@ -1001,7 +1021,7 @@ pub(crate) fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
     // path (see `SmtpTransport::build_message`) — `Address::new_list`
     // mailbox arrays, never comma-joined strings.
     let mut builder = MessageBuilder::new()
-        .from(email.from.as_str())
+        .from(from_mailbox(email))
         .subject(email.subject.as_str());
     if email.mime_to.is_empty() {
         builder = builder.to(single_mailbox(email.to.as_str()));
@@ -1184,8 +1204,14 @@ impl EmailTransport for SesTransport {
             .destination(Destination::builder().to_addresses(&email.to).build())
             .content(content);
 
-        // Attach configuration set if configured (enables event tracking).
-        if let Some(config_set) = &self.config.configuration_set {
+        // Attach a configuration set (enables event tracking). A
+        // per-message pool (campaign `settings.ipPool` →
+        // `dedicated_ips.ses_pool_name`) overrides the deployment-wide one.
+        if let Some(config_set) = email
+            .ses_configuration_set
+            .as_ref()
+            .or(self.config.configuration_set.as_ref())
+        {
             req = req.configuration_set_name(config_set);
         }
 
@@ -1277,9 +1303,17 @@ impl HybridTransport {
         }
     }
 
-    /// Whether the SES shared-pool transport is configured.
+    /// Whether the shared-pool transport is configured.
     pub fn has_ses_shared(&self) -> bool {
         self.ses_shared.is_some()
+    }
+
+    /// The shared-route backend's own transport name — "smtp" when SMTP mode
+    /// bound the shared route to the configured relay, "ses" otherwise. Lets
+    /// tests (and logs) assert WHICH backend carries the shared route, not
+    /// merely that one is present.
+    pub fn shared_backend_name(&self) -> Option<&str> {
+        self.ses_shared.as_ref().map(|t| t.transport_name())
     }
 
     /// Whether the dedicated SMTP relay transport is configured.
@@ -1495,9 +1529,38 @@ pub async fn create_transport_from_config_with_db_and_redis(
     db: Option<&sqlx::PgPool>,
     redis: Option<&deadpool_redis::Pool>,
 ) -> ProcessorResult<HybridTransport> {
-    info!(region = %config.ses.region, "Initialising SES shared-pool transport");
-    let ses_shared: Arc<dyn EmailTransport> =
-        Arc::new(SesTransport::from_env(config.ses.clone()).await?);
+    // The shared-pool route's backend is selected by the deployment's
+    // configured transport. In SES mode (the production default) it is the
+    // SES client — and it must NEVER silently fall back to a relay: a
+    // deployment without usable AWS credentials fails the shared route
+    // loudly at send time instead. In SMTP mode (`EMAIL_TRANSPORT_TYPE=smtp`,
+    // e.g. the dev stack's Mailpit sink or an operator-chosen relay
+    // deployment) the configuration EXPLICITLY selects the SMTP backend, so
+    // the shared route binds to it directly — this is a deliberate route
+    // binding, not a silent fallback.
+    let smtp_mode = config.transport_type == TransportType::Smtp;
+    let ses_shared: Arc<dyn EmailTransport> = if smtp_mode {
+        // SMTP mode with no concrete host is a configuration error: the
+        // deployment has declared SMTP as its transport but given the
+        // shared route nowhere to deliver. Refuse at construction (boot
+        // time, loud) — never arm a pipeline whose every send can only
+        // fail.
+        if !smtp_relay_configured(&config.smtp) {
+            return Err(ProcessorError::Config(
+                "EMAIL_TRANSPORT_TYPE=smtp requires a concrete SMTP_HOST (currently \
+                 unset or default) — the shared delivery route would have no backend"
+                    .into(),
+            ));
+        }
+        info!(
+            host = %config.smtp.host,
+            "transport_type=smtp: shared-pool route bound to the configured SMTP relay"
+        );
+        Arc::new(SmtpTransport::new(config.smtp.clone()))
+    } else {
+        info!(region = %config.ses.region, "Initialising SES shared-pool transport");
+        Arc::new(SesTransport::from_env(config.ses.clone()).await?)
+    };
 
     // Prefer the in-process outbound MTA: it is the only dedicated backend
     // that can bind the recipient socket and report the verified source IP
@@ -1643,6 +1706,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:bcc-recipient@example.net".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             // Envelope destination of THIS copy (the Bcc recipient).
             to: "bcc-recipient@example.net".into(),
             mime_to: vec![
@@ -1740,6 +1805,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:envelope@example.net".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "envelope@example.net".into(),
             mime_to: vec![
                 Mailbox {
@@ -1785,6 +1852,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:only@example.net".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "only@example.net".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -1809,6 +1878,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             subject: "Test".into(),
             html: Some("<p>Hello</p>".into()),
@@ -1836,6 +1907,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:c@d.com".into(),
             from: "a@b.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "c@d.com".into(),
             subject: "Empty".into(),
             html: None,
@@ -1860,6 +1933,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: "email_queue:job-1:c@d.com".into(),
             from: "a@b.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "c@d.com".into(),
             subject: "With attachment".into(),
             html: None,
@@ -2009,27 +2084,59 @@ mod tests {
         );
     }
 
-    /// P0: `create_transport_from_config` now returns the route-aware hybrid
-    /// dispatcher. An SMTP-selected deployment still gets the relay; the SES
-    /// shared-pool slot is always present so shared routes never fall back to
-    /// the relay.
+    /// `create_transport_from_config` returns the route-aware hybrid
+    /// dispatcher. In SMTP mode the CONFIGURATION selects the relay for the
+    /// shared route (a deliberate binding, not a fallback); the dedicated
+    /// slot gets the same relay.
     #[tokio::test]
-    async fn test_create_transport_from_config_smtp() {
+    async fn test_create_transport_from_config_smtp_binds_shared_route_to_smtp() {
         crate::common::ensure_aws_test_env();
         let config = EmailConfig {
             transport_type: TransportType::Smtp,
+            smtp: crate::common::config::SmtpConfig {
+                host: "relay.example.test".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let transport = create_transport_from_config(&config).await.unwrap();
         assert!(
             transport.has_ses_shared(),
-            "the shared-pool transport must always be available"
+            "the shared-pool route must always have a backend"
+        );
+        assert_eq!(
+            transport.shared_backend_name(),
+            Some("smtp"),
+            "SMTP mode binds the shared route to the configured relay"
         );
         assert!(
             transport.has_dedicated_smtp(),
             "an SMTP-selected deployment must have the relay"
         );
         assert_eq!(transport.transport_name(), "hybrid");
+    }
+
+    /// SMTP mode with NO concrete host is a boot-time configuration error —
+    /// the deployment declared SMTP as its transport but gave the shared
+    /// route nowhere to deliver. Never arm a pipeline whose every send can
+    /// only fail.
+    #[tokio::test]
+    async fn test_create_transport_from_config_smtp_without_host_fails_fast() {
+        crate::common::ensure_aws_test_env();
+        let config = EmailConfig {
+            transport_type: TransportType::Smtp,
+            smtp: crate::common::config::SmtpConfig::default(),
+            ..Default::default()
+        };
+        let error = match create_transport_from_config(&config).await {
+            Err(error) => error,
+            Ok(_) => panic!("smtp mode without a host must refuse to build"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("SMTP_HOST"),
+            "the error must name the missing configuration: {message}"
+        );
     }
 
     /// P0: without a concrete SMTP relay the dedicated slot stays empty, so
@@ -2461,6 +2568,8 @@ mod tests {
         let mut email = PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             subject: "Test".into(),
             html: None,
@@ -2525,6 +2634,8 @@ mod tests {
         PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -2611,25 +2722,21 @@ mod tests {
         }));
     }
 
-    /// The mirror invariant: the SMTP relay transport refuses the SHARED
-    /// route before touching the network — shared-pool mail must never ride a
-    /// dedicated IP. The host points nowhere; a refusal that happens after a
-    /// connection attempt would surface a different (transport) error.
-    #[tokio::test]
-    async fn smtp_transport_refuses_the_shared_route_before_connecting() {
-        let transport = SmtpTransport::new(SmtpConfig {
-            host: "127.0.0.1".into(),
-            port: 1,
-            secure: false,
-            ..Default::default()
-        });
-        let error = transport
-            .send(&route_test_email(vec![]), &DeliveryRoute::SesShared)
-            .await
-            .expect_err("the relay must refuse the shared route");
+    /// The relay no longer refuses the shared route: in SMTP mode the
+    /// deployment explicitly binds the shared route to this relay (see the
+    /// hybrid-binding test `test_create_transport_from_config_smtp_binds_
+    /// shared_route_to_smtp` for the binding itself, and the campaign E2E
+    /// for the live delivery). This pins the guard's ABSENCE at the source
+    /// level: the route admissibility match accepts both route kinds and no
+    /// refusal string survives anywhere in the relay's send path.
+    #[test]
+    fn smtp_transport_route_guard_accepts_shared_routes() {
+        let source = include_str!("transport.rs");
+        let guard_start = source.find("async fn send(").expect("relay send present");
+        let guard_window = &source[guard_start..guard_start + 4000];
         assert!(
-            error.to_string().contains("dedicated delivery route"),
-            "the refusal must name the route invariant: {error}"
+            !guard_window.contains("only carries the dedicated delivery route"),
+            "the obsolete dedicated-only refusal must not return to the relay"
         );
     }
 }
@@ -2866,6 +2973,8 @@ mod coverage_arms {
         PreparedEmail {
             send_unit: "email_queue:00000000-0000-0000-0000-000000000001:r@x.test".into(),
             from: "sender@example.test".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "rcpt@dest.test".into(),
             mime_to: vec![
                 Mailbox {
@@ -3186,6 +3295,8 @@ mod wire_and_ses_tests {
         PreparedEmail {
             send_unit: "email_queue:q-1:r@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to,
             mime_cc: vec![],
@@ -3372,6 +3483,8 @@ mod wire_and_ses_tests {
         let email = PreparedEmail {
             send_unit: "email_queue:q-1:r@example.com".into(),
             from: "s@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "r@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -3502,6 +3615,8 @@ mod wire_and_ses_tests {
         PreparedEmail {
             send_unit: "email_queue:q-1:r@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -3583,6 +3698,8 @@ mod residual_transport_arms {
         PreparedEmail {
             send_unit: "email_queue:q-1:r@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],

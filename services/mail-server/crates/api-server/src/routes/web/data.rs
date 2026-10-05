@@ -635,14 +635,26 @@ async fn web_route_data(
         "/settings/suppressions" => Some(web_suppressions(state, &tenant, q, cid).await),
         _ => None,
     };
-    let campaign_edit = if path.starts_with("/campaigns/") && path.ends_with("/edit") {
+    let campaign_editor = if path == "/campaigns/new" {
+        let editor = load_campaign_editor(state, &tenant, None).await;
+        tracing::debug!(
+            tenant = %tenant,
+            lists = editor.lists.len(),
+            segments = editor.segments.len(),
+            "campaign editor (new) loaded"
+        );
+        Some(editor)
+    } else if path.starts_with("/campaigns/") && path.ends_with("/edit") {
         let id = path
             .trim_start_matches("/campaigns/")
             .trim_end_matches("/edit");
-        load_campaign_edit(state, &tenant, id).await
+        Some(load_campaign_editor(state, &tenant, Some(id)).await)
     } else {
         None
     };
+    let campaign_edit = campaign_editor
+        .as_ref()
+        .and_then(|editor| editor.edit.clone());
     // Batch-2 list-edit fix: /lists/{id}/edit is data-backed like the
     // campaign editor, so the form can carry the real id + name.
     let list_edit = if path.starts_with("/lists/") && path.ends_with("/edit") {
@@ -654,6 +666,7 @@ async fn web_route_data(
     RouteData {
         list,
         campaign_edit,
+        campaign_editor,
         list_edit,
         mfa_setup: None,
         sales: None,
@@ -877,7 +890,181 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     data
 }
 
+/// Full-fidelity editor loader: the tenant's lists + segments plus every
+/// prefilled campaign field (including html_body, which the previous loader
+/// never selected — the editor rendered an EMPTY body for existing rows).
+async fn load_campaign_editor(
+    state: &AppState,
+    tenant: &str,
+    id: Option<&str>,
+) -> ui_foundation::view_data::CampaignEditorData {
+    let lists: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name LIMIT 200",
+    )
+    .bind(tenant)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, tenant, "campaign editor: lists lookup failed");
+            Vec::new()
+        }
+    };
+    let segments: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT id::text, name FROM segments WHERE tenant_id = $1 ORDER BY name LIMIT 200",
+    )
+    .bind(tenant)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, tenant, "campaign editor: segments lookup failed");
+            Vec::new()
+        }
+    };
+
+    let mut editor = ui_foundation::view_data::CampaignEditorData {
+        lists,
+        segments,
+        track_opens: true,
+        track_clicks: true,
+        ..Default::default()
+    };
+
+    let Some(id) = id else {
+        return editor;
+    };
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        bool,
+        bool,
+        serde_json::Value,
+        serde_json::Value,
+    )> = match sqlx::query_as(
+        "SELECT id::text, name, subject, from_email, from_name, reply_to, preview_text, html_body, \
+                scheduled_at, track_opens, track_clicks, \
+                COALESCE(utm_params, '{}'::jsonb), COALESCE(settings, '{}'::jsonb) \
+         FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id)
+    .bind(tenant)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(error = %error, "campaign editor lookup failed");
+            return editor;
+        }
+    };
+    let Some((
+        id,
+        name,
+        subject,
+        from_email,
+        from_name,
+        reply_to,
+        preview_text,
+        html_body,
+        scheduled_at,
+        track_opens,
+        track_clicks,
+        utm_params,
+        settings,
+    )) = row
+    else {
+        return editor;
+    };
+    // One query, two list-shaped columns: split segment_id/list ids by a
+    // second narrow read to keep the bind types simple.
+    let (segment_id, list_ids): (String, Vec<String>) = sqlx::query_as(
+        "SELECT COALESCE(segment_id::text, ''), \
+                COALESCE((SELECT array_agg(value) FROM jsonb_array_elements_text(COALESCE(list_ids, '[]'::jsonb)) AS value), '{}') \
+         FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(id.as_str())
+    .bind(tenant)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or_default();
+
+    editor.from_email = from_email.unwrap_or_default();
+    editor.from_name = from_name.unwrap_or_default();
+    editor.reply_to = reply_to.unwrap_or_default();
+    editor.preview_text = preview_text.unwrap_or_default();
+    editor.list_ids = list_ids;
+    editor.segment_id = segment_id;
+    editor.track_opens = track_opens;
+    editor.track_clicks = track_clicks;
+    editor.utm_source = utm_params
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    editor.utm_medium = utm_params
+        .get("medium")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    editor.utm_campaign = utm_params
+        .get("campaign")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    editor.throttle_rate = settings
+        .get("throttleRate")
+        .and_then(|v| v.as_i64())
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    editor.ip_pool = settings
+        .get("ipPool")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    editor.timezone = settings
+        .get("timezone")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    editor.send_time_optimization = settings
+        .get("sendTimeOptimization")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    editor.variables = String::new();
+    editor.edit = Some(ui_foundation::view_data::CampaignEditData {
+        id,
+        name,
+        subject: subject.unwrap_or_default(),
+        html_body: html_body.unwrap_or_default(),
+        scheduled_at: scheduled_at
+            .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
+            .unwrap_or_default(),
+    });
+    editor
+}
+
+#[allow(dead_code)]
 async fn load_campaign_edit(
+    state: &AppState,
+    tenant: &str,
+    id: &str,
+) -> Option<ui_foundation::view_data::CampaignEditData> {
+    load_campaign_editor(state, tenant, Some(id)).await.edit
+}
+
+#[allow(dead_code)]
+async fn load_campaign_edit_legacy(
     state: &AppState,
     tenant: &str,
     id: &str,
@@ -2385,6 +2572,7 @@ async fn control_plane_route_data(
     RouteData {
         list,
         campaign_edit: None,
+        campaign_editor: None,
         list_edit: None,
         mfa_setup: None,
         sales,
@@ -6698,6 +6886,19 @@ mod coverage_loader_tests {
         .await
         .campaign_edit
         .expect("campaign edit for owner");
+        // The /campaigns/new editor carries the tenant's real lists and
+        // segments (the select options must never fall back to placeholders).
+        let new_page = load_page_data(&app, "web", "/campaigns/new", None, Some(&user_a)).await;
+        let editor = new_page.campaign_editor.expect("new-campaign editor data");
+        assert_eq!(
+            editor.lists.len(),
+            1,
+            "the seeded list must appear as an audience option"
+        );
+        assert!(
+            editor.lists.iter().any(|(id, _)| id == &seeded.list_id),
+            "the seeded list id must be an option value"
+        );
         assert!(edit.name.contains(&tag_a));
         let leaked = load_page_data(
             &app,

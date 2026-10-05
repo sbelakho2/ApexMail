@@ -24,6 +24,10 @@ pub struct RouteData {
     pub list: Option<ListPageData>,
     /// Campaign edit form values (server-filled from the campaigns row).
     pub campaign_edit: Option<CampaignEditData>,
+    /// Full-fidelity campaign editor state: the tenant's lists and segments
+    /// plus every prefilled field. Takes precedence over `campaign_edit`
+    /// when present.
+    pub campaign_editor: Option<crate::view_data::CampaignEditorData>,
     /// List edit form values (server-filled from the lists row).
     pub list_edit: Option<ListEditData>,
     /// Pending TOTP setup (QR + secret) for the CP security page.
@@ -1798,7 +1802,10 @@ fn render_web(
         "/campaigns" => {
             data_backed_inner("/campaigns", data).unwrap_or_else(leptos_views::web_campaigns_page)
         }
-        "/campaigns/new" => leptos_views::web_campaigns_new_page(),
+        "/campaigns/new" => match data.and_then(|d| d.campaign_editor.as_ref()) {
+            Some(editor) => leptos_views::web_campaigns_new_page_with_data(editor),
+            None => leptos_views::web_campaigns_new_page(),
+        },
         "/contacts" => {
             data_backed_inner("/contacts", data).unwrap_or_else(leptos_views::web_contacts_page)
         }
@@ -1845,9 +1852,12 @@ fn render_web(
         "/settings/suppressions" => data_backed_inner("/settings/suppressions", data)
             .unwrap_or_else(leptos_views::web_settings_suppressions_page),
         p if p.starts_with("/campaigns/") && p.ends_with("/edit") => {
-            match data.and_then(|d| d.campaign_edit.as_ref()) {
-                Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
-                None => leptos_views::web_campaign_edit_page(),
+            match data.and_then(|d| d.campaign_editor.as_ref()) {
+                Some(editor) => leptos_views::web_campaign_edit_page_with_data(editor),
+                None => match data.and_then(|d| d.campaign_edit.as_ref()) {
+                    Some(edit) => leptos_views::web_campaign_edit_page_with_values(edit),
+                    None => leptos_views::web_campaign_edit_page(),
+                },
             }
         }
         p if p.starts_with("/campaigns/") => {
@@ -2250,6 +2260,7 @@ mod tests {
         // With server-loaded values the form carries the hidden id and the
         // prefilled name so POST /web/lists/update can save.
         let data = RouteData {
+            campaign_editor: None,
             list_edit: Some(ListEditData {
                 id: "3f9d6fbe-6bd8-4e04-9c0d-1a2b3c4d5e6f".into(),
                 name: "Launch Waitlist".into(),
@@ -2835,6 +2846,7 @@ mod tests {
             list: Some(data),
             sales: None,
             campaign_edit: None,
+            campaign_editor: None,
             list_edit: None,
             mfa_setup: None,
         }
@@ -2949,6 +2961,7 @@ mod tests {
         let data = RouteData {
             list: None,
             sales: None,
+            campaign_editor: None,
             campaign_edit: Some(CampaignEditData {
                 id: "c_123".into(),
                 name: "Spring Winback".into(),
@@ -2978,6 +2991,7 @@ mod tests {
             list: None,
             sales: None,
             campaign_edit: None,
+            campaign_editor: None,
             list_edit: None,
             mfa_setup: Some(crate::view_data::MfaSetupData {
                 secret: "JBSWY3DPEHPK3PXP".into(),
@@ -3216,6 +3230,7 @@ mod tests {
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
+                campaign_editor: None,
                 list_edit: None,
                 mfa_setup: None,
             }),
@@ -3276,6 +3291,7 @@ mod tests {
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
+                campaign_editor: None,
                 list_edit: None,
                 mfa_setup: None,
             }),
@@ -3979,6 +3995,7 @@ mod tests {
     #[test]
     fn control_plane_sales_renders_live_data_or_honest_unavailable() {
         let data = RouteData {
+            campaign_editor: None,
             sales: Some(crate::view_data::SalesPageData {
                 csrf_token: "tok".into(),
                 overview: Some(crate::view_data::SalesOverviewData {

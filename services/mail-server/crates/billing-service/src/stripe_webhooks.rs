@@ -355,7 +355,18 @@ async fn process_webhook(
     payload: &[u8],
     signature: &str,
 ) -> Result<ProcessWebhookResult, ProcessWebhookError> {
-    let event = verify_and_parse_event(state, payload, signature)?;
+    // A deployment without a configured secret cannot verify anything; that
+    // is SERVER misconfiguration, not a bad delivery. Classify it as
+    // retryable (503) so Stripe keeps replaying — a 400 would make Stripe
+    // treat the event as permanently rejected and drop every billing event
+    // that arrived while the operator was fixing the config.
+    let event = match verify_and_parse_event(state, payload, signature) {
+        Ok(event) => event,
+        Err(error) if error == "Stripe webhook secret is not configured" => {
+            return Err(ProcessWebhookError::RetryLater(error));
+        }
+        Err(error) => return Err(ProcessWebhookError::RecordDeadletter(error)),
+    };
 
     match claim_webhook_event(state, &event.id, &event.event_type).await? {
         WebhookEventClaim::Claimed => {}

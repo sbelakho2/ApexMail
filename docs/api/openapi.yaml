@@ -267,11 +267,50 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MfaStatusResponse'
+                $ref: '#/components/schemas/MfaConfirmSetupResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/AuthenticationError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/mfa/disable:
+    post:
+      operationId: disableMfa
+      summary: Disable MFA
+      description: |
+        Turn off multi-factor authentication for the authenticated user.
+        Requires the CURRENT password AND a currently-valid second factor
+        (TOTP code or recovery code) — a stolen session alone is never
+        sufficient. On success the enrollment is cleared, the used recovery
+        code is consumed, an `auth.mfa_disabled` audit event is written, and
+        every OTHER session of the user is revoked (the calling session
+        stays signed in).
+      tags:
+        - Multi-Factor Authentication
+      security:
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DisableMfaRequest'
+      responses:
+        '200':
+          description: MFA disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaDisableResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -1269,6 +1308,34 @@ paths:
           $ref: '#/components/responses/AuthenticationError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '429':
+          $ref: '#/components/responses/RateLimitError'
+
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      summary: List the caller's active sessions
+      description: |
+        Return the authenticated user's active (unexpired) sessions, newest
+        first — the same records `POST /auth/sessions/revoke` acts on. The
+        query is scoped to the authenticated user id; other users' sessions
+        are never returned.
+      tags:
+        - Auth
+      security:
+        - SessionCookieAuth: []
+        - BearerSessionAuth: []
+      responses:
+        '200':
+          description: Active sessions for the authenticated user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionInfo'
+        '401':
+          $ref: '#/components/responses/AuthenticationError'
         '429':
           $ref: '#/components/responses/RateLimitError'
 
@@ -12813,6 +12880,98 @@ components:
           format: date-time
         user:
           $ref: '#/components/schemas/AuthUserInfo'
+        recovery_codes:
+          type: array
+          items:
+            type: string
+          description: >
+            One-time recovery codes, returned only on responses that enroll
+            MFA (the setup-kind `mfa/verify` challenge). Present exactly when
+            `recoveryCodes` is present (identical contents; snake primary).
+        recoveryCodes:
+          type: array
+          items:
+            type: string
+          description: camelCase alias of `recovery_codes` (identical contents).
+
+    DisableMfaRequest:
+      type: object
+      required:
+        - current_password
+      properties:
+        current_password:
+          type: string
+          description: The account's current password
+        mfaCode:
+          type: string
+          description: A current TOTP code (one of mfaCode / recoveryCode is required)
+        mfa_code:
+          type: string
+          description: snake_case alias of mfaCode
+        recoveryCode:
+          type: string
+          description: An unused recovery code (one of mfaCode / recoveryCode is required)
+        recovery_code:
+          type: string
+          description: snake_case alias of recoveryCode
+
+    MfaDisableResponse:
+      type: object
+      required:
+        - mfaEnabled
+      properties:
+        mfaEnabled:
+          type: boolean
+          description: Always false after a successful disable
+
+    MfaConfirmSetupResponse:
+      type: object
+      required:
+        - mfaEnabled
+        - recoveryCodes
+      properties:
+        mfaEnabled:
+          type: boolean
+          description: Always true after a confirmed enrollment
+        recoveryCodes:
+          type: array
+          items:
+            type: string
+          description: One-time recovery codes (camelCase key)
+        recovery_codes:
+          type: array
+          items:
+            type: string
+          description: One-time recovery codes (snake_case alias of recoveryCodes)
+
+    SessionInfo:
+      type: object
+      required:
+        - id
+        - created_at
+        - expires_at
+        - current
+      properties:
+        id:
+          type: string
+          description: Session id — pass to `POST /auth/sessions/revoke` to revoke
+        created_at:
+          type: string
+          format: date-time
+        ip_address:
+          type: string
+          nullable: true
+          description: Client IP recorded at session issue (omitted when unknown)
+        user_agent:
+          type: string
+          nullable: true
+          description: Client user-agent recorded at session issue (omitted when unknown)
+        expires_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+          description: True when this is the session the request authenticated with
 
     RegisterRequest:
       type: object
@@ -12919,19 +13078,15 @@ components:
     MfaStatusResponse:
       type: object
       required:
-        - enabled
+        - mfaEnabled
+        - roleRequiresMfa
       properties:
-        enabled:
+        mfaEnabled:
           type: boolean
           description: Whether MFA is currently enabled
-        method:
-          type: string
-          nullable: true
-          description: Configured MFA method (e.g. totp)
-        updated_at:
-          type: string
-          format: date-time
-          nullable: true
+        roleRequiresMfa:
+          type: boolean
+          description: Whether the user's role policy demands MFA enrollment
 
     ResetPasswordRequest:
       type: object
@@ -13083,6 +13238,11 @@ components:
           type: string
         key_prefix:
           type: string
+          description: >
+            Display form `am_live_…abcd` — the shared 8-char key head, an
+            ellipsis, and the LAST 4 characters of the key, so keys are
+            distinguishable in listings. Keys minted before this convention
+            keep the bare `am_live_` prefix.
         name:
           type: string
         scopes:
@@ -13108,6 +13268,9 @@ components:
           type: string
         key_prefix:
           type: string
+          description: >
+            Display form `am_live_…abcd` (prefix + last 4 of the key); legacy
+            keys may carry the bare `am_live_`.
         scopes:
           type: array
           items:

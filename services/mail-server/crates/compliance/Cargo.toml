@@ -11,6 +11,10 @@ path = "src/bin/server.rs"
 
 [dependencies]
 mail-common = { path = "../mail-common" }
+# Canonical audit hash-chain primitives (src/audit_logger.rs hashes through
+# apexmail_lib::audit so compliance rows re-derive on the platform chain —
+# DF-5 finding C).
+apexmail-lib = { path = "../apexmail-lib" }
 
 # Statutory accounting ledger (migrations 220/222) — payroll/expense sweeps.
 accounting-core.workspace = true

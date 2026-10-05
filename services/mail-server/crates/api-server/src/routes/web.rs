@@ -577,6 +577,17 @@ pub const FORM_CSRF_COOKIE_NAME: &str = "csrf_token";
 /// plant the matching cookie in the victim's browser. On failure the caller
 /// redirects back with a friendly "session expired" flash — never a 403
 /// JSON dump.
+/// Test helper: HashMap → urlencoded request body (file scope so every
+/// nested test module sees it).
+#[cfg(test)]
+fn serialize_pairs(form: &HashMap<String, String>) -> Vec<u8> {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in form {
+        serializer.append_pair(key, value);
+    }
+    serializer.finish().into_bytes()
+}
+
 fn check_csrf(
     form: &HashMap<String, String>,
     headers: &HeaderMap,
@@ -5158,18 +5169,171 @@ async fn form_template_create(
     }
 }
 
+/// Parse the campaign editor's extra fields into the SAME normalized JSONB
+/// pieces the JSON API persists, through the SAME validators
+/// (routes::campaigns) — the console and the API can never drift.
+fn parse_campaign_editor_fields(
+    form: &ParsedForm,
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+    ),
+    String,
+> {
+    use crate::routes::campaigns::{
+        validate_campaign_settings, validate_display_header, validate_sender, validate_utm_params,
+        validate_variables,
+    };
+    let from = form.field("from").trim().to_string();
+    let from_name = {
+        let raw = form.field("from_name");
+        match validate_display_header("fromName", Some(raw.trim()).filter(|v| !v.is_empty())) {
+            Ok(name) => name.unwrap_or_default(),
+            Err(_) => {
+                return Err("Sender name must be a single line of at most 120 characters.".into())
+            }
+        }
+    };
+    let reply_to = form.field("reply_to").trim().to_string();
+    if !from.is_empty() {
+        validate_sender(&from)
+            .map_err(|_| "Sender address must be a single valid email address.".to_string())?;
+    }
+    if !reply_to.is_empty() {
+        validate_sender(&reply_to)
+            .map_err(|_| "Reply-To must be a single valid email address.".to_string())?;
+    }
+    let preview_text = form.field("preview_text").trim().to_string();
+    if preview_text.chars().count() > 300 {
+        return Err("Preview text must be at most 300 characters.".into());
+    }
+    // Variables: one key=value per line.
+    let mut variables = serde_json::Map::new();
+    for line in form.field("variables").lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err("Variables must be one key=value pair per line.".into());
+        };
+        variables.insert(
+            key.trim().to_string(),
+            serde_json::Value::String(value.trim().to_string()),
+        );
+    }
+    let variables =
+        validate_variables(&Some(serde_json::Value::Object(variables))).map_err(|_| {
+            "Variables must be one key=value pair per line (max 200, names 1-64 chars).".to_string()
+        })?;
+    // UTM: three form fields.
+    let mut utm = serde_json::Map::new();
+    for (field_name, key) in [
+        ("utm_source", "source"),
+        ("utm_medium", "medium"),
+        ("utm_campaign", "campaign"),
+    ] {
+        let value = form.field(field_name).trim().to_string();
+        if !value.is_empty() {
+            utm.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+    let utm_params = validate_utm_params(&Some(serde_json::Value::Object(utm)))
+        .map_err(|_| "UTM values must be at most 512 characters.".to_string())?;
+    // Settings: throttle + pool + timezone + STO checkbox.
+    let mut settings = serde_json::Map::new();
+    let throttle = form.field("throttle_rate").trim().to_string();
+    if !throttle.is_empty() {
+        let rate: i64 = throttle
+            .parse()
+            .map_err(|_| "Throttle rate must be a whole number.".to_string())?;
+        settings.insert("throttleRate".into(), serde_json::json!(rate));
+    }
+    let ip_pool = form.field("ip_pool").trim().to_string();
+    if !ip_pool.is_empty() {
+        settings.insert("ipPool".into(), serde_json::json!(ip_pool));
+    }
+    let timezone = form.field("timezone").trim().to_string();
+    if !timezone.is_empty() {
+        settings.insert("timezone".into(), serde_json::json!(timezone));
+    }
+    if form.field("send_time_optimization") == "true" {
+        settings.insert("sendTimeOptimization".into(), serde_json::json!(true));
+    }
+    let settings =
+        validate_campaign_settings(&Some(serde_json::Value::Object(settings))).map_err(|_| {
+            "Send settings are invalid (throttle ≤ 1000000, IANA timezone, pool ≤ 128 chars)."
+                .to_string()
+        })?;
+    Ok((
+        from,
+        from_name,
+        reply_to,
+        preview_text,
+        String::new(),
+        String::new(),
+        variables,
+        utm_params,
+        settings,
+    ))
+}
+
+/// Tenant's lists + segments as (id, name), feeding the editor selects.
+async fn campaign_editor_choices(
+    state: &AppState,
+    tenant_id: &str,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let lists: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name LIMIT 200",
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let segments: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id::text, name FROM segments WHERE tenant_id = $1 ORDER BY name LIMIT 200",
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    (lists, segments)
+}
+
 async fn form_campaign_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => return redirect_error(message, "/campaigns/new", &state.config),
+    };
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/campaigns/new", &state.config);
     }
-    let name = field_truncated(&form, "name", 120);
-    let subject = field_truncated(&form, "subject", 200);
-    let scheduled_at = field(&form, "scheduled_at");
+    let name = form
+        .field("name")
+        .trim()
+        .chars()
+        .take(120)
+        .collect::<String>();
+    let subject = form
+        .field("subject")
+        .trim()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let scheduled_at = form.field("scheduled_at");
     let mut fields = FormFieldMap::new("campaign-create");
     fields.set("name", &name);
     fields.set("subject", &subject);
@@ -5207,17 +5371,61 @@ async fn form_campaign_create(
             );
         }
     };
+    // Full-fidelity editor fields through the SHARED JSON-API validators.
+    let (from, from_name, reply_to, preview_text, _h, _t, variables, utm_params, settings) =
+        match parse_campaign_editor_fields(&form) {
+            Ok(parts) => parts,
+            Err(message) => {
+                fields.error("from", &message);
+                return redirect_with_field_map(&fields, &message, "/campaigns/new", &state.config);
+            }
+        };
+    let html_body = form.field("html_body");
+    let list_ids: Vec<String> = form
+        .get_all("list_ids")
+        .into_iter()
+        .filter(|v| uuid::Uuid::parse_str(v).is_ok())
+        .collect();
+    let segment_id = form.field("segment_id").trim().to_string();
+    let segment_uuid: Option<Uuid> = uuid::Uuid::parse_str(&segment_id).ok();
+    let track_opens = form.field("track_opens") == "true";
+    let track_clicks = form.field("track_clicks") == "true";
+    let status = if scheduled.is_some() {
+        "scheduled"
+    } else {
+        "draft"
+    };
+
     // campaigns.id is a UUID column (both schema lineages; ci/README §9 F4)
     // — text nanoid ids fail the bind.
     let result = sqlx::query(
-        "INSERT INTO campaigns (id, tenant_id, name, subject, status, scheduled_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'draft', $5::timestamptz, NOW(), NOW())",
+        "INSERT INTO campaigns (id, tenant_id, name, subject, status, scheduled_at, \
+             from_email, from_name, reply_to, preview_text, html_body, variables, \
+             segment_id, track_opens, track_clicks, utm_params, settings, list_ids, \
+             created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6::timestamptz, \
+             NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''), $12, \
+             $13, $14, $15, $16, $17, $18, \
+             NOW(), NOW())",
     )
     .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(&name)
     .bind(&subject)
+    .bind(status)
     .bind(scheduled.clone())
+    .bind(&from)
+    .bind(&from_name)
+    .bind(&reply_to)
+    .bind(&preview_text)
+    .bind(&html_body)
+    .bind(&variables)
+    .bind(segment_uuid)
+    .bind(track_opens)
+    .bind(track_clicks)
+    .bind(&utm_params)
+    .bind(&settings)
+    .bind(serde_json::json!(list_ids))
     .execute(&state.db)
     .await;
     let scheduled_saved = scheduled.is_some();
@@ -5275,15 +5483,29 @@ async fn form_campaign_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => return redirect_error(message, "/campaigns", &state.config),
+    };
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/campaigns", &state.config);
     }
-    let id = field(&form, "id");
-    let name = field_truncated(&form, "name", 120);
-    let subject = field_truncated(&form, "subject", 200);
-    let scheduled_at = field(&form, "scheduled_at");
+    let id = form.field("id");
+    let name = form
+        .field("name")
+        .trim()
+        .chars()
+        .take(120)
+        .collect::<String>();
+    let subject = form
+        .field("subject")
+        .trim()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let scheduled_at = form.field("scheduled_at");
     let back = if id.is_empty() {
         "/campaigns".to_string()
     } else {
@@ -5310,13 +5532,44 @@ async fn form_campaign_update(
         }
     };
     // campaigns.id is a UUID column: cast the String form bind.
+    let (from, from_name, reply_to, preview_text, _h, _t, variables, utm_params, settings) =
+        match parse_campaign_editor_fields(&form) {
+            Ok(parts) => parts,
+            Err(message) => return redirect_error(&message, &back, &state.config),
+        };
+    let html_body = form.field("html_body");
+    let list_ids: Vec<String> = form
+        .get_all("list_ids")
+        .into_iter()
+        .filter(|v| uuid::Uuid::parse_str(v).is_ok())
+        .collect();
+    let segment_uuid: Option<Uuid> = uuid::Uuid::parse_str(form.field("segment_id").trim()).ok();
+    let track_opens = form.field("track_opens") == "true";
+    let track_clicks = form.field("track_clicks") == "true";
     let result = sqlx::query(
-        "UPDATE campaigns SET name = $1, subject = $2, scheduled_at = $3::timestamptz, updated_at = NOW()
-         WHERE id = $4::uuid AND tenant_id = $5",
+        "UPDATE campaigns SET name = $1, subject = $2, scheduled_at = $3::timestamptz, \
+             from_email = NULLIF($4, ''), from_name = NULLIF($5, ''), reply_to = NULLIF($6, ''), \
+             preview_text = NULLIF($7, ''), html_body = NULLIF($8, ''), variables = $9, \
+             utm_params = $10, settings = $11, list_ids = $12, segment_id = $13, \
+             track_opens = $14, track_clicks = $15, \
+             updated_at = NOW()
+         WHERE id = $16::uuid AND tenant_id = $17",
     )
     .bind(&name)
     .bind(&subject)
     .bind(scheduled)
+    .bind(&from)
+    .bind(&from_name)
+    .bind(&reply_to)
+    .bind(&preview_text)
+    .bind(&html_body)
+    .bind(&variables)
+    .bind(&utm_params)
+    .bind(&settings)
+    .bind(serde_json::json!(list_ids))
+    .bind(segment_uuid)
+    .bind(track_opens)
+    .bind(track_clicks)
     .bind(&id)
     .bind(user.tenant_id.as_str())
     .execute(&state.db)
@@ -5501,7 +5754,7 @@ async fn web_domain_detail(
     // Non-UUID segments (`/domains/new`) fall back to the static SSR page
     // exactly as the fallback handler would have rendered it.
     if Uuid::parse_str(&id).is_err() {
-        return static_ssr_fallback("web", &format!("/domains/{id}"), &headers, &state.config);
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
     }
     let flash = flash_from_headers(&headers, &state.config);
     match data::load_domain_detail(
@@ -5635,7 +5888,7 @@ async fn web_list_detail(
     // would have rendered them. A REAL id that does not exist must never
     // show demo content — it gets the honest not-found flash instead.
     if Uuid::parse_str(&id).is_err() {
-        return static_ssr_fallback("web", &format!("/lists/{id}"), &headers, &state.config);
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
     }
     let flash = flash_from_headers(&headers, &state.config);
     match data::load_list_detail(&state.db, user.tenant_id.as_str(), &id).await {
@@ -5690,7 +5943,7 @@ async fn web_campaign_detail(
         );
     };
     if Uuid::parse_str(&id).is_err() {
-        return static_ssr_fallback("web", &format!("/campaigns/{id}"), &headers, &state.config);
+        return state_ssr_fallback(&state, "web", &uri, &headers).await;
     }
     let flash = flash_from_headers(&headers, &state.config);
     match data::load_campaign_detail(&state.db, user.tenant_id.as_str(), &id).await {
@@ -6516,6 +6769,54 @@ async fn form_template_preview(
 
 /// Render any path through ui-foundation's public SSR entry (used when a
 /// detail route matches a non-id segment like `/campaigns/new`).
+/// Data-aware SSR fallback for detail routes whose `:id` segment is not a
+/// UUID (e.g. `/campaigns/new`, `/domains/new`): renders through the SAME
+/// loader the main page pipeline uses, so data-backed pages keep their real
+/// option sources (tenant lists/segments) instead of placeholder-grade
+/// static forms. Falls back to the static render if the loader/renderer
+/// declines the path.
+async fn state_ssr_fallback(
+    state: &AppState,
+    surface: &str,
+    uri: &axum::http::Uri,
+    headers: &HeaderMap,
+) -> Response {
+    let flash = flash_from_headers(headers, &state.config);
+    let field_map = decode_form_fields_from_headers(headers, &state.config.csrf_secret);
+    let field_data = field_map.as_ref().map(|map| map.clone().into_view_data());
+    let form_csrf = form_csrf_for_render(headers, &state.config);
+    let route_data = crate::routes::web::data::load_page_data(
+        state,
+        surface,
+        uri.path(),
+        uri.query(),
+        browser_session_user(state, headers, uri).await.as_ref(),
+    )
+    .await;
+    match ui_foundation::axum_router::render_route_with_form_fields_and_csrf(
+        surface,
+        uri.path(),
+        uri.query(),
+        Some(state.config.csrf_secret.as_str()),
+        &flash,
+        Some(&route_data),
+        field_data.as_ref(),
+        Some(form_csrf.token.as_str()),
+    ) {
+        Some((html, _embedded_token)) => {
+            let mut response =
+                html_page_response(html, &form_csrf, !flash.is_empty(), &state.config);
+            if field_map.is_some() {
+                if let Ok(value) = form_fields_clear_cookie(is_secure(&state.config)).parse() {
+                    response.headers_mut().append(header::SET_COOKIE, value);
+                }
+            }
+            response
+        }
+        None => static_ssr_fallback(surface, uri.path(), headers, &state.config),
+    }
+}
+
 fn static_ssr_fallback(
     surface: &str,
     path: &str,
@@ -13149,6 +13450,21 @@ mod coverage_handler_tests {
         (headers, form)
     }
 
+    /// urlencoded body + headers for the handlers that parse `Bytes`
+    /// (multi-value forms).
+    pub(crate) fn signed_form_bytes(
+        config: &Config,
+        pairs: &[(&str, &str)],
+    ) -> (HeaderMap, axum::body::Bytes) {
+        let (headers, token) = cookie_headers(config);
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in pairs {
+            serializer.append_pair(key, value);
+        }
+        serializer.append_pair("_csrf", &token);
+        (headers, axum::body::Bytes::from(serializer.finish()))
+    }
+
     pub(crate) fn unsigned_form(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
             .iter()
@@ -13289,11 +13605,21 @@ mod coverage_handler_tests {
             "/templates"
         );
         bounced!(
-            form_campaign_create(state(), extension(), headers.clone(), Form(form.clone())),
+            form_campaign_create(
+                state(),
+                extension(),
+                headers.clone(),
+                axum::body::Bytes::from(serialize_pairs(&form))
+            ),
             "/campaigns/new"
         );
         bounced!(
-            form_campaign_update(state(), extension(), headers.clone(), Form(form.clone())),
+            form_campaign_update(
+                state(),
+                extension(),
+                headers.clone(),
+                axum::body::Bytes::from(serialize_pairs(&form))
+            ),
             "/campaigns"
         );
         bounced!(
@@ -13729,7 +14055,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(flash_text(&response, &app.config), "Campaign draft saved.");
@@ -13745,7 +14071,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
 
@@ -13756,7 +14082,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(
@@ -13777,7 +14103,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(flash_text(&response, &app.config), "Campaign saved.");
@@ -13793,7 +14119,7 @@ mod coverage_handler_tests {
             State(app.clone()),
             axum::Extension(user.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("could not be found"));
@@ -17407,7 +17733,7 @@ mod adversarial_outage_tests {
             State(state.clone()),
             Extension(caller()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_graceful_error(&response, &config, "campaign create");
@@ -17420,7 +17746,7 @@ mod adversarial_outage_tests {
             State(state.clone()),
             Extension(caller()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_graceful_error(&response, &config, "campaign update");
@@ -19983,7 +20309,7 @@ mod residual_zero_tests {
             State(app.clone()),
             axum::Extension(caller.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("name and subject are required"));
@@ -20001,7 +20327,7 @@ mod residual_zero_tests {
             State(app.clone()),
             axum::Extension(caller.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(
@@ -20018,7 +20344,7 @@ mod residual_zero_tests {
             State(app.clone()),
             axum::Extension(caller.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(flash_text(&response, &app.config), "Missing campaign id.");
@@ -20034,7 +20360,7 @@ mod residual_zero_tests {
             State(app.clone()),
             axum::Extension(caller.clone()),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert_eq!(
@@ -22996,7 +23322,7 @@ mod residual_zero_tests {
                 State(state.clone()),
                 axum::Extension(caller.clone()),
                 headers,
-                Form(form),
+                axum::body::Bytes::from(serialize_pairs(&form)),
             )
         };
 
@@ -23060,7 +23386,7 @@ mod residual_zero_tests {
             State(state.clone()),
             axum::Extension(caller),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(
@@ -23094,7 +23420,7 @@ mod residual_zero_tests {
             State(state.clone()),
             axum::Extension(caller2),
             headers,
-            Form(form),
+            axum::body::Bytes::from(serialize_pairs(&form)),
         )
         .await;
         assert!(flash_text(&response, &state.config).contains("Campaign saved"));

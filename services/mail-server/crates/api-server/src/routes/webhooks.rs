@@ -126,6 +126,10 @@ pub(crate) const KNOWN_WEBHOOK_EVENTS: &[&str] = &[
     "message.cancelled",
     // tracking-service
     "recipient.unsubscribed",
+    // Campaign lifecycle (customer campaigns; produced by the campaign worker)
+    "campaign.started",
+    "campaign.ab_winner_selected",
+    "campaign.completed",
     // inbox-placement
     "placement_test.completed",
     // inbound email pipeline

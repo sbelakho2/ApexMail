@@ -74,9 +74,8 @@
         <ul class="space-y-4">
           <li><a href="{{ lp }}/privacy/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["privacy"] %}{{ i18n_data[l]["footer"]["privacy"] }}{% else %}Privacy{% endif %}</a></li>
           {# CCPA notice: deliberately footer-linked on every page (conspicuous placement). #}
-          {# `zola check` still WARNs "orphan" for /privacy/do-not-sell/ because Zola's orphan = #}
-          {# "leaf page in a folder without _index.md" — adding one would break the colocated #}
-          {# index.md bundles, so the links here + privacy pages are the discoverability fix. #}
+          {# The privacy folder is a true Zola section (_index.md), so the leaf page is a #}
+          {# section child — `zola check` reports zero orphans. #}
           <li><a href="/privacy/do-not-sell/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["your_privacy_choices"] %}{{ i18n_data[l]["footer"]["your_privacy_choices"] }}{% else %}Your Privacy Choices{% endif %}</a></li>
           <li><a href="{{ lp }}/terms/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["terms"] %}{{ i18n_data[l]["footer"]["terms"] }}{% else %}Terms{% endif %}</a></li>
           <li><a href="{{ lp }}/cookies/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["cookies"] %}{{ i18n_data[l]["footer"]["cookies"] }}{% else %}Cookies{% endif %}</a></li>

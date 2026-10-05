@@ -6,9 +6,7 @@
 //! `resource_type`/`metadata` INSERTs fail at runtime.
 
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -23,12 +21,15 @@ use uuid::Uuid;
 /// (while `ENVIRONMENT` stays unset) would otherwise silently sign with the
 /// public fallback key. The [`state_is_production`] legacy wrapper exists
 /// only for the deprecated delegating writers below.
+///
+/// The HMAC bytes come from the ONE shared implementation
+/// (`apexmail_lib::audit::audit_log_signature`): `previous_hash|hash`, the
+/// same formula compliance and billing-service verify with.
 fn audit_log_signature(
     hash: &str,
     previous_hash: &str,
     is_production: bool,
 ) -> Result<String, sqlx::Error> {
-    type HmacSha256 = Hmac<Sha256>;
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(k) if !k.is_empty() => k,
         Ok(_) | Err(_) => {
@@ -43,12 +44,8 @@ fn audit_log_signature(
             "apexmail-audit-fallback-key".to_string()
         }
     };
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
-        .map_err(|_| sqlx::Error::Io(std::io::Error::other("audit HMAC init failed")))?;
-    mac.update(previous_hash.as_bytes());
-    mac.update(b"|");
-    mac.update(hash.as_bytes());
-    Ok(hex::encode(mac.finalize().into_bytes()))
+    apexmail_lib::audit::audit_log_signature(Some(previous_hash), hash, &key)
+        .map_err(|_| sqlx::Error::Io(std::io::Error::other("audit HMAC init failed")))
 }
 
 /// Legacy production probe: reads the raw `ENVIRONMENT` env var.
@@ -73,19 +70,10 @@ fn state_is_production() -> bool {
 /// (microsecond) one makes every row's hash UNREPRODUCIBLE from storage —
 /// no verifier can re-derive it, which defeats the chain's purpose. Both the
 /// hash input and the bound column therefore use the same microsecond-
-/// truncated instant (the same discipline `compliance::audit_logger` applies).
+/// truncated instant (the ONE shared implementation — the same discipline
+/// `compliance::audit_logger` applies).
 fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
-    let nanos = ts.timestamp_subsec_nanos();
-    if nanos.is_multiple_of(1_000) {
-        return ts;
-    }
-    let micros = ts.timestamp_micros();
-    match DateTime::from_timestamp_micros(micros) {
-        Some(truncated) => truncated,
-        // Out-of-range instants cannot occur for `Utc::now()`; fall back to
-        // the original value rather than inventing a different timestamp.
-        None => ts,
-    }
+    apexmail_lib::audit::truncate_timestamp_to_micros(ts)
 }
 
 fn compute_hash(
@@ -97,21 +85,21 @@ fn compute_hash(
     details: &Value,
     timestamp: DateTime<Utc>,
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(tenant_id.unwrap_or_default().as_bytes());
-    hasher.update(b"|");
-    hasher.update(user_id.unwrap_or_default().as_bytes());
-    hasher.update(b"|");
-    hasher.update(action.as_bytes());
-    hasher.update(b"|");
-    hasher.update(resource.as_bytes());
-    hasher.update(b"|");
-    hasher.update(resource_id.unwrap_or_default().as_bytes());
-    hasher.update(b"|");
-    hasher.update(details.to_string().as_bytes());
-    hasher.update(b"|");
-    hasher.update(timestamp.to_rfc3339().as_bytes());
-    hex::encode(hasher.finalize())
+    // The ONE canonical implementation (apexmail_lib::audit) — byte-for-byte
+    // the 7-segment `tenant|user|action|resource|resource_id|details|
+    // timestamp` payload this function always hashed (NULL ids contribute
+    // the empty string; the chain link is NOT hashed into the row hash).
+    // Shared so billing-service and compliance rows re-derive with exactly
+    // this formula (DF-5 finding C).
+    apexmail_lib::audit::audit_hash(
+        tenant_id,
+        user_id,
+        action,
+        resource,
+        resource_id,
+        details,
+        timestamp,
+    )
 }
 
 /// Insert one audit log entry in the canonical (hash-chained) shape.
@@ -460,6 +448,8 @@ pub async fn insert_audit_log_best_effort_with_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
 
@@ -544,6 +534,89 @@ mod tests {
             timestamp,
         );
         assert_ne!(hash_a, hash_c, "tenant is part of the hashed payload");
+    }
+
+    /// DF-5 finding C parity pin: this writer's row hash is byte-identical
+    /// to the shared canonical formula (`apexmail_lib::audit`) and to an
+    /// independently hand-built 7-segment payload — the exact bytes every
+    /// other writer (billing-service, compliance) and every verifier must
+    /// reproduce from the stored columns.
+    #[test]
+    fn compute_hash_is_byte_parity_with_the_shared_canonical_formula() {
+        let details = serde_json::json!({"event": "login", "n": 2});
+        let timestamp = DateTime::parse_from_rfc3339("2026-10-04T23:00:53.250028Z")
+            .expect("fixed timestamp")
+            .with_timezone(&Utc);
+
+        let ours = compute_hash(
+            Some("ten_abc26chars123456789abc"),
+            Some("usr_def26chars123456789abc"),
+            "login",
+            "auth",
+            Some("res_1"),
+            &details,
+            timestamp,
+        );
+
+        // Independent hand-built payload (no shared code involved).
+        let hand_built = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            "ten_abc26chars123456789abc",
+            "usr_def26chars123456789abc",
+            "login",
+            "auth",
+            "res_1",
+            serde_json::to_string(&details).expect("compact details"),
+            "2026-10-04T23:00:53.250028+00:00",
+        );
+        assert_eq!(ours, {
+            use sha2::Digest;
+            format!("{:x}", sha2::Sha256::digest(hand_built.as_bytes()))
+        });
+
+        // Same inputs through the shared module: identical hash.
+        assert_eq!(
+            ours,
+            apexmail_lib::audit::audit_hash(
+                Some("ten_abc26chars123456789abc"),
+                Some("usr_def26chars123456789abc"),
+                "login",
+                "auth",
+                Some("res_1"),
+                &details,
+                timestamp,
+            )
+        );
+
+        // A machine row (no user) keeps the empty user SEGMENT — the exact
+        // shape billing-service's machine writer hashes (DF-7c regression).
+        let machine = compute_hash(
+            Some("ten_abc26chars123456789abc"),
+            None,
+            "billing.x",
+            "metering_event",
+            None,
+            &details,
+            timestamp,
+        );
+        let payload = apexmail_lib::audit::audit_hash_payload(
+            Some("ten_abc26chars123456789abc"),
+            None,
+            "billing.x",
+            "metering_event",
+            None,
+            &details,
+            timestamp,
+        );
+        assert_eq!(
+            payload.matches('|').count(),
+            6,
+            "exactly 7 segments for machine rows too"
+        );
+        assert_eq!(machine, {
+            use sha2::Digest;
+            format!("{:x}", sha2::Sha256::digest(payload.as_bytes()))
+        });
     }
 
     /// Canonical audit_logs shape (migration 050's columns, unpartitioned for

@@ -21,6 +21,7 @@ for the full session/CSRF contract.
 | GET | `/v1/auth/verify-email/:token` | Verify email address (link form used by emails) |
 | POST | `/v1/auth/mfa/setup` | Begin TOTP enrollment (authenticated) |
 | POST | `/v1/auth/mfa/confirm-setup` | Confirm TOTP enrollment with a code |
+| POST | `/v1/auth/mfa/disable` | Disable MFA (current password + a valid second factor) |
 | POST | `/v1/auth/mfa/verify` | Complete an MFA login challenge |
 | GET | `/v1/auth/mfa/status` | MFA status for the current user |
 | GET | `/v1/auth/me` | Current user profile |
@@ -28,6 +29,7 @@ for the full session/CSRF contract.
 | POST | `/v1/auth/api-keys` | Create API key |
 | DELETE | `/v1/auth/api-keys/:id` | Revoke API key |
 | POST | `/v1/auth/change-password` | Change password (revokes all OTHER sessions; current session stays signed in) |
+| GET | `/v1/auth/sessions` | List the caller's active sessions |
 | POST | `/v1/auth/sessions/revoke` | Revoke sessions: `{"session_id"}` targets one session, `{}` revokes all others, `{"revoke_all": true}` revokes every session including the current one |
 
 ---
@@ -312,8 +314,9 @@ MFA enrollment is TOTP-based (SHA-256, 6 digits, 30-second period). Codes
 are single-use (replay-guarded), challenges are single-attempt, and the
 session rotates on every enrollment/verification.
 
-> There is currently NO API endpoint to disable MFA once enrolled;
-> disabling requires operator assistance. This gap is tracked separately.
+Disabling MFA requires the account's CURRENT password plus a currently
+valid second factor (TOTP code or recovery code) — a stolen session alone
+is never sufficient.
 
 ### Begin Enrollment
 
@@ -343,12 +346,15 @@ Content-Type: application/json
 ```
 
 Response (200) — the session is rotated and one-time recovery codes are
-returned (each consumable once at `/v1/auth/mfa/verify`):
+returned (each consumable once at `/v1/auth/mfa/verify`). The codes ride
+under BOTH spellings (`recoveryCodes` and `recovery_codes`, identical
+contents) so clients pinned to either shape keep working:
 
 ```json
 {
   "mfaEnabled": true,
-  "recoveryCodes": ["BZDPKHWR2H7X", "..."]
+  "recoveryCodes": ["BZDPKHWR2H7X", "..."],
+  "recovery_codes": ["BZDPKHWR2H7X", "..."]
 }
 ```
 
@@ -368,8 +374,9 @@ compatibility a recovery code sent in the `mfaCode` field is also accepted
 (it fails the 6-digit TOTP format check and is then tried as a recovery
 code). Either way every challenge token is single-use: a failed or
 successful verification burns it. On success the endpoint
-returns the same session shape as login (`expires_at` + `user`) and sets
-the `am_session` cookie.
+returns the same session shape as login (`expires_at` + `user`, plus
+`recovery_codes` / `recoveryCodes` when the challenge was an enrollment)
+and sets the `am_session` cookie.
 
 ### MFA Status
 
@@ -378,6 +385,76 @@ GET /v1/auth/mfa/status
 ```
 
 Response: `{ "mfaEnabled": bool, "roleRequiresMfa": bool }`
+
+### Disable MFA
+
+Requires the CURRENT password AND a currently-valid second factor — a
+phished or stolen session can never strip the account's protection on its
+own.
+
+```http
+POST /v1/auth/mfa/disable
+X-CSRF-Token: <token from GET /v1/auth/csrf>
+Content-Type: application/json
+
+{ "current_password": "...", "mfaCode": "123456" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `current_password` | string | ✓ | The account's current password |
+| `mfaCode` | string | one of | A current TOTP code (alias: `mfa_code`) |
+| `recoveryCode` | string | one of | An unused recovery code (alias: `recovery_code`) |
+
+Response (200):
+
+```json
+{ "mfaEnabled": false }
+```
+
+Effects on success: `mfa_secret`, `mfa_recovery_hashes` and the
+`mfa_enabled` flag are cleared; the used recovery code is consumed; an
+`auth.mfa_disabled` audit event records the actor and the method
+(`totp` or `recovery_code`); and every OTHER session of the user is revoked
+immediately (per-session revocation, exactly like a password change — the
+session that performed the disable stays signed in).
+
+Errors: `400 VALIDATION_ERROR` when MFA is not enrolled or no second factor
+was supplied, `401 UNAUTHORIZED` for a wrong password or wrong second
+factor, `404 NOT_FOUND` for an unknown user, `429 RATE_LIMIT_EXCEEDED`
+after 5 attempts per user per 15 minutes.
+
+---
+
+## List Sessions
+
+```http
+GET /v1/auth/sessions
+Cookie: am_session=<session>
+```
+
+Returns the CALLER's active (unexpired) sessions, newest first — the same
+records `POST /v1/auth/sessions/revoke` acts on. Other users' sessions are
+never returned (the query is scoped to the authenticated user id).
+
+Response (200):
+
+```json
+[
+  {
+    "id": "0e8c1f2a-…",
+    "created_at": "2026-01-15T10:30:00+00:00",
+    "ip_address": "203.0.113.9",
+    "user_agent": "Mozilla/5.0 …",
+    "expires_at": "2026-01-16T10:30:00+00:00",
+    "current": true
+  }
+]
+```
+
+`current: true` marks the session the request itself authenticated with.
+`ip_address` / `user_agent` are omitted when unknown. Revoke individual
+sessions via `POST /v1/auth/sessions/revoke { "session_id": "<id>" }`.
 
 ---
 
@@ -403,7 +480,7 @@ Returns a plain JSON array (see the [OpenAPI](../openapi.yaml) `ApiKeyInfo` sche
   {
     "id": "73f1ed44-b5a3-422b-b55b-a64f31d445fd",
     "name": "Production API Key",
-    "key_prefix": "am_live_",
+    "key_prefix": "am_live_…a4f3",
     "scopes": ["messages:send", "messages:read", "analytics:read"],
     "created_at": "2024-01-15T10:30:00Z",
     "expires_at": "2024-04-15T10:30:00Z",
@@ -411,6 +488,11 @@ Returns a plain JSON array (see the [OpenAPI](../openapi.yaml) `ApiKeyInfo` sche
   }
 ]
 ```
+
+`key_prefix` is the display form `am_live_…abcd` (the shared 8-char key head,
+an ellipsis, and the LAST 4 characters of the key) so keys are
+distinguishable in the list. Keys minted before this convention keep the
+bare `am_live_` prefix until they expire and are re-created.
 
 ### Create API Key
 
@@ -444,7 +526,7 @@ Content-Type: application/json
 {
   "id": "73f1ed44-b5a3-422b-b55b-a64f31d445fd",
   "key": "am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "key_prefix": "am_live_",
+  "key_prefix": "am_live_…xxxx",
   "name": "Production API Key",
   "scopes": ["messages:send", "messages:read", "analytics:read"],
   "created_at": "2024-01-15T10:30:00Z",

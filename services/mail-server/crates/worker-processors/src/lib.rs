@@ -12,6 +12,10 @@
 //!   shared `SendAdmissionService`. Moved here from `sales-autopilot` so the
 //!   owner's sales brain and customer automation execution are separate trust
 //!   domains; this crate has NO dependency on `sales-autopilot`.
+//! - [`campaigns`] — Campaign send consumer (dogfood DF-3): starts due
+//!   scheduled campaigns, drains `campaign_jobs` resend jobs, and sends each
+//!   `campaign_recipients` row through the same admission gate + enqueue
+//!   transaction, so `/v1/campaigns` sends actually deliver.
 //! - [`email`] — Email sending pipeline (SMTP/SES, DKIM, tracking, warmup)
 //! - [`reply_handler`] — Pattern-based reply classification with Aho-Corasick
 //! - [`webhook`] — Webhook delivery with SSRF protection and circuit breakers
@@ -20,6 +24,7 @@
 #![deny(unsafe_code)]
 pub mod analytics;
 pub mod automations;
+pub mod campaigns;
 pub mod common;
 pub mod email;
 pub mod fence;
@@ -29,6 +34,7 @@ pub mod webhook;
 // Re-export main processor types
 pub use analytics::AnalyticsProcessor;
 pub use automations::AutomationExecutor;
+pub use campaigns::CampaignExecutor;
 pub use common::{ProcessorConfig, ProcessorError, ProcessorResult};
 pub use email::EmailProcessor;
 pub use reply_handler::{classify, ReplyClassification, ReplyHandler};

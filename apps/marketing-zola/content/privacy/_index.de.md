@@ -1,7 +1,8 @@
 +++
 title = "Datenschutzerklärung"
 description = "ApexMail-Datenschutzerklärung — wie wir Ihre Daten erfassen, verwenden und schützen."
-template = "prose.html"
+template = "prose-section.html"
+page_template = "prose.html"
 
 [extra]
 last_updated = "2026-05-02"

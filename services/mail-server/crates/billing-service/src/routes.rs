@@ -32,7 +32,6 @@ use axum::{
 use billing_common::proration;
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
@@ -1226,15 +1225,12 @@ pub(crate) fn generate_audit_log_id() -> String {
 /// HMAC-SHA256 signature over the audit chain LINK, keyed with the same
 /// `AUDIT_SIGNING_KEY` the compliance crate uses for chain verification.
 /// Covers `previous_hash | hash` exactly like the canonical api-server
-/// writer, so both writers' rows sit in one verifiable chain.
+/// writer, so both writers' rows sit in one verifiable chain. The HMAC bytes
+/// come from the ONE shared implementation (`apexmail_lib::audit`).
 ///
 /// Development keeps the same documented fallback key the api-server's
 /// canonical writer uses; signing with it beats leaving the chain unsigned.
 fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    type HmacSha256 = Hmac<Sha256>;
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(key) if !key.trim().is_empty() => key,
         _ => {
@@ -1244,19 +1240,15 @@ fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
             "apexmail-audit-fallback-key".to_string()
         }
     };
-    let mut mac = match HmacSha256::new_from_slice(key.as_bytes()) {
-        Ok(mac) => mac,
+    match apexmail_lib::audit::audit_log_signature(Some(previous_hash), hash, &key) {
+        Ok(signature) => signature,
         Err(_) => {
             tracing::error!(
                 "AUDIT_SIGNING_KEY could not be parsed; audit-log signature left empty"
             );
-            return String::new();
+            String::new()
         }
-    };
-    mac.update(previous_hash.as_bytes());
-    mac.update(b"|");
-    mac.update(hash.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    }
 }
 
 // The legacy `compute_audit_log_hash` (per-tenant chaining with
@@ -1268,9 +1260,12 @@ fn audit_log_signature(previous_hash: &str, hash: &str) -> String {
 /// resource_id|details|timestamp` — byte-for-byte the input the api-server's
 /// `audit_log::compute_hash` hashes (its `user_id.unwrap_or_default()` makes
 /// the `user` segment EMPTY, never absent, for machine-context writers).
-/// Kept pure so a unit test can pin the exact 7-segment shape; the live
-/// failure this guards against is a hash no verifier can re-derive from the
-/// stored row (DF-7c: the metering writer dropped the whole segment).
+/// Delegates to the ONE shared implementation (`apexmail_lib::audit`) so
+/// every writer and verifier builds the identical bytes; kept as a wrapper so
+/// the machine-writer shape (empty user segment) and its unit test stay
+/// pinned in this crate. The live failure this guards against is a hash no
+/// verifier can re-derive from the stored row (DF-7c: the metering writer
+/// dropped the whole segment).
 fn audit_hash_payload(
     tenant_id: &str,
     action: &str,
@@ -1279,15 +1274,16 @@ fn audit_hash_payload(
     metadata: &serde_json::Value,
     timestamp: &chrono::DateTime<chrono::Utc>,
 ) -> String {
-    format!(
-        "{}|{}|{}|{}|{}|{}|{}",
-        tenant_id,
-        "", // user segment: machine context, same as api-server's machine rows
+    // Machine context: user segment EMPTY (never absent) — same as
+    // api-server's machine rows (`user_id = None`).
+    apexmail_lib::audit::audit_hash_payload(
+        Some(tenant_id),
+        None,
         action,
         resource_type,
-        resource_id.unwrap_or_default(),
+        resource_id,
         metadata,
-        timestamp.to_rfc3339(),
+        *timestamp,
     )
 }
 
@@ -1304,11 +1300,7 @@ async fn insert_audit_log(
     // and store the same microsecond-truncated instant so the row's hash is
     // re-derivable from its own columns (mirrors api-server `audit_log` and
     // `compliance::audit_logger`).
-    let timestamp = if timestamp.timestamp_subsec_nanos().is_multiple_of(1_000) {
-        timestamp
-    } else {
-        chrono::DateTime::from_timestamp_micros(timestamp.timestamp_micros()).unwrap_or(timestamp)
-    };
+    let timestamp = apexmail_lib::audit::truncate_timestamp_to_micros(timestamp);
 
     // Canonical hash shape — the SAME formula the api-server's canonical
     // `audit_log::compute_hash` writer uses (tenant|user|action|resource|
@@ -1332,7 +1324,7 @@ async fn insert_audit_log(
         &metadata,
         &timestamp,
     );
-    let hash = format!("{:x}", Sha256::digest(hash_payload.as_bytes()));
+    let hash = apexmail_lib::audit::audit_row_hash(&hash_payload);
 
     // Advance the ONE platform-wide chain head inside this transaction
     // (identical statement to api-server `advance_chain_head`): concurrent

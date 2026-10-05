@@ -1,7 +1,8 @@
 +++
 title = "Política de privacidad"
 description = "Política de privacidad de ApexMail: cómo recopilamos, usamos y protegemos sus datos."
-template = "prose.html"
+template = "prose-section.html"
+page_template = "prose.html"
 
 [extra]
 last_updated = "2026-05-02"

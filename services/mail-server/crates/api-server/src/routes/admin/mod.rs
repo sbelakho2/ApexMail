@@ -38,6 +38,7 @@ pub mod growth_analytics;
 pub mod inbox;
 pub mod insights;
 pub mod leads_discovery;
+pub mod mailboxes;
 pub mod operators;
 pub mod predictive_analytics;
 pub mod proxy;

@@ -341,6 +341,8 @@ mod tests {
         PreparedEmail {
             send_unit: "email_queue:job-1:user@example.com".into(),
             from: "sender@apexmail.ee".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "user@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],

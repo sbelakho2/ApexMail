@@ -1327,13 +1327,25 @@ impl ReservedDeliveryIp {
     }
 }
 
-/// Route-aware domain readiness. A shared-pool send requires
+/// Route-aware domain readiness. A shared-pool send THROUGH SES requires
 /// `domains.ses_verified` (SES refuses unverified senders); a dedicated relay
 /// route binds a tenant IP and does not traverse SES, so it is ready without
 /// it. `None` = ready; `Some(reason)` = defer the row with that reason.
-fn domain_route_readiness(route: &DeliveryRoute, domain: &Domain) -> Option<&'static str> {
+///
+/// `shared_route_is_ses` reflects WHICH backend the deployment bound the
+/// shared route to (`EMAIL_TRANSPORT_TYPE`): in SMTP mode the shared route
+/// rides the configured relay (Mailpit in dev, an operator relay in prod),
+/// which never touches SES — demanding `ses_verified` there deferred every
+/// send forever with `domain_ses_not_verified`.
+fn domain_route_readiness(
+    route: &DeliveryRoute,
+    domain: &Domain,
+    shared_route_is_ses: bool,
+) -> Option<&'static str> {
     match route {
-        DeliveryRoute::SesShared if !domain.ses_verified => Some("domain_ses_not_verified"),
+        DeliveryRoute::SesShared if shared_route_is_ses && !domain.ses_verified => {
+            Some("domain_ses_not_verified")
+        }
         _ => None,
     }
 }
@@ -2460,7 +2472,11 @@ impl EmailProcessor {
             },
             None => DeliveryRoute::SesShared,
         };
-        if let Some(reason) = domain_route_readiness(&planned_route, &domain) {
+        let shared_route_is_ses = self
+            .transport
+            .shared_backend_name()
+            .is_none_or(|name| name != "smtp");
+        if let Some(reason) = domain_route_readiness(&planned_route, &domain, shared_route_is_ses) {
             info!(
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
@@ -3060,11 +3076,26 @@ impl EmailProcessor {
         let mut html = job.html.clone();
         let mut text = job.text.clone();
 
-        // Add tracking if enabled
+        // Add tracking if enabled — honoring the per-message toggles the
+        // campaign ladder writes (`track_opens` / `track_clicks` in the job
+        // metadata; absent = both on). The unsubscribe affordance is
+        // applied separately below and is NEVER toggled off.
         if self.config.tracking.enabled {
+            let flag = |key: &str| {
+                job.metadata
+                    .as_ref()
+                    .and_then(|m| m.get(key))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true)
+            };
             if let Some(ref h) = html {
-                let tracked = add_tracking_pixel(h, job, &self.config.tracking);
-                let tracked = rewrite_links(&tracked, job, &self.config.tracking);
+                let mut tracked = h.clone();
+                if flag("track_opens") {
+                    tracked = add_tracking_pixel(&tracked, job, &self.config.tracking);
+                }
+                if flag("track_clicks") {
+                    tracked = rewrite_links(&tracked, job, &self.config.tracking);
+                }
                 html = Some(tracked);
             }
         }
@@ -3228,6 +3259,26 @@ impl EmailProcessor {
             })
             .unwrap_or_default();
 
+        // Display name for the MIME From mailbox (never the envelope; see
+        // PreparedEmail::from_name). Carried in the job metadata by the
+        // campaign ladder; other producers simply omit it.
+        let from_name = job
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("from_name"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !n.contains(['\r', '\n']))
+            .map(str::to_string);
+        let ses_configuration_set = job
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("ip_pool"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && p.len() <= 128)
+            .map(str::to_string);
+
         Ok(PreparedEmail {
             // The stable logical send identity: the same value the acceptance
             // reservation (`claim_acceptance`) and the outbound MTA's
@@ -3235,6 +3286,8 @@ impl EmailProcessor {
             // idempotent on both sides (migration 212).
             send_unit: send_unit_of(job),
             from: job.from.clone(),
+            from_name,
+            ses_configuration_set,
             to: job.to.clone(),
             mime_to,
             mime_cc,
@@ -4446,7 +4499,91 @@ async fn insert_recipient_event(db: &PgPool, event: RecipientEvent<'_>) -> Resul
     .bind(provider_source)
     .execute(db)
     .await
-    .map(|_| ())
+    .map(|_| ())?;
+
+    // Outcome-event webhooks: the transport-acceptance event ("sent") is the
+    // documented `message.accepted` moment (accepted for delivery by the
+    // mail system). Delivery CONFIRMATION (`message.delivered`) rides the
+    // provider feedback webhooks (SES notifications), never this acceptance.
+    // Bounced/complained likewise come from provider feedback (SES), so this
+    // chokepoint only emits acceptance — no double-fire.
+    if event_type == "sent" {
+        enqueue_recipient_outcome_webhook(db, tenant_id, message_id, recipient, "message.accepted")
+            .await;
+    }
+    Ok(())
+}
+
+/// Best-effort enqueue of ONE outcome webhook for every subscribed, enabled
+/// webhook of the tenant. The queue id is a deterministic v5 UUID of
+/// (message_id, recipient, webhook id, event type): the same terminal
+/// transition can never enqueue two deliveries, even across worker retries.
+/// Delivery (retries, circuit breaker, SSRF guard) stays the webhook
+/// processor's job.
+async fn enqueue_recipient_outcome_webhook(
+    db: &PgPool,
+    tenant_id: &str,
+    message_id: &str,
+    recipient: &str,
+    webhook_event: &str,
+) {
+    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+        0x4d, 0x2a, 0x76, 0x1e, 0x55, 0x9b, 0x4a, 0x31, 0x8c, 0x66, 0x14, 0x7d, 0x6b, 0x02, 0xa9,
+        0x58,
+    ]);
+    let subscribed: Vec<(String,)> = match sqlx::query_as(
+        "SELECT id FROM webhooks \
+         WHERE tenant_id = $1 AND enabled = true \
+           AND (events ? $2 OR events ? '*')",
+    )
+    .bind(tenant_id)
+    .bind(webhook_event)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, webhook_event, "outcome webhook subscription lookup failed");
+            return;
+        }
+    };
+    for (webhook_id,) in subscribed {
+        let queue_id = format!(
+            "whj_{}",
+            uuid::Uuid::new_v5(
+                &NAMESPACE,
+                format!("{message_id}:{recipient}:{webhook_id}:{webhook_event}").as_bytes(),
+            )
+            .simple()
+        );
+        let payload = serde_json::json!({
+            "id": format!("evt_{}", uuid::Uuid::new_v4().simple()),
+            "type": webhook_event,
+            "tenantId": tenant_id,
+            "timestamp": Utc::now().to_rfc3339(),
+            "data": {
+                "messageId": message_id,
+                "recipient": recipient,
+                "status": "accepted",
+            },
+        });
+        if let Err(error) = sqlx::query(
+            "INSERT INTO webhook_queue \
+             (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+             VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&queue_id)
+        .bind(&webhook_id)
+        .bind(tenant_id)
+        .bind(webhook_event)
+        .bind(&payload)
+        .execute(db)
+        .await
+        {
+            tracing::warn!(error = %error, webhook_event, "outcome webhook enqueue failed");
+        }
+    }
 }
 
 /// The `metadata.dlp` annotation stamped on a held/refused queue row:
@@ -5741,7 +5878,7 @@ mod tests {
         let mut domain = tracking_gate_domain();
         domain.ses_verified = false;
         assert_eq!(
-            domain_route_readiness(&DeliveryRoute::SesShared, &domain),
+            domain_route_readiness(&DeliveryRoute::SesShared, &domain, true),
             Some("domain_ses_not_verified"),
             "an unverified domain must not ride the shared SES pool"
         );
@@ -5750,14 +5887,22 @@ mod tests {
             source_ip: "203.0.113.9".parse().expect("test IP"),
         };
         assert_eq!(
-            domain_route_readiness(&dedicated, &domain),
+            domain_route_readiness(&dedicated, &domain, true),
             None,
             "a dedicated relay route does not need SES verification"
         );
         domain.ses_verified = true;
         assert_eq!(
-            domain_route_readiness(&DeliveryRoute::SesShared, &domain),
+            domain_route_readiness(&DeliveryRoute::SesShared, &domain, true),
             None
+        );
+        // In SMTP mode the shared route rides the relay, not SES — an
+        // unverified domain is ready there.
+        domain.ses_verified = false;
+        assert_eq!(
+            domain_route_readiness(&DeliveryRoute::SesShared, &domain, false),
+            None,
+            "a relay-backed shared route must not demand SES verification"
         );
     }
 
@@ -8522,6 +8667,8 @@ mod tests {
         PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -8802,6 +8949,8 @@ mod tests {
         let email = PreparedEmail {
             send_unit: send_unit_of(&job),
             from: job.from.clone(),
+            from_name: None,
+            ses_configuration_set: None,
             to: job.to.clone(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -9445,6 +9594,8 @@ mod acceptance_ledger_db_tests {
         PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "recipient@example.com".into(),
             mime_to: vec![],
             mime_cc: vec![],
@@ -11759,6 +11910,8 @@ mod end_to_end_db_tests {
         let prepared = PreparedEmail {
             send_unit: send_unit_of(&job),
             from: job.from.clone(),
+            from_name: None,
+            ses_configuration_set: None,
             to: job.to.clone(),
             mime_to: vec![],
             mime_cc: vec![],

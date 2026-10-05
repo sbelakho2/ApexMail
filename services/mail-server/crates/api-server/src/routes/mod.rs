@@ -21,6 +21,7 @@ pub mod lists;
 pub mod messages;
 pub mod pagination;
 pub mod scim;
+pub mod segments;
 pub mod self_hosted_bounces;
 pub mod ses_notifications;
 pub mod support;

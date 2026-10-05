@@ -64,8 +64,12 @@ pub enum CreditNoteError {
     Db(#[from] sqlx::Error),
     #[error("invoice not found: {0}")]
     InvoiceNotFound(Uuid),
-    #[error("invoice {0} has status that does not allow credits")]
-    InvoiceNotCreditable(Uuid),
+    /// Creditable states are `paid`/`pending`/`uncollectible`; the refusal
+    /// NAMES the refusing status so API consumers get an honest 4xx reason
+    /// instead of an opaque id (DF-5 finding B: state-machine refusals must
+    /// surface the current state).
+    #[error("invoice {invoice_id} is in status '{status}': only paid, pending or uncollectible invoices can be credited")]
+    InvoiceNotCreditable { invoice_id: Uuid, status: String },
     #[error("credit amount exceeds invoice total")]
     AmountExceedsInvoice,
     #[error(
@@ -198,7 +202,10 @@ pub async fn create_credit_note(
                 status = other,
                 "attempted to credit non-creditable invoice"
             );
-            return Err(CreditNoteError::InvoiceNotCreditable(input.invoice_id));
+            return Err(CreditNoteError::InvoiceNotCreditable {
+                invoice_id: input.invoice_id,
+                status: other.to_string(),
+            });
         }
     }
 
@@ -1065,7 +1072,7 @@ mod coverage_adversarial {
             .await
             .expect_err("not creditable");
             assert!(
-                matches!(error, CreditNoteError::InvoiceNotCreditable(_)),
+                matches!(error, CreditNoteError::InvoiceNotCreditable { .. }),
                 "{status}: {error:?}"
             );
         }
@@ -1143,7 +1150,6 @@ mod coverage_adversarial {
     // transaction is healed and the failure lands on the same logged-skip
     // policy as typed errors.
     // ------------------------------------------------------------------
-
     env_test!(
         sql_failure_in_the_posting_hook_does_not_rollback_the_credit_note,
         |env| {
@@ -1213,6 +1219,104 @@ mod coverage_adversarial {
                     .await
                     .expect("wallet");
             assert_eq!(balance, 400, "the replay never mints twice");
+        }
+    );
+
+    // DF-5 finding B: the `billing.credit_note_created` event is a CANONICAL
+    // audit chain row — hash re-derives byte-exactly from the stored columns
+    // through the shared formula (empty user segment — machine writer), the
+    // signature re-derives from the chain link, and the row is LINKED into
+    // the global chain head the append advanced.
+    env_test!(
+        credit_note_audit_row_rederives_with_the_canonical_formula,
+        |env| {
+            // Serialises the AUDIT_SIGNING_KEY mutation against any other
+            // env-sensitive test in this binary's test thread pool.
+            static AUDIT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+            let guard = AUDIT_ENV_LOCK.lock().await;
+            let previous_key = std::env::var("AUDIT_SIGNING_KEY").ok();
+            std::env::set_var("AUDIT_SIGNING_KEY", "cncov-audit-key-0123456789abcdef");
+
+            let tenant = "cncov_audit";
+            seed_tenant(env, tenant).await;
+            let invoice = seed_invoice(env, tenant, "paid", 1000, "EUR").await;
+            record_payment(env, tenant, invoice, 1000, "EUR").await;
+            let created = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-audit"))
+                .await
+                .expect("credit note");
+
+            let (
+                action,
+                resource,
+                resource_id,
+                row_tenant,
+                details,
+                timestamp,
+                hash,
+                previous_hash,
+                signature,
+            ): (
+                String,
+                String,
+                Option<String>,
+                String,
+                serde_json::Value,
+                chrono::DateTime<chrono::Utc>,
+                String,
+                Option<String>,
+                String,
+            ) = sqlx::query_as(
+                "SELECT action, resource, resource_id, tenant_id, details,
+                        timestamp, hash, previous_hash, signature
+                 FROM audit_logs
+                 WHERE action = 'billing.credit_note_created' AND resource_id = $1",
+            )
+            .bind(created.id.to_string())
+            .fetch_one(&env.pool)
+            .await
+            .expect("audit row");
+
+            assert_eq!(resource, "credit_note");
+            assert_eq!(
+                details["invoiceId"],
+                serde_json::Value::String(invoice.to_string()),
+                "the audited payload names the credited invoice"
+            );
+
+            let recomputed = apexmail_lib::audit::audit_hash(
+                Some(&row_tenant),
+                None,
+                &action,
+                &resource,
+                resource_id.as_deref(),
+                &details,
+                timestamp,
+            );
+            assert_eq!(
+                recomputed, hash,
+                "the credit-note audit row re-derives byte-exactly"
+            );
+            let expected_signature = apexmail_lib::audit::audit_log_signature(
+                previous_hash.as_deref(),
+                &hash,
+                "cncov-audit-key-0123456789abcdef",
+            )
+            .expect("signs");
+            assert_eq!(expected_signature, signature);
+
+            let head_seq: i64 = sqlx::query_scalar(
+                "SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("chain head");
+            assert!(head_seq >= 1, "the append advanced the shared chain head");
+
+            match previous_key {
+                Some(value) => std::env::set_var("AUDIT_SIGNING_KEY", value),
+                None => std::env::remove_var("AUDIT_SIGNING_KEY"),
+            }
+            drop(guard);
         }
     );
 

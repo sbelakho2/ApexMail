@@ -1,0 +1,36 @@
+{# Prose SECTION template — legal/policy sections rendered with section context.
+   Sections (folders with _index.md) get `section` instead of `page`; this
+   mirrors prose.html markdown-for-markdown so converting a bundle page into
+   a real section keeps the rendered output (and the URL) identical. #}
+{% extends "base.html" %}
+
+{% block title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
+{% block description %}{% if section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}
+{% block og_title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock og_title %}
+{% block og_description %}{% if section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock og_description %}
+{% block twitter_title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock twitter_title %}
+{% block twitter_description %}{% if section.description %}{{ section.description }}{% else %}{{ config.description }}{% endif %}{% endblock twitter_description %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
+  <h1 class="mb-4 text-surface-950 [overflow-wrap:anywhere]">{{ section.title }}</h1>
+  {% if section.extra.last_updated %}
+  <p class="text-surface-400 mb-12 text-xs font-bold tracking-widest">Last updated: {{ section.extra.last_updated }}</p>
+  {% endif %}
+  <div class="prose max-w-none">
+    {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
+    {# |safe is acceptable because the content author is the site owner, not end users. #}
+    {{ section.content | safe }}
+  </div>
+  {% if section.pages %}
+  <div class="mt-12 border-t border-surface-200 pt-8">
+    <h2 class="text-lg font-semibold text-surface-950 mb-4">Related</h2>
+    <ul class="space-y-2">
+      {% for page in section.pages %}
+      <li><a href="{{ page.permalink }}" class="text-brand-700 hover:underline">{{ page.title }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+{% endblock content %}

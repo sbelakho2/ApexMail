@@ -171,6 +171,7 @@ struct WorkerSettings {
     run_reply_handler: bool,
     run_webhook: bool,
     run_automations: bool,
+    run_campaigns: bool,
     run_billing_maintenance: bool,
 }
 
@@ -202,6 +203,7 @@ fn load_worker_settings() -> WorkerSettings {
         run_reply_handler: env_flag("WORKER_RUN_REPLY_HANDLER"),
         run_webhook: env_flag("WORKER_RUN_WEBHOOK"),
         run_automations: env_flag("WORKER_RUN_AUTOMATIONS"),
+        run_campaigns: env_flag("WORKER_RUN_CAMPAIGNS"),
         run_billing_maintenance: env_flag("WORKER_RUN_BILLING_MAINTENANCE"),
     }
 }
@@ -243,6 +245,9 @@ fn heartbeat_capabilities(settings: &WorkerSettings, liveness: &ProcessorLivenes
     }
     if settings.run_automations {
         capabilities.push("automations".to_string());
+    }
+    if settings.run_campaigns {
+        capabilities.push("campaigns".to_string());
     }
     capabilities
 }
@@ -459,6 +464,10 @@ struct WorkerProcesses {
     /// it holds is leased and every write exactly-once (migration 224), so an
     /// aborted tick is recovered by a later one, never double-executed.
     automations: Option<tokio::task::JoinHandle<()>>,
+    /// The campaign send consumer's tick task — same self-contained-loop
+    /// contract as [`WorkerProcesses::automations`]: leased claims and
+    /// per-recipient idempotency keys make an aborted tick recoverable.
+    campaigns: Option<tokio::task::JoinHandle<()>>,
     heartbeat: tokio::task::JoinHandle<()>,
 }
 
@@ -518,6 +527,7 @@ async fn run_worker(
     let mut reply_processor: Option<Arc<ReplyHandler>> = None;
     let mut webhook_processor: Option<Arc<WebhookProcessor>> = None;
     let mut automations_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut campaigns_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start analytics processor
     if settings.run_analytics {
@@ -671,6 +681,71 @@ async fn run_worker(
         }));
     }
 
+    // ── Campaign send consumer (dogfood DF-3) ────────────────────────────
+    // The consumer of `campaigns.scheduled_at` + `campaign_jobs` +
+    // `campaign_recipients`: each tick claims due scheduled campaigns,
+    // processes resend jobs, drains a bounded batch of recipient rows through
+    // the shared `SendAdmissionService` (suppression + quota) and the exact
+    // automations enqueue transaction (`messages` 'queued' + `email_queue`),
+    // then finalizes finished campaigns to sent/partial. Like the automation
+    // tick, every claim is lease- or claim-guarded, so an aborted tick is
+    // recovered by a later one, never double-executed.
+    if settings.run_campaigns {
+        let admission = Arc::new(
+            billing_service::send_admission::PostgresAdmissionBackend::new(
+                db.clone(),
+                redis.clone(),
+            ),
+        );
+        let executor = Arc::new(worker_processors::campaigns::CampaignExecutor::new(
+            db.clone(),
+            billing_service::send_admission::SendAdmissionService::new(admission),
+            unique_worker_id(),
+        ));
+        let interval_secs = automation_tick_secs();
+        info!(
+            interval_secs,
+            batch = worker_processors::campaigns::DEFAULT_BATCH_SIZE,
+            drain_batch = worker_processors::campaigns::DRAIN_BATCH_SIZE,
+            "Campaign send consumer started"
+        );
+        campaigns_task = Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match executor.tick().await {
+                    Ok(report)
+                        if report.campaigns_started > 0
+                            || report.jobs_completed > 0
+                            || report.recipients_sent > 0
+                            || report.recipients_failed > 0
+                            || report.recipients_suppressed > 0
+                            || report.campaigns_completed > 0 =>
+                    {
+                        info!(
+                            campaigns_started = report.campaigns_started,
+                            jobs_completed = report.jobs_completed,
+                            recipients_sent = report.recipients_sent,
+                            recipients_failed = report.recipients_failed,
+                            recipients_suppressed = report.recipients_suppressed,
+                            recipients_deferred = report.recipients_deferred,
+                            campaigns_completed = report.campaigns_completed,
+                            "campaign consumer tick"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        // The next tick retries; claim leases and the
+                        // per-recipient idempotency keys make a crash mid-tick
+                        // a recoverable state.
+                        error!(error = %err, "campaign consumer tick failed");
+                    }
+                }
+            }
+        }));
+    }
+
     // ── Billing maintenance (overage/PAYG cycle-close, dedicated-IP billing,
     // SLA credits) ─────────────────────────────────────────────────────────
     // These periodic jobs previously ran ONLY in the billing-service binary,
@@ -742,6 +817,7 @@ async fn run_worker(
         reply: reply_processor,
         webhook: webhook_processor,
         automations: automations_task,
+        campaigns: campaigns_task,
         heartbeat,
     })
 }
@@ -786,10 +862,13 @@ fn health_port() -> u16 {
 /// Stop every processor, then join their tasks with a bounded wait. A
 /// shutdown that exceeds `timeout` logs and returns (the process exits).
 async fn shutdown_worker(processes: WorkerProcesses, shutdown_timeout: Duration) {
-    // The automation tick has no stop() handshake: abort it (safe — leased
-    // claims and exactly-once identities make an interrupted tick recoverable)
-    // before joining the supervised processors.
+    // The automation and campaign ticks have no stop() handshake: abort them
+    // (safe — leased claims and exactly-once identities make an interrupted
+    // tick recoverable) before joining the supervised processors.
     if let Some(handle) = &processes.automations {
+        handle.abort();
+    }
+    if let Some(handle) = &processes.campaigns {
         handle.abort();
     }
     if let Some(processor) = &processes.analytics {
@@ -1097,6 +1176,7 @@ mod tests {
                 ("WORKER_RUN_REPLY_HANDLER", Some("1")),
                 ("WORKER_RUN_WEBHOOK", Some("true")),
                 ("WORKER_RUN_AUTOMATIONS", Some("false")),
+                ("WORKER_RUN_CAMPAIGNS", Some("false")),
                 ("AUTOMATION_TICK_SECS", Some("7")),
             ],
             || {
@@ -1112,6 +1192,7 @@ mod tests {
                 assert!(s.run_reply_handler, "1 enables");
                 assert!(s.run_webhook, "true enables");
                 assert!(!s.run_automations, "false disables the automation tick");
+                assert!(!s.run_campaigns, "false disables the campaign consumer");
                 assert_eq!(
                     automation_tick_secs(),
                     7,
@@ -1133,7 +1214,11 @@ mod tests {
                 // Any explicit value other than true/1 DISABLES the processor.
                 assert!(!s.run_analytics, "unknown flag value disables");
                 assert!(
-                    s.run_email && s.run_reply_handler && s.run_webhook && s.run_automations,
+                    s.run_email
+                        && s.run_reply_handler
+                        && s.run_webhook
+                        && s.run_automations
+                        && s.run_campaigns,
                     "every processor defaults to enabled"
                 );
                 assert_eq!(
@@ -1180,6 +1265,7 @@ mod tests {
             run_reply_handler: false,
             run_webhook: false,
             run_automations: false,
+            run_campaigns: false,
             run_billing_maintenance: false,
         };
         let liveness = ProcessorLiveness::new();
@@ -1193,6 +1279,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: true,
             run_automations: true,
+            run_campaigns: true,
             run_billing_maintenance: false,
             ..base
         };
@@ -1201,7 +1288,7 @@ mod tests {
         // enabled processor unconditionally, even one that had panicked).
         assert_eq!(
             heartbeat_capabilities(&all, &liveness),
-            ["postgres", "redis", "automations"]
+            ["postgres", "redis", "automations", "campaigns"]
         );
         // Once supervision registers the attempts alive, the capabilities
         // reappear.
@@ -1218,7 +1305,8 @@ mod tests {
                 "email",
                 "reply-handler",
                 "webhook",
-                "automations"
+                "automations",
+                "campaigns"
             ]
         );
         // A processor dying between beats loses ONLY its own entry.
@@ -1231,7 +1319,8 @@ mod tests {
                 "analytics",
                 "reply-handler",
                 "webhook",
-                "automations"
+                "automations",
+                "campaigns"
             ]
         );
         // And a disabled processor is never advertised even if a stale entry
@@ -1574,6 +1663,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: true,
             run_automations: true,
+            run_campaigns: true,
             run_billing_maintenance: false,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
@@ -1586,6 +1676,10 @@ mod tests {
         assert!(
             processes.automations.is_some(),
             "the customer automation executor started"
+        );
+        assert!(
+            processes.campaigns.is_some(),
+            "the campaign send consumer started"
         );
         assert_eq!(processes.handles.len(), 4, "one supervised task each");
 
@@ -1623,6 +1717,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: false,
             run_automations: false,
+            run_campaigns: false,
             run_billing_maintenance: false,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
@@ -1635,6 +1730,10 @@ mod tests {
         assert!(
             processes.automations.is_none(),
             "the automation tick honours its disable flag"
+        );
+        assert!(
+            processes.campaigns.is_none(),
+            "the campaign consumer honours its disable flag"
         );
         assert_eq!(processes.handles.len(), 1);
         shutdown_worker(processes, Duration::from_secs(10)).await;

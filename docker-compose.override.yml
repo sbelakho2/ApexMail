@@ -79,6 +79,14 @@ services:
       # api-server mounts /webhooks/stripe only when this secret exists.
       # Local-only literal; production supplies the real secret.
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-dev-stripe-webhook-secret-local-only-0123456789}
+      # Same transport selection as the worker: the REST send gate's domain
+      # readiness reads EMAIL_TRANSPORT_TYPE (unset = SES, demanding
+      # ses_verified on every sender domain — which rejected every REST send
+      # in the SMTP-mode dev stack).
+      EMAIL_TRANSPORT_TYPE: smtp
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_TLS: "false"
       # Dev parity for local webhook listeners (docs dogfood): the api-server
       # refuses loopback webhook URLs unless this explicit override is set.
       # MFA_SECRET_ENCRYPTION_KEY pins the shared secret-at-rest key so
@@ -136,8 +144,16 @@ services:
       # F4 (audit): loopback bind hardcoded outside the variable — bare
       # CLICKHOUSE_HTTP_PORT / CLICKHOUSE_NATIVE_PORT values (.env.example)
       # must stay loopback-only.
+      #
+      # DOGFOOD 2026-10-05: a native host ClickHouse owns 127.0.0.1:8123 on
+      # this machine, silently shadowing the compose publish (same landmine
+      # class as host postgres on 5432 / host postfix on 25), so host-run
+      # tests reached the HOST server's stale store. The compose server is
+      # ALSO published on non-conflicting loopback ports for host tooling
+      # and tests (CLICKHOUSE_TEST_URL=http://127.0.0.1:8125).
       - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
       - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+      - "127.0.0.1:8125:8123"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 10s
@@ -261,6 +277,7 @@ services:
 
   worker:
     environment:
+      RUST_LOG: ${WORKER_RUST_LOG:-info}
       EMAIL_TRANSPORT_TYPE: smtp
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"

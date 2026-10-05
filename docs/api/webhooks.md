@@ -39,10 +39,15 @@ Webhooks allow you to receive HTTP POST requests when events happen in ApexMail,
 > `{"id":"evt_...","type":"recipient.unsubscribed","tenantId":"...","timestamp":"...","data":{...}}`.
 > The examples below show the shape of the `data` object. Also note which
 > events are currently produced: `recipient.unsubscribed` (tracking
-> service), `message.bounced` / `message.complained` (SES feedback
-> webhooks). `message.opened` / `message.clicked` are accepted subscription
-> event names, but the tracking pipeline does not enqueue webhook
-> deliveries for them yet.
+> service) and `message.bounced` / `message.complained` / `message.opened` /
+> `message.clicked` (SES feedback + tracking pipelines). Every event above
+> has a live producer: acceptance at the worker's transport-acceptance step,
+> delivery/bounce/complaint from SES feedback, opens/clicks from the
+> tracking event stream, and campaign lifecycle events
+> (`campaign.started` / `campaign.ab_winner_selected` / `campaign.completed`)
+> from the campaign worker. Deliveries land on the same queue the webhook
+> processor drains (retries, circuit breaker, SSRF guard), deduplicated per
+> (event, webhook).
 
 ### `message.accepted`
 

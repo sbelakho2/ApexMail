@@ -951,6 +951,290 @@ pub async fn get_invoice_by_id(
 }
 
 // ---------------------------------------------------------------------------
+// Invoice void (DF-5 finding B) — the missing half of the invoice state
+// machine. Status filters already reference 'void' (outstanding derivation,
+// dunning) but NO surface could express the transition; this is the one
+// writer. Operators reach it through the api-server admin billing routes
+// (`POST /v1/billing/admin/tenants/:tenantId/invoices/:invoiceId/void`).
+// ---------------------------------------------------------------------------
+
+/// Input for [`void_invoice`].
+#[derive(Debug, Clone)]
+pub struct VoidInvoiceInput {
+    /// Tenant owning the invoice — the lookup is tenant-scoped, so another
+    /// tenant's invoice id is indistinguishable from an unknown one.
+    pub tenant_id: String,
+    pub invoice_id: Uuid,
+    /// Human-readable reason, recorded on the audit event.
+    pub reason: String,
+    /// Operator-provided idempotency key. Repeated voids of an already-void
+    /// invoice return the SAME invoice (the requested end-state) and write
+    /// nothing further, so retries are never duplicate rows.
+    pub idempotency_key: String,
+}
+
+/// Failure modes of [`void_invoice`]. Every variant the caller can influence
+/// is a 4xx-shaped product answer; the state variant NAMES the current
+/// status so the operator sees why the machine refused.
+#[derive(Debug, thiserror::Error)]
+pub enum InvoiceVoidError {
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("invoice not found: {0}")]
+    InvoiceNotFound(Uuid),
+    /// Only draft/open (here: `draft`/`pending`) invoices void. Paid
+    /// invoices are refunded with a credit note instead; the refusal carries
+    /// the refusing state verbatim.
+    #[error("invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided")]
+    NotVoidable { invoice_id: Uuid, status: String },
+    /// The invoice carries a Stripe-side invoice (`stripe_invoice_id`) but
+    /// this deployment cannot reach Stripe (no `STRIPE_SECRET_KEY`): refused
+    /// HONESTLY — the local row is left untouched rather than drifting from
+    /// the provider state.
+    #[error(
+        "invoice {invoice_id} has a Stripe-side invoice ({stripe_invoice_id}) but Stripe is not \
+         configured (STRIPE_SECRET_KEY): the provider-side invoice cannot be voided from this \
+         deployment, so the local invoice was left in status '{status}'"
+    )]
+    StripeUnavailable {
+        invoice_id: Uuid,
+        stripe_invoice_id: String,
+        status: String,
+    },
+    /// Stripe was configured but refused/completed-with-error on the void.
+    #[error("Stripe refused the invoice void: {message}")]
+    StripeFailed { message: String },
+    #[error("audit log failure: {0}")]
+    Audit(String),
+    /// The void committed but the re-read of the voided invoice failed
+    /// (e.g. corrupt line_items JSONB) — the state DID change, the response
+    /// payload could not be built.
+    #[error(transparent)]
+    Readback(#[from] InvoiceError),
+}
+
+/// One Stripe-side invoice void, isolated for testability (tests point
+/// `STRIPE_API_BASE_URL` at a local mock). `Err(StripeVoidError::Unavailable)`
+/// means the deployment lacks Stripe credentials; `Err(Failed)` means Stripe
+/// itself refused or the exchange failed.
+#[derive(Debug, Clone)]
+pub struct StripeVoidConfig {
+    pub base_url: String,
+    pub secret_key: String,
+}
+
+fn stripe_void_config_from_env() -> Result<StripeVoidConfig, ()> {
+    let secret_key = std::env::var("STRIPE_SECRET_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or(())?;
+    Ok(StripeVoidConfig {
+        base_url: std::env::var("STRIPE_API_BASE_URL")
+            .unwrap_or_else(|_| "https://api.stripe.com".into()),
+        secret_key,
+    })
+}
+
+async fn stripe_void_invoice(
+    config: &StripeVoidConfig,
+    stripe_invoice_id: &str,
+    idempotency_key: &str,
+) -> Result<(), InvoiceVoidError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/v1/invoices/{}/void",
+            config.base_url.trim_end_matches('/'),
+            // Stripe ids are `[a-zA-Z0-9_]+`; the path segment is still built
+            // through the typed client URL, never a raw string concat of
+            // user input (the id comes from our own DB column).
+            stripe_invoice_id,
+        ))
+        .bearer_auth(&config.secret_key)
+        .header("Idempotency-Key", idempotency_key)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| InvoiceVoidError::StripeFailed {
+            message: format!("Stripe void request failed: {error}"),
+        })?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // Truncate the provider body: the operator needs the reason, not a
+        // multi-kilobyte HTML error page in an API envelope.
+        let mut message = body;
+        if message.len() > 300 {
+            message.truncate(300);
+        }
+        return Err(InvoiceVoidError::StripeFailed {
+            message: format!("Stripe returned {status}: {message}"),
+        });
+    }
+    Ok(())
+}
+
+/// The voidable pre-states: `draft` and `pending` (the platform's
+/// open/unpaid states — a pending invoice is issued but unsettled). `paid`
+/// refuses (refund via credit note instead); `uncollectible` refuses (a
+/// deliberate write-off state, not an open obligation); `void` is the
+/// idempotent success replay.
+fn is_voidable_status(status: &str) -> bool {
+    matches!(status, "draft" | "pending")
+}
+
+/// Void an open/draft invoice **idempotently** (DF-5 finding B).
+///
+/// * `draft`/`pending` → `void` with `closed_at` pinned, audited on the
+///   canonical 7-segment chain (`billing.invoice_voided`).
+/// * An already-`void` invoice returns the SAME invoice unchanged — the
+///   requested end-state — and writes nothing further (retries and duplicate
+///   submissions are never duplicate rows or duplicate audit events).
+/// * `paid` (and `uncollectible`) refuse with [`InvoiceVoidError::
+///   NotVoidable`] naming the current status; a paid invoice is refunded via
+///   a credit note (`credit_notes::create_credit_note`), never voided.
+/// * When the invoice carries a `stripe_invoice_id`, the provider-side
+///   invoice is voided FIRST (Stripe idempotency key derived from the local
+///   operation identity, so a retried void replays the same provider
+///   request); a Stripe refusal or an unconfigured Stripe deployment leaves
+///   the local row untouched — never a fake local-only success.
+pub async fn void_invoice(
+    pool: &PgPool,
+    input: VoidInvoiceInput,
+) -> Result<Invoice, InvoiceVoidError> {
+    // ── 1. Lock + validate the current state ────────────────────────────
+    let (status, stripe_invoice_id): (String, Option<String>) = {
+        let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status::text, stripe_invoice_id FROM invoices
+             WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(input.invoice_id)
+        .bind(&input.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(InvoiceVoidError::Db)?;
+        let Some(row) = row else {
+            return Err(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
+        };
+        let (status, stripe_invoice_id) = row;
+        if status == "void" {
+            // Idempotent replay: the requested end-state is already the
+            // stored state — return it, write nothing.
+            tx.commit().await.map_err(InvoiceVoidError::Db)?;
+            return get_invoice_by_id(pool, input.invoice_id)
+                .await?
+                .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
+        }
+        if !is_voidable_status(&status) {
+            return Err(InvoiceVoidError::NotVoidable {
+                invoice_id: input.invoice_id,
+                status,
+            });
+        }
+        // The DB lock is released before any Stripe HTTP call: no database
+        // transaction is held across provider I/O. The post-Stripe append
+        // re-locks and re-validates below.
+        tx.rollback().await.map_err(InvoiceVoidError::Db)?;
+        (status, stripe_invoice_id)
+    };
+
+    // ── 2. Stripe-side void FIRST (when a provider invoice exists) ──────
+    let mut stripe_voided = false;
+    if let Some(stripe_invoice_id) = stripe_invoice_id.as_deref() {
+        // Idempotency on the provider call is derived from the immutable
+        // local operation identity, never from a caller-supplied value
+        // alone — a retried void replays the SAME Stripe request.
+        let key = format!(
+            "invoice-void:{}:{}",
+            input.invoice_id.simple(),
+            input.idempotency_key
+        );
+        match stripe_void_config_from_env() {
+            Ok(config) => {
+                stripe_void_invoice(&config, stripe_invoice_id, &key).await?;
+                stripe_voided = true;
+            }
+            // Honest degradation: without provider credentials the void
+            // cannot complete both sides, so NEITHER side moves.
+            Err(()) => {
+                return Err(InvoiceVoidError::StripeUnavailable {
+                    invoice_id: input.invoice_id,
+                    stripe_invoice_id: stripe_invoice_id.to_string(),
+                    status,
+                });
+            }
+        }
+    }
+
+    // ── 3. Flip the local state + audit in ONE transaction ──────────────
+    let mut tx = pool.begin().await.map_err(InvoiceVoidError::Db)?;
+    let now = Utc::now();
+    let result = sqlx::query(
+        "UPDATE invoices
+         SET status = 'void', closed_at = $3, updated_at = $3
+         WHERE id = $1 AND tenant_id = $2 AND status IN ('draft', 'pending')",
+    )
+    .bind(input.invoice_id)
+    .bind(&input.tenant_id)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(InvoiceVoidError::Db)?;
+
+    if result.rows_affected() == 0 {
+        // A concurrent writer moved the invoice between our validation and
+        // the update. Re-read UNDER the lock and answer from reality.
+        let current: Option<(String,)> = sqlx::query_as(
+            "SELECT status::text FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(input.invoice_id)
+        .bind(&input.tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(InvoiceVoidError::Db)?;
+        let status = current
+            .map(|(status,)| status)
+            .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id))?;
+        if status == "void" {
+            // The concurrent void won; this request's end-state is met.
+            tx.commit().await.map_err(InvoiceVoidError::Db)?;
+            return get_invoice_by_id(pool, input.invoice_id)
+                .await?
+                .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id));
+        }
+        return Err(InvoiceVoidError::NotVoidable {
+            invoice_id: input.invoice_id,
+            status,
+        });
+    }
+
+    crate::routes::append_audit_log(
+        &mut tx,
+        &input.tenant_id,
+        "billing.invoice_voided",
+        "invoice",
+        Some(&input.invoice_id.to_string()),
+        serde_json::json!({
+            "invoiceId": input.invoice_id,
+            "reason": input.reason,
+            "idempotencyKey": input.idempotency_key,
+            "stripeVoided": stripe_voided,
+            "stripeInvoiceId": stripe_invoice_id,
+        }),
+        now,
+    )
+    .await
+    .map_err(InvoiceVoidError::Audit)?;
+
+    tx.commit().await.map_err(InvoiceVoidError::Db)?;
+
+    get_invoice_by_id(pool, input.invoice_id)
+        .await?
+        .ok_or(InvoiceVoidError::InvoiceNotFound(input.invoice_id))
+}
+
+// ---------------------------------------------------------------------------
 // Internal row mapping
 // ---------------------------------------------------------------------------
 
@@ -2575,4 +2859,377 @@ mod coverage_adversarial {
         assert_eq!(allocations, vec![0, 0]);
         assert_eq!(allocate_vat_across_lines(&[], 22.0), Vec::<i64>::new());
     }
+
+    // -------------------------------------------------------------------
+    // DF-5 finding B — the invoice VOID transition (previously referenced
+    // by status filters but expressible NOWHERE). The transition matrix,
+    // idempotency, Stripe honesty and audit re-derivability.
+    // -------------------------------------------------------------------
+
+    fn void_input(tenant: &str, invoice: Uuid, key: &str) -> VoidInvoiceInput {
+        VoidInvoiceInput {
+            tenant_id: tenant.to_string(),
+            invoice_id: invoice,
+            reason: "coverage void".to_string(),
+            idempotency_key: key.to_string(),
+        }
+    }
+
+    async fn seed_invoice_status(
+        env: &Env,
+        tenant: &str,
+        status: &str,
+        total: i64,
+        stripe_invoice_id: Option<&str>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, stripe_invoice_id,
+                                   issued_at, due_at, period_start, period_end,
+                                   created_at, updated_at)
+             VALUES ($1, $2, $3, 'EUR', $4, $5, $3, 0, $3, $6,
+                     NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(total)
+        .bind(status)
+        .bind(format!("IVCOV-{}", id.simple()))
+        .bind(stripe_invoice_id)
+        .execute(&env.pool)
+        .await
+        .expect("seed invoice");
+        id
+    }
+
+    // The full transition matrix: draft/open void, paid/uncollectible
+    // refuse WITH the state named, unknown and cross-tenant ids are 404-
+    // shaped, and a replay of an already-void invoice returns the SAME
+    // invoice and writes nothing further.
+    env_test!(void_transition_matrix, |env| {
+        let tenant = "ivcov_void";
+        seed_tenant(env, tenant).await;
+
+        // draft → void: the open-charge path.
+        let draft = seed_invoice_status(env, tenant, "draft", 5_000, None).await;
+        let voided = void_invoice(&env.pool, void_input(tenant, draft, "k-draft"))
+            .await
+            .expect("draft voids");
+        assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
+        let closed_at: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT closed_at FROM invoices WHERE id = $1")
+                .bind(draft)
+                .fetch_one(&env.pool)
+                .await
+                .expect("closed_at");
+        assert!(closed_at.is_some(), "voiding pins closed_at");
+
+        // pending (the platform's open state) → void.
+        let pending = seed_invoice_status(env, tenant, "pending", 7_000, None).await;
+        let voided = void_invoice(&env.pool, void_input(tenant, pending, "k-open"))
+            .await
+            .expect("pending voids");
+        assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
+
+        // paid → REFUSED, the state named: refunds go through credit notes.
+        let paid = seed_invoice_status(env, tenant, "paid", 9_000, None).await;
+        let error = void_invoice(&env.pool, void_input(tenant, paid, "k-paid"))
+            .await
+            .expect_err("paid refuses");
+        match &error {
+            InvoiceVoidError::NotVoidable { status, .. } => {
+                assert_eq!(status, "paid", "the refusing state must be named");
+            }
+            other => panic!("expected NotVoidable, got {other:?}"),
+        }
+        let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
+            .bind(paid)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "paid", "a refused void changes nothing");
+
+        // uncollectible → REFUSED (a deliberate write-off, not an open
+        // obligation; it can still be CREDITED via credit notes).
+        let uncollectible = seed_invoice_status(env, tenant, "uncollectible", 3_000, None).await;
+        let error = void_invoice(&env.pool, void_input(tenant, uncollectible, "k-unc"))
+            .await
+            .expect_err("uncollectible refuses");
+        assert!(
+            matches!(&error, InvoiceVoidError::NotVoidable { status, .. } if status == "uncollectible"),
+            "{error:?}"
+        );
+
+        // Unknown id and cross-tenant id are indistinguishable 404s.
+        let stranger = "ivcov_void_other";
+        seed_tenant(env, stranger).await;
+        let theirs = seed_invoice_status(env, stranger, "draft", 1_000, None).await;
+        let error = void_invoice(&env.pool, void_input(tenant, theirs, "k-cross"))
+            .await
+            .expect_err("cross-tenant invoice");
+        assert!(
+            matches!(error, InvoiceVoidError::InvoiceNotFound(_)),
+            "{error:?}"
+        );
+        let error = void_invoice(&env.pool, void_input(tenant, Uuid::new_v4(), "k-missing"))
+            .await
+            .expect_err("unknown invoice");
+        assert!(
+            matches!(error, InvoiceVoidError::InvoiceNotFound(_)),
+            "{error:?}"
+        );
+
+        // Idempotent replay: voiding the already-void draft returns the SAME
+        // invoice and writes NO second audit row.
+        async fn void_audit_rows(pool: &PgPool, invoice: Uuid) -> i64 {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE action = 'billing.invoice_voided'
+                   AND resource_id = $1",
+            )
+            .bind(invoice.to_string())
+            .fetch_one(pool)
+            .await
+            .expect("audit count")
+        }
+        assert_eq!(void_audit_rows(&env.pool, draft).await, 1);
+        let replay = void_invoice(&env.pool, void_input(tenant, draft, "k-draft-replay"))
+            .await
+            .expect("replay void");
+        assert_eq!(replay.id, draft);
+        assert!(matches!(replay.status, crate::types::InvoiceStatus::Void));
+        assert_eq!(
+            void_audit_rows(&env.pool, draft).await,
+            1,
+            "a replay writes no duplicate audit event"
+        );
+    });
+
+    // The audit event a void writes is a CANONICAL chain row: its hash
+    // re-derives byte-exactly from the stored columns through the shared
+    // formula, and its signature re-derives from the chain link.
+    env_test!(void_writes_a_canonical_rederivable_audit_row, |env| {
+        let guard = ENV_LOCK.lock().await;
+        let previous_key = std::env::var("AUDIT_SIGNING_KEY").ok();
+        std::env::set_var("AUDIT_SIGNING_KEY", "ivcov-audit-key-0123456789abcdef");
+
+        let tenant = "ivcov_voidaudit";
+        seed_tenant(env, tenant).await;
+        let draft = seed_invoice_status(env, tenant, "draft", 5_500, None).await;
+        void_invoice(&env.pool, void_input(tenant, draft, "k-audit"))
+            .await
+            .expect("voids");
+
+        let (
+            action,
+            resource,
+            resource_id,
+            row_tenant,
+            details,
+            timestamp,
+            hash,
+            previous_hash,
+            signature,
+        ): (
+            String,
+            String,
+            Option<String>,
+            String,
+            serde_json::Value,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT action, resource, resource_id, tenant_id, details,
+                    timestamp, hash, previous_hash, signature
+             FROM audit_logs
+             WHERE action = 'billing.invoice_voided' AND resource_id = $1",
+        )
+        .bind(draft.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit row");
+
+        assert_eq!(resource, "invoice");
+        assert_eq!(resource_id.as_deref(), Some(draft.to_string().as_str()));
+        assert_eq!(
+            details["stripeVoided"],
+            serde_json::Value::Bool(false),
+            "a local-only invoice records an honest stripeVoided=false"
+        );
+
+        // Byte-exact re-derivation: the canonical 7-segment formula over the
+        // row's own columns (machine writer — empty user segment).
+        let recomputed = apexmail_lib::audit::audit_hash(
+            Some(&row_tenant),
+            None,
+            &action,
+            &resource,
+            resource_id.as_deref(),
+            &details,
+            timestamp,
+        );
+        assert_eq!(
+            recomputed, hash,
+            "the void audit row re-derives byte-exactly"
+        );
+
+        let expected_signature = apexmail_lib::audit::audit_log_signature(
+            previous_hash.as_deref(),
+            &hash,
+            "ivcov-audit-key-0123456789abcdef",
+        )
+        .expect("signs");
+        assert_eq!(expected_signature, signature);
+
+        // The row is LINKED into the platform chain: previous_hash is the
+        // head the append captured (NULL for the very first append on a
+        // fresh template, a real hash otherwise).
+        let head_seq: i64 =
+            sqlx::query_scalar("SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_one(&env.pool)
+                .await
+                .expect("chain head");
+        if previous_hash.is_none() {
+            assert_eq!(head_seq, 1, "the first append starts the chain at seq 1");
+        } else {
+            assert!(head_seq >= 2, "the append advanced the shared chain head");
+        }
+
+        match previous_key {
+            Some(value) => std::env::set_var("AUDIT_SIGNING_KEY", value),
+            None => std::env::remove_var("AUDIT_SIGNING_KEY"),
+        }
+        drop(guard);
+    });
+
+    // Stripe honesty: an invoice WITH a provider id must refuse the void
+    // when Stripe is unconfigured (status untouched — never a fake local
+    // success), and void BOTH sides when a Stripe (mock) accepts.
+    env_test!(void_with_a_stripe_invoice_is_honest_both_sides, |env| {
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+
+        let tenant = "ivcov_voidstripe";
+        seed_tenant(env, tenant).await;
+        let invoice =
+            seed_invoice_status(env, tenant, "pending", 6_000, Some("in_test_void_cov")).await;
+
+        // 1. Stripe UNCONFIGURED: refused, nothing changed, audit empty.
+        std::env::remove_var("STRIPE_SECRET_KEY");
+        std::env::remove_var("STRIPE_API_BASE_URL");
+        let error = void_invoice(&env.pool, void_input(tenant, invoice, "k-stripe-unconf"))
+            .await
+            .expect_err("unconfigured Stripe refuses");
+        match &error {
+            InvoiceVoidError::StripeUnavailable {
+                stripe_invoice_id,
+                status,
+                ..
+            } => {
+                assert_eq!(stripe_invoice_id, "in_test_void_cov");
+                assert_eq!(status, "pending");
+            }
+            other => panic!("expected StripeUnavailable, got {other:?}"),
+        }
+        let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
+            .bind(invoice)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(
+            status, "pending",
+            "the local row never moves without Stripe"
+        );
+        let audit_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.invoice_voided'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_rows, 0, "a refused void writes no audit event");
+
+        // 2. Stripe CONFIGURED (local mock accepting the void): both sides
+        // move, and the provider call carries the derived idempotency key.
+        let mock = Mock::default();
+        mock.route(
+            "/v1/invoices/in_test_void_cov/void",
+            200,
+            r#"{"id":"in_test_void_cov","status":"void"}"#,
+        );
+        let base = spawn_mock(mock.clone()).await;
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_ivcov");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let voided = void_invoice(&env.pool, void_input(tenant, invoice, "k-stripe-ok"))
+            .await
+            .expect("voids both sides");
+        assert!(matches!(voided.status, crate::types::InvoiceStatus::Void));
+
+        let call = mock
+            .last_call("/v1/invoices/in_test_void_cov/void")
+            .expect("Stripe void called");
+        assert_eq!(call.method, "POST");
+        assert_eq!(
+            call.headers.get("idempotency-key").map(String::as_str),
+            Some(format!("invoice-void:{}:k-stripe-ok", invoice.simple()).as_str()),
+            "the provider idempotency key derives from the local operation identity"
+        );
+        let audit_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.invoice_voided'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_rows, 1);
+
+        // 3. Stripe REFUSES (e.g. provider-side state): honest 4xx-shaped
+        // error, local row untouched.
+        let refused =
+            seed_invoice_status(env, tenant, "pending", 6_100, Some("in_test_refused")).await;
+        mock.route(
+            "/v1/invoices/in_test_refused/void",
+            400,
+            r#"{"error":{"message":"Invoice is already voided"}}"#,
+        );
+        let error = void_invoice(&env.pool, void_input(tenant, refused, "k-stripe-refused"))
+            .await
+            .expect_err("Stripe refusal propagates");
+        assert!(
+            matches!(&error, InvoiceVoidError::StripeFailed { message }
+                if message.contains("already voided")),
+            "{error:?}"
+        );
+        let status: String = sqlx::query_scalar("SELECT status::text FROM invoices WHERE id = $1")
+            .bind(refused)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "pending", "a Stripe refusal leaves the row pending");
+
+        match &previous {
+            (Some(key), Some(base_url)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", base_url);
+            }
+            (Some(key), None) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+            (None, Some(base_url)) => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::set_var("STRIPE_API_BASE_URL", base_url);
+            }
+            (None, None) => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+    });
 }

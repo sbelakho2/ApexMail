@@ -110,6 +110,20 @@ pub fn admin_router() -> Router<AppState> {
             post(admin_reset_dunning),
         )
         .route("/tenants/:tenantId/invoices", post(admin_create_invoice))
+        // DF-5 finding B — the invoice state machine's missing transitions,
+        // wired on the SAME operator surface (system-tenant + CP gate):
+        //   POST .../invoices/:invoiceId/void          draft/open → void
+        //   POST .../invoices/:invoiceId/credit-notes  paid-invoice refund
+        // The state machines live in billing-service (single writer); these
+        // handlers only gate + map errors + attribute the operator.
+        .route(
+            "/tenants/:tenantId/invoices/:invoiceId/void",
+            post(admin_void_invoice),
+        )
+        .route(
+            "/tenants/:tenantId/invoices/:invoiceId/credit-notes",
+            post(admin_issue_credit_note),
+        )
         .route("/reports/revenue", get(admin_get_revenue_report))
         .route("/reports/mrr", get(admin_get_mrr_report))
         .route("/reports/churn", get(admin_get_churn_report))
@@ -4540,6 +4554,262 @@ async fn admin_create_invoice(
             created_at: inserted.1,
             updated_at: inserted.2,
         })?),
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminVoidInvoiceBody {
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminCreditNoteBody {
+    /// Amount to credit in the invoice currency's smallest unit (cents).
+    /// Must be positive and within the invoice's remaining creditable
+    /// balance — the billing-service state machine enforces both.
+    amount: i64,
+    reason: String,
+}
+
+/// Map a billing-service [`billing_service::invoices::InvoiceVoidError`] to
+/// an honest HTTP answer. State-machine and provider refusals are 4xx WITH
+/// the refusing state/provider named — never a 500, never a fake success.
+fn invoice_void_error_response(error: billing_service::invoices::InvoiceVoidError) -> Response {
+    use billing_service::invoices::InvoiceVoidError as VoidError;
+    let (status, message) = match &error {
+        VoidError::InvoiceNotFound(id) => (
+            StatusCode::NOT_FOUND,
+            format!("Invoice {id} not found for this tenant"),
+        ),
+        VoidError::NotVoidable { invoice_id, status } => (
+            StatusCode::CONFLICT,
+            format!("Invoice {invoice_id} is in status '{status}': only draft or open (pending) invoices can be voided; refund a paid invoice with a credit note instead"),
+        ),
+        VoidError::StripeUnavailable { .. } | VoidError::StripeFailed { .. } => {
+            (StatusCode::CONFLICT, error.to_string())
+        }
+        // Infra faults (DB / audit pipeline): these are genuine 5xx-s —
+        // error honesty means the operator learns the write did NOT land,
+        // not that a user input was wrong.
+        VoidError::Db(_) | VoidError::Audit(_) | VoidError::Readback(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Invoice void failed and nothing was changed; retry the operation".to_string(),
+        ),
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// Map a billing-service [`billing_service::credit_notes::CreditNoteError`]
+/// to an honest HTTP answer for the admin refund route.
+fn credit_note_error_response(error: billing_service::credit_notes::CreditNoteError) -> Response {
+    use billing_service::credit_notes::CreditNoteError as NoteError;
+    let (status, message) = match &error {
+        NoteError::InvoiceNotFound(id) => (
+            StatusCode::NOT_FOUND,
+            format!("Invoice {id} not found for this tenant"),
+        ),
+        NoteError::InvoiceNotCreditable { invoice_id, status } => (
+            StatusCode::CONFLICT,
+            format!("Invoice {invoice_id} is in status '{status}': only paid, pending or uncollectible invoices can be credited"),
+        ),
+        NoteError::AmountExceedsInvoice => (
+            StatusCode::CONFLICT,
+            "Credit amount exceeds the invoice's remaining creditable balance".to_string(),
+        ),
+        NoteError::CurrencyMismatch { invoice_currency, wallet_currency } => (
+            StatusCode::CONFLICT,
+            format!("Invoice currency {invoice_currency} does not match wallet currency {wallet_currency}; refund via the payment provider instead"),
+        ),
+        NoteError::IdempotencyKeyReused { idempotency_key } => (
+            StatusCode::CONFLICT,
+            format!("Idempotency-Key {idempotency_key} was already used for a different credit note payload"),
+        ),
+        NoteError::Db(_) | NoteError::Audit(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Credit note failed and nothing was changed; retry the operation".to_string(),
+        ),
+    };
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// Header idempotency key shared by the void and credit-note admin routes —
+/// the same contract `admin_apply_credit` pins (F6): an explicit, bounded,
+/// non-blank `Idempotency-Key`.
+fn admin_operation_idempotency_key(headers: &HeaderMap) -> Result<String, Response> {
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Idempotency-Key header is required for invoice void / credit-note operations"
+                })),
+            )
+                .into_response()
+        })?;
+    if key.len() > 255 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Idempotency-Key header must be at most 255 characters"
+            })),
+        )
+            .into_response());
+    }
+    Ok(key.to_string())
+}
+
+/// POST /v1/billing/admin/tenants/:tenantId/invoices/:invoiceId/void
+///
+/// DF-5 finding B: the `void` transition the status filters referenced but
+/// no surface could express. The state machine (idempotency, Stripe-side
+/// void, audit event) lives in `billing_service::invoices::void_invoice`;
+/// this handler gates the operator, enforces the header idempotency
+/// contract, maps refusals to honest 4xx-s and attributes the operator on
+/// the platform audit chain.
+async fn admin_void_invoice(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((tenant_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(body): Json<AdminVoidInvoiceBody>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
+        return Ok(response);
+    }
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({ "error": "A non-empty reason is required to void an invoice" }),
+            ),
+        )
+            .into_response());
+    }
+    let idempotency_key = match admin_operation_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(response) => return Ok(response),
+    };
+
+    let invoice = billing_service::invoices::void_invoice(
+        &state.db,
+        billing_service::invoices::VoidInvoiceInput {
+            tenant_id: tenant_id.clone(),
+            invoice_id,
+            reason: reason.clone(),
+            idempotency_key: idempotency_key.clone(),
+        },
+    )
+    .await;
+
+    let invoice = match invoice {
+        Ok(invoice) => invoice,
+        Err(error) => return Ok(invoice_void_error_response(error)),
+    };
+
+    // Operator attribution on the platform audit chain — the voided invoice
+    // row itself carries the billing-service machine event
+    // (`billing.invoice_voided`); this row answers WHO ordered it (the same
+    // split `admin_apply_credit` uses for wallet credits).
+    crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(&tenant_id),
+        auth.user_id.as_deref(),
+        "billing.invoice_void",
+        "invoice",
+        Some(&invoice.id.to_string()),
+        serde_json::json!({
+            "invoiceNumber": invoice.invoice_number,
+            "status": invoice.status,
+            "reason": reason,
+            "idempotencyKey": idempotency_key,
+        }),
+        None,
+        None,
+    )
+    .await?;
+
+    Ok(billing_success_response(serde_json::to_value(invoice)?))
+}
+
+/// POST /v1/billing/admin/tenants/:tenantId/invoices/:invoiceId/credit-notes
+///
+/// Issues a credit note against an issued invoice (the paid-refund path:
+/// the paid part becomes wallet value once, exactly-once per idempotency
+/// key). All money semantics — creditable states, the creditable balance,
+/// the debt/refund split, replay safety — are the credit_notes.rs
+/// internals' contract; this handler never re-implements them.
+async fn admin_issue_credit_note(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((tenant_id, invoice_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(body): Json<AdminCreditNoteBody>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_admin_tenant_access(&state, &auth, &tenant_id).await {
+        return Ok(response);
+    }
+    let reason = body.reason.trim().to_string();
+    if reason.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "A non-empty reason is required to issue a credit note" })),
+        )
+            .into_response());
+    }
+    let idempotency_key = match admin_operation_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(response) => return Ok(response),
+    };
+
+    let note = billing_service::credit_notes::create_credit_note(
+        &state.db,
+        billing_service::credit_notes::CreateCreditNoteInput {
+            invoice_id,
+            amount: body.amount,
+            reason,
+            tenant_id: tenant_id.clone(),
+            idempotency_key: idempotency_key.clone(),
+        },
+    )
+    .await;
+
+    let note = match note {
+        Ok(note) => note,
+        Err(error) => return Ok(credit_note_error_response(error)),
+    };
+
+    // Operator attribution (same split as the void route).
+    crate::audit_log::insert_audit_log(
+        &state.db,
+        Some(&tenant_id),
+        auth.user_id.as_deref(),
+        "billing.credit_note_issued",
+        "credit_note",
+        Some(&note.id.to_string()),
+        serde_json::json!({
+            "invoiceId": note.invoice_id,
+            "amount": note.amount,
+            "currency": note.currency,
+            "debtReductionCents": note.debt_reduction_cents,
+            "refundedCents": note.refunded_cents,
+            "idempotencyKey": idempotency_key,
+        }),
+        None,
+        None,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        billing_success(serde_json::to_value(note)?),
     )
         .into_response())
 }

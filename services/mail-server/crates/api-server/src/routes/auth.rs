@@ -1837,6 +1837,7 @@ pub fn router() -> Router<AppState> {
         .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/mfa/setup", post(init_mfa_setup))
         .route("/mfa/confirm-setup", post(confirm_mfa_setup))
+        .route("/mfa/disable", post(disable_mfa))
         .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
@@ -1853,6 +1854,7 @@ pub fn router() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/refresh", post(refresh_token))
         .route("/change-password", post(change_password))
+        .route("/sessions", get(list_sessions))
         .route("/sessions/revoke", post(revoke_session))
 }
 
@@ -1863,6 +1865,7 @@ pub fn control_plane_alias_router() -> Router<AppState> {
         .route("/mfa/verify", post(complete_mfa_challenge))
         .route("/mfa/setup", post(init_mfa_setup))
         .route("/mfa/confirm-setup", post(confirm_mfa_setup))
+        .route("/mfa/disable", post(disable_mfa))
         .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
@@ -1872,6 +1875,7 @@ pub fn control_plane_alias_router() -> Router<AppState> {
         // Same documented JSON form as the canonical router (POST body token).
         .route("/verify-email", post(verify_email_post).get(verify_email))
         .route("/reset-password", post(reset_password))
+        .route("/sessions", get(list_sessions))
         .route("/logout", post(logout))
         .route("/refresh", post(refresh_token))
 }
@@ -1898,6 +1902,24 @@ pub struct SessionAuthResponse {
     pub user: UserInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_codes: Option<Vec<String>>,
+    /// DF-7: camelCase alias of `recovery_codes`, carried so clients pinned
+    /// to either spelling keep working. `/mfa/confirm-setup` returned
+    /// `recoveryCodes` while the login-flow `mfa/verify` returned
+    /// `recovery_codes`; both session responses now carry BOTH keys with
+    /// identical contents (snake primary + camel alias).
+    #[serde(rename = "recoveryCodes", skip_serializing_if = "Option::is_none")]
+    pub recovery_codes_camel: Option<Vec<String>>,
+}
+
+impl SessionAuthResponse {
+    fn new(expires_at: String, user: UserInfo, recovery_codes: Option<Vec<String>>) -> Self {
+        Self {
+            expires_at,
+            user,
+            recovery_codes_camel: recovery_codes.clone(),
+            recovery_codes,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2143,11 +2165,11 @@ async fn issue_session_response_with_codes_at(
 
     Ok((
         headers,
-        Json(SessionAuthResponse {
-            expires_at: exp.to_rfc3339(),
-            user: build_user_info(user),
+        Json(SessionAuthResponse::new(
+            exp.to_rfc3339(),
+            build_user_info(user),
             recovery_codes,
-        }),
+        )),
     )
         .into_response())
 }
@@ -3228,7 +3250,12 @@ async fn confirm_mfa_setup(
         StatusCode::OK,
         serde_json::json!({
             "mfaEnabled": true,
+            // DF-7: both spellings ride on every recovery-code response —
+            // `recoveryCodes` (this endpoint's original key, matching the
+            // camelCase convention of its siblings) and `recovery_codes`
+            // (the key the login-flow `mfa/verify` session responses carry).
             "recoveryCodes": recovery_codes,
+            "recovery_codes": recovery_codes,
         }),
     ))
 }
@@ -3253,6 +3280,290 @@ async fn mfa_status(
         "mfaEnabled": row.0,
         "roleRequiresMfa": role_requires_mfa(&row.1),
     })))
+}
+
+// ─── MFA disable (FX-2 FIX 1) ───────────────────────────────────────────────
+
+/// Per-user rate limit for `POST /v1/auth/mfa/disable` — a credential-gated
+/// destructive operation, throttled like `reset-password` (5 per 15 min).
+const MFA_DISABLE_RATE_LIMIT_MAX: i64 = 5;
+const MFA_DISABLE_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
+
+/// Request body for disabling MFA. Turning off the second factor requires
+/// the CURRENT password AND a currently-valid second factor (TOTP code or
+/// recovery code) — a stolen session alone is never sufficient (the same
+/// two-factor bar the login itself enforces).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisableMfaRequest {
+    pub current_password: String,
+    /// Optional TOTP code. One of `mfaCode` / `recoveryCode` is required
+    /// (blank fields are treated as absent, matching `/mfa/verify`).
+    #[serde(default, rename = "mfaCode", alias = "mfa_code")]
+    pub mfa_code: Option<String>,
+    #[serde(default, rename = "recoveryCode", alias = "recovery_code")]
+    pub recovery_code: Option<String>,
+}
+
+/// Disable MFA for the authenticated user.
+///
+/// Requires the CURRENT password plus a currently-valid second factor
+/// (TOTP code or recovery code), so phished/hijacked session alone cannot
+/// strip the account's protection. On success: `mfa_secret`,
+/// `mfa_recovery_hashes` are cleared, `mfa_enabled` flips false, the used
+/// recovery code is consumed, an `auth.mfa_disabled` audit row is written
+/// (actor + method), and every OTHER session of the user is revoked
+/// (per-session markers — the exact `change-password` precedent — so the
+/// caller's own session survives).
+async fn disable_mfa(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<DisableMfaRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = authenticated_user_id(&auth)?;
+
+    // Rate-limit BEFORE any password work so the endpoint cannot be used as
+    // an offline password/second-factor oracle (fail-closed on Redis errors,
+    // matching reset-password).
+    let client_ip = connect_info.as_ref().map(|ConnectInfo(addr)| {
+        extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+    });
+    let user_agent = headers.get("user-agent").and_then(|v| v.to_str().ok());
+    let rate_key = format!("apexmail:mfa_disable_rate:{user_id}");
+    if let Ok(mut conn) = state.redis.get().await {
+        let count: i64 = match deadpool_redis::redis::Script::new(INCR_EXPIRE_LUA)
+            .key(&rate_key)
+            .arg(MFA_DISABLE_RATE_LIMIT_WINDOW_SECS)
+            .invoke_async(&mut *conn)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, user_id = %user_id, "mfa-disable rate-limit INCR failed; rejecting request");
+                return Err(ApiError::Internal("rate limit check unavailable".into()));
+            }
+        };
+        if count > MFA_DISABLE_RATE_LIMIT_MAX {
+            return Err(ApiError::RateLimitedIn(MFA_DISABLE_RATE_LIMIT_WINDOW_SECS));
+        }
+    }
+
+    let mut user = sqlx::query_as::<_, UserRow>(
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret, mfa_recovery_hashes
+         FROM users WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(&auth.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+    // The stored secret is an at-rest envelope — decrypt in place so the
+    // second-factor check sees the plaintext base32 secret.
+    decrypt_mfa_secret_in_place(&mut user)?;
+
+    // There must be something to disable (also covers the mfa_enabled flag
+    // set with no usable secret — a Misconfigured enrollment can be
+    // re-enrolled, not "disabled").
+    let stored_secret = user
+        .mfa_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty());
+    if !user.mfa_enabled || stored_secret.is_none() {
+        return Err(ApiError::Validation(vec!["MFA is not enabled".into()]));
+    }
+    let secret = stored_secret.expect("checked non-empty above");
+    // Email-MFA enrollments carry the sentinel "email" instead of a base32
+    // secret; a submitted TOTP code can never verify against it, and feeding
+    // the literal into the shared TOTP lockout would let one account
+    // cross-lock every email-MFA user. Route those to the recovery-code
+    // factor honestly below.
+    let totp_capable = secret != "email";
+
+    // 1. CURRENT password (same message and verifier as change-password).
+    let password_valid =
+        verify_password_or_log(&body.current_password, &user.password_hash, user_id)?;
+    if !password_valid {
+        return Err(ApiError::Unauthorized("Invalid current password".into()));
+    }
+
+    // 2. A currently-valid second factor. The recovery-code consumption is
+    //    deliberately sequenced AFTER the password verdict so a wrong
+    //    password never burns a code.
+    let mfa_code = body
+        .mfa_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty());
+    let recovery_code = body
+        .recovery_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|code| !code.is_empty());
+
+    let method = match (mfa_code, recovery_code) {
+        (Some(code), _) if totp_capable => {
+            if !verify_totp_code_guarded(&state.redis, secret, code).await {
+                return Err(ApiError::Unauthorized("invalid MFA code".into()));
+            }
+            "totp"
+        }
+        (Some(_), _) => {
+            // Email-MFA account: no authenticator secret exists.
+            return Err(ApiError::Unauthorized("invalid MFA code".into()));
+        }
+        (None, Some(code)) => {
+            let consumed = verify_and_consume_recovery_code(
+                &state.db,
+                user_id,
+                &auth.tenant_id,
+                code,
+                user.mfa_recovery_hashes.as_ref(),
+            )
+            .await?;
+            if !consumed {
+                return Err(ApiError::Unauthorized("invalid MFA code".into()));
+            }
+            "recovery_code"
+        }
+        (None, None) => {
+            return Err(ApiError::Validation(vec![
+                "mfa_code or recovery_code is required".into(),
+            ]));
+        }
+    };
+
+    // 3. Revoke every OTHER session (change-password precedent): per-session
+    //    revocation markers land BEFORE the credential mutation so a Redis
+    //    outage aborts the disable instead of leaving sibling sessions live.
+    let ttl = state.config.jwt_expiry.as_secs();
+    let revoked_ids: Vec<String> = if auth.session_id.is_some() {
+        sqlx::query_scalar(
+            "DELETE FROM sessions WHERE user_id = $1::uuid AND id != $2 RETURNING id::text",
+        )
+        .bind(user_id)
+        .bind(auth.session_id.as_deref().unwrap_or(""))
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1::uuid RETURNING id::text")
+            .bind(user_id)
+            .fetch_all(&state.db)
+            .await?
+    };
+    for session_id in &revoked_ids {
+        revoke_session_marker(&state, session_id, ttl).await?;
+    }
+
+    // 4. Clear the enrollment. `mfa_recovery_hashes` is NOT NULL DEFAULT
+    //    '[]' (migration 025), so it resets to the empty array rather than
+    //    NULL; any recovery code consumed in step 2 is gone with it.
+    sqlx::query(
+        "UPDATE users
+         SET mfa_secret = NULL, mfa_enabled = false, mfa_recovery_hashes = '[]'::jsonb, updated_at = NOW()
+         WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(user_id)
+    .bind(&auth.tenant_id)
+    .execute(&state.db)
+    .await?;
+
+    // 5. Audit the actor + method.
+    insert_auth_audit_log(
+        &state,
+        &auth.tenant_id,
+        user_id,
+        "auth.mfa_disabled",
+        serde_json::json!({
+            "role": user.role,
+            "method": method,
+            "revoked_sessions": revoked_ids.len(),
+        }),
+        client_ip.as_deref(),
+        user_agent,
+    )
+    .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        method = method,
+        revoked_sessions = revoked_ids.len(),
+        "MFA disabled"
+    );
+
+    Ok(Json(serde_json::json!({ "mfaEnabled": false })))
+}
+
+// ─── Session inventory (FX-2 FIX 4) ────────────────────────────────────────
+
+/// Upper bound on the inventory returned by `GET /v1/auth/sessions` — the
+/// retention window of the table is the session TTL, so a bound well past
+/// any real concurrency keeps the response shape stable.
+const LIST_SESSIONS_LIMIT: i64 = 100;
+
+#[derive(Debug, Serialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    pub expires_at: String,
+    pub current: bool,
+}
+
+/// List the CALLER's active (unexpired) sessions.
+///
+/// Reads strictly `WHERE user_id = <caller>` — other users' sessions are
+/// unreachable by construction (tenant isolation rides on the same
+/// authenticated user id). `current` marks the session the request itself
+/// authenticated with. Pair with `POST /v1/auth/sessions/revoke` for
+/// per-session revocation.
+async fn list_sessions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Vec<SessionInfo>>, ApiError> {
+    let user_id = authenticated_user_id(&auth)?;
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            chrono::DateTime<Utc>,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<Utc>,
+        ),
+    >(
+        "SELECT id::text, created_at, ip_address, user_agent, expires_at
+         FROM sessions
+         WHERE user_id = $1::uuid AND expires_at > NOW()
+         ORDER BY created_at DESC
+         LIMIT $2",
+    )
+    .bind(user_id)
+    .bind(LIST_SESSIONS_LIMIT)
+    .fetch_all(&state.db)
+    .await?;
+
+    let sessions = rows
+        .into_iter()
+        .map(
+            |(id, created_at, ip_address, user_agent, expires_at)| SessionInfo {
+                current: auth.session_id.as_deref() == Some(id.as_str()),
+                id,
+                created_at: created_at.to_rfc3339(),
+                ip_address,
+                user_agent,
+                expires_at: expires_at.to_rfc3339(),
+            },
+        )
+        .collect();
+
+    Ok(Json(sessions))
 }
 
 #[derive(sqlx::FromRow)]
@@ -3833,6 +4144,32 @@ pub(crate) struct MintedApiKey {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
+/// Display prefix for an API key (FIX 3/B1): the shared 8-char head of the
+/// key plus the LAST 4 characters, joined by an ellipsis —
+/// `am_live_…abcd`. Char-boundary-safe: keys are ASCII today, but a short or
+/// non-ASCII-shaped key degrades to the head-only form instead of panicking.
+/// Must stay within the widened `api_keys.key_prefix VARCHAR(32)`
+/// (migration 237).
+pub(crate) fn display_key_prefix(raw_key: &str) -> String {
+    const HEAD: usize = 8;
+    const TAIL: usize = 4;
+    let head: String = raw_key.chars().take(HEAD).collect();
+    // Key too short to split without the tail overlapping the head — expose
+    // nothing beyond the head.
+    if raw_key.chars().count() <= HEAD + TAIL {
+        return head;
+    }
+    let tail: String = raw_key
+        .chars()
+        .rev()
+        .take(TAIL)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
+}
+
 /// Shared API key creation (F46): the JSON endpoint (`POST /v1/api-keys`)
 /// and the console form (`POST /web/api-keys`) BOTH go through this
 /// function, so scope authorization (F17), the expiry default/bounds, the
@@ -3882,15 +4219,15 @@ pub(crate) async fn mint_api_key(
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash =
         apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
-    // The persisted prefix must fit the api_keys.key_prefix VARCHAR(8) column.
-    // If the key is unusually short, store at most 8 chars (or half the key)
-    // to avoid exposing the full key.
-    let prefix_len = if raw_key.len() >= 8 {
-        8
-    } else {
-        raw_key.len().min(8).max(raw_key.len() / 2)
-    };
-    let key_prefix = raw_key[..prefix_len].to_string();
+    // B1 (FIX 3): the persisted prefix must DISTINGUISH keys — the raw key
+    // always starts with the shared `am_live_`, so the old first-8-chars
+    // prefix stored the literal 'am_live_' for every key and the API-keys
+    // list was unusable. The display form keeps the recognizable head and
+    // appends the LAST 4 characters: `am_live_…abcd` (13 chars, within the
+    // widened VARCHAR(32) from migration 237). The last-4 fragment is
+    // identification metadata, not a secret — the keyed-HMAC `key_hash`
+    // is what authenticates.
+    let key_prefix = display_key_prefix(&raw_key);
 
     let id = Uuid::new_v4();
 
@@ -4473,17 +4810,17 @@ async fn refresh_token(
 
     Ok((
         headers,
-        Json(SessionAuthResponse {
-            expires_at: exp.to_rfc3339(),
-            user: UserInfo {
+        Json(SessionAuthResponse::new(
+            exp.to_rfc3339(),
+            UserInfo {
                 id: user.id,
                 email: user.email,
                 name: user.name,
                 tenant_id: user.tenant_id,
                 role: user.role,
             },
-            recovery_codes: None,
-        }),
+            None,
+        )),
     ))
 }
 
@@ -4519,20 +4856,41 @@ mod tests {
 
     #[test]
     fn test_session_auth_response_serialisation() {
-        let resp = SessionAuthResponse {
-            expires_at: "2026-01-01T00:00:00Z".into(),
-            user: UserInfo {
+        let resp = SessionAuthResponse::new(
+            "2026-01-01T00:00:00Z".into(),
+            UserInfo {
                 id: Uuid::nil().to_string(),
                 email: "a@b.com".into(),
                 name: None,
                 tenant_id: Uuid::nil().to_string(),
                 role: "admin".into(),
             },
-            recovery_codes: None,
-        };
+            Some(vec!["CODE1".into(), "CODE2".into()]),
+        );
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["user"]["role"], "admin");
         assert!(json.get("token").is_none());
+        // DF-7: the recovery-code payload rides under BOTH spellings.
+        assert_eq!(
+            json["recovery_codes"],
+            serde_json::json!(["CODE1", "CODE2"])
+        );
+        assert_eq!(json["recoveryCodes"], serde_json::json!(["CODE1", "CODE2"]));
+        // Absent codes omit both keys.
+        let bare = SessionAuthResponse::new(
+            "2026-01-01T00:00:00Z".into(),
+            UserInfo {
+                id: Uuid::nil().to_string(),
+                email: "a@b.com".into(),
+                name: None,
+                tenant_id: Uuid::nil().to_string(),
+                role: "admin".into(),
+            },
+            None,
+        );
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(bare_json.get("recovery_codes").is_none());
+        assert!(bare_json.get("recoveryCodes").is_none());
     }
 
     #[test]
@@ -9688,6 +10046,18 @@ mod adversarial_auth_tests_3 {
         assert!(created.key.starts_with("am_"));
         assert_eq!(created.scopes, vec!["messages:send".to_string()]);
         assert!(created.expires_at.is_some());
+        // FIX 3 (B1): the persisted prefix is the DISTINGUISHING display
+        // form — shared head, ellipsis, last 4 of THIS key — never the
+        // literal 'am_live_' every key used to store.
+        assert_eq!(
+            created.key_prefix,
+            format!(
+                "{}…{}",
+                &created.key[..8],
+                &created.key[created.key.len() - 4..]
+            )
+        );
+        assert_ne!(created.key_prefix, "am_live_");
 
         // Default expiry is 90 days.
         let (_, Json(defaulted)) = create_api_key(
@@ -9795,6 +10165,15 @@ mod adversarial_auth_tests_3 {
         .expect("offset page");
         assert_eq!(offset_page.len(), 1);
         assert!(listed.iter().any(|k| k.prefix_matches(&created)));
+
+        // FIX 3 (B1): stored prefixes DISTINGUISH keys — pre-fix every row
+        // held the literal 'am_live_' and this set collapsed to size 1.
+        let prefixes: std::collections::HashSet<&str> =
+            listed.iter().map(|key| key.key_prefix.as_str()).collect();
+        assert!(
+            prefixes.len() >= 3,
+            "key prefixes must be distinguishable, got {prefixes:?}"
+        );
 
         // Revoke: own key 204, repeat/foreign/unknown 404.
         let revoke_auth = auth_with(&tenant, None, &["api-keys:write"]);
@@ -10812,6 +11191,604 @@ mod adversarial_auth_tests_3 {
     }
 }
 
+// ─── FX-2: MFA disable + session inventory (handler-level, DB + Redis) ──
+
+#[cfg(test)]
+mod adversarial_auth_tests_4 {
+    use super::*;
+    use crate::app::test_support::{test_config, test_state_over_with_config_and_redis};
+    use serde_json::json;
+    use sqlx::PgPool;
+
+    const TEST_PASSWORD: &str = "Sup3r#SecurePass";
+
+    fn redis_url_for(db: u32) -> Option<String> {
+        crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
+        let base = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let base = base.trim().trim_end_matches('/');
+        match base.rsplit_once('/') {
+            Some((host, last)) if last.parse::<u32>().is_ok() => Some(format!("{host}/{db}")),
+            _ => Some(format!("{base}/{db}")),
+        }
+    }
+
+    fn rsa_test_config() -> crate::config::Config {
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+            .expect("valid PKCS8 private key");
+        let mut config = test_config();
+        config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        config.jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public PEM")
+            .to_string();
+        config
+    }
+
+    struct Fx4 {
+        pool: PgPool,
+        state: AppState,
+        slug_prefix: String,
+    }
+
+    impl Fx4 {
+        async fn cleanup(&self) {
+            let pattern = format!("{}%", self.slug_prefix);
+            for table in ["sessions", "audit_logs", "users"] {
+                let _ = sqlx::query(&format!(
+                    "DELETE FROM {table} WHERE tenant_id IN \
+                     (SELECT id FROM tenants WHERE slug LIKE $1)"
+                ))
+                .bind(&pattern)
+                .execute(&self.pool)
+                .await;
+            }
+            let _ = sqlx::query("DELETE FROM tenants WHERE slug LIKE $1")
+                .bind(&pattern)
+                .execute(&self.pool)
+                .await;
+            let _ = self.pool.close().await;
+        }
+    }
+
+    /// Redis logical DBs 20/21/22 are owned by this module (see the registry in
+    /// `adversarial_auth_tests`).
+    async fn fx4(test_name: &str, redis_db: u32) -> Option<Fx4> {
+        let pool = crate::test_db::optional_pg_pool(test_name).await?;
+        let Some(url) = redis_url_for(redis_db) else {
+            pool.close().await;
+            return None;
+        };
+        let redis = deadpool_redis::Config::from_url(&url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        match redis.get().await {
+            Ok(mut conn) => {
+                let ok: Result<(), _> = deadpool_redis::redis::cmd("FLUSHDB")
+                    .query_async(&mut *conn)
+                    .await;
+                if ok.is_err() {
+                    eprintln!("skipping {test_name}: Redis unreachable");
+                    pool.close().await;
+                    return None;
+                }
+            }
+            Err(error) => {
+                eprintln!("skipping {test_name}: Redis unavailable: {error}");
+                pool.close().await;
+                return None;
+            }
+        }
+        let state =
+            test_state_over_with_config_and_redis(pool.clone(), rsa_test_config(), &url).await;
+        let slug_prefix = format!("authadv4{}", &Uuid::new_v4().simple().to_string()[..10]);
+        Some(Fx4 {
+            pool,
+            state,
+            slug_prefix,
+        })
+    }
+
+    async fn seed_tenant4(pool: &PgPool, slug_prefix: &str, tenant_id: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'Auth Adv4 Co', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(tenant_id)
+        .bind(format!("{slug_prefix}-{tenant_id}"))
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_user4(
+        pool: &PgPool,
+        tenant_id: &str,
+        email: &str,
+        role: &str,
+        mfa_enabled: bool,
+        mfa_secret: Option<&str>,
+        recovery_hashes: Option<serde_json::Value>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, mfa_secret, mfa_recovery_hashes, metadata,
+                                created_at, updated_at)
+             VALUES ($1, $2, $3, 'Adv4 User', $4, $5, 'active', true, $6, $7, COALESCE($8, '[]'::jsonb), '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(email)
+        .bind(bcrypt::hash(TEST_PASSWORD, 4).unwrap())
+        .bind(role)
+        .bind(mfa_enabled)
+        .bind(mfa_secret)
+        .bind(recovery_hashes)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        id
+    }
+
+    async fn seed_session4(
+        pool: &PgPool,
+        user_id: &Uuid,
+        tenant_id: &str,
+        session_id: &str,
+        expired: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, tenant_id, expires_at, created_at, ip_address, user_agent)
+             VALUES ($1, $2::uuid, $3, CASE WHEN $4 THEN NOW() - INTERVAL '1 hour' ELSE NOW() + INTERVAL '1 day' END,
+                     NOW() - INTERVAL '5 minutes', '203.0.113.9', 'adv4-agent/1.0')",
+        )
+        .bind(session_id)
+        .bind(user_id)
+        .bind(tenant_id)
+        .bind(expired)
+        .execute(pool)
+        .await
+        .expect("seed session");
+    }
+
+    fn auth4(tenant: &str, user_id: &Uuid, session_id: Option<&str>) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: Some(user_id.to_string()),
+            api_key_id: None,
+            session_id: session_id.map(str::to_string),
+            scopes: vec!["*".into()],
+        }
+    }
+
+    fn new_tenant_id4() -> String {
+        format!("tauth4{}", &Uuid::new_v4().simple().to_string()[..21])
+    }
+
+    // ── TOTP generation (mirrors apexmail_lib::mfa's SHA-256 TOTP) ──
+    fn totp_code4(secret_base32: &str, step_offset: i64) -> String {
+        use hmac::{Hmac, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let input = secret_base32.trim_end_matches('=').as_bytes();
+        let mut bits: u64 = 0;
+        let mut bit_count: u32 = 0;
+        let mut secret = Vec::new();
+        for &c in input {
+            let val = alphabet
+                .iter()
+                .position(|&a| a == c.to_ascii_uppercase())
+                .expect("valid base32") as u64;
+            bits = (bits << 5) | val;
+            bit_count += 5;
+            if bit_count >= 8 {
+                bit_count -= 8;
+                secret.push((bits >> bit_count) as u8);
+                bits &= (1u64 << bit_count) - 1;
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let counter = (now / TOTP_STEP_SECS) as i64 + step_offset;
+        let mut mac = HmacSha256::new_from_slice(&secret).expect("HMAC key");
+        mac.update(&(counter as u64).to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        let offset = (result[result.len() - 1] & 0x0f) as usize;
+        let code = u32::from_be_bytes([
+            result[offset],
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ]);
+        format!("{:06}", code % 1_000_000)
+    }
+
+    #[tokio::test]
+    async fn mfa_disable_requires_password_and_live_second_factor() {
+        let Some(fx) = fx4("adv4_mfa_disable", 20).await else {
+            return;
+        };
+        let tenant = new_tenant_id4();
+        seed_tenant4(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let secret = generate_mfa_secret().expect("totp secret");
+        let recovery = "ADV4RECOVERY1";
+        let email = format!("disable-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user4(
+            &fx.pool,
+            &tenant,
+            &email,
+            "member",
+            true,
+            Some(&secret),
+            Some(json!([apexmail_lib::mfa::hash_recovery_code(recovery)])),
+        )
+        .await;
+        // Two live sessions: the caller's + a sibling that must die.
+        seed_session4(&fx.pool, &user_id, &tenant, "current-session", false).await;
+        seed_session4(&fx.pool, &user_id, &tenant, "sibling-session", false).await;
+        let auth = auth4(&tenant, &user_id, Some("current-session"));
+
+        // Authz: no user identity (API-key principal) → 401; a user id that
+        // exists nowhere (or another tenant) → 404.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: None,
+                    api_key_id: Some("key".into()),
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                },
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: None,
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth4(&tenant, &Uuid::new_v4(), Some("x")),
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: None,
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Missing second factor: 400.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth.clone(),
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: None,
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+
+        // Wrong password: 401, enrollment untouched.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth.clone(),
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: "WrongPassword#12345".into(),
+                    mfa_code: Some(totp_code4(&secret, 0)),
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        let still_on: (bool, Option<String>) =
+            sqlx::query_as("SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1::uuid")
+                .bind(user_id)
+                .fetch_one(&fx.pool)
+                .await
+                .expect("reload user");
+        assert!(
+            still_on.0 && still_on.1.is_some(),
+            "wrong password must not disable"
+        );
+
+        // Wrong TOTP code: 401, enrollment untouched.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth.clone(),
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: Some("000000".into()),
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        let hashes: serde_json::Value =
+            sqlx::query_scalar("SELECT mfa_recovery_hashes FROM users WHERE id = $1::uuid")
+                .bind(user_id)
+                .fetch_one(&fx.pool)
+                .await
+                .expect("reload hashes");
+        assert_eq!(
+            hashes.as_array().unwrap().len(),
+            1,
+            "failed attempt must not burn the recovery code"
+        );
+
+        // Happy path: password + CURRENT TOTP code.
+        let Json(value) = disable_mfa(
+            State(fx.state.clone()),
+            auth.clone(),
+            None,
+            HeaderMap::new(),
+            Json(DisableMfaRequest {
+                current_password: TEST_PASSWORD.into(),
+                mfa_code: Some(totp_code4(&secret, 0)),
+                recovery_code: None,
+            }),
+        )
+        .await
+        .expect("disable mfa");
+        assert_eq!(value["mfaEnabled"], false);
+
+        // Enrollment cleared…
+        let row: (bool, Option<String>, serde_json::Value) = sqlx::query_as(
+            "SELECT mfa_enabled, mfa_secret, mfa_recovery_hashes FROM users WHERE id = $1::uuid",
+        )
+        .bind(user_id)
+        .fetch_one(&fx.pool)
+        .await
+        .expect("reload user");
+        assert!(!row.0, "mfa_enabled must flip false");
+        assert!(row.1.is_none(), "mfa_secret must be cleared");
+        assert_eq!(
+            row.2.as_array().unwrap().len(),
+            0,
+            "recovery hashes cleared"
+        );
+
+        // …audit row written with actor + method…
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND user_id = $2 AND action = 'auth.mfa_disabled'",
+        )
+        .bind(&tenant)
+        .bind(user_id.to_string())
+        .fetch_one(&fx.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_count, 1, "exactly one mfa_disabled audit row");
+
+        // …the OTHER session is revoked (row gone + per-session marker)…
+        let sibling_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = 'sibling-session'")
+                .fetch_one(&fx.pool)
+                .await
+                .expect("sibling count");
+        assert_eq!(sibling_rows, 0, "sibling session row must be deleted");
+        {
+            let mut conn = fx.state.redis.get().await.expect("redis");
+            let marked: bool = deadpool_redis::redis::cmd("EXISTS")
+                .arg(crate::middleware::auth::session_revoked_key(
+                    "sibling-session",
+                ))
+                .query_async(&mut *conn)
+                .await
+                .expect("marker exists");
+            assert!(marked, "sibling session must carry its revocation marker");
+        }
+
+        // …and the CALLER's session survives (change-password precedent).
+        let current_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE id = 'current-session'")
+                .fetch_one(&fx.pool)
+                .await
+                .expect("current count");
+        assert_eq!(current_rows, 1, "caller's session must survive");
+
+        // A second disable is refused: nothing left to disable.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth,
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: Some(totp_code4(&secret, 0)),
+                    recovery_code: None,
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn mfa_disable_accepts_recovery_code_and_consumes_it() {
+        let Some(fx) = fx4("adv4_mfa_disable_rc", 21).await else {
+            return;
+        };
+        let tenant = new_tenant_id4();
+        seed_tenant4(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let secret = generate_mfa_secret().expect("totp secret");
+        let recovery = "ADV4RECOVERY2";
+        let email = format!("rc-{}@example.com", Uuid::new_v4().simple());
+        let user_id = seed_user4(
+            &fx.pool,
+            &tenant,
+            &email,
+            "member",
+            true,
+            Some(&secret),
+            Some(json!([
+                apexmail_lib::mfa::hash_recovery_code(recovery),
+                apexmail_lib::mfa::hash_recovery_code("ADV4RECOVERY3")
+            ])),
+        )
+        .await;
+        let auth = auth4(&tenant, &user_id, None);
+
+        // Wrong recovery code: 401, no code burned.
+        assert!(matches!(
+            disable_mfa(
+                State(fx.state.clone()),
+                auth.clone(),
+                None,
+                HeaderMap::new(),
+                Json(DisableMfaRequest {
+                    current_password: TEST_PASSWORD.into(),
+                    mfa_code: None,
+                    recovery_code: Some("ADV4WRONGCODE".into()),
+                })
+            )
+            .await,
+            Err(ApiError::Unauthorized(_))
+        ));
+        let hashes: serde_json::Value =
+            sqlx::query_scalar("SELECT mfa_recovery_hashes FROM users WHERE id = $1::uuid")
+                .bind(user_id)
+                .fetch_one(&fx.pool)
+                .await
+                .expect("hashes");
+        assert_eq!(hashes.as_array().unwrap().len(), 2);
+
+        // Recovery-code variant disables MFA.
+        let Json(value) = disable_mfa(
+            State(fx.state.clone()),
+            auth,
+            None,
+            HeaderMap::new(),
+            Json(DisableMfaRequest {
+                current_password: TEST_PASSWORD.into(),
+                mfa_code: None,
+                recovery_code: Some(recovery.into()),
+            }),
+        )
+        .await
+        .expect("disable via recovery code");
+        assert_eq!(value["mfaEnabled"], false);
+        let row: (bool, Option<String>) =
+            sqlx::query_as("SELECT mfa_enabled, mfa_secret FROM users WHERE id = $1::uuid")
+                .bind(user_id)
+                .fetch_one(&fx.pool)
+                .await
+                .expect("reload");
+        assert!(!row.0 && row.1.is_none());
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND user_id = $2 AND action = 'auth.mfa_disabled' AND details->>'method' = 'recovery_code'",
+        )
+        .bind(&tenant)
+        .bind(user_id.to_string())
+        .fetch_one(&fx.pool)
+        .await
+        .expect("audit count");
+        assert_eq!(audit_count, 1, "audit must name the recovery_code method");
+
+        fx.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn session_inventory_lists_only_caller_sessions_with_current_marker() {
+        let Some(fx) = fx4("adv4_sessions", 22).await else {
+            return;
+        };
+        let tenant = new_tenant_id4();
+        seed_tenant4(&fx.pool, &fx.slug_prefix, &tenant).await;
+        let email = format!("sess-{}@example.com", Uuid::new_v4().simple());
+        let user_a = seed_user4(&fx.pool, &tenant, &email, "member", false, None, None).await;
+        let email_b = format!("sessb-{}@example.com", Uuid::new_v4().simple());
+        let user_b = seed_user4(&fx.pool, &tenant, &email_b, "member", false, None, None).await;
+
+        seed_session4(&fx.pool, &user_a, &tenant, "a-old", false).await;
+        seed_session4(&fx.pool, &user_a, &tenant, "a-current", false).await;
+        seed_session4(&fx.pool, &user_a, &tenant, "a-expired", true).await;
+        seed_session4(&fx.pool, &user_b, &tenant, "b-session", false).await;
+
+        // Caller A (session a-current): sees ONLY its own two live sessions,
+        // current marker exactly on a-current, the expired row filtered.
+        let Json(listed) = list_sessions(
+            State(fx.state.clone()),
+            auth4(&tenant, &user_a, Some("a-current")),
+        )
+        .await
+        .expect("list sessions");
+        let ids: Vec<&str> = listed.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "own live sessions only, got {ids:?}");
+        assert!(ids.contains(&"a-old") && ids.contains(&"a-current"));
+        assert!(
+            !ids.contains(&"a-expired"),
+            "expired sessions are not active"
+        );
+        assert!(
+            !ids.contains(&"b-session"),
+            "other users' sessions must never appear"
+        );
+        let currents: Vec<&str> = listed
+            .iter()
+            .filter(|s| s.current)
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(currents, vec!["a-current"], "exactly one current marker");
+        let shape = &listed[0];
+        assert!(!shape.created_at.is_empty() && !shape.expires_at.is_empty());
+        assert_eq!(shape.ip_address.as_deref(), Some("203.0.113.9"));
+        assert_eq!(shape.user_agent.as_deref(), Some("adv4-agent/1.0"));
+
+        // Session-less principal (API key auth) is refused: there is no user
+        // identity to inventory.
+        assert!(matches!(
+            list_sessions(
+                State(fx.state.clone()),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: None,
+                    api_key_id: Some("key".into()),
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                }
+            )
+            .await,
+            Err(ApiError::Unauthorized(_))
+        ));
+
+        fx.cleanup().await;
+    }
+}
+
 // ─── Adversarial unit tests for auth helpers ────────────────────────
 
 #[cfg(test)]
@@ -10902,6 +11879,25 @@ mod adversarial_auth_units {
             Err(ApiError::Validation(_))
         ));
         pool.close().await;
+    }
+
+    #[test]
+    fn display_key_prefix_distinguishes_keys_and_fits_the_column() {
+        // Standard key shape: `am_live_` + 32 random chars.
+        let key = "am_live_QWXYZabcdefghij1234567890abcdefghijklmn";
+        let prefix = display_key_prefix(key);
+        assert_eq!(prefix, "am_live_…klmn");
+        assert!(prefix.len() <= 32, "must fit VARCHAR(32)");
+        // Two real-shaped keys never collide on the display form (the whole
+        // point of FIX 3 — pre-fix both stored 'am_live_').
+        let other = "am_live_QWXYZabcdefghij1234567890abcdefghMNOPQR";
+        assert_ne!(display_key_prefix(other), prefix);
+        // Key too short to split degrades to the head-only form.
+        assert_eq!(display_key_prefix("am_live_"), "am_live_");
+        assert_eq!(display_key_prefix("am_live_ab"), "am_live_");
+        // Test keys get the same treatment.
+        let test_key = "am_test_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+        assert_eq!(display_key_prefix(test_key), "am_test_…3456");
     }
 
     #[tokio::test]

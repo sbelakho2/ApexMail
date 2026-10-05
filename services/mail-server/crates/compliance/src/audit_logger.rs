@@ -8,8 +8,6 @@
 #[cfg(test)]
 use chrono::Duration;
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -18,8 +16,6 @@ use uuid::Uuid;
 
 use crate::config::AuditConfig;
 use crate::types::*;
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Truncate a timestamp to whole microseconds — the exact precision Postgres
 /// `TIMESTAMPTZ` stores. Entry hashes cover the rfc3339 timestamp, so any
@@ -249,7 +245,7 @@ impl AuditLogger {
             &previous_hash,
         );
 
-        let signature = self.compute_signature(&hash)?;
+        let signature = self.compute_signature(previous_hash.as_deref(), &hash)?;
 
         let entry = AuditLogEntry {
             id,
@@ -631,21 +627,23 @@ impl AuditLogger {
                 };
             }
 
-            // Verify HMAC signature
+            // Verify HMAC signature over the chain link (previous_hash|hash)
+            // with the same key the canonical writers sign under.
             // coverage: justified — HMAC-SHA256 accepts EVERY key length, so
-            // `new_from_slice` on the configured signing key cannot fail; the
+            // signing with the configured key cannot fail; the
             // arm only keeps the match total.
-            let expected_sig = match self.compute_signature(&entry.hash) {
-                Ok(v) => v,
-                Err(e) => {
-                    return ChainValidationResult {
-                        valid: false,
-                        entries_checked: i + 1,
-                        first_invalid_entry: Some(entry.id.clone()),
-                        error: Some(e),
+            let expected_sig =
+                match self.compute_signature(entry.previous_hash.as_deref(), &entry.hash) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return ChainValidationResult {
+                            valid: false,
+                            entries_checked: i + 1,
+                            first_invalid_entry: Some(entry.id.clone()),
+                            error: Some(e),
+                        }
                     }
-                }
-            };
+                };
             if expected_sig != entry.signature {
                 return ChainValidationResult {
                     valid: false,
@@ -681,24 +679,31 @@ impl AuditLogger {
     ///
     /// E-2: verification spans BOTH the live table and the archive — archived
     /// rows used to vanish from verification after archival.
+    ///
+    /// DF-5 finding C: verification runs on the RAW column projection, not on
+    /// typed decodes — the canonical api-server/billing writers store
+    /// free-form action/resource vocabularies (`wallet.credit`,
+    /// `metering_event`) outside this crate's enum set, and a typed decode
+    /// ahead of the hash made `verify_chain` ERROR OUT on exactly the mixed-
+    /// writer chains it exists to attest (the shared platform chain is not
+    /// compliance-vocabulary-only). The hash payload is the raw strings, so
+    /// raw-string re-derivation is byte-identical for compliance-written
+    /// rows too (their `Display` strings ARE the stored strings).
     pub async fn verify_chain(
         &self,
         tenant_id: Option<&str>,
         start_date: Option<DateTime<Utc>>,
         end_date: Option<DateTime<Utc>>,
     ) -> Result<ChainValidationResult, String> {
-        let rows: Vec<AuditRow> = sqlx::query_as(
-            "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
-                    details, ip_address, user_agent, outcome, error_message,
-                    timestamp, hash, previous_hash, signature
-             FROM (SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
-                          details, ip_address, user_agent, outcome, error_message,
-                          timestamp, hash, previous_hash, signature
+        let rows: Vec<RawAuditRow> = sqlx::query_as(
+            "SELECT id, tenant_id, user_id, action, resource, resource_id,
+                    details, timestamp, hash, previous_hash, signature
+             FROM (SELECT id, tenant_id, user_id, action, resource, resource_id,
+                          details, timestamp, hash, previous_hash, signature
                    FROM audit_logs
                    UNION ALL
-                   SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
-                          details, ip_address, user_agent, outcome, error_message,
-                          timestamp, hash, previous_hash, signature
+                   SELECT id, tenant_id, user_id, action, resource, resource_id,
+                          details, timestamp, hash, previous_hash, signature
                    FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::timestamptz IS NULL OR timestamp >= $2)
@@ -712,12 +717,85 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        let entries: Vec<AuditLogEntry> = rows
-            .into_iter()
-            .map(|r| r.into_entry())
-            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.verify_raw_rows(&rows))
+    }
 
-        Ok(self.verify_chain_entries(&entries))
+    /// Re-derive every row's hash from its own canonical columns, verify the
+    /// HMAC chain-link signature, and verify the `previous_hash` linkage in
+    /// timestamp order. First failure names the entry.
+    fn verify_raw_rows(&self, rows: &[RawAuditRow]) -> ChainValidationResult {
+        if rows.is_empty() {
+            return ChainValidationResult {
+                valid: true,
+                entries_checked: 0,
+                first_invalid_entry: None,
+                error: None,
+            };
+        }
+
+        for (i, row) in rows.iter().enumerate() {
+            let expected_hash = apexmail_lib::audit::audit_hash(
+                row.tenant_id.as_deref(),
+                row.user_id.as_deref(),
+                &row.action,
+                &row.resource,
+                row.resource_id.as_deref(),
+                &row.details,
+                row.timestamp,
+            );
+            if expected_hash != row.hash {
+                return ChainValidationResult {
+                    valid: false,
+                    entries_checked: i + 1,
+                    first_invalid_entry: Some(row.id.clone()),
+                    error: Some(format!("Hash mismatch at entry {}", row.id)),
+                };
+            }
+
+            // coverage: justified — HMAC-SHA256 accepts EVERY key length, so
+            // signing with the configured key cannot fail; the arm only keeps
+            // the match total.
+            let expected_sig = match self.compute_signature(row.previous_hash.as_deref(), &row.hash)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return ChainValidationResult {
+                        valid: false,
+                        entries_checked: i + 1,
+                        first_invalid_entry: Some(row.id.clone()),
+                        error: Some(e),
+                    }
+                }
+            };
+            if expected_sig != row.signature {
+                return ChainValidationResult {
+                    valid: false,
+                    entries_checked: i + 1,
+                    first_invalid_entry: Some(row.id.clone()),
+                    error: Some(format!("Signature mismatch at entry {}", row.id)),
+                };
+            }
+
+            // Verify chain linkage.
+            if i > 0 {
+                let prev = &rows[i - 1];
+                if row.previous_hash.as_deref() != Some(&prev.hash) {
+                    return ChainValidationResult {
+                        valid: false,
+                        entries_checked: i + 1,
+                        first_invalid_entry: Some(row.id.clone()),
+                        error: Some(format!("Chain link broken at entry {}", row.id)),
+                    };
+                }
+            }
+        }
+
+        ChainValidationResult {
+            valid: true,
+            entries_checked: rows.len(),
+            first_invalid_entry: None,
+            error: None,
+        }
     }
 
     // ── Export ───────────────────────────────────────────────
@@ -979,6 +1057,29 @@ impl AuditLogger {
 
     // ── Hash & Signature Computation ────────────────────────
 
+    /// The platform-canonical audit row hash: SHA-256 over the 7-segment
+    /// pipe payload `tenant|user|action|resource|resource_id|details|
+    /// timestamp`, via the ONE shared implementation (`apexmail_lib::audit`)
+    /// the api-server and billing-service writers use.
+    ///
+    /// DF-5 finding C: this writer previously hashed a sorted-key JSON object
+    /// that folded `previousHash` (and, transitively, the whole chain state)
+    /// into the row hash — a formula NO canonical verifier could re-derive
+    /// from the stored row (live dogfood: 0/40 compliance-written rows
+    /// matched the canonical formula). If compliance ever appended to the
+    /// shared `audit_logs` chain again, every row after it would have been
+    /// unverifiable. The chain formula is now the canonical one.
+    ///
+    /// Deliberately NOT part of the hashed payload (matching every canonical
+    /// writer — the platform chain's byte contract): `id`, `session_id`,
+    /// `ip_address`, `user_agent`, `outcome` and `error_message`. They remain
+    /// stored, queryable columns; the `previous_hash` linkage and the HMAC
+    /// signature over `previous_hash|hash` are what make rewrites detectable,
+    /// and the per-chain append lock makes reordering detectable.
+    ///
+    /// Legacy compliance-formula rows: NONE exist (0/40 live at the fix),
+    /// so the canonical verifier rejecting any such row is correct-by-
+    /// construction — the legacy shape never shipped.
     #[allow(clippy::too_many_arguments)]
     fn compute_hash(
         &self,
@@ -997,41 +1098,41 @@ impl AuditLogger {
         timestamp: &DateTime<Utc>,
         previous_hash: &Option<String>,
     ) -> String {
-        // Deterministic JSON object with sorted keys (manual assembly)
-        let obj = serde_json::json!({
-            "action": action.to_string(),
-            "details": details,
-            "errorMessage": error_message,
-            "id": id,
-            "ipAddress": ip_address,
-            "outcome": outcome.to_string(),
-            "previousHash": previous_hash,
-            "resource": resource.to_string(),
-            "resourceId": resource_id,
-            "sessionId": session_id,
-            "tenantId": tenant_id,
-            "timestamp": timestamp.to_rfc3339(),
-            "userAgent": user_agent,
-            "userId": user_id,
-        });
-
-        // coverage: justified — `serde_json::to_string` over a
-        // `serde_json::Value` is infallible (Values carry no unserializable
-        // state); the fallback keeps the hash input total for type reasons.
-        let serialized = serde_json::to_string(&obj).unwrap_or_else(|e| {
-            tracing::error!(error = %e, "Failed to serialize audit log entry, using empty string");
-            String::new()
-        });
-        let mut hasher = Sha256::new();
-        hasher.update(serialized.as_bytes());
-        hex::encode(hasher.finalize())
+        // The ignored fields stay in the signature so linters show the full
+        // writer contract at the call sites; they are part of the STORED row,
+        // not the hashed payload.
+        let _ = (
+            id,
+            session_id,
+            ip_address,
+            user_agent,
+            outcome,
+            error_message,
+            previous_hash,
+        );
+        apexmail_lib::audit::audit_hash(
+            tenant_id.as_deref(),
+            user_id.as_deref(),
+            &action.to_string(),
+            &resource.to_string(),
+            resource_id.as_deref(),
+            details,
+            *timestamp,
+        )
     }
 
-    fn compute_signature(&self, hash: &str) -> Result<String, String> {
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
-            .map_err(|e| format!("Invalid HMAC key: {e}"))?;
-        mac.update(hash.as_bytes());
-        Ok(hex::encode(mac.finalize().into_bytes()))
+    /// HMAC-SHA256 signature over the chain LINK (`previous_hash|hash`),
+    /// keyed with the configured signing key (deployment
+    /// `AUDIT_SIGNING_KEY`). This is exactly how the canonical api-server and
+    /// billing-service writers sign: the signature rides ALONGSIDE the row —
+    /// covering the link the row hash deliberately excludes — never inside
+    /// the hash payload.
+    fn compute_signature(&self, previous_hash: Option<&str>, hash: &str) -> Result<String, String> {
+        apexmail_lib::audit::audit_log_signature(
+            previous_hash,
+            hash,
+            &String::from_utf8_lossy(&self.signing_key),
+        )
     }
 
     /// Persist an entry INSIDE the caller's transaction — the INSERT commits
@@ -1172,6 +1273,24 @@ fn generate_simple_pdf(entries: &[AuditLogEntry]) -> String {
 }
 
 // ─── DB row helper ─────────────────────────────────────────────
+
+/// Raw column projection for chain verification — NO typed decode of
+/// action/resource/outcome, because canonical writers outside this crate
+/// store free-form vocabularies (see [`AuditLogger::verify_chain`]).
+#[derive(sqlx::FromRow)]
+struct RawAuditRow {
+    id: String,
+    tenant_id: Option<String>,
+    user_id: Option<String>,
+    action: String,
+    resource: String,
+    resource_id: Option<String>,
+    details: serde_json::Value,
+    timestamp: DateTime<Utc>,
+    hash: String,
+    previous_hash: Option<String>,
+    signature: String,
+}
 
 #[derive(sqlx::FromRow)]
 struct AuditRow {
@@ -1315,6 +1434,11 @@ mod tests {
         let ts = Utc::now();
         let details = serde_json::json!({"key": "value"});
 
+        // The canonical payload hashes tenant|user|action|resource|
+        // resource_id|details|timestamp — the row id is a stored column, NOT
+        // part of the hash (a re-derivable hash can only cover columns every
+        // canonical verifier reads). Any HASHED field changing must move the
+        // hash.
         let h1 = logger.compute_hash(
             "id1",
             &Some("t1".into()),
@@ -1332,6 +1456,41 @@ mod tests {
             &None,
         );
         let h2 = logger.compute_hash(
+            "id1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &Some("r1".into()),
+            &details,
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
+        );
+        assert_ne!(h1, h2, "resource_id is part of the hashed payload");
+        let h3 = logger.compute_hash(
+            "id1",
+            &Some("t1".into()),
+            &None,
+            &None,
+            &AuditAction::Create,
+            &AuditResource::User,
+            &None,
+            &serde_json::json!({"key": "changed"}),
+            &None,
+            &None,
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &None,
+        );
+        assert_ne!(h1, h3, "details are part of the hashed payload");
+        // The row id alone does NOT move the hash (canonical byte contract).
+        let h4 = logger.compute_hash(
             "id2",
             &Some("t1".into()),
             &None,
@@ -1347,14 +1506,17 @@ mod tests {
             &ts,
             &None,
         );
-        assert_ne!(h1, h2);
+        assert_eq!(
+            h1, h4,
+            "the stored row id is deliberately outside the canonical payload"
+        );
     }
 
     #[test]
     fn test_compute_signature_deterministic() {
         let logger = test_logger();
-        let s1 = logger.compute_signature("testhash").unwrap();
-        let s2 = logger.compute_signature("testhash").unwrap();
+        let s1 = logger.compute_signature(None, "testhash").unwrap();
+        let s2 = logger.compute_signature(None, "testhash").unwrap();
         assert_eq!(s1, s2);
         assert_eq!(s1.len(), 64); // HMAC-SHA-256 hex
     }
@@ -1376,9 +1538,89 @@ mod tests {
             },
         );
 
-        let s1 = logger1.compute_signature("samehash").unwrap();
-        let s2 = logger2.compute_signature("samehash").unwrap();
+        let s1 = logger1.compute_signature(None, "samehash").unwrap();
+        let s2 = logger2.compute_signature(None, "samehash").unwrap();
         assert_ne!(s1, s2);
+    }
+
+    /// DF-5 finding C: the writer's row hash is byte-identical to the shared
+    /// canonical formula and to an independently hand-built 7-segment
+    /// payload. The legacy sorted-JSON shape (which folded previousHash into
+    /// the hash) produced hashes NO canonical verifier could re-derive —
+    /// 0/40 live rows matched; this pin keeps the canonical shape from
+    /// regressing.
+    #[test]
+    fn compute_hash_is_byte_parity_with_the_shared_canonical_formula() {
+        let logger = test_logger();
+        let ts = DateTime::parse_from_rfc3339("2026-10-04T23:00:53.250028Z")
+            .expect("fixed timestamp")
+            .with_timezone(&Utc);
+        let details = serde_json::json!({"why": "compliance", "n": 3});
+
+        let ours = logger.compute_hash(
+            "row-1",
+            &Some("ten_abc26chars123456789abc".into()),
+            &Some("usr_def26chars123456789abc".into()),
+            &Some("session-1".into()),
+            &AuditAction::Create,
+            &AuditResource::ApiKey,
+            &Some("key-1".into()),
+            &details,
+            &Some("192.168.1.1".into()),
+            &Some("TestAgent/1.0".into()),
+            &AuditOutcome::Success,
+            &None,
+            &ts,
+            &Some("prev-hash".into()),
+        );
+
+        // Independent hand-built canonical payload — note that the row's
+        // id/session/ip/user-agent/outcome/error_message/previous_hash are
+        // deliberately NOT hashed (the platform chain's byte contract).
+        let hand_built = format!(
+            "{}|{}|{}|{}|{}|{}|{}",
+            "ten_abc26chars123456789abc",
+            "usr_def26chars123456789abc",
+            "create",
+            "api_key",
+            "key-1",
+            serde_json::to_string(&details).expect("compact details"),
+            "2026-10-04T23:00:53.250028+00:00",
+        );
+        use sha2::Digest;
+        assert_eq!(
+            ours,
+            format!("{:x}", sha2::Sha256::digest(hand_built.as_bytes()))
+        );
+
+        // Same inputs through the shared module: identical hash.
+        assert_eq!(
+            ours,
+            apexmail_lib::audit::audit_hash(
+                Some("ten_abc26chars123456789abc"),
+                Some("usr_def26chars123456789abc"),
+                "create",
+                "api_key",
+                Some("key-1"),
+                &details,
+                ts,
+            )
+        );
+
+        // The signature covers previous_hash|hash — the same bytes the
+        // canonical api-server writer signs (link rides alongside, never
+        // inside the row hash).
+        use hmac::Mac;
+        let signature = logger
+            .compute_signature(Some("prev-hash"), &ours)
+            .expect("signs");
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(
+            "test-signing-key-that-is-at-least-32-chars-long!!".as_bytes(),
+        )
+        .expect("HMAC key");
+        mac.update(b"prev-hash|");
+        mac.update(ours.as_bytes());
+        assert_eq!(signature, hex::encode(mac.finalize().into_bytes()));
     }
 
     #[test]
@@ -1411,7 +1653,7 @@ mod tests {
             &ts,
             &None,
         );
-        let sig = logger.compute_signature(&hash).unwrap();
+        let sig = logger.compute_signature(None, &hash).unwrap();
 
         let entry = AuditLogEntry {
             id: "e1".into(),
@@ -1461,7 +1703,7 @@ mod tests {
             &ts1,
             &None,
         );
-        let sig1 = logger.compute_signature(&hash1).unwrap();
+        let sig1 = logger.compute_signature(None, &hash1).unwrap();
         let entry1 = AuditLogEntry {
             id: "e1".into(),
             tenant_id: Some("t1".into()),
@@ -1498,7 +1740,7 @@ mod tests {
             &ts2,
             &Some(hash1.clone()),
         );
-        let sig2 = logger.compute_signature(&hash2).unwrap();
+        let sig2 = logger.compute_signature(Some(&hash1), &hash2).unwrap();
         let entry2 = AuditLogEntry {
             id: "e2".into(),
             tenant_id: Some("t1".into()),
@@ -1545,7 +1787,7 @@ mod tests {
             &ts,
             &None,
         );
-        let sig = logger.compute_signature(&real_hash).unwrap();
+        let sig = logger.compute_signature(None, &real_hash).unwrap();
 
         let entry = AuditLogEntry {
             id: "e1".into(),
@@ -1594,7 +1836,7 @@ mod tests {
             &ts1,
             &None,
         );
-        let sig1 = logger.compute_signature(&hash1).unwrap();
+        let sig1 = logger.compute_signature(None, &hash1).unwrap();
         let entry1 = AuditLogEntry {
             id: "e1".into(),
             tenant_id: Some("t1".into()),
@@ -1632,7 +1874,9 @@ mod tests {
             &ts2,
             &wrong_prev,
         );
-        let sig2 = logger.compute_signature(&hash2).unwrap();
+        let sig2 = logger
+            .compute_signature(wrong_prev.as_deref(), &hash2)
+            .unwrap();
         let entry2 = AuditLogEntry {
             id: "e2".into(),
             tenant_id: Some("t1".into()),
@@ -2377,6 +2621,177 @@ mod db_tests {
             entry.previous_hash.as_deref(),
             Some("future-head-hash"),
             "the append chains onto the authoritative head"
+        );
+        pool.close().await;
+    }
+
+    /// DF-5 finding C — ONE canonical chain across writers. An api-server /
+    /// billing-service-style canonical row (hash + signature through the
+    /// shared `apexmail_lib::audit` formula — those crates' own tests pin
+    /// their writers to exactly these functions) is followed by a REAL
+    /// compliance `log()` append. The compliance row must LINK onto the
+    /// canonical row, the mixed-writer chain must verify green, and both
+    /// rows must re-derive byte-exactly from their stored columns.
+    #[tokio::test]
+    async fn compliance_rows_link_and_verify_across_canonical_writers() {
+        let Some((pool, logger)) = logger("mixed").await else {
+            return;
+        };
+        const TEST_KEY: &str = "unit-audit-key-0123456789abcdef";
+        let tenant = test_support::unique_tenant();
+
+        // ── Canonical writer row (api-server / billing-service shape) ─────
+        let canonical_details = serde_json::json!({"event": "wallet.credit", "amount": 500});
+        let canonical_ts = Utc::now() - Duration::seconds(10);
+        let canonical_hash = apexmail_lib::audit::audit_hash(
+            Some(&tenant),
+            Some("usr_operator26chars1234567"),
+            "wallet.credit",
+            "wallet",
+            Some("wallet-tx-1"),
+            &canonical_details,
+            canonical_ts,
+        );
+        let canonical_signature =
+            apexmail_lib::audit::audit_log_signature(None, &canonical_hash, TEST_KEY)
+                .expect("signs");
+        sqlx::query(
+            "INSERT INTO audit_logs
+               (id, tenant_id, user_id, session_id, action, resource, resource_id,
+                details, ip_address, user_agent, outcome, error_message,
+                timestamp, hash, previous_hash, signature)
+             VALUES ($1, $2, $3, NULL, 'wallet.credit', 'wallet', 'wallet-tx-1',
+                $4, NULL, NULL, 'success', NULL,
+                $5, $6, NULL, $7)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tenant)
+        .bind("usr_operator26chars1234567")
+        .bind(&canonical_details)
+        .bind(canonical_ts)
+        .bind(&canonical_hash)
+        .bind(&canonical_signature)
+        .execute(&pool)
+        .await
+        .expect("seed canonical writer row");
+
+        // ── The compliance writer appends to the SAME tenant chain ────────
+        let compliance_entry = logger
+            .log(
+                AuditAction::Export,
+                AuditResource::Billing,
+                Some("audit-export-1"),
+                serde_json::json!({"format": "csv"}),
+                AuditOutcome::Success,
+                None,
+                &ctx(&tenant),
+            )
+            .await
+            .expect("compliance append");
+
+        // Chain linkage ACROSS writers: the compliance row's previous_hash
+        // is the canonical row's hash.
+        assert_eq!(
+            compliance_entry.previous_hash.as_deref(),
+            Some(canonical_hash.as_str()),
+            "the compliance append chains onto the canonical writer's row"
+        );
+
+        // Mixed-writer verification is GREEN (same formula, same signature).
+        let verdict = logger
+            .verify_chain(Some(&tenant), None, None)
+            .await
+            .expect("verify");
+        assert!(verdict.valid, "mixed-writer chain must verify: {verdict:?}");
+        assert_eq!(verdict.entries_checked, 2);
+
+        // Byte-exact re-derivation of BOTH stored rows from their columns —
+        // the property DF-5c found broken for compliance rows (0/40).
+        let rows: Vec<(
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+            String,
+        )> = sqlx::query_as(
+            "SELECT action, user_id, resource, resource_id, tenant_id, details,
+                    timestamp, hash, previous_hash, signature
+             FROM audit_logs WHERE tenant_id = $1 ORDER BY timestamp ASC",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("read rows");
+        assert_eq!(rows.len(), 2);
+        for (
+            action,
+            user_id,
+            resource,
+            resource_id,
+            row_tenant,
+            details,
+            timestamp,
+            hash,
+            previous_hash,
+            signature,
+        ) in rows
+        {
+            let recomputed = apexmail_lib::audit::audit_hash(
+                row_tenant.as_deref(),
+                user_id.as_deref(),
+                &action,
+                &resource,
+                resource_id.as_deref(),
+                &details,
+                timestamp,
+            );
+            assert_eq!(recomputed, hash, "row hash must re-derive from columns");
+            let expected_signature =
+                apexmail_lib::audit::audit_log_signature(previous_hash.as_deref(), &hash, TEST_KEY)
+                    .expect("signs");
+            assert_eq!(
+                expected_signature, signature,
+                "signature must re-derive from the chain link"
+            );
+        }
+        pool.close().await;
+    }
+
+    /// Legacy compliance-formula rows NEVER shipped (0/40 live at the fix):
+    /// a row whose stored hash does not re-derive under the canonical
+    /// formula is REJECTED by the canonical verifier — documented decision,
+    /// not an accident.
+    #[tokio::test]
+    async fn canonical_verifier_rejects_non_canonical_legacy_rows() {
+        let Some((pool, logger)) = logger("legacy").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        sqlx::query(
+            "INSERT INTO audit_logs
+               (id, tenant_id, action, resource, outcome, timestamp, hash, signature)
+             VALUES ('legacy-row', $1, 'create', 'api_key', 'success', NOW() - interval '5 seconds',
+                     'legacy-formula-hash-not-re-derivable', 'sig')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed legacy row");
+
+        let verdict = logger
+            .verify_chain(Some(&tenant), None, None)
+            .await
+            .expect("verify");
+        assert!(!verdict.valid, "a non-canonical row must not verify");
+        assert_eq!(
+            verdict.first_invalid_entry.as_deref(),
+            Some("legacy-row"),
+            "the legacy row itself is named as the first invalid entry"
         );
         pool.close().await;
     }

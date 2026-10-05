@@ -255,6 +255,16 @@ pub struct PreparedEmail {
     pub mime_cc: Vec<Mailbox>,
     /// F26: structured Reply-To mailbox (display-name capable).
     pub reply_to: Option<Mailbox>,
+    /// Display name for the MIME `From:` mailbox. NEVER part of the
+    /// envelope: the SMTP MAIL FROM / relay envelope uses the bare
+    /// `from` address (a display name in MAIL FROM is a protocol
+    /// violation, and the outbound relay copies `from` verbatim).
+    pub from_name: Option<String>,
+    /// Per-message SES configuration set (a dedicated-IP pool name from
+    /// `dedicated_ips.ses_pool_name`, carried in job metadata as `ip_pool`).
+    /// Overrides the deployment-wide `ses.configuration_set` for THIS send;
+    /// `None` keeps the global assignment.
+    pub ses_configuration_set: Option<String>,
     pub subject: String,
     pub html: Option<String>,
     pub text: Option<String>,

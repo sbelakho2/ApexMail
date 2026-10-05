@@ -537,6 +537,7 @@ pub fn build_app(state: AppState) -> Router {
     let admin = Router::new()
         .nest("/v1/admin/tenants", routes::admin::tenants::router())
         .nest("/v1/admin/features", routes::admin::features::router())
+        .nest("/v1/admin/mailboxes", routes::admin::mailboxes::router())
         .nest("/v1/admin/gdpr", routes::admin::gdpr::router())
         .nest("/v1/admin/secrets", routes::admin::secrets::router())
         .nest("/v1/admin/audit", routes::admin::audit::router())
@@ -660,6 +661,7 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/scim", routes::scim::router())
         .nest("/v1/billing", routes::billing::router())
         .nest("/v1/campaigns", routes::campaigns::router())
+        .nest("/v1/segments", routes::segments::router())
         .nest("/v1/contacts", routes::contacts::router())
         .nest("/v1/lists", routes::lists::router())
         .nest("/v1/dashboard", routes::dashboard::router())
@@ -5698,13 +5700,15 @@ mod tests {
     async fn stripe_webhook_ingest_mounts_when_secret_configured() {
         // Dogfood finding A (2026-10-05): /webhooks/stripe was mounted only
         // by the billing-service binary, which has no container in any
-        // deployed topology — every provider delivery 404'd. With a secret
-        // configured the route must exist on the api-server and refuse a
-        // garbage signature (400, never 404/405); nextest runs one process
-        // per test, so the env pin is isolated.
+        // deployed topology — every provider delivery 404'd. The route is
+        // now ALWAYS mounted: with a secret a garbage signature is refused
+        // (400); without a secret the handler answers a retryable 503 (Stripe
+        // keeps replaying across the misconfiguration window) and NEVER 404.
+        // nextest runs one process per test, so the env pin is isolated.
         std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_dogfood_mount_probe");
         let app = test_app().await;
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -5726,7 +5730,32 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "a garbage signature must be signature-refused"
         );
+
+        // Unconfigured secret: still mounted, retryable 503 — never 404.
         std::env::remove_var("STRIPE_WEBHOOK_SECRET");
+        let app_unconfigured = test_app().await;
+        let resp = app_unconfigured
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/stripe")
+                    .header("content-type", "application/json")
+                    .header("stripe-signature", "t=1,v1=deadbeef")
+                    .body(Body::from("{\"id\":\"evt_probe\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "ingest route must be mounted even without a secret"
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unconfigured secret is server misconfiguration: retryable 503"
+        );
     }
 }
 // Build cache invalidation: 1785670948
@@ -6771,23 +6800,19 @@ mod adversarial_helper_tests {
     }
 }
 
-/// The Stripe webhook ingest, mounted on the public rate-limited stack when
-/// `STRIPE_WEBHOOK_SECRET` is configured. The handler authenticates purely
-/// by Stripe's HMAC signature (no session/API-key applies to provider
-/// callbacks) and is idempotent per event id, so replays and Stripe's
-/// at-least-once redelivery are safe. Without a secret the route stays
-/// absent — a 404 is honest, a signature-rejecting endpoint that can never
-/// succeed is not.
+/// The Stripe webhook ingest, ALWAYS mounted on the public rate-limited
+/// stack. The handler authenticates purely by Stripe's HMAC signature (no
+/// session/API-key applies to provider callbacks) and is idempotent per
+/// event id, so replays and Stripe's at-least-once redelivery are safe.
+/// A deployment without `STRIPE_WEBHOOK_SECRET` gets a retryable 503 from
+/// the handler — never a 404 (which would silently drop provider events
+/// and make the route's existence unverifiable).
 fn stripe_webhook_router(state: &AppState) -> Router<AppState> {
-    let secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
-    if secret.trim().is_empty() {
-        return Router::new();
-    }
     let billing_state = billing_service::AppState::new(
         state.db.clone(),
         state.redis.clone(),
         billing_service::config::BillingConfig {
-            stripe_webhook_secret: secret,
+            stripe_webhook_secret: std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default(),
             ..Default::default()
         },
     );

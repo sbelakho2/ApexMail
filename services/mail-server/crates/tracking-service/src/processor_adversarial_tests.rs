@@ -510,6 +510,7 @@ async fn flush_failure_reenqueues_with_retry_budget_and_drops_poison() {
         tenant_id: "tn_retry_wal".into(),
         message_id: unique("msg"),
         recipient: "retry@example.com".into(),
+        campaign_id: None,
         link_id: None,
         link_url: None,
         unsubscribe_reason: None,
@@ -862,6 +863,7 @@ fn wal_event(tenant: &str, message: &str, event_type: EventType) -> TrackingEven
         tenant_id: tenant.into(),
         message_id: message.into(),
         recipient: "residual@example.com".into(),
+        campaign_id: None,
         link_id: Some("lnk_1".into()),
         link_url: Some("https://example.com/r".into()),
         unsubscribe_reason: None,
@@ -884,11 +886,19 @@ async fn seed_wal(redis: &RedisPool, entries: &[String]) {
 }
 
 /// A live ClickHouse client for the OLAP ingest path (workspace test server).
+/// Honors the workspace's CLICKHOUSE_TEST_USER / CLICKHOUSE_TEST_PASSWORD
+/// convention (the compose server requires the apexmail app user; only the
+/// container's loopback-only `default` user is passwordless — which a host
+/// test can never use).
 fn live_clickhouse() -> clickhouse::Client {
     let url =
         std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+    let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
+    let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
     clickhouse::Client::default()
         .with_url(&url)
+        .with_user(user)
+        .with_password(password)
         .with_database("apexmail")
 }
 
@@ -2585,6 +2595,7 @@ async fn legacy_bare_wal_entries_still_flush() {
         tenant_id: tenant.clone(),
         message_id: unique("msg_legacy"),
         recipient: "legacy@example.com".into(),
+        campaign_id: None,
         link_id: None,
         link_url: None,
         unsubscribe_reason: None,

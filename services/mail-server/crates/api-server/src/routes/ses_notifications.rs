@@ -1467,33 +1467,102 @@ async fn process_click(
 
 /// Queue a webhook event for delivery to the tenant's registered endpoints.
 /// Uses Redis list as a lightweight queue (same pattern as MTA webhook_queue).
+/// Enqueue one SES feedback event for every subscribed, enabled webhook of
+/// the tenant — into the CANONICAL `webhook_queue` table the worker webhook
+/// processor drains. (This previously LPUSHed onto a Redis list
+/// `ses:webhook_queue` that NOTHING consumed: every SES-driven delivery —
+/// message.delivered / bounced / complained / opened / clicked — was
+/// silently dropped. The table is the one delivery path with retries, the
+/// circuit breaker and the SSRF guard.)
+///
+/// The queue id is a deterministic v5 UUID of (tenant, event type, message,
+/// recipient, webhook id, timestamp-second): an SNS replay of the same
+/// feedback collapses onto the same queue row via ON CONFLICT DO NOTHING.
+/// The payload uses the platform envelope {id,type,tenantId,timestamp,data}
+/// with the provider detail under `data`.
 async fn queue_webhook_event(
     state: &AppState,
     tenant_id: &str,
     event_type: &str,
     payload: &serde_json::Value,
 ) {
-    let event = serde_json::json!({
-        "tenantId": tenant_id,
-        "eventType": event_type,
-        "payload": payload,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
+    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+        0x77, 0x31, 0x9c, 0x02, 0x64, 0x1d, 0x4e, 0x07, 0x9a, 0x55, 0x2e, 0x8b, 0x41, 0x90, 0x6d,
+        0x14,
+    ]);
 
-    match state.redis.get().await {
-        Ok(mut conn) => {
-            let event_str = event.to_string();
-            let result: Result<(), _> = redis::cmd("LPUSH")
-                .arg("ses:webhook_queue")
-                .arg(&event_str)
-                .query_async(&mut *conn)
-                .await;
-            if let Err(e) = result {
-                warn!(error = %e, "Failed to queue SES webhook event");
-            }
+    let subscribed: Vec<(String,)> = match sqlx::query_as(
+        "SELECT id FROM webhooks \
+         WHERE tenant_id = $1 AND enabled = true \
+           AND (events ? $2 OR events ? '*')",
+    )
+    .bind(tenant_id)
+    .bind(event_type)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, event_type, "SES webhook subscription lookup failed");
+            return;
         }
-        Err(e) => {
-            warn!(error = %e, "Failed to get Redis connection for webhook queuing");
+    };
+    if subscribed.is_empty() {
+        return;
+    }
+
+    let message_id = payload
+        .get("messageId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let recipient = payload
+        .get("recipients")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    // Second granularity in the dedup key: an SNS redelivery of the SAME
+    // feedback shares the provider timestamp; genuinely distinct events a
+    // second apart stay distinct.
+    let identity = format!(
+        "{}:{}:{}:{}:{}",
+        tenant_id,
+        event_type,
+        message_id,
+        recipient,
+        chrono::Utc::now().timestamp()
+    );
+
+    for (webhook_id,) in subscribed {
+        let queue_id = format!(
+            "whj_{}",
+            uuid::Uuid::new_v5(&NAMESPACE, format!("{identity}:{webhook_id}").as_bytes()).simple()
+        );
+        let envelope = serde_json::json!({
+            "id": format!("evt_{}", uuid::Uuid::new_v4().simple()),
+            "type": event_type,
+            "tenantId": tenant_id,
+            "timestamp": timestamp,
+            "data": payload,
+        });
+        if let Err(error) = sqlx::query(
+            "INSERT INTO webhook_queue \
+             (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+             VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&queue_id)
+        .bind(&webhook_id)
+        .bind(tenant_id)
+        .bind(event_type)
+        .bind(&envelope)
+        .execute(&state.db)
+        .await
+        {
+            warn!(error = %error, event_type, "Failed to queue SES webhook event");
         }
     }
 }
@@ -2750,19 +2819,46 @@ mod adversarial_handler_tests {
         assert_eq!(event_row.1, "bounced");
         assert_eq!(event_row.2, fixture.recipient);
 
-        // Webhook queued for the stored tenant.
-        let queued: Vec<String> = redis_cmd::cmd("LRANGE")
-            .arg("ses:webhook_queue")
-            .arg(0)
-            .arg(-1)
-            .query_async(&mut *conn)
-            .await
-            .unwrap_or_default();
-        assert!(
-            queued
-                .iter()
-                .any(|entry| entry.contains("message.bounced") && entry.contains(&fixture.tenant)),
-            "bounce webhook queued: {queued:?}"
+        // Webhook queued for a SUBSCRIBED webhook of the stored tenant — on
+        // the CANONICAL webhook_queue table the worker processor drains (the
+        // previous Redis-list target had no consumer at all). Subscription
+        // is the filter: tenants without a subscribed webhook get nothing.
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled) \
+             VALUES ($1, $2, 'https://hooks.example.test/ses', 'whsec_test', \
+                     '\"message.bounced\"'::jsonb, true)",
+        )
+        .bind(format!(
+            "swh{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(&fixture.tenant)
+        .execute(&pool)
+        .await
+        .expect("seed subscribed webhook");
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_queue \
+             WHERE tenant_id = $1 AND event_type = 'message.bounced'",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("bounce webhook queue count");
+        assert_eq!(queued, 1, "exactly one bounce webhook queued");
+        // Replay collapses onto the same deterministic queue id.
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+        let queued_after_replay: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_queue \
+             WHERE tenant_id = $1 AND event_type = 'message.bounced'",
+        )
+        .bind(&fixture.tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("bounce webhook queue count after replay");
+        assert_eq!(
+            queued_after_replay, 1,
+            "replay must not duplicate the queue row"
         );
 
         // Replay: no duplicate suppression, no duplicate analytics row.

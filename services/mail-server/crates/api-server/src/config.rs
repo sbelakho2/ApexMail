@@ -634,6 +634,16 @@ fn validate_https_url(name: &str, value: &str) -> Result<(), ConfigError> {
             "{name} must use https in production"
         )));
     }
+    // The host must be one clients can actually dial: these URLs are
+    // composed into outbound email links and redirects, so an unspecified
+    // bind address (0.0.0.0 / ::) or an empty host would publish unreachable
+    // URLs into real messages.
+    let host = parsed.host_str().unwrap_or_default();
+    if host.is_empty() || host == "0.0.0.0" || host == "::" || host == "[::]" {
+        return Err(ConfigError::SecurityCheck(format!(
+            "{name} must name a reachable host, not an unspecified address (got {value})"
+        )));
+    }
     Ok(())
 }
 
@@ -686,7 +696,13 @@ impl Config {
             parse_optional_pem_list(env::var("JWT_PREVIOUS_PUBLIC_KEYS_PEM").ok());
         let api_key_hash_secret = env_required("API_KEY_HASH_SECRET")?;
         let webhook_signing_secret = env_required("WEBHOOK_SIGNING_SECRET")?;
-        let base_url = env_or("BASE_URL", "http://0.0.0.0:3000");
+        // The default must be a REACHABLE address: this value is composed
+        // into outbound email links (verification, reset, tracking) and
+        // OAuth redirects — an unspecified-address default bakes
+        // undialable http://0.0.0.0/... URLs into real messages. `localhost`
+        // is the useful dev default; production configurations are pinned
+        // to https by `validate_https_url` and must name a real host.
+        let base_url = env_or("BASE_URL", "http://localhost:8080");
         let cors_origins = match env::var("CORS_ORIGINS") {
             Ok(value) => parse_csv(&value),
             Err(_) => default_cors_origins(environment, &base_url),
@@ -1038,7 +1054,7 @@ impl Config {
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
             github_client_id: env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
-            oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://0.0.0.0:3000"),
+            oauth_redirect_base_url: env_or("OAUTH_REDIRECT_BASE_URL", "http://localhost:8080"),
 
             session_secret: session_secret_env
                 .clone()
@@ -2295,8 +2311,9 @@ mod adversarial_tests {
         assert_eq!(config.rate_limit_max_requests, 1000);
         assert_eq!(config.rate_limit_window_ms, 60_000);
         assert_eq!(config.max_inflight_requests, 75);
-        // Default base URL is 0.0.0.0 (not a localhost host) -> no CORS.
-        assert!(config.cors_origins.is_empty());
+        // Default base URL is http://localhost:8080 (a local host) -> the
+        // development wildcard CORS default applies.
+        assert_eq!(config.cors_origins, vec!["*".to_string()]);
         assert_eq!(config.ui_default_surface.as_deref(), Some("web"));
         assert!(config.session_secret.starts_with("dev-session-secret-"));
         assert!(config

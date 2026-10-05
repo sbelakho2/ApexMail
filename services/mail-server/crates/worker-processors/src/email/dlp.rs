@@ -263,6 +263,8 @@ mod tests {
         PreparedEmail {
             send_unit: "email_queue:dlp-test:r@example.test".into(),
             from: "s@example.test".into(),
+            from_name: None,
+            ses_configuration_set: None,
             to: "r@example.test".into(),
             mime_to: vec![],
             mime_cc: vec![],

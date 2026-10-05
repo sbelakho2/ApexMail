@@ -1,7 +1,8 @@
 +++
 title = "API Reference"
 description = "Authentication, core message endpoints, and the fastest way to send and inspect email with ApexMail."
-template = "prose.html"
+template = "prose-section.html"
+page_template = "prose.html"
 weight = 1
 +++
 

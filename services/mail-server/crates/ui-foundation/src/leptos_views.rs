@@ -1131,10 +1131,33 @@ fn render_campaign_editor_page(
     return_href: &str,
     primary_action_label: &str,
 ) -> String {
+    render_campaign_editor_page_with_data(
+        title,
+        breadcrumb_label,
+        return_href,
+        primary_action_label,
+        &Default::default(),
+        None,
+    )
+}
+
+/// Full-fidelity campaign editor. `editor` carries the tenant's REAL lists
+/// and segments plus (edit mode) the prefilled values; every control is a
+/// shared ui-foundation primitive (Input / Textarea / NativeSelect /
+/// NativeCheckbox / Label) so styling and a11y stay global.
+fn render_campaign_editor_page_with_data(
+    title: &str,
+    breadcrumb_label: &str,
+    return_href: &str,
+    primary_action_label: &str,
+    editor: &crate::view_data::CampaignEditorData,
+    campaign_id: Option<&str>,
+) -> String {
+    use crate::primitives::{Input, Label, NativeCheckbox, NativeSelect, SelectOption, Textarea};
+
     let breadcrumbs = format!(
         "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
-        return_href,
-        breadcrumb_label,
+        return_href, breadcrumb_label,
     );
     let draft_badge = Badge {
         text: "Draft",
@@ -1143,38 +1166,166 @@ fn render_campaign_editor_page(
         icon: Some("<span class=\"h-2.5 w-2.5 rounded-sm bg-warning\"></span>"),
     }
     .render_html();
-    // Native <select> — no combobox JS; the value is serialized by the
-    // browser when the form is submitted.
-    let audience_select = "<div><label class=\"text-sm font-medium leading-none\" for=\"campaign-audience\">Audience</label><select id=\"campaign-audience\" name=\"audience\" class=\"mt-2 flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\"><option value=\"vip\" selected>VIP Customers</option><option value=\"newsletter\">Newsletter Subscribers</option><option value=\"trial\">Trial Accounts</option></select></div>";
+
+    let text_input = |id: &'static str,
+                      name: &'static str,
+                      label: &'static str,
+                      value: &str,
+                      placeholder: &'static str| {
+        format!(
+            "<div class=\"space-y-2\">{}{}</div>",
+            Label {
+                html_for: Some(id),
+                text: label,
+                variant: "default",
+                size: "default",
+                required: false,
+                optional: false
+            }
+            .render_html(),
+            Input {
+                id: Some(id),
+                input_type: "text",
+                variant: "default",
+                size: "default",
+                placeholder,
+                value,
+                left_icon: None,
+                right_icon: None,
+                error: None,
+                disabled: false,
+                autocomplete: None,
+                required: false,
+                name: Some(name)
+            }
+            .render_html(),
+        )
+    };
+
+    // Audience: the tenant's REAL lists as a multi-select (listIds[]).
+    let list_options: Vec<SelectOption> = editor
+        .lists
+        .iter()
+        .map(|(id, name)| SelectOption {
+            value: id.as_str(),
+            label: name.as_str(),
+            disabled: false,
+            selected: editor.list_ids.contains(id),
+        })
+        .collect();
+    let audience_select = NativeSelect {
+        id: "campaign-lists",
+        name: "list_ids",
+        options: list_options,
+        required: false,
+        multiple: true,
+        size: Some(6),
+    }
+    .render_html();
+
+    // Segment: the tenant's saved segments (optional narrowing).
+    let mut segment_options = vec![SelectOption {
+        value: "",
+        label: "No segment",
+        disabled: false,
+        selected: editor.segment_id.is_empty(),
+    }];
+    segment_options.extend(editor.segments.iter().map(|(id, name)| SelectOption {
+        value: id.as_str(),
+        label: name.as_str(),
+        disabled: false,
+        selected: editor.segment_id == *id,
+    }));
+    let segment_select = NativeSelect {
+        id: "campaign-segment",
+        name: "segment_id",
+        options: segment_options,
+        required: false,
+        multiple: false,
+        size: None,
+    }
+    .render_html();
+
     let content_input = Textarea {
         id: Some("campaign-content"),
-        value: "",
+        value: editor
+            .edit
+            .as_ref()
+            .map(|e| e.html_body.as_str())
+            .unwrap_or(""),
         placeholder: "Paste your HTML content here...",
         variant: "default",
         resize: "vertical",
         max_length: Some(25_000),
         show_count: true,
-        // Server-side preview POSTs the draft to /web/campaigns/preview;
-        // the payload field is part of that form submission.
         name: Some("html_body"),
     }
     .render_html();
-    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label);
+
+    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</button>", primary_action_label);
+
+    let hidden_id = campaign_id
+        .map(|id| format!("<input type=\"hidden\" name=\"id\" value=\"{}\" />", id))
+        .unwrap_or_default();
 
     format!(
-        "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft. Scheduling stores the time only — nothing sends automatically, and the campaign still waits for you to press Start.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
+        "{breadcrumbs}\
+<div class=\"w-full max-w-3xl space-y-6\">\
+<section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section>\
+<form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
+<div class=\"space-y-2\">{name_label}{name_input}</div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft. Scheduling stores the time only — nothing sends automatically, and the campaign still waits for you to press Start.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"text-xs text-muted-foreground\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"text-xs text-muted-foreground\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
+<div class=\"space-y-2\">{content_label}{content_input}</div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"text-xs text-muted-foreground\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"text-xs text-muted-foreground\">The unsubscribe link is always included.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-3\"><div class=\"space-y-2\">{utm_source_label}{utm_source_input}</div><div class=\"space-y-2\">{utm_medium_label}{utm_medium_input}</div><div class=\"space-y-2\">{utm_campaign_label}{utm_campaign_input}</div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{throttle_label}{throttle_input}<p class=\"text-xs text-muted-foreground\">Maximum emails per hour for this campaign (0 = unlimited).</p></div><div class=\"space-y-2\">{ip_pool_label}{ip_pool_input}<p class=\"text-xs text-muted-foreground\">Optional dedicated-IP pool name to route this campaign through.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{timezone_label}{timezone_input}</div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Send-time optimization</p>{sto_box}<p class=\"text-xs text-muted-foreground\">Schedule each recipient at their optimal engagement hour.</p></div></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div>\
+</form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
         draft_badge = draft_badge,
         primary_action_label = primary_action_label,
+        hidden_id = hidden_id,
+        scheduled_value = editor.edit.as_ref().map(|e| e.scheduled_at.clone()).unwrap_or_default(),
         name_label = Label { html_for: Some("campaign-name"), text: "Campaign Name", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        name_input = Input { id: Some("campaign-name"), input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
+        name_input = Input { id: Some("campaign-name"), input_type: "text", variant: "default", size: "default", placeholder: "My awesome campaign", value: editor.edit.as_ref().map(|e| e.name.as_str()).unwrap_or(""), left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("name") }.render_html(),
         subject_label = Label { html_for: Some("campaign-subject"), text: "Subject Line", variant: "default", size: "default", required: true, optional: false }.render_html(),
-        subject_input = Input { id: Some("campaign-subject"), input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: "", left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("subject") }.render_html(),
-        audience_label = Label { html_for: None, text: "Audience", variant: "default", size: "default", required: true, optional: false }.render_html(),
+        subject_input = Input { id: Some("campaign-subject"), input_type: "text", variant: "default", size: "default", placeholder: "Enter email subject...", value: editor.edit.as_ref().map(|e| e.subject.as_str()).unwrap_or(""), left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: true, name: Some("subject") }.render_html(),
+        preview_label = Label { html_for: Some("campaign-preview-text"), text: "Preview Text", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        preview_input = Input { id: Some("campaign-preview-text"), input_type: "text", variant: "default", size: "default", placeholder: "Inbox snippet shown after the subject", value: &editor.preview_text, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("preview_text") }.render_html(),
+        from_label = Label { html_for: Some("campaign-from"), text: "Sender Address", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        from_input = Input { id: Some("campaign-from"), input_type: "text", variant: "default", size: "default", placeholder: "newsletter@yourcompany.com", value: &editor.from_email, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("from") }.render_html(),
+        from_name_label = Label { html_for: Some("campaign-from-name"), text: "Sender Name", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        from_name_input = Input { id: Some("campaign-from-name"), input_type: "text", variant: "default", size: "default", placeholder: "Your Company", value: &editor.from_name, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("from_name") }.render_html(),
+        reply_to_label = Label { html_for: Some("campaign-reply-to"), text: "Reply-To", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        reply_to_input = Input { id: Some("campaign-reply-to"), input_type: "text", variant: "default", size: "default", placeholder: "support@yourcompany.com", value: &editor.reply_to, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("reply_to") }.render_html(),
+        audience_label = Label { html_for: Some("campaign-lists"), text: "Audience Lists", variant: "default", size: "default", required: false, optional: false }.render_html(),
         audience_select = audience_select,
+        segment_label = Label { html_for: Some("campaign-segment"), text: "Segment", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        segment_select = segment_select,
         content_label = Label { html_for: Some("campaign-content"), text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
         content_input = content_input,
+        variables_label = Label { html_for: Some("campaign-variables"), text: "Variables", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        variables_input = text_input("campaign-variables", "variables", "Variables", &editor.variables, "month=October"),
+        track_opens_box = NativeCheckbox { id: "campaign-track-opens", name: "track_opens", checked: editor.track_opens, label: "Track opens" }.render_html(),
+        track_clicks_box = NativeCheckbox { id: "campaign-track-clicks", name: "track_clicks", checked: editor.track_clicks, label: "Track clicks" }.render_html(),
+        utm_source_label = Label { html_for: Some("campaign-utm-source"), text: "UTM Source", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        utm_source_input = Input { id: Some("campaign-utm-source"), input_type: "text", variant: "default", size: "default", placeholder: "email", value: &editor.utm_source, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("utm_source") }.render_html(),
+        utm_medium_label = Label { html_for: Some("campaign-utm-medium"), text: "UTM Medium", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        utm_medium_input = Input { id: Some("campaign-utm-medium"), input_type: "text", variant: "default", size: "default", placeholder: "newsletter", value: &editor.utm_medium, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("utm_medium") }.render_html(),
+        utm_campaign_label = Label { html_for: Some("campaign-utm-campaign"), text: "UTM Campaign", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        utm_campaign_input = Input { id: Some("campaign-utm-campaign"), input_type: "text", variant: "default", size: "default", placeholder: "january-launch", value: &editor.utm_campaign, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("utm_campaign") }.render_html(),
+        throttle_label = Label { html_for: Some("campaign-throttle"), text: "Throttle Rate", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        throttle_input = Input { id: Some("campaign-throttle"), input_type: "text", variant: "default", size: "default", placeholder: "1000", value: &editor.throttle_rate, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("throttle_rate") }.render_html(),
+        ip_pool_label = Label { html_for: Some("campaign-ip-pool"), text: "Dedicated IP Pool", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        ip_pool_input = Input { id: Some("campaign-ip-pool"), input_type: "text", variant: "default", size: "default", placeholder: "pool-name", value: &editor.ip_pool, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("ip_pool") }.render_html(),
+        timezone_label = Label { html_for: Some("campaign-timezone"), text: "Timezone", variant: "default", size: "default", required: false, optional: true }.render_html(),
+        timezone_input = Input { id: Some("campaign-timezone"), input_type: "text", variant: "default", size: "default", placeholder: "Europe/Tallinn", value: &editor.timezone, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("timezone") }.render_html(),
+        sto_box = NativeCheckbox { id: "campaign-sto", name: "send_time_optimization", checked: editor.send_time_optimization, label: "Optimize send time per recipient" }.render_html(),
         preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
         save_button = save_button,
     )
@@ -1552,11 +1703,20 @@ fn escape_attribute_value(value: &str) -> String {
 
 /// Pixel-identical reproduction of the web new-campaign page contract.
 pub fn web_campaigns_new_page() -> String {
-    render_campaign_editor_page(
+    web_campaigns_new_page_with_data(&Default::default())
+}
+
+/// Data-driven create editor: the tenant's REAL lists and segments feed the
+/// audience and segment selects (the previous placeholder options were
+/// never persisted anywhere).
+pub fn web_campaigns_new_page_with_data(editor: &crate::view_data::CampaignEditorData) -> String {
+    render_campaign_editor_page_with_data(
         "Create Campaign",
         "New Campaign",
         "/campaigns?page=1",
         "Save Draft",
+        editor,
+        None,
     )
 }
 
@@ -3238,6 +3398,24 @@ pub fn web_campaign_edit_page() -> String {
 /// campaign's id (hidden) and prefilled name/subject/content, and POSTs to
 /// the real update handler — editing updates the row instead of silently
 /// creating a duplicate.
+/// Data-driven edit editor: same full-fidelity form as create, prefilled
+/// from the row and posting to /web/campaigns/update with the hidden id.
+pub fn web_campaign_edit_page_with_data(editor: &crate::view_data::CampaignEditorData) -> String {
+    let id = editor
+        .edit
+        .as_ref()
+        .map(|e| e.id.clone())
+        .unwrap_or_default();
+    render_campaign_editor_page_with_data(
+        "Edit Campaign",
+        "Edit Campaign",
+        "/campaigns?page=1",
+        "Save Changes",
+        editor,
+        Some(id.as_str()),
+    )
+}
+
 pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditData) -> String {
     let breadcrumbs = render_page_breadcrumbs("Campaigns");
     format!(

@@ -1,7 +1,8 @@
 +++
 title = "Privacy Policy"
 description = "ApexMail Privacy Policy — how we collect, use, and protect your data."
-template = "prose.html"
+template = "prose-section.html"
+page_template = "prose.html"
 
 [extra]
 last_updated = "2026-05-02"
