@@ -6,9 +6,8 @@
 //! resolver (api-server + worker, same semantics) unions the segment's lists
 //! and excludes with the campaign's own and applies the match rules.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};

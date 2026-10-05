@@ -5286,28 +5286,6 @@ fn parse_campaign_editor_fields(
     ))
 }
 
-/// Tenant's lists + segments as (id, name), feeding the editor selects.
-async fn campaign_editor_choices(
-    state: &AppState,
-    tenant_id: &str,
-) -> (Vec<(String, String)>, Vec<(String, String)>) {
-    let lists: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name LIMIT 200",
-    )
-    .bind(tenant_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    let segments: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id::text, name FROM segments WHERE tenant_id = $1 ORDER BY name LIMIT 200",
-    )
-    .bind(tenant_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    (lists, segments)
-}
-
 async fn form_campaign_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -13448,21 +13426,6 @@ mod coverage_handler_tests {
             .collect();
         form.insert("_csrf".to_string(), token);
         (headers, form)
-    }
-
-    /// urlencoded body + headers for the handlers that parse `Bytes`
-    /// (multi-value forms).
-    pub(crate) fn signed_form_bytes(
-        config: &Config,
-        pairs: &[(&str, &str)],
-    ) -> (HeaderMap, axum::body::Bytes) {
-        let (headers, token) = cookie_headers(config);
-        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-        for (key, value) in pairs {
-            serializer.append_pair(key, value);
-        }
-        serializer.append_pair("_csrf", &token);
-        (headers, axum::body::Bytes::from(serializer.finish()))
     }
 
     pub(crate) fn unsigned_form(pairs: &[(&str, &str)]) -> HashMap<String, String> {

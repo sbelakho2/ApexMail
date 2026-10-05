@@ -578,8 +578,23 @@ async fn run_worker(
 
     // Start reply handler
     if settings.run_reply_handler {
+        // The AI classification layer (layer 2): deterministic first, then
+        // this. Enabled only by explicit opt-in with an endpoint; without
+        // both, the never-guessing static fallback stands (Unknown/0.0).
         let config = ReplyHandlerConfig {
             base: base_config("reply-handler", settings),
+            // Opt-in only: a classifier turned on by a default would send
+            // inbound mail to the AI service on every deployment upgrade.
+            llm_enabled: env::var("WORKER_REPLY_CLASSIFIER_AI_ENABLED")
+                .map(|value| value == "true" || value == "1")
+                .unwrap_or(false),
+            llm_endpoint: env::var("WORKER_REPLY_CLASSIFIER_AI_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            llm_api_key: env::var("WORKER_REPLY_CLASSIFIER_AI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(zeroize::Zeroizing::new),
             ..Default::default()
         };
 
@@ -774,11 +789,10 @@ async fn run_worker(
                             return;
                         }
                     };
-                    let conn = &conn;
                     let acquired = sqlx::query_scalar::<_, bool>(
                         "SELECT pg_try_advisory_lock(hashtext('apexmail:billing-maintenance'))",
                     )
-                    .fetch_one(conn)
+                    .fetch_one(&conn)
                     .await
                     .unwrap_or(false);
                     if !acquired {

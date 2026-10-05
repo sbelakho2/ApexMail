@@ -11,6 +11,7 @@ name = "billing-service"
 path = "src/bin/server.rs"
 
 [dependencies]
+platform-catalog = { path = "../platform-catalog" }
 moka.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
 billing-common = { path = "../billing-common" }

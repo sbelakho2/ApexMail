@@ -516,7 +516,7 @@ mod tests {
     /// hardens links with `rel="noopener noreferrer"`).
     #[test]
     fn sanitize_model_output_preserves_benign_text() {
-        let answer = "The Pro plan costs €65 per month with 150,000 emails included.";
+        let answer = "The Pro plan costs €89 per month with 150,000 emails included.";
         assert_eq!(sanitize_model_output(answer), answer);
         let html_answer = "<p>Hello <strong>world</strong> — see <a href=\"https://apexmail.ee/docs\">the docs</a>.</p>";
         let out = sanitize_model_output(html_answer);
@@ -574,11 +574,11 @@ mod tests {
     fn streaming_sanitizer_forwards_benign_tokens_losslessly() {
         let mut sink = StreamingSanitizer::new();
         let mut emitted = String::new();
-        for t in ["The Pro plan ", "costs €65 ", "per month."] {
+        for t in ["The Pro plan ", "costs €89 ", "per month."] {
             emitted.push_str(&sink.push(t));
         }
         emitted.push_str(&sink.finish());
-        assert_eq!(emitted, "The Pro plan costs €65 per month.");
+        assert_eq!(emitted, "The Pro plan costs €89 per month.");
     }
 
     /// A trailing partial tag at end-of-stream is flushed inert (escaped or

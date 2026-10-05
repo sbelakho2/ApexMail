@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn test_sanitize_output_clean() {
         let result =
-            sanitize_llm_output("The Pro plan costs €65/month and includes 150,000 emails.");
+            sanitize_llm_output("The Pro plan costs €89/month and includes 150,000 emails.");
         assert!(!result.was_modified);
     }
 
@@ -1218,10 +1218,10 @@ mod tests {
     #[test]
     fn test_sanitize_email_body_preserves_content() {
         let result = sanitize_email_body(
-            "Your Pro plan at €65/month includes 150,000 emails. Best regards, ApexMail AI",
+            "Your Pro plan at €89/month includes 150,000 emails. Best regards, ApexMail AI",
             false,
         );
-        assert!(result.contains("€65"));
+        assert!(result.contains("€89"));
         assert!(result.contains("ApexMail AI"));
     }
 

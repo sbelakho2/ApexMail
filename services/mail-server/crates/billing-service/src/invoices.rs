@@ -2982,6 +2982,7 @@ mod coverage_adversarial {
 
         // Idempotent replay: voiding the already-void draft returns the SAME
         // invoice and writes NO second audit row.
+
         async fn void_audit_rows(pool: &PgPool, invoice: Uuid) -> i64 {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM audit_logs
@@ -3021,6 +3022,19 @@ mod coverage_adversarial {
             .await
             .expect("voids");
 
+        /// `(action, resource, resource_id, tenant_id, details, timestamp,
+        /// hash, previous_hash, signature)` as the audit-logs query returns it.
+        type AuditRow = (
+            String,
+            String,
+            Option<String>,
+            String,
+            serde_json::Value,
+            chrono::DateTime<Utc>,
+            String,
+            Option<String>,
+            String,
+        );
         let (
             action,
             resource,
@@ -3031,17 +3045,7 @@ mod coverage_adversarial {
             hash,
             previous_hash,
             signature,
-        ): (
-            String,
-            String,
-            Option<String>,
-            String,
-            serde_json::Value,
-            chrono::DateTime<Utc>,
-            String,
-            Option<String>,
-            String,
-        ) = sqlx::query_as(
+        ): AuditRow = sqlx::query_as(
             "SELECT action, resource, resource_id, tenant_id, details,
                     timestamp, hash, previous_hash, signature
              FROM audit_logs

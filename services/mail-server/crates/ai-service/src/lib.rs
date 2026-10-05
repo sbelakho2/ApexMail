@@ -20,6 +20,7 @@ pub mod inference;
 pub mod knowledge;
 pub mod pentest;
 pub mod pipeline;
+pub mod reply_classify;
 pub mod retrieval;
 pub mod routes;
 pub mod sto;

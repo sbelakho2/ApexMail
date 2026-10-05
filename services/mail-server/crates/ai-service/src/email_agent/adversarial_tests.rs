@@ -254,7 +254,7 @@ fn agent_config(db_url: &str) -> EmailAnsweringConfig {
     }
 }
 
-const GOOD_REPLY: &str = "Hello John,\n\nThanks for reaching out. Your SPF record should include our servers; you can find the exact values under Dashboard → Domains. The Growth plan is €150 per month.\n\nBest regards,\nApexMail AI Assistant";
+const GOOD_REPLY: &str = "Hello John,\n\nThanks for reaching out. Your SPF record should include our servers; you can find the exact values under Dashboard → Domains. The Growth plan is €229 per month.\n\nBest regards,\nApexMail AI Assistant";
 
 // ── Config parsing ──────────────────────────────────────────────────────────
 

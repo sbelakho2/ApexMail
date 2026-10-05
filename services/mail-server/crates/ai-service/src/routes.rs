@@ -409,7 +409,7 @@ fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static 
 }
 
 /// Why a tenant-scoped route refused to resolve a tenant identity.
-enum TenantIdentityError {
+pub(crate) enum TenantIdentityError {
     /// Header absent or blank — the caller asserted no tenant at all.
     Missing,
     /// Header present but not a valid bounded identity.
@@ -425,7 +425,7 @@ enum TenantIdentityError {
 /// a caller that merely omits the header must not be able to put an
 /// arbitrary tenant in the request body and act as that tenant. The same
 /// bounded charset/length rules as [`tenant_rate_key_from_headers`] apply.
-fn required_tenant_identity(headers: &HeaderMap) -> Result<String, TenantIdentityError> {
+pub(crate) fn required_tenant_identity(headers: &HeaderMap) -> Result<String, TenantIdentityError> {
     let Some(value) = headers.get("x-apexmail-tenant-id") else {
         return Err(TenantIdentityError::Missing);
     };
@@ -727,7 +727,7 @@ async fn chat_history_handler(
     }
 }
 
-fn error_response_json(status: StatusCode, message: &str) -> Response {
+pub(crate) fn error_response_json(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
@@ -753,6 +753,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/domains/dns-records", post(domain_dns_handler))
         .route("/chat", post(chat_handler))
         .route("/admin/chat/history", post(chat_history_handler))
+        .route(
+            "/reply/classify",
+            post(crate::reply_classify::reply_classify_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_service_token,
@@ -1718,7 +1722,7 @@ mod tests {
             return;
         };
         let mock = spawn_scripted_llm(vec![LlmScript::Content(
-            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included.",
+            "The Pro plan costs \u{20ac}89 per month with 150,000 emails included.",
         )])
         .await;
         let config = AiConfig {
@@ -1744,7 +1748,7 @@ mod tests {
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(body["answer"].as_str().unwrap().contains("\u{20ac}65"));
+        assert!(body["answer"].as_str().unwrap().contains("\u{20ac}89"));
         // P1-GROUNDING rename: policy flag name on the wire contract.
         assert_eq!(body["passed_policy_verification"], true);
         assert!(body.get("passed_verification").is_none());

@@ -23,84 +23,81 @@ pub struct PlanFacts {
     pub retention_days: i64,
 }
 
-/// Mirrors `billing-service/src/plans.rs` seeds.
-pub static PLANS: LazyLock<[PlanFacts; 6]> = LazyLock::new(|| {
-    [
-        PlanFacts {
-            name: "Free",
-            price_eur: 0,
-            email_limit: 30_000,
-            api_call_limit: 300_000,
-            team: 1,
-            retention_days: 7,
-        },
-        PlanFacts {
-            name: "Starter",
-            price_eur: 25,
-            email_limit: 50_000,
-            api_call_limit: 500_000,
-            team: 5,
-            retention_days: 30,
-        },
-        PlanFacts {
-            name: "Pro",
-            price_eur: 65,
-            email_limit: 150_000,
-            api_call_limit: 2_000_000,
-            team: 10,
-            retention_days: 60,
-        },
-        PlanFacts {
-            name: "Growth",
-            price_eur: 150,
-            email_limit: 500_000,
-            api_call_limit: 5_000_000,
-            team: 25,
-            retention_days: 90,
-        },
-        PlanFacts {
-            name: "Scale",
-            price_eur: 350,
-            email_limit: 2_000_000,
-            api_call_limit: 20_000_000,
-            team: 50,
-            retention_days: 365,
-        },
-        PlanFacts {
-            name: "Enterprise",
-            price_eur: 3_000,
-            email_limit: 5_000_000,
-            api_call_limit: -1,
-            team: -1,
-            retention_days: 730,
-        },
-    ]
+/// DERIVED from `platform-catalog` — the canonical source the billing
+/// runtime seeds from. The catalog prices are euro CENTS; the chat/verifier
+/// surfaces speak whole EUR (the deployed catalog has no sub-euro monthly
+/// price). This cannot drift: the catalog row IS the value.
+pub static PLANS: LazyLock<Vec<PlanFacts>> = LazyLock::new(|| {
+    platform_catalog::PLANS
+        .iter()
+        .map(|row| PlanFacts {
+            name: row.display_name,
+            price_eur: row.price_monthly_cents / 100,
+            email_limit: row.email_limit,
+            api_call_limit: row.api_call_limit,
+            team: row.max_team_members,
+            retention_days: row.max_retention_days,
+        })
+        .collect()
 });
 
-/// PAYG per-email tier rates (EUR/email) by cumulative volume.
-pub const PAYG_TIERS: &[f64] = &[0.001, 0.0008, 0.0005, 0.0003];
-/// Subscription overage: EUR per 1,000 emails beyond the included volume.
-pub const OVERAGE_PER_1K: f64 = 0.40;
+/// PAYG per-email tier rates (EUR/email) by cumulative volume — derived
+/// from `platform-catalog`.
+pub static PAYG_TIERS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    platform_catalog::PAYG_TIERS_EUR_PER_EMAIL
+        .iter()
+        .map(|(_, rate)| *rate)
+        .collect()
+});
+/// Per-plan subscription overage rates (EUR per 1,000 emails beyond the
+/// included volume) — derived from the catalog. Plan order matches PLANS.
+pub static OVERAGE_PER_1K: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    platform_catalog::PLANS
+        .iter()
+        .map(|row| {
+            // millicents/email (cents/1000) → EUR per 1,000 emails:
+            // 80 millicents/email = 0.08 cents/email = €0.80 per 1,000.
+            row.overage_millicents_per_email
+                .map(|m| m as f64 / 100.0)
+                .unwrap_or(0.0)
+        })
+        .collect()
+});
 /// PAYG API calls: first 100K/month free, then EUR per 1,000 calls.
 pub const PAYG_API_PER_1K: f64 = 0.10;
 /// Paid plans may send into an overage allowance of +100% of the included
 /// volume before the hard quota gate; the excess is invoiced at period end.
 pub const OVERAGE_ALLOWANCE_PERCENT: i64 = 100;
 
-/// Canonical whole-EUR prices (verifier input).
+/// Canonical whole-EUR monthly prices (verifier input). PAYG is excluded:
+/// it is usage-priced with no monthly subscription price to verify.
 pub fn plan_prices() -> Vec<i64> {
-    PLANS.iter().map(|p| p.price_eur).collect()
+    PLANS
+        .iter()
+        .filter(|p| p.name != "Pay As You Go")
+        .map(|p| p.price_eur)
+        .collect()
 }
 
-/// Canonical email limits (verifier input).
+/// Canonical email limits (verifier input). PAYG excluded (unlimited, not a
+/// verifiable monthly limit).
 pub fn email_limits() -> Vec<i64> {
-    PLANS.iter().map(|p| p.email_limit).collect()
+    PLANS
+        .iter()
+        .filter(|p| p.name != "Pay As You Go")
+        .map(|p| p.email_limit)
+        .collect()
 }
 
-/// Canonical sub-EUR rates: PAYG tiers, overage, API overage (verifier input).
+/// Canonical sub-EUR rates: PAYG tiers, then the per-plan overage rates,
+/// then the PAYG API overage (verifier input; mirrors verifier::CANONICAL_RATES).
 pub fn canonical_rates() -> Vec<f64> {
     let mut r: Vec<f64> = PAYG_TIERS.to_vec();
-    r.push(OVERAGE_PER_1K);
+    for rate in OVERAGE_PER_1K.iter() {
+        if *rate > 0.0 {
+            r.push(*rate);
+        }
+    }
     r.push(PAYG_API_PER_1K);
     r
 }
@@ -162,9 +159,10 @@ pub fn shared_knowledge_markdown() -> String {
     let _ = write!(
         md,
         "\nPAYG per-email tiers: €0.001 (0–10K), €0.0008 (10K–100K), €0.0005 (100K–1M), €0.0003 (1M+); \
-first 100K API calls/month free, then €0.10/1K. Subscription overage: €0.40 per 1,000 emails \
-beyond the included volume — paid plans keep sending into a +{}% allowance and the excess is \
-invoiced at period end; free plans stop at the limit.\n\n{}\n\n{}\n\n{}\n",
+first 100K API calls/month free, then €0.10/1K. Subscription overage per 1,000 emails beyond \
+the included volume: Developer €0.80, Pro €0.60, Growth/Business €0.35 (Enterprise Cloud \
+contractual, €0.35 runtime default) — paid plans keep sending into a +{}% allowance and the \
+excess is invoiced at period end; free plans stop at the limit.\n\n{}\n\n{}\n\n{}\n",
         OVERAGE_ALLOWANCE_PERCENT,
         COMPLIANCE_FACTS,
         SECURITY_FACTS,
@@ -186,13 +184,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_matches_runtime_plans() {
-        // Mirror of billing-service seeds (kept in lockstep deliberately;
-        // a runtime catalog change must update this too — see module docs).
-        assert_eq!(plan_prices(), vec![0, 25, 65, 150, 350, 3000]);
+    fn catalog_is_the_canonical_source() {
+        // The catalog IS the source now: this pins the derived table to
+        // platform-catalog and carries the pricing review's numbers as the
+        // regression record.
+        assert_eq!(plan_prices(), vec![0, 29, 89, 229, 699, 1750]);
         assert_eq!(
             email_limits(),
-            vec![30_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000]
+            vec![3_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000]
         );
     }
 
@@ -212,7 +211,8 @@ mod tests {
     fn shared_knowledge_is_stable_for_prefix_caching() {
         // Byte-stable across calls: required for KV-prefix cache hits.
         assert_eq!(shared_knowledge_markdown(), shared_knowledge_markdown());
-        assert!(shared_knowledge_markdown().contains("€0.40 per 1,000"));
+        assert!(shared_knowledge_markdown().contains("Developer €0.80"));
+        assert!(shared_knowledge_markdown().contains("Pro €0.60"));
     }
 
     #[test]

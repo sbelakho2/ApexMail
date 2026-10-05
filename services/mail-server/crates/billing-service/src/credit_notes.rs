@@ -1245,6 +1245,19 @@ mod coverage_adversarial {
                 .await
                 .expect("credit note");
 
+            /// `(action, resource, resource_id, tenant_id, details, timestamp,
+            /// hash, previous_hash, signature)` as the audit-logs query returns it.
+            type AuditRow = (
+                String,
+                String,
+                Option<String>,
+                String,
+                serde_json::Value,
+                chrono::DateTime<chrono::Utc>,
+                String,
+                Option<String>,
+                String,
+            );
             let (
                 action,
                 resource,
@@ -1255,17 +1268,7 @@ mod coverage_adversarial {
                 hash,
                 previous_hash,
                 signature,
-            ): (
-                String,
-                String,
-                Option<String>,
-                String,
-                serde_json::Value,
-                chrono::DateTime<chrono::Utc>,
-                String,
-                Option<String>,
-                String,
-            ) = sqlx::query_as(
+            ): AuditRow = sqlx::query_as(
                 "SELECT action, resource, resource_id, tenant_id, details,
                         timestamp, hash, previous_hash, signature
                  FROM audit_logs

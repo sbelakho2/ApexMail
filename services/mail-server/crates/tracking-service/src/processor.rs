@@ -1275,7 +1275,7 @@ impl EventProcessor {
         // consumers inherit the events table's dedup semantics exactly.
         {
             let db = self.db.clone();
-            let deliverable: Vec<(String, String, String, Option<String>, Option<String>)> = events
+            let deliverable: Vec<DeliverableEvent> = events
                 .iter()
                 .filter(|ev| matches!(ev.event_type, EventType::Opened | EventType::Clicked))
                 .map(|ev| {
@@ -2031,17 +2031,15 @@ fn bump_suppression_retry(raw: &str) -> Option<String> {
 /// One delivery per (event, subscribed webhook) for tracking events. The
 // queue id is deterministic — `v5(event id, webhook id)` — so a duplicate
 /// event (ON CONFLICT DO NOTHING upstream) can never enqueue a second
+/// One deliverable tracking event:
+/// `(event id, tenant id, event type, message id, recipient)`.
+type DeliverableEvent = (String, String, String, Option<String>, Option<String>);
+
 /// delivery; a genuine event always does. Best-effort: a failure logs and
 /// the events remain the source of truth.
-async fn enqueue_tracking_event_webhooks(
-    db: &sqlx::PgPool,
-    events: &[(String, String, String, Option<String>, Option<String>)],
-) {
+async fn enqueue_tracking_event_webhooks(db: &sqlx::PgPool, events: &[DeliverableEvent]) {
     use std::collections::HashMap;
-    let mut by_tenant: HashMap<
-        &str,
-        Vec<&(String, String, String, Option<String>, Option<String>)>,
-    > = HashMap::new();
+    let mut by_tenant: HashMap<&str, Vec<&DeliverableEvent>> = HashMap::new();
     for event in events {
         by_tenant.entry(event.1.as_str()).or_default().push(event);
     }

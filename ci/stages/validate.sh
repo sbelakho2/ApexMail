@@ -299,6 +299,19 @@ validate_repo_gates() {
             python3 docs/marketing/check_pricing_parity.py
             python3 docs/marketing/check_comparison_freshness.py
         '
+        # Knowledge consistency (SalesCloser plan §9; gap analysis §4.1
+        # defect 1): the canonical catalog (crates/platform-catalog) must
+        # equal the billing seeds, the ai-service knowledge/verifier tables,
+        # the sales KB derivations and docs/pricing.md — the drift that once
+        # shipped a chat quoting Pro €65 while billing charged €89. The same
+        # invariants are pinned by nextest; this gate fails in validate,
+        # before anything compiles. Its --self-test proves the checker reacts
+        # to mutated fixtures (a gate that cannot fail is not a gate).
+        ci_check "knowledge consistency (canonical catalog)" bash -c '
+            set -eu
+            python3 tools/check_knowledge_consistency.py
+            python3 tools/check_knowledge_consistency.py --self-test
+        '
         # docs-lint (adopted from the KiwiCaptcha product): prose ratchet over
         # docs/ + the product root files. Baseline enforced; the integrity
         # check runs against the parent-commit baseline when available so a

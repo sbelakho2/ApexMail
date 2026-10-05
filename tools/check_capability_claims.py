@@ -106,6 +106,7 @@ FACT_ENV_VARS = {
     "spam_phishing_filtering": "MTA_SPAM_FILTER_ENABLED",
     "intrusion_detection_prevention": "MTA_IDS_ENABLED",
     "attachment_sandboxing": "MTA_ATTACHMENT_SCAN_ENABLED",
+    "ai_reply_classification": "WORKER_REPLY_CLASSIFIER_AI_ENABLED",
 }
 
 # Tree-evidence verifications for individual facts. Each entry lists
@@ -144,6 +145,22 @@ FACT_TREE_VERIFICATIONS = {
     ],
     "standby_regions": [
         ("docs/operations/disaster-recovery.md", "no second region", True),
+    ],
+    "ai_reply_classification": [
+        ("services/mail-server/crates/ai-service/src/reply_classify.rs", "reply_classify_handler", True),
+        ("services/mail-server/crates/worker-processors/src/reply_handler/ai.rs", "x-apexmail-tenant-id", True),
+        ("services/mail-server/crates/worker-processors/src/bin/worker.rs", "WORKER_REPLY_CLASSIFIER_AI_ENABLED", True),
+        (".env.production.example", "WORKER_REPLY_CLASSIFIER_AI_ENABLED=true", True),
+        ("services/mail-server/crates/integration-tests/tests/reply_classify_contract_tests.rs", "taxonomy_matches_the_worker_disposition_enum", True),
+    ],
+    "inbound_reply_mirroring": [
+        ("services/mail-server/crates/mta/src/servers/inbound.rs", "parse_inbound_mirrors", True),
+        ("services/mail-server/crates/worker-processors/src/reply_handler/processor.rs", "from_email IS NOT NULL", True),
+    ],
+    "mta_event_webhooks": [
+        ("services/mail-server/crates/mta/src/servers/util.rs", "queue_tenant_webhook_event", True),
+        ("services/mail-server/crates/mta/src/servers/inbound.rs", "message.inbound", True),
+        ("docs/api/webhooks.md", "### `message.inbound`", True),
     ],
     "arc_sealing": [
         ("docker-compose.yml", "SMTP_ARC_SEAL", False),

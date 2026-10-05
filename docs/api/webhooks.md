@@ -39,11 +39,14 @@ Webhooks allow you to receive HTTP POST requests when events happen in ApexMail,
 > `{"id":"evt_...","type":"recipient.unsubscribed","tenantId":"...","timestamp":"...","data":{...}}`.
 > The examples below show the shape of the `data` object. Also note which
 > events are currently produced: `recipient.unsubscribed` (tracking
-> service) and `message.bounced` / `message.complained` / `message.opened` /
-> `message.clicked` (SES feedback + tracking pipelines). Every event above
-> has a live producer: acceptance at the worker's transport-acceptance step,
-> delivery/bounce/complaint from SES feedback, opens/clicks from the
-> tracking event stream, and campaign lifecycle events
+> service), `message.inbound` (the MTA's inbound acceptance, including
+> VERP/DSN mail), `message.bounced` / `message.complained` (SES feedback AND
+> the MTA's own VERP-bounce / ARF ingestion), `message.opened` /
+> `message.clicked` (tracking pipelines). Every event above has a live
+> producer. Acceptance comes from the worker's transport-acceptance step, and
+> inbound acceptance from the MTA. Delivery, bounce and complaint come from
+> SES feedback and the MTA's bounce/ARF servers. Opens and clicks come from
+> the tracking event stream, and campaign lifecycle events
 > (`campaign.started` / `campaign.ab_winner_selected` / `campaign.completed`)
 > from the campaign worker. Deliveries land on the same queue the webhook
 > processor drains (retries, circuit breaker, SSRF guard), deduplicated per
@@ -67,6 +70,22 @@ Triggered when a message is accepted for delivery.
       "userId": "usr_123"
     }
   }
+}
+```
+
+### `message.inbound`
+
+Produced when the MTA accepts a message for a hosted domain (SMTP 250).
+`data.recipients` lists the accepted envelope recipients and
+`data.message_id` is the platform's `inb_...` identity.
+
+```json
+{
+  "event": "message.inbound",
+  "message_id": "inb_01H...",
+  "from": "prospect@example.com",
+  "recipients": ["sales@yourdomain.com"],
+  "timestamp": "2026-10-05T12:00:00Z"
 }
 ```
 

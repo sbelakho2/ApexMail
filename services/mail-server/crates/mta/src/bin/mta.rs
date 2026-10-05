@@ -285,7 +285,6 @@ async fn run_(
         let srv = Arc::new(BounceServer::new(
             config.bounce.clone(),
             pool.clone(),
-            redis_pool.clone(),
             config.bounce.hostname.clone(),
             verp_secret,
             config.verp.v2_enabled,

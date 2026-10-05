@@ -81,7 +81,6 @@ pub enum BounceType {
 pub struct BounceServer {
     config: BounceConfig,
     pool: PgPool,
-    redis: deadpool_redis::Pool,
     hostname: String,
     shutdown: Arc<Notify>,
     /// Active connections per IP — enforces `max_connections_per_ip`.
@@ -102,7 +101,6 @@ impl BounceServer {
     pub fn new(
         config: BounceConfig,
         pool: PgPool,
-        redis: deadpool_redis::Pool,
         hostname: String,
         verp_secret: Option<Vec<u8>>,
         verp_v2_enabled: bool,
@@ -110,7 +108,6 @@ impl BounceServer {
         Self {
             config,
             pool,
-            redis,
             hostname,
             shutdown: Arc::new(Notify::new()),
             connections: Arc::new(DashMap::new()),
@@ -704,7 +701,6 @@ impl BounceServer {
             Some(suppression_recipient.clone())
         };
         let payload = serde_json::json!({
-            "event": "bounce",
             "bounce_id": bounce_id,
             "original_message_id": claims.queue_id,
             "original_recipient": webhook_recipient,
@@ -715,15 +711,18 @@ impl BounceServer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-        if let Ok(mut conn) = self.redis.get().await {
-            // LPUSH + LTRIM: a dead consumer must not grow the list (and
-            // Redis memory) without bound.
-            if let Err(e) =
-                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
-            {
-                debug!(error = %e, "Failed to push bounce webhook to Redis queue");
-            }
-        }
+        // The bounce is durable (suppression written above); enqueue the
+        // `message.bounced` event into the canonical queue. The identity is
+        // the (queue message, recipient) pair, so a redelivered DSN for the
+        // same bounce collapses onto one queue row per webhook.
+        super::util::queue_tenant_webhook_event(
+            &self.pool,
+            &tenant_id,
+            "message.bounced",
+            &format!("{}:{}", claims.queue_id, suppression_recipient),
+            &payload,
+        )
+        .await;
 
         info!(
             bounce_id = %bounce_id,
@@ -2032,9 +2031,6 @@ mod tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
             .expect("lazy pool construction cannot fail with a well-formed URL");
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy redis pool construction");
         let config = BounceConfig {
             enabled: true,
             host: "127.0.0.1".into(),
@@ -2047,7 +2043,7 @@ mod tests {
             max_messages_per_connection: 100,
             max_messages_per_ip_per_hour: 2000,
         };
-        BounceServer::new(config, pool, redis, "bounce.test".into(), None, true)
+        BounceServer::new(config, pool, "bounce.test".into(), None, true)
     }
 
     async fn read_reply(
@@ -2369,13 +2365,9 @@ mod tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
             .unwrap();
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap();
         let server = std::sync::Arc::new(BounceServer::new(
             config,
             pool,
-            redis,
             "bounce.test".into(),
             None,
             true,
@@ -2455,16 +2447,24 @@ mod tests {
     }
 
     #[test]
-    fn webhook_push_is_trimmed_to_a_bounded_length() {
-        // The `mta:webhook_queue` Redis list must be trimmed after every
-        // LPUSH: with a dead consumer an unbounded list grows Redis memory
-        // without limit. Pinned against the compiled-in source (needles
-        // concat!-built so the test cannot match its own text).
+    fn webhook_events_go_to_the_canonical_consumer_queue() {
+        // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
+        // which NO component ever consumed — every inbound/bounce/complaint
+        // webhook was silently dropped. They now enter the canonical
+        // `webhook_queue` table the worker's webhook processor drains
+        // (retries, circuit breaker, SSRF guard). Pinned against the
+        // compiled-in source (needles concat!-built so the test cannot match
+        // its own text).
         let source = include_str!("bounce.rs");
-        let trim_needle = std::concat!("LT", "RIM");
+        let queue_call = std::concat!("super::util::queue_tenant_", "webhook_event");
+        let dead_push = std::concat!("super::util::push_", "webhook_bounded");
         assert!(
-            source.contains(trim_needle),
-            "the webhook push path must trim the queue to a bounded length"
+            source.contains(queue_call),
+            "the webhook path must enqueue into the canonical consumer queue"
+        );
+        assert!(
+            !source.contains(dead_push),
+            "the dead Redis-list push must not be called again"
         );
     }
 
@@ -2574,9 +2574,6 @@ mod tests {
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
             .expect("lazy pool");
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy redis pool");
         let config = BounceConfig {
             enabled: true,
             host: "127.0.0.1".into(),
@@ -2592,7 +2589,6 @@ mod tests {
         let server = std::sync::Arc::new(BounceServer::new(
             config,
             pool,
-            redis,
             "bounce.test".into(),
             None,
             true,
@@ -2897,17 +2893,7 @@ mod adversarial_db_tests {
         }
     }
 
-    fn redis_pool() -> deadpool_redis::Pool {
-        let url = std::env::var("TEST_REDIS_URL")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool")
-    }
-
-    fn test_server(pool: PgPool, redis: deadpool_redis::Pool) -> BounceServer {
+    fn test_server(pool: PgPool) -> BounceServer {
         BounceServer::new(
             BounceConfig {
                 enabled: true,
@@ -2922,7 +2908,6 @@ mod adversarial_db_tests {
                 max_messages_per_ip_per_hour: 2000,
             },
             pool,
-            redis,
             "bounce.test".into(),
             Some(SECRET.to_vec()),
             true,
@@ -3017,15 +3002,32 @@ mod adversarial_db_tests {
             .expect("suppression count")
     }
 
-    async fn webhook_payloads(server: &BounceServer, len: isize) -> Vec<String> {
-        let mut conn = server.redis.get().await.unwrap();
-        redis::cmd("LRANGE")
-            .arg("mta:webhook_queue")
-            .arg(0)
-            .arg(len - 1)
-            .query_async(&mut *conn)
+    /// Subscribe one enabled webhook to `event_type` for the tenant, so the
+    /// canonical-queue delivery path has an endpoint to fan out to.
+    async fn subscribe_webhook(pool: &PgPool, tenant: &str, event_type: &str) -> String {
+        let id = format!("whk_{}", &uuid::Uuid::new_v4().simple().to_string()[..22]);
+        sqlx::query(
+            r#"INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled)
+               VALUES ($1, $2, 'https://example.com/hook', 'whsec_test', $3::jsonb, true)"#,
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(serde_json::json!([event_type]).to_string())
+        .execute(pool)
+        .await
+        .expect("webhook fixture");
+        id
+    }
+
+    async fn queued_webhook_events(
+        pool: &PgPool,
+        tenant: &str,
+    ) -> Vec<(String, serde_json::Value)> {
+        sqlx::query_as("SELECT event_type, payload FROM webhook_queue WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_all(pool)
             .await
-            .unwrap()
+            .expect("webhook_queue")
     }
 
     // ── RFC 3463 classification matrix (pure, but pinned as the contract) ──
@@ -3098,10 +3100,11 @@ mod adversarial_db_tests {
         let Some(pool) = test_pool("bounce_hard").await else {
             return;
         };
-        let server = test_server(pool.clone(), redis_pool());
+        let server = test_server(pool.clone());
         let tenant = unique_tenant();
         let recipient = "gone@example.test";
         let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+        subscribe_webhook(&pool, &tenant, "message.bounced").await;
         let claims = claims(
             &queue_id,
             &tenant,
@@ -3131,11 +3134,13 @@ mod adversarial_db_tests {
             1,
             "the authenticated token is recorded as an observation"
         );
-        let payloads = webhook_payloads(&server, 10).await;
-        assert!(
-            payloads.iter().any(|p| p.contains(&id)),
-            "the bounce webhook must be queued"
-        );
+        // The `message.bounced` event reached the canonical queue the
+        // worker's webhook processor drains (the former Redis list had no
+        // consumer, so this assertion used to pass against a dead write).
+        let queued = queued_webhook_events(&pool, &tenant).await;
+        assert_eq!(queued.len(), 1, "exactly one queued event: {queued:?}");
+        assert_eq!(queued[0].0, "message.bounced");
+        assert_eq!(queued[0].1["data"]["bounce_id"], id.as_str());
 
         // REPLAY: same token, same report — no second suppression/webhook.
         let replay = server
@@ -3158,7 +3163,7 @@ mod adversarial_db_tests {
         let Some(pool) = test_pool("bounce_soft").await else {
             return;
         };
-        let server = test_server(pool.clone(), redis_pool());
+        let server = test_server(pool.clone());
         let tenant = unique_tenant();
         let recipient = "full@example.test";
         let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
@@ -3189,7 +3194,7 @@ mod adversarial_db_tests {
         let Some(pool) = test_pool("bounce_mismatch").await else {
             return;
         };
-        let server = test_server(pool.clone(), redis_pool());
+        let server = test_server(pool.clone());
         let tenant = unique_tenant();
         let recipient = "real@example.test";
         let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
@@ -3239,10 +3244,13 @@ mod adversarial_db_tests {
         let Some(pool) = test_pool("bounce_forged").await else {
             return;
         };
-        let server = test_server(pool.clone(), redis_pool());
+        let server = test_server(pool.clone());
         let tenant = unique_tenant();
         let recipient = "victim@example.test";
         let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+        // Subscribed BEFORE processing: any emitted webhook would be visible
+        // to the negative assertion below (no vacuous pass).
+        subscribe_webhook(&pool, &tenant, "message.bounced").await;
 
         // Tampered MAC.
         let genuine = verp_address(&claims(
@@ -3280,12 +3288,10 @@ mod adversarial_db_tests {
         assert_eq!(row.4, "v1");
         assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
 
-        // No webhook may be emitted for either observation.
-        let payloads = webhook_payloads(&server, 20).await;
+        // No webhook may be emitted for either observation — with the
+        // endpoint subscribed, any queue row would be one.
         assert!(
-            !payloads
-                .iter()
-                .any(|p| p.contains("v2-rejected") || p.contains("v1")),
+            queued_webhook_events(&pool, &tenant).await.is_empty(),
             "observations must never emit an authentic-looking webhook"
         );
     }

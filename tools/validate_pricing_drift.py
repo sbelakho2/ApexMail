@@ -356,6 +356,29 @@ def validate_runtime_catalog(errors: list[str]) -> dict[str, ParsedPlan]:
     return catalog
 
 
+def extract_overage_rates(source: str) -> dict[str, float]:
+    """EUR per 1,000 emails per plan, from the runtime map arms.
+
+    `plan_overage_rate_millicents` stores MILLICENTS per email
+    (cents/1000), so the public per-1,000 rate is millicents/100:
+    80 millicents/email = €0.80 per 1,000.
+    """
+    body = re.search(
+        r"pub fn plan_overage_rate_millicents\(plan_name: &str\) -> Option<i64> \{(.*?)\n\}",
+        source,
+        re.S,
+    )
+    if body is None:
+        raise ValueError("plan_overage_rate_millicents not found in the runtime catalog")
+    rates: dict[str, float] = {}
+    for arm in re.finditer(r'((?:\s*\|?\s*"[^"]+"\s*)+)=>\s*Some\((\d+)\)', body.group(1)):
+        for name in re.findall(r'"([^"]+)"', arm.group(1)):
+            rates[name] = int(arm.group(2)) / 100
+    if not rates:
+        raise ValueError("no overage rate arms parsed from the runtime catalog")
+    return rates
+
+
 def display_money(cents: int, annual: bool = False) -> str:
     value = cents / 100
     formatted = f"{value:,.0f}" if value == int(value) else f"{value:,.2f}"
@@ -394,6 +417,11 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
 
 
 def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    try:
+        overage_rates = extract_overage_rates(read(BILLING_PLANS))
+    except (ValueError, RuntimeError) as error:
+        errors.append(f"cannot parse runtime overage rates: {error}")
+        return
     try:
         data: dict[str, Any] = json.loads(read(MARKETING_PRICING_JSON))
     except json.JSONDecodeError as error:
@@ -441,9 +469,11 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
             f"marketing pricing data {plan_id}.annual_price_per_month drift: expected {annual_expected}",
             errors,
         )
+        expected_overage = overage_rates.get(plan_id)
         check(
-            data_plan.get("overage_per_1k") == (None if plan_id == "free" else 0.40),
-            f"marketing pricing data {plan_id}.overage_per_1k is not the runtime public rate",
+            data_plan.get("overage_per_1k") == expected_overage,
+            f"marketing pricing data {plan_id}.overage_per_1k is not the runtime public rate "
+            f"(expected {expected_overage!r}, got {data_plan.get('overage_per_1k')!r})",
             errors,
         )
         check(

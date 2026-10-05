@@ -1867,3 +1867,75 @@ mod coverage_adversarial {
         }
     );
 }
+
+#[cfg(test)]
+mod catalog_drift_tests {
+    //! The catalog drift gate (SalesCloser gap analysis §4.1): the runtime
+    //! seeds must equal the canonical `platform-catalog` rows that
+    //! ai-service (knowledge/verifier) and the sales KB derive from. A
+    //! billing-side price change without a catalog change fails HERE.
+
+    use super::*;
+
+    #[test]
+    fn default_plans_match_the_canonical_catalog() {
+        let seeds = default_plans();
+        for seed in &seeds {
+            let row = platform_catalog::plan_by_name(seed.name)
+                .unwrap_or_else(|| panic!("plan '{}' missing from platform-catalog", seed.name));
+            assert_eq!(
+                seed.display_name, row.display_name,
+                "{}: display_name",
+                seed.name
+            );
+            assert_eq!(
+                seed.price_monthly, row.price_monthly_cents,
+                "{}: monthly price drifted from the canonical catalog",
+                seed.name
+            );
+            assert_eq!(
+                seed.price_yearly, row.price_yearly_cents,
+                "{}: yearly price drifted",
+                seed.name
+            );
+            assert_eq!(
+                seed.email_limit, row.email_limit,
+                "{}: email_limit",
+                seed.name
+            );
+            assert_eq!(
+                seed.api_call_limit, row.api_call_limit,
+                "{}: api_call_limit",
+                seed.name
+            );
+            assert_eq!(
+                seed.features.max_retention_days as i64, row.max_retention_days,
+                "{}: retention",
+                seed.name
+            );
+            assert_eq!(
+                seed.features.max_team_members as i64, row.max_team_members,
+                "{}: team size",
+                seed.name
+            );
+        }
+        assert_eq!(
+            seeds.len(),
+            platform_catalog::PLANS.len(),
+            "plan count drifted"
+        );
+    }
+
+    #[test]
+    fn overage_rates_match_the_canonical_catalog() {
+        for seed in default_plans() {
+            let row = platform_catalog::plan_by_name(seed.name).expect("catalog row");
+            assert_eq!(
+                plan_overage_rate_millicents(seed.name),
+                row.overage_millicents_per_email,
+                "{}: overage rate drifted",
+                seed.name
+            );
+        }
+    }
+}

@@ -670,13 +670,25 @@ mod adversarial_tests {
     #[test]
     fn private_targets_admitted_only_under_explicit_override() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The plain-HTTP scheme is incidental here (this test is about the
+        // private-target override); without the allowance the validator
+        // refuses on the HTTPS policy first. Set under the lock, removed
+        // below, exactly like the HTTP-policy test above.
+        std::env::set_var("ALLOW_WEBHOOK_HTTP", "1");
         std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
         let strict = SsrfValidator::new();
         let error = futures::executor::block_on(
             strict.validate_and_resolve_url("http://127.0.0.1:9999/hook"),
         )
         .expect_err("loopback must be refused without the override");
-        assert!(error.to_string().contains("private IP"), "got: {error}");
+        // The refusal may come from the dedicated localhost branch or the
+        // private-range branch depending on which check runs first; both are
+        // fail-closed and both name the reason.
+        let text = error.to_string();
+        assert!(
+            text.contains("private IP") || text.contains("internal/localhost"),
+            "got: {text}"
+        );
 
         std::env::set_var("WEBHOOK_ALLOW_PRIVATE_TARGETS", "true");
         let permissive = SsrfValidator::new();
@@ -687,6 +699,7 @@ mod adversarial_tests {
         assert_eq!(resolved.port, 9999);
         assert!(resolved.host_is_ip);
         std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
+        std::env::remove_var("ALLOW_WEBHOOK_HTTP");
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ name = "sales-autopilot"
 path = "src/bin/server.rs"
 
 [dependencies]
+platform-catalog = { path = "../platform-catalog" }
 apexmail-lib = { path = "../apexmail-lib" }
 async-trait.workspace      = true
 tokio.workspace            = true

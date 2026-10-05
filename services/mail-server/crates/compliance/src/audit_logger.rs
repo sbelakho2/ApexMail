@@ -2707,7 +2707,7 @@ mod db_tests {
 
         // Byte-exact re-derivation of BOTH stored rows from their columns —
         // the property DF-5c found broken for compliance rows (0/40).
-        let rows: Vec<(
+        type StoredRow = (
             String,
             Option<String>,
             String,
@@ -2718,7 +2718,8 @@ mod db_tests {
             String,
             Option<String>,
             String,
-        )> = sqlx::query_as(
+        );
+        let rows: Vec<StoredRow> = sqlx::query_as(
             "SELECT action, user_id, resource, resource_id, tenant_id, details,
                     timestamp, hash, previous_hash, signature
              FROM audit_logs WHERE tenant_id = $1 ORDER BY timestamp ASC",

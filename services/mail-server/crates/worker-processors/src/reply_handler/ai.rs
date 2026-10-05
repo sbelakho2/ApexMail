@@ -290,6 +290,13 @@ impl ReplyClassifier for HttpReplyClassifier {
         if let Some(key) = self.api_key.as_deref() {
             builder = builder.header("x-api-key", key);
         }
+        // The AI service rate-governs per tenant (`/reply/classify` requires
+        // the header, exactly like `/chat`); a NULL-tenant row classifies
+        // headerless and the service refuses it — which is the audited
+        // fallback, never a guess.
+        if let Some(tenant) = input.tenant_id.as_deref() {
+            builder = builder.header("x-apexmail-tenant-id", tenant);
+        }
 
         let response = builder
             .send()

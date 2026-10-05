@@ -32,6 +32,7 @@ members = [
     "crates/ui-foundation",
     "crates/sales-autopilot",
     "crates/ai-service",
+    "crates/platform-catalog",
     "crates/pdf-renderer",
     "crates/apexmail-db",
     "crates/apexmail-lib",

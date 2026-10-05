@@ -376,7 +376,6 @@ pub struct InboundServer {
     config: InboundConfig,
     rate_limit_config: RateLimitConfig,
     pool: PgPool,
-    redis: deadpool_redis::Pool,
     authenticator: Arc<EmailAuthenticator>,
     hostname: String,
     /// Per‑IP connection counter (admission control).
@@ -433,7 +432,6 @@ impl InboundServer {
             config,
             rate_limit_config,
             pool,
-            redis,
             authenticator,
             hostname,
             connections: Arc::new(DashMap::new()),
@@ -1787,26 +1785,30 @@ impl InboundServer {
         //    (servers::inbound_delivery) owns mailbox delivery from here and
         //    retries/DSNs every failure.
         //
-        //    The message INSERT uses ONLY the columns migration 088
-        //    guarantees on inbound_messages (tenant_id, mail_from, rcpt_to,
-        //    client_ip, helo_hostname, raw_message, raw_size, auth_results,
-        //    spf_result, disposition, is_verp_reply). The previously written
-        //    from_email/to_email/subject/body_text/body_html/headers/
-        //    created_at family exists in NO deployed migration — that INSERT
-        //    failed with "column does not exist" and 451-rejected every
-        //    inbound message. The full raw MIME (trace headers included) is
-        //    preserved in raw_message for downstream consumers.
+        //    The mirror columns (from_email, to_email, message_id_header,
+        //    subject, body_text, body_html, headers) are populated from ONE
+        //    parse of the client bytes: they are the reply pipeline's input
+        //    (its claim predicate is `from_email IS NOT NULL`), and leaving
+        //    them NULL — as this writer did after the 088 column incident —
+        //    makes every accepted reply invisible to that pipeline. The
+        //    parse is best-effort: a message the parser cannot read is still
+        //    accepted with NULL mirrors, never 451'd. The full raw MIME
+        //    (trace headers included) remains in raw_message for downstream
+        //    consumers.
+        let mirrors = parse_inbound_mirrors(raw, ctx.rcpt_to.first().map(String::as_str));
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"INSERT INTO inbound_messages (
                 id, tenant_id, mail_from, rcpt_to, client_ip, helo_hostname,
                 raw_message, raw_size, auth_results, spf_result, disposition,
-                is_verp_reply
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                is_verp_reply, from_email, to_email, message_id_header,
+                subject, body_text, body_html, headers
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                      $13, $14, $15, $16, $17, $18, $19)
             ON CONFLICT (id) DO NOTHING"#,
         )
         .bind(&message_id)
-        .bind(tenant_id)
+        .bind(tenant_id.as_deref())
         .bind(sender)
         .bind(&ctx.rcpt_to)
         .bind(ctx.client_ip.to_string())
@@ -1817,6 +1819,13 @@ impl InboundServer {
         .bind(format!("{:?}", auth_results.spf.result).to_lowercase())
         .bind(format!("{:?}", disposition).to_lowercase())
         .bind(is_verp)
+        .bind(&mirrors.from_email)
+        .bind(&mirrors.to_email)
+        .bind(&mirrors.message_id_header)
+        .bind(&mirrors.subject)
+        .bind(&mirrors.body_text)
+        .bind(&mirrors.body_html)
+        .bind(&mirrors.headers)
         .execute(&mut *tx)
         .await?;
 
@@ -1837,7 +1846,7 @@ impl InboundServer {
 
         // 11. Queue webhook notification (best-effort, after the durable
         //    commit — a webhook failure must never reject accepted mail).
-        self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
+        self.queue_inbound_webhook(&message_id, tenant_id.as_deref(), mail_from, &ctx.rcpt_to)
             .await?;
 
         info!(
@@ -1978,35 +1987,32 @@ impl InboundServer {
     async fn queue_inbound_webhook(
         &self,
         message_id: &str,
+        tenant_id: Option<&str>,
         from: &str,
         rcpt_to: &[String],
     ) -> anyhow::Result<()> {
         let payload = serde_json::json!({
-            "event": "inbound",
             "message_id": message_id,
             "from": from,
             "recipients": rcpt_to,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-        // Best-effort: the message is already persisted; a webhook notification
-        // failure must never reject the mail or fail the session.
-        let push_result: Result<(), ()> = async {
-            let mut conn = self.redis.get().await.map_err(|e| {
-                tracing::error!(message_id = %message_id, error = %e, "Failed to get Redis connection for inbound webhook");
-            })?;
-            // #139: LPUSH returns list length (i64), not String. The push
-            // is paired with an LTRIM so a dead consumer cannot grow the
-            // list (and Redis memory) without bound.
-            if let Err(e) =
-                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
-            {
-                tracing::error!(message_id = %message_id, error = %e, "Failed to push inbound webhook to Redis queue");
-            }
-            Ok(())
-        }
+        // Enqueue into the canonical `webhook_queue` table the worker's
+        // webhook processor drains; the former LPUSH onto the
+        // `mta:webhook_queue` Redis list had no consumer, so accepted
+        // inbound mail never produced a webhook. Best-effort by contract:
+        // the message is already persisted and a queue failure must never
+        // reject the mail or fail the session. Tenant-less mail (no
+        // resolvable owning tenant) cannot be routed and is skipped.
+        super::util::queue_tenant_webhook_event(
+            &self.pool,
+            tenant_id.unwrap_or_default(),
+            "message.inbound",
+            message_id,
+            &payload,
+        )
         .await;
-        let _ = push_result;
 
         Ok(())
     }
@@ -2278,6 +2284,178 @@ fn build_stored_message(
     }
     final_message.extend_from_slice(raw);
     final_message
+}
+
+/// The reply-pipeline mirror columns parsed once from the client bytes at
+/// accept time. The reply handler claims on `from_email IS NOT NULL`
+/// (worker-processors/src/reply_handler/processor.rs), so without this the
+/// MTA's own rows were invisible to the reply pipeline — the gap the
+/// SalesCloser plan closes at the writer.
+struct InboundMirrors {
+    from_email: Option<String>,
+    to_email: Option<String>,
+    message_id_header: Option<String>,
+    subject: Option<String>,
+    body_text: Option<String>,
+    body_html: Option<String>,
+    headers: Option<serde_json::Value>,
+}
+
+/// Column widths of the VARCHAR(255) mirror fields (migration 088).
+const MIRROR_ADDRESS_MAX_CHARS: usize = 255;
+
+/// Headers carried in dedicated columns, plus hop/crypto material that is
+/// already in `auth_results`/`raw_message` — everything else is mirrored
+/// into the `headers` JSONB object the classifier reads (auto-submitted,
+/// precedence, in-reply-to, references, list-unsubscribe[-post],
+/// x-failed-recipients, content-type, ...).
+const MIRROR_EXCLUDED_HEADERS: &[&str] = &[
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "date",
+    "message-id",
+    "received",
+    "received-spf",
+    "authentication-results",
+    "dkim-signature",
+    "arc-seal",
+    "arc-message-signature",
+    "arc-authentication-results",
+    "return-path",
+    "mime-version",
+    "content-transfer-encoding",
+];
+
+/// Postgres TEXT cannot store a NUL byte (the INSERT fails with 22021), and
+/// an accepted message may carry one (8-bit/raw bodies are legal on the
+/// wire). The mirror columns describe the message for the reply pipeline;
+/// the raw_message BYTEA stays authoritative. Replace NUL with U+FFFD so the
+/// mirror never blocks acceptance and never silently truncates the rest.
+fn mirror_text(value: &str) -> String {
+    if value.contains('\0') {
+        value.replace('\0', "\u{FFFD}")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Char-safe truncation for the VARCHAR(255) mirror columns.
+fn truncate_mirror_chars(value: &str) -> String {
+    if value.chars().count() <= MIRROR_ADDRESS_MAX_CHARS {
+        value.to_string()
+    } else {
+        value.chars().take(MIRROR_ADDRESS_MAX_CHARS).collect()
+    }
+}
+
+/// Parse the raw client bytes ONCE for the mirror columns. `None` fields are
+/// tolerated by every reader (the reply handler treats them as absent), so a
+/// malformed message is still stored with whatever the parser could read —
+/// and the SMTP 250 is never withheld because MIME parsing failed.
+fn parse_inbound_mirrors(raw: &[u8], envelope_recipient: Option<&str>) -> InboundMirrors {
+    let parsed = mail_parser::MessageParser::default().parse(raw);
+    let Some(message) = parsed else {
+        return InboundMirrors {
+            from_email: None,
+            to_email: envelope_recipient.map(|r| truncate_mirror_chars(&mirror_text(r))),
+            message_id_header: None,
+            subject: None,
+            body_text: None,
+            body_html: None,
+            headers: None,
+        };
+    };
+
+    let address = |list: Option<&mail_parser::Address<'_>>| -> Option<String> {
+        list.and_then(|a| a.first())
+            .and_then(|a| a.address())
+            .filter(|address| !address.is_empty())
+            .map(|address| truncate_mirror_chars(&mirror_text(address)))
+    };
+    let from_email = address(message.from());
+    let to_email = address(message.to())
+        .or_else(|| envelope_recipient.map(|r| truncate_mirror_chars(&mirror_text(r))));
+    let message_id_header = message
+        .message_id()
+        .map(|id| id.trim().trim_start_matches('<').trim_end_matches('>'))
+        .filter(|id| !id.is_empty())
+        .map(|id| truncate_mirror_chars(&mirror_text(id)));
+    let subject = message
+        .subject()
+        .map(|subject| truncate_mirror_chars(&mirror_text(subject.trim())))
+        .filter(|subject| !subject.is_empty());
+    let body_text = message.body_text(0).map(|b| mirror_text(&b));
+    let body_html = message.body_html(0).map(|b| mirror_text(&b));
+
+    let mut header_map = serde_json::Map::new();
+    for header in message.headers() {
+        let name = header.name().to_ascii_lowercase();
+        if MIRROR_EXCLUDED_HEADERS.contains(&name.as_str()) {
+            continue;
+        }
+        let value = match header.value() {
+            mail_parser::HeaderValue::Text(text) => Some(text.to_string()),
+            mail_parser::HeaderValue::TextList(list) => Some(
+                list.iter()
+                    .map(|item| item.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            // Content-Type parses into its own variant; the reply handler's
+            // HTML-only detection reads it, so reconstruct "type/subtype"
+            // plus the parameters verbatim (e.g. charset, boundary).
+            mail_parser::HeaderValue::ContentType(content_type) => {
+                let mut rendered = match content_type.subtype() {
+                    Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
+                    None => content_type.ctype().to_string(),
+                };
+                if let Some(attributes) = content_type.attributes() {
+                    for (name, value) in attributes {
+                        rendered.push_str("; ");
+                        rendered.push_str(name.as_ref());
+                        rendered.push('=');
+                        rendered.push_str(value.as_ref());
+                    }
+                }
+                Some(rendered)
+            }
+            _ => header.value().as_text().map(str::to_string),
+        };
+        if let Some(value) = value
+            .filter(|value| !value.is_empty())
+            .map(|value| mirror_text(&value))
+        {
+            // A repeated header (e.g. two Received-style hops) joins its
+            // values the way the RAW block reads, never silently replaces.
+            match header_map.get_mut(&name) {
+                Some(serde_json::Value::String(existing)) => {
+                    existing.push_str(", ");
+                    existing.push_str(&value);
+                }
+                _ => {
+                    header_map.insert(name, serde_json::Value::String(value));
+                }
+            }
+        }
+    }
+    let headers = if header_map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(header_map))
+    };
+
+    InboundMirrors {
+        from_email,
+        to_email,
+        message_id_header,
+        subject,
+        body_text,
+        body_html,
+        headers,
+    }
 }
 
 /// Parse a PEM-encoded RSA private key (PKCS#8 first, then PKCS#1 — the
@@ -4436,16 +4614,24 @@ mod tests {
     }
 
     #[test]
-    fn webhook_push_is_trimmed_to_a_bounded_length() {
-        // The `mta:webhook_queue` Redis list must be trimmed after every
-        // LPUSH: with a dead consumer an unbounded list grows Redis memory
-        // without limit. Pinned against the compiled-in source (needles
-        // concat!-built so the test cannot match its own text).
+    fn webhook_events_go_to_the_canonical_consumer_queue() {
+        // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
+        // which NO component ever consumed — every inbound/bounce/complaint
+        // webhook was silently dropped. They now enter the canonical
+        // `webhook_queue` table the worker's webhook processor drains
+        // (retries, circuit breaker, SSRF guard). Pinned against the
+        // compiled-in source (needles concat!-built so the test cannot match
+        // its own text).
         let source = include_str!("inbound.rs");
-        let trim_needle = std::concat!("LT", "RIM");
+        let queue_call = std::concat!("super::util::queue_tenant_", "webhook_event");
+        let dead_push = std::concat!("super::util::push_", "webhook_bounded");
         assert!(
-            source.contains(trim_needle),
-            "the webhook push path must trim the queue to a bounded length"
+            source.contains(queue_call),
+            "the webhook path must enqueue into the canonical consumer queue"
+        );
+        assert!(
+            !source.contains(dead_push),
+            "the dead Redis-list push must not be called again"
         );
     }
 }
@@ -5915,19 +6101,52 @@ mod adversarial_data_tests {
         .await;
         assert!(reply.starts_with("250"), "transcript: {transcript}");
 
-        let rows: Vec<(String, String, Vec<u8>, i64, String, String)> = sqlx::query_as(
-            "SELECT mail_from, helo_hostname, raw_message, raw_size, spf_result, disposition
+        /// (mail_from, helo, raw, raw_size, spf, disposition, from_email,
+        /// to_email, subject, body_text) — an alias keeps the tuple legal
+        /// under the workspace's clippy -D warnings gate.
+        type PersistedRow = (
+            String,
+            String,
+            Vec<u8>,
+            i64,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let rows: Vec<PersistedRow> = sqlx::query_as(
+            "SELECT mail_from, helo_hostname, raw_message, raw_size, spf_result, disposition, \
+                    from_email, to_email, subject, body_text
                FROM inbound_messages",
         )
         .fetch_all(&pool)
         .await
         .expect("query inbound_messages");
         assert_eq!(rows.len(), 1, "exactly one message row: {rows:?}");
-        let (mail_from, helo, raw, raw_size, _spf, disposition) = &rows[0];
+        let (
+            mail_from,
+            helo,
+            raw,
+            raw_size,
+            _spf,
+            disposition,
+            from_email,
+            to_email,
+            subject,
+            body_text,
+        ) = &rows[0];
         assert_eq!(mail_from, "sender@invalid.invalid");
         assert_eq!(helo, "invalid.invalid");
         assert_eq!(*raw_size, body.len() as i64);
         assert_eq!(disposition, "accept");
+        // The reply-pipeline mirrors: without from_email the handler's claim
+        // (`from_email IS NOT NULL`) can never see an accepted reply.
+        assert_eq!(from_email.as_deref(), Some("sender@invalid.invalid"));
+        assert_eq!(to_email.as_deref(), Some("rcpt@invalid.invalid"));
+        assert_eq!(subject.as_deref(), Some("hi"));
+        assert_eq!(body_text.as_deref(), Some("hello\r\n"));
         let raw_text = String::from_utf8_lossy(raw);
         assert!(
             raw_text.starts_with("Received: from invalid.invalid"),
@@ -5948,6 +6167,190 @@ mod adversarial_data_tests {
             .await
             .unwrap();
         assert_eq!(jobs, 1, "one delivery job");
+    }
+
+    #[tokio::test]
+    async fn reply_mirrors_carry_headers_html_and_message_id() {
+        let Some(pool) = test_pool("inbound_session_mirrors").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        let body = b"From: Prospect <prospect@example.com>\r\n\
+To: sales@apexmail.ee\r\n\
+Subject: Re: pricing\r\n\
+Message-ID: <repl-42@example.com>\r\n\
+In-Reply-To: <campaign-7@apexmail.ee>\r\n\
+Auto-Submitted: auto-replied\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative; boundary=xyz\r\n\
+\r\n\
+--xyz\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+not interested, too expensive\r\n\
+--xyz\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>not interested, <b>too expensive</b></p>\r\n\
+--xyz--\r\n";
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "prospect@example.com",
+            "sales@invalid.invalid",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "transcript: {transcript}");
+
+        type MirrorRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<serde_json::Value>,
+        );
+        let row: MirrorRow = sqlx::query_as(
+            "SELECT from_email, to_email, message_id_header, subject, body_html, headers \
+               FROM inbound_messages",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("query inbound_messages");
+        assert_eq!(row.0.as_deref(), Some("prospect@example.com"));
+        assert_eq!(row.1.as_deref(), Some("sales@apexmail.ee"));
+        // Stored without angle brackets, matching the reply handler's
+        // in-reply-to comparisons.
+        assert_eq!(row.2.as_deref(), Some("repl-42@example.com"));
+        assert_eq!(row.3.as_deref(), Some("Re: pricing"));
+        assert!(
+            row.4
+                .as_deref()
+                .is_some_and(|html| html.contains("<b>too expensive</b>")),
+            "body_html: {:?}",
+            row.4
+        );
+        let headers = row.5.expect("headers JSONB populated");
+        assert_eq!(headers["auto-submitted"], "auto-replied");
+        // Message-id-shaped headers are stored in the parser's canonical
+        // bracketless form — the same form `message_id_header` uses, so the
+        // analytics thread-depth join (`message_id = in_reply_to`) compares
+        // like with like.
+        assert_eq!(headers["in-reply-to"], "campaign-7@apexmail.ee");
+        assert_eq!(
+            headers["content-type"],
+            "multipart/alternative; boundary=xyz"
+        );
+        assert!(
+            headers.get("from").is_none() && headers.get("subject").is_none(),
+            "dedicated-column headers must not be duplicated: {headers}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_webhook_event_lands_in_the_canonical_queue() {
+        let Some(pool) = test_pool("inbound_session_webhook_queue").await else {
+            return;
+        };
+        // Tenant + verified domain so the MTA resolves the owning tenant, and
+        // one webhook subscribed to the inbound event.
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("ten_whq_{}", &suffix[..18]);
+        let domain = format!("webhook-{}.invalid", &suffix[..8]);
+        sqlx::query("INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'WHQ', $1, 'free', 'active')")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("tenant");
+        sqlx::query("INSERT INTO domains (id, tenant_id, name, verified, status) VALUES (gen_random_uuid(), $1, $2, true, 'verified')")
+            .bind(&tenant)
+            .bind(&domain)
+            .execute(&pool)
+            .await
+            .expect("domain");
+        let webhook_id = format!("whk_{}", &suffix[..22]);
+        sqlx::query(
+            r#"INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled)
+               VALUES ($1, $2, 'https://example.com/hook', 'whsec_test',
+                       '["message.inbound"]'::jsonb, true)"#,
+        )
+        .bind(&webhook_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("webhook");
+
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        let recipient = format!("sales@{domain}");
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            &recipient,
+            b"Subject: inbound webhook\r\n\r\nhello\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("250"), "transcript: {transcript}");
+
+        // The canonical queue (drained by the worker's webhook processor)
+        // must hold exactly one pending `message.inbound` event for this
+        // tenant — the former Redis LPUSH had no consumer at all.
+        let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT event_type, status, payload FROM webhook_queue WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("query webhook_queue");
+        assert_eq!(rows.len(), 1, "exactly one queued event: {rows:?}");
+        let (event_type, status, payload) = &rows[0];
+        assert_eq!(event_type, "message.inbound");
+        assert_eq!(status, "pending");
+        assert_eq!(payload["type"], "message.inbound");
+        assert_eq!(payload["tenantId"], tenant);
+        assert_eq!(payload["data"]["recipients"][0], recipient);
+        assert!(
+            payload["data"]["message_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("inb_")),
+            "payload carries the accepted message id: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unparseable_message_is_accepted_with_null_from_email() {
+        let Some(pool) = test_pool("inbound_session_unparseable").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        // No header block at all: mail_parser yields no message, so the
+        // mirrors stay NULL — the row is stored and NOT claimable, rather
+        // than 451-ing the connection.
+        let body = b"this is not a message\r\n";
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "transcript: {transcript}");
+        let (from_email, to_email): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT from_email, to_email FROM inbound_messages")
+                .fetch_one(&pool)
+                .await
+                .expect("row stored");
+        assert_eq!(
+            from_email, None,
+            "unparsed mail must not fabricate a sender"
+        );
+        assert_eq!(
+            to_email.as_deref(),
+            Some("rcpt@invalid.invalid"),
+            "the envelope recipient is still recorded"
+        );
     }
 
     #[tokio::test]

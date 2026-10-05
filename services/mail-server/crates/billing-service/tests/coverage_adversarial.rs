@@ -4679,6 +4679,18 @@ async fn seed_invoice_row(
     .expect("seed invoice")
 }
 
+/// The Europe/Tallinn calendar month of an instant — the SAME convention
+/// `vat_recognition` uses for `recognition_period` (its dates are Tallinn
+/// local). Deriving the expectation from the UTC date instead flips the
+/// month twice a year whenever a UTC evening is already the next day in
+/// Tallinn, making the suite fail for a few hours around a month boundary.
+fn tallinn_month(instant: chrono::DateTime<chrono::Utc>) -> String {
+    instant
+        .with_timezone(&chrono_tz::Europe::Tallinn)
+        .format("%Y-%m")
+        .to_string()
+}
+
 db_test!(vat_recognition_general_and_cash_special_timing, |h| {
     let tenant = "cov_recog_general";
     let cash = "cov_recog_cash";
@@ -4710,7 +4722,7 @@ db_test!(vat_recognition_general_and_cash_special_timing, |h| {
     assert_eq!(entry.taxable_amount_cents, 10_000);
     assert_eq!(entry.vat_amount_cents, 2_400);
     assert_eq!(entry.currency, "EUR");
-    let expected_period = issued.format("%Y-%m").to_string();
+    let expected_period = tallinn_month(issued);
     assert_eq!(entry.recognition_period, expected_period);
 
     // Replay replaces the current row, never duplicates it.
@@ -4793,9 +4805,7 @@ db_test!(vat_recognition_general_and_cash_special_timing, |h| {
     assert_eq!(paid_entry.event_type.as_str(), "payment");
     assert_eq!(
         paid_entry.recognition_period,
-        (now - chrono::Duration::days(35))
-            .format("%Y-%m")
-            .to_string()
+        tallinn_month(now - chrono::Duration::days(35))
     );
 
     // Never paid, issued more than two months ago → the fallback sweep
@@ -4830,10 +4840,8 @@ db_test!(vat_recognition_general_and_cash_special_timing, |h| {
     assert_eq!(swept_again, 0, "already-materialised supplies are skipped");
 
     // Backfill: idempotent over an explicit period range.
-    let from = (now - chrono::Duration::days(80))
-        .format("%Y-%m")
-        .to_string();
-    let to = now.format("%Y-%m").to_string();
+    let from = tallinn_month(now - chrono::Duration::days(80));
+    let to = tallinn_month(now);
     let written =
         billing_service::vat_recognition::backfill_recognition_from_invoices(&h.pool, &from, &to)
             .await

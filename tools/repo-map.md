@@ -8,11 +8,11 @@
 
 ## 1. Cargo workspace (`services/mail-server`)
 
-52 workspace members: 23 binary crates, 29 library crates.
+53 workspace members: 23 binary crates, 30 library crates.
 
 **Binary crates:** `crates/mailstore-core`, `crates/tracking-service`, `crates/worker-processors`, `crates/mta`, `crates/outbound-mta`, `crates/imap-server`, `crates/edge-cases`, `crates/analytics`, `crates/compliance`, `crates/isolation`, `crates/ha`, `crates/enterprise`, `crates/template-renderer`, `crates/ai-embeddings`, `crates/api-server`, `crates/billing-service`, `crates/devex-service`, `crates/observability-service`, `crates/ui-foundation`, `crates/sales-autopilot`, `crates/ai-service`, `crates/pdf-renderer`, `crates/migrator`
 
-**Library crates:** `crates/mail-proto`, `crates/mail-common`, `crates/queue-provider`, `crates/pattern-matcher`, `crates/rate-limiter`, `crates/dns-resolver`, `crates/auth-server`, `crates/accounting-core`, `crates/billing-common`, `crates/billing-entitlements`, `crates/apexmail-db`, `crates/apexmail-lib`, `crates/smoke-tests`, `crates/functional-tests`, `crates/integration-tests`, `crates/perf-tests`, `crates/fuzz-tests`, `crates/load-tests`, `crates/ddos-protection`, `crates/fingerprint`, `crates/waf-engine`, `crates/ids-engine`, `crates/spam-filter`, `crates/sandbox`, `crates/ato-protection`, `crates/dlp-engine`, `crates/threat-intel`, `crates/email-grader`, `crates/inbox-placement`
+**Library crates:** `crates/mail-proto`, `crates/mail-common`, `crates/queue-provider`, `crates/pattern-matcher`, `crates/rate-limiter`, `crates/dns-resolver`, `crates/auth-server`, `crates/accounting-core`, `crates/billing-common`, `crates/billing-entitlements`, `crates/platform-catalog`, `crates/apexmail-db`, `crates/apexmail-lib`, `crates/smoke-tests`, `crates/functional-tests`, `crates/integration-tests`, `crates/perf-tests`, `crates/fuzz-tests`, `crates/load-tests`, `crates/ddos-protection`, `crates/fingerprint`, `crates/waf-engine`, `crates/ids-engine`, `crates/spam-filter`, `crates/sandbox`, `crates/ato-protection`, `crates/dlp-engine`, `crates/threat-intel`, `crates/email-grader`, `crates/inbox-placement`
 
 ## 2. Dockerfile runtime targets
 
@@ -55,12 +55,15 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | mta-sts-tlsrpt | implemented | — |
 | pattern-matcher-library | implemented | — |
 | rate-limiter-crate-library | implemented | — |
+| ai-reply-classification | runtime-wired | WORKER_REPLY_CLASSIFIER_AI_ENABLED |
 | arc-sealing | runtime-wired | — |
 | attachment-sandboxing | runtime-wired | MTA_ATTACHMENT_SCAN_ENABLED |
 | data-loss-prevention | runtime-wired | WORKER_DLP_ENABLED |
 | ddos-middleware | runtime-wired | — |
 | fingerprint-library | runtime-wired | — |
+| inbound-reply-mirroring | runtime-wired | — |
 | intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |
+| mta-event-webhooks | runtime-wired | — |
 | smtp-starttls | runtime-wired | — |
 | spam-phishing-filtering | runtime-wired | MTA_SPAM_FILTER_ENABLED |
 | threat-intelligence-feeds | runtime-wired | — |
@@ -90,7 +93,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **206 `*.sql` files**, latest `234_auth_sessions.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **211 `*.sql` files**, latest `239_analytics_domain_id_width.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

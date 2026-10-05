@@ -242,11 +242,11 @@ async fn set_active(
 ) -> Result<Json<MailboxRow>, ApiError> {
     require_operator(state, auth).await?;
     let uuid = Uuid::parse_str(id).map_err(|_| ApiError::NotFound("mailbox not found".into()))?;
-    let updated: Option<MailboxRow> = sqlx::query_as(&format!(
+    let updated: Option<MailboxRow> = sqlx::query_as(
         "UPDATE mail_accounts SET is_active = $2, updated_at = NOW() WHERE id = $1 \
          RETURNING id, email, domain, display_name, quota_bytes, used_bytes, is_active, created_at, \
-           EXISTS (SELECT 1 FROM mail_mailboxes m WHERE m.account_id = mail_accounts.id AND m.mailbox_type = 'inbox') AS inbox_provisioned"
-    ))
+           EXISTS (SELECT 1 FROM mail_mailboxes m WHERE m.account_id = mail_accounts.id AND m.mailbox_type = 'inbox') AS inbox_provisioned",
+    )
     .bind(uuid)
     .bind(active)
     .fetch_optional(&state.db)

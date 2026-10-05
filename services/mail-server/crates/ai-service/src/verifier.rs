@@ -23,11 +23,19 @@ use std::collections::HashSet;
 // Canonical values come from the knowledge module (single source of truth
 // shared with the prompt builders) so the verifier can never drift from
 // what the model was told.
-const CANONICAL_PRICES: &[i64] = &[0, 25, 65, 150, 350, 3000];
-const CANONICAL_EMAIL_LIMITS: &[i64] = &[30_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000];
-/// Canonical per-unit rates: PAYG per-email tiers, the subscription overage
-/// rate (€0.40/1K emails), and the PAYG API overage rate (€0.10/1K calls).
-const CANONICAL_RATES: &[f64] = &[0.001, 0.0008, 0.0005, 0.0003, 0.40, 0.10];
+// Canonical values DERIVED from `platform-catalog` (the source the billing
+// runtime seeds from) via the knowledge module — the verifier can never
+// bless a stale price or reject a real one. Overage: Developer €0.80/1K,
+// Pro €0.60/1K, Growth/Business €0.35/1K, Enterprise contractual €0.35
+// default; PAYG API overage €0.10/1K calls.
+const CANONICAL_PRICES: &[i64] = &[0, 29, 89, 229, 699, 1750];
+const CANONICAL_EMAIL_LIMITS: &[i64] = &[3_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000];
+/// Canonical per-unit rates: PAYG per-email tiers, then the subscription
+/// overage rates per plan (Developer/Pro/Growth/Business/Enterprise) and
+/// the PAYG API overage rate (€0.10/1K calls).
+const CANONICAL_RATES: &[f64] = &[
+    0.001, 0.0008, 0.0005, 0.0003, 0.80, 0.60, 0.35, 0.35, 0.35, 0.10,
+];
 
 // Allowed answer domains come from the knowledge module (single source of
 // truth shared with the prompt builders) so the verifier can never reject a
@@ -353,7 +361,7 @@ impl ResponseVerifier {
             }
 
             // Only treat an amount as a quoted plan price when it appears
-            // next to plan/period language ("per month", "Starter", "plan").
+            // next to plan/period language ("per month", "Developer", "plan").
             // Bare computed totals are validated through `allowed_totals`.
             if has_plan_or_period_context(context) && !is_canonical_price && !is_allowed_total {
                 violations.push(Violation::ForbiddenPrice {
@@ -1345,7 +1353,7 @@ mod tests {
     #[test]
     fn test_clean_response_passes() {
         let v = ResponseVerifier::new();
-        let verdict = v.verify("The Pro plan costs €65/month and includes 150,000 emails.");
+        let verdict = v.verify("The Pro plan costs €89/month and includes 150,000 emails.");
         assert!(
             verdict.passed,
             "Clean response should pass: {:?}",
@@ -1385,7 +1393,7 @@ mod tests {
             );
         }
         // Benign prose with ordinary angle brackets is untouched.
-        let verdict = v.verify("If 5 < 6 then the Pro plan costs €65/month with 150,000 emails.");
+        let verdict = v.verify("If 5 < 6 then the Pro plan costs €89/month with 150,000 emails.");
         assert!(
             verdict.passed,
             "benign prose must pass: {:?}",
@@ -1406,11 +1414,12 @@ mod tests {
 
     #[test]
     fn canonical_overage_rate_is_not_rejected() {
-        // Regression: the verifier used to ban ANY response containing €0.40,
-        // including the canonical overage rate the generator itself teaches.
+        // Regression: the verifier used to ban ANY response containing the
+        // old flat overage rate, including the per-plan canonical rates the
+        // generator itself teaches. Developer €0.80/1K is canonical now.
         let v = ResponseVerifier::new();
         let verdict = v.verify(
-            "If you exceed your plan limit, overage is charged at €0.40 per 1,000 extra emails.",
+            "If you exceed your plan limit, overage is charged at €0.80 per 1,000 extra emails.",
         );
         assert!(
             verdict.passed,
@@ -1433,7 +1442,7 @@ mod tests {
     #[test]
     fn tool_computed_total_passes_when_allowlisted() {
         let v = ResponseVerifier::new();
-        let response = "Your total bill is €69.00/month: €65 base plus €4.00 overage.";
+        let response = "Your total bill is €89.00/month: €89 base plus €4.00 overage.";
         // Without the allowlist the €69 total is not a plan price and is rejected.
         assert!(!v.verify(response).passed, "unlisted total must be flagged");
         // With the tool-computed totals allowlisted, the response passes.
@@ -1461,10 +1470,10 @@ mod tests {
     #[test]
     fn non_canonical_overage_rate_is_flagged() {
         let v = ResponseVerifier::new();
-        let verdict = v.verify("Overage on your plan is €0.80 per 1,000 extra emails.");
+        let verdict = v.verify("Overage on your plan is €0.40 per 1,000 extra emails.");
         assert!(
             !verdict.passed,
-            "old fictional overage rate must be rejected"
+            "the old flat overage rate must be rejected"
         );
     }
 
@@ -1632,7 +1641,7 @@ mod tests {
         // Regression: the €-context slice (±60 bytes) panicked when multi-
         // byte characters surrounded the amount.
         let v = ResponseVerifier::new();
-        let response = "您好！🎉 Pro 计划的价格是 €65/月 🎉，包含 150,000 封邮件。祝您使用愉快！😀 詳細はサポートまで 🚀";
+        let response = "您好！🎉 Pro 计划的价格是 €89/月 🎉，包含 150,000 封邮件。祝您使用愉快！😀 詳細はサポートまで 🚀";
         let verdict = v.verify(response);
         assert!(
             verdict.passed,
@@ -2034,11 +2043,11 @@ mod grounding_tests {
     #[test]
     fn canonical_fact_and_tool_backed_claims_pass_without_citations() {
         let canonical = canonical();
-        // (a) canonical pricing: €65/150,000 are canonical, "Pro" a canonical
+        // (a) canonical pricing: €89/150,000 are canonical, "Pro" a canonical
         // plan name — no chunk, no marker needed.
         let grounding = grounded(&canonical, &[], "", "");
         let v = ResponseVerifier::new().verify_grounded(
-            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included.",
+            "The Pro plan costs \u{20ac}89 per month with 150,000 emails included.",
             &[],
             &grounding,
         );
@@ -2166,10 +2175,10 @@ mod grounding_tests {
     #[test]
     fn sentence_splitting_keeps_decimals_and_hostnames_whole() {
         let sentences = split_sentences(
-            "The rate is \u{20ac}65.50 per 1,000 emails. Contact support@apexmail.ee.",
+            "The rate is \u{20ac}89.50 per 1,000 emails. Contact support@apexmail.ee.",
         );
         assert_eq!(sentences.len(), 2, "{sentences:?}");
-        assert!(sentences[0].contains("65.50"), "{sentences:?}");
+        assert!(sentences[0].contains("89.50"), "{sentences:?}");
         assert!(sentences[1].starts_with("Contact"), "{sentences:?}");
         assert!(sentences[1].ends_with("apexmail.ee."), "{sentences:?}");
     }
@@ -2209,7 +2218,7 @@ mod grounding_tests {
         let canonical = canonical();
         let grounding = grounded_unavailable(&canonical, &[], "", "");
         let v = ResponseVerifier::new().verify_grounded(
-            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included [1].",
+            "The Pro plan costs \u{20ac}89 per month with 150,000 emails included [1].",
             &[],
             &grounding,
         );
@@ -2226,7 +2235,7 @@ mod grounding_tests {
         // The identical factual content WITHOUT the marker stays allowed:
         // canonical facts are in-process data, not served by the broken index.
         let v = ResponseVerifier::new().verify_grounded(
-            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included.",
+            "The Pro plan costs \u{20ac}89 per month with 150,000 emails included.",
             &[],
             &grounding,
         );

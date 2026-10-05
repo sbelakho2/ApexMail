@@ -2752,7 +2752,9 @@ mod adversarial_handler_tests {
             return;
         };
         let state = test_state_over(pool.clone()).await;
-        let Some(mut conn) = state.redis.get().await.ok() else {
+        // Redis must be reachable for this suite; the probe is the guard,
+        // the connection itself is unused in this test.
+        let Some(_redis_probe) = state.redis.get().await.ok() else {
             eprintln!("skipping: Redis unavailable");
             return;
         };

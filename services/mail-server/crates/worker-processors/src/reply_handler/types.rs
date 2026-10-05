@@ -295,6 +295,10 @@ pub struct ReplyInput {
     pub body: String,
     /// Lowercased header name -> raw value.
     pub headers: BTreeMap<String, String>,
+    /// Owning tenant of the inbound row (`inbound_messages.tenant_id`). The
+    /// HTTP classifier sends it as `x-apexmail-tenant-id` so the AI service
+    /// rate-governs per tenant; a NULL-tenant row classifies without one.
+    pub tenant_id: Option<String>,
 }
 
 impl ReplyInput {
@@ -303,7 +307,13 @@ impl ReplyInput {
             subject: subject.into(),
             body: body.into(),
             headers: BTreeMap::new(),
+            tenant_id: None,
         }
+    }
+
+    pub fn with_tenant(mut self, tenant_id: Option<&str>) -> Self {
+        self.tenant_id = tenant_id.map(str::to_string);
+        self
     }
 
     /// Build from raw bytes, lossily converting invalid UTF-8.
@@ -572,7 +582,9 @@ impl InboundMessage {
             .filter(|body| !body.trim().is_empty())
             .or(self.body_html.as_deref())
             .unwrap_or("");
-        ReplyInput::new(self.subject.clone(), body).with_headers_json(self.headers.as_ref())
+        ReplyInput::new(self.subject.clone(), body)
+            .with_headers_json(self.headers.as_ref())
+            .with_tenant(self.tenant_id.as_deref())
     }
 }
 

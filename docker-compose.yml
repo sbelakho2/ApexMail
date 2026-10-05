@@ -661,6 +661,14 @@ services:
       # ── Customer automation executor (moved from sales-autopilot) ────────
       WORKER_RUN_AUTOMATIONS: ${WORKER_RUN_AUTOMATIONS:-true}
       AUTOMATION_TICK_SECS: ${AUTOMATION_TICK_SECS:-30}
+      # ── Reply classifier, AI layer 2 (SalesCloser plan §5.4) ─────────────
+      # Deterministic classification always runs FIRST; this layer only sees
+      # what it could not prove, and ANY failure (including the model being
+      # disabled in ai-service) falls back to the audited Unknown/0.0 — never
+      # a guessed disposition. Harmless to leave on without AI_MODEL_ENABLED.
+      WORKER_REPLY_CLASSIFIER_AI_ENABLED: ${WORKER_REPLY_CLASSIFIER_AI_ENABLED:-true}
+      WORKER_REPLY_CLASSIFIER_AI_URL: ${WORKER_REPLY_CLASSIFIER_AI_URL:-http://ai-service:3012}
+      WORKER_REPLY_CLASSIFIER_AI_API_KEY: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
     healthcheck:
       # The worker binary serves /health on HEALTH_PORT — which resolves
       # HEALTH_PORT, then METRICS_PORT (9093 above), then 9090. A stale

@@ -291,58 +291,59 @@ impl SalesKnowledgeBase {
             .single()
             .unwrap_or(v2);
 
-        // ── Plan catalog: crates/billing-service/src/plans.rs ───────────
-        // Values transcribed from `default_plans()` (2026-09-08 pricing
-        // review); `docs/pricing-authority.md` names this file (plus the
-        // `plans` table and Stripe webhooks) as the operational authority.
+        // ── Plan catalog: crates/platform-catalog (the canonical source) ─
+        // The plan facts are DERIVED from `platform-catalog`, the same
+        // module the billing runtime seeds from and the ai-service
+        // knowledge/verifier tables derive from, so a price or limit can
+        // never go stale here while billing charges the new number.
+        let free = platform_catalog::plan_by_name("free").expect("canonical catalog row");
         let mut facts = vec![fact(
             "KB-PLAN-FREE",
-            "ApexMail Free includes 3,000 emails per month forever plus a one-time 30,000-email launch allowance for the first 30 days.",
+            &format!(
+                "ApexMail Free includes {} emails per month forever plus a one-time {}-email launch allowance for the first {} days.",
+                thousands(free.email_limit),
+                thousands(platform_catalog::FREE_LAUNCH_ALLOWANCE),
+                platform_catalog::FREE_LAUNCH_WINDOW_DAYS,
+            ),
             KnowledgeStatus::Verified,
             v2,
             None,
             KnowledgeSource::PlanCatalog,
             true,
         )];
-        facts.push(fact(
-            "KB-PLAN-DEVELOPER",
-            "The Developer plan is EUR 29 per month (EUR 290 per year) and includes 50,000 emails per month.",
-            KnowledgeStatus::Verified,
-            v2,
-            None,
-            KnowledgeSource::PlanCatalog,
-            true,
-        ));
-        facts.push(fact(
-            "KB-PLAN-PRO",
-            "The Pro plan is EUR 89 per month (EUR 890 per year) and includes 150,000 emails per month.",
-            KnowledgeStatus::Verified,
-            v2,
-            None,
-            KnowledgeSource::PlanCatalog,
-            true,
-        ));
-        facts.push(fact(
-            "KB-PLAN-GROWTH",
-            "The Growth plan is EUR 229 per month (EUR 2,290 per year) and includes 500,000 emails per month.",
-            KnowledgeStatus::Verified,
-            v2,
-            None,
-            KnowledgeSource::PlanCatalog,
-            true,
-        ));
-        facts.push(fact(
-            "KB-PLAN-BUSINESS",
-            "The Business plan is EUR 699 per month (EUR 6,990 per year) and includes 2,000,000 emails per month.",
-            KnowledgeStatus::Verified,
-            v2,
-            None,
-            KnowledgeSource::PlanCatalog,
-            true,
-        ));
+        for (id, plan_name) in [
+            ("KB-PLAN-DEVELOPER", "starter"),
+            ("KB-PLAN-PRO", "pro"),
+            ("KB-PLAN-GROWTH", "growth"),
+            ("KB-PLAN-BUSINESS", "scale"),
+        ] {
+            let row = platform_catalog::plan_by_name(plan_name)
+                .expect("canonical catalog row for a KB fact");
+            facts.push(fact(
+                id,
+                &format!(
+                    "The {} plan is EUR {} per month (EUR {} per year) and includes {} emails per month.",
+                    row.display_name,
+                    row.price_monthly_cents / 100,
+                    row.price_yearly_cents / 100,
+                    thousands(row.email_limit),
+                ),
+                KnowledgeStatus::Verified,
+                v2,
+                None,
+                KnowledgeSource::PlanCatalog,
+                true,
+            ));
+        }
+        let enterprise = platform_catalog::plan_by_name("enterprise")
+            .expect("canonical catalog row for a KB fact");
         facts.push(fact(
             "KB-PLAN-ENTERPRISE",
-            "Enterprise Cloud starts from EUR 1,750 per month on an annual contract and includes 5,000,000 emails per month.",
+            &format!(
+                "Enterprise Cloud starts from EUR {} per month on an annual contract and includes {} emails per month.",
+                enterprise.price_monthly_cents / 100,
+                thousands(enterprise.email_limit),
+            ),
             KnowledgeStatus::Verified,
             v2,
             None,
@@ -608,6 +609,24 @@ fn fact(
         valid_until,
         source,
         allowed_in_external_copy,
+    }
+}
+
+/// Render an integer with thousands separators ("150000" → "150,000"), the
+/// catalog-fact display convention the pricing docs use.
+fn thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::new();
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
     }
 }
 

@@ -101,11 +101,13 @@ pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[
 /// These were the control plane's second sales system. If one of them is
 /// still present the deployment is running a half-applied migration, which
 /// would let a stale code path write rows nothing consumes.
-pub const RETIRED_TABLES: &[&str] = &[
-    "drip_campaigns",
-    "campaign_recipients",
-    "sales_autopilot_state",
-];
+///
+/// `campaign_recipients` is NOT here: migration 236
+/// (236_campaign_send_pipeline) deliberately re-created it as the live
+/// recipient-tracking table for the real campaign pipeline
+/// (api-server/src/routes/campaigns.rs + worker-processors/src/campaigns.rs),
+/// so its presence is the expected shape, not a half-applied migration.
+pub const RETIRED_TABLES: &[&str] = &["drip_campaigns", "sales_autopilot_state"];
 
 /// Verify the connected database matches this build's expectations.
 ///

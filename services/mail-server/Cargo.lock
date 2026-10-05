@@ -127,6 +127,7 @@ dependencies = [
  "observability-service",
  "once_cell",
  "parking_lot",
+ "platform-catalog",
  "rand 0.9.4",
  "regex",
  "reqwest",
@@ -1349,6 +1350,7 @@ dependencies = [
  "metrics",
  "moka",
  "observability-service",
+ "platform-catalog",
  "redis",
  "reqwest",
  "serde",
@@ -5716,6 +5718,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platform-catalog"
+version = "0.1.0"
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6719,6 +6725,7 @@ dependencies = [
  "migrator",
  "observability-service",
  "parking_lot",
+ "platform-catalog",
  "rand 0.9.4",
  "redis",
  "reqwest",

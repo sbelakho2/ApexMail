@@ -33,7 +33,7 @@
     "matrix_surfaces": [
       "apps/marketing-zola/content/compare/**/*.md"
     ],
-    "matrix_rule": "Comparison matrices + translated feature grids (the compare pages, ALL locales). A capability alias inside a row's `apex = '…'` cell containing ✓ is a claim (requires stage >= runtime-wired); an apex cell containing ✗ is a DISCLAIMER, not a claim, and passes. Alias mentions in prose (description/verdict_points) are claims like any other surface. This closes the coverage hole where ✓/✗ grids drifted from the registry (audit 2026-10-02 #5)."
+    "matrix_rule": "Comparison matrices + translated feature grids (the compare pages, ALL locales). A capability alias inside a row's `apex = '\u2026'` cell containing \u2713 is a claim (requires stage >= runtime-wired); an apex cell containing \u2717 is a DISCLAIMER, not a claim, and passes. Alias mentions in prose (description/verdict_points) are claims like any other surface. This closes the coverage hole where \u2713/\u2717 grids drifted from the registry (audit 2026-10-02 #5)."
   },
   "in_flight_wiring": {
     "$comment": "Wiring contracts agreed with a crate owner whose code has not arrived in the tree yet. The checker FAILS (both modes) on an item whose env gate is already greppable in the wiring crate's Rust sources: a landed item must be REMOVED from this list in the same change that raises the capability entry's stage, so the registry never carries two lifecycle states for one capability. Each entry names the env gate that WILL gate the wiring so registry/gate/READMEs agree on the contract before the code arrives.",
@@ -153,7 +153,7 @@
         },
         "call_path": "worker-processors email/processor.rs (EngineDlpScanner built into the email processor; when config.dlp.enabled it runs dlp_scanner.scan_prepared on every prepared email before claim_acceptance) + email/dlp.rs (PreSendDlpScanner seam over dlp_engine::DlpEngine) + common/config.rs (DlpGateConfig::from_env reads WORKER_DLP_ENABLED)",
         "metrics": "apexmail_dlp_presend_scans / apexmail_dlp_presend_held / apexmail_dlp_presend_refused / apexmail_dlp_engine_unavailable_failopen counters",
-        "explanation": "WIRED into the worker outbound delivery path: every prepared email is scanned by the dlp-engine before claim_acceptance — Refuse refuses the send, Hold defers the row with a metadata.dlp annotation plus audit trail, and the scan runs under the WORKER_DLP_ENABLED gate. BINARY default OFF (DlpGateConfig::from_env keeps the gate off without an explicit operator decision), but the MANAGED BASELINE pins WORKER_DLP_ENABLED=true in .env.production.example (compose ${VAR:?}-guarded), so the managed cloud runs DLP enforced — see the deployment block. Fail-open by contract: an engine error allows the send with a loud log and the apexmail_dlp_engine_unavailable_failopen counter. Enforcement is global (no per-tenant override surface). No alert rule consumes the counters — not monitored. crates/dlp-engine/README.md carries the matching wiring-status line.",
+        "explanation": "WIRED into the worker outbound delivery path: every prepared email is scanned by the dlp-engine before claim_acceptance \u2014 Refuse refuses the send, Hold defers the row with a metadata.dlp annotation plus audit trail, and the scan runs under the WORKER_DLP_ENABLED gate. BINARY default OFF (DlpGateConfig::from_env keeps the gate off without an explicit operator decision), but the MANAGED BASELINE pins WORKER_DLP_ENABLED=true in .env.production.example (compose ${VAR:?}-guarded), so the managed cloud runs DLP enforced \u2014 see the deployment block. Fail-open by contract: an engine error allows the send with a loud log and the apexmail_dlp_engine_unavailable_failopen counter. Enforcement is global (no per-tenant override surface). No alert rule consumes the counters \u2014 not monitored. crates/dlp-engine/README.md carries the matching wiring-status line.",
         "notes": "enforced inside the deployed worker daemon (no separate service); the managed baseline (.env.production.example) already sets WORKER_DLP_ENABLED=true"
       },
       "scan_aliases": [
@@ -173,7 +173,7 @@
         "implementation_stage": "runtime-wired",
         "binary_default": false,
         "managed_cloud_enabled": true,
-        "enforcement_mode": "flag (MTA_ATTACHMENT_SCAN_MODE=flag — static + content inspection tags mail; strip/reject are explicit operator modes)",
+        "enforcement_mode": "flag (MTA_ATTACHMENT_SCAN_MODE=flag \u2014 static + content inspection tags mail; strip/reject are explicit operator modes)",
         "monitored": false,
         "advertised": true
       },
@@ -204,7 +204,7 @@
       "deployment": {
         "fact": "web_application_firewall",
         "implementation_stage": "runtime-wired",
-        "binary_default": "enabled, MONITOR mode (WAF_ENABLED=true, WAF_ENFORCE=false — would-block verdicts are logged, bodies not inspected)",
+        "binary_default": "enabled, MONITOR mode (WAF_ENABLED=true, WAF_ENFORCE=false \u2014 would-block verdicts are logged, bodies not inspected)",
         "managed_cloud_enabled": true,
         "enforcement_mode": "enforced (managed baseline pins WAF_ENFORCE=true; would-block verdicts block)",
         "monitored": false,
@@ -312,7 +312,7 @@
         "enforcement_mode": "not-applicable",
         "monitored": false,
         "advertised": false,
-        "gate": "SMTP_ARC_SEAL env / mta config arc_seal — config-gated, default FALSE; docker-compose*.yml and .env.production.example set it NOWHERE, so the managed cloud does not seal"
+        "gate": "SMTP_ARC_SEAL env / mta config arc_seal \u2014 config-gated, default FALSE; docker-compose*.yml and .env.production.example set it NOWHERE, so the managed cloud does not seal"
       },
       "evidence": {
         "docker_target": "mta",
@@ -344,7 +344,7 @@
         "compose_service": "mta",
         "call_path": null,
         "metrics": null,
-        "explanation": "Stage implemented: crates/mta/src/auth/dane.rs provides DANE/TLSA verification (verify_dane, certificate/chain-vs-TLSA validation, TLSA record generation) and its consumers are limited to the crates/mta/src/auth re-exports — neither the inbound nor the outbound delivery path verifies DANE/TLSA. Naming it as an applied control requires roadmap context."
+        "explanation": "Stage implemented: crates/mta/src/auth/dane.rs provides DANE/TLSA verification (verify_dane, certificate/chain-vs-TLSA validation, TLSA record generation) and its consumers are limited to the crates/mta/src/auth re-exports \u2014 neither the inbound nor the outbound delivery path verifies DANE/TLSA. Naming it as an applied control requires roadmap context."
       },
       "scan_aliases": [
         "DANE",
@@ -710,6 +710,89 @@
         "explanation": "Scheduled encrypted backups with retention cleanup exist as compose services. Genuinely deployed \u2014 marketing naming is honest."
       },
       "scan_aliases": []
+    },
+    {
+      "capability": "ai-reply-classification",
+      "crate": "crates/worker-processors",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "ai_reply_classification",
+        "implementation_stage": "runtime-wired",
+        "binary_default": false,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "advisory classification (semantic layer 2 of deterministic -> AI -> policy); ANY failure (outage, disabled model, invalid output) falls back to Unknown/0.0 \u2014 never a guessed disposition",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "worker",
+        "compose_service": "worker",
+        "env_gate": {
+          "name": "WORKER_REPLY_CLASSIFIER_AI_ENABLED",
+          "crate": "crates/worker-processors",
+          "default": "false"
+        },
+        "call_path": "crates/worker-processors/src/reply_handler/ai.rs (HttpReplyClassifier; classifier_from_config) -> ai-service POST /reply/classify (crates/ai-service/src/reply_classify.rs); always deterministic-first (reply_handler/classifier.rs classify_full)",
+        "metrics": null,
+        "explanation": "Layer 2 of the worker's reply classification: only messages the deterministic layer could not prove reach it, and any failure (transport, disabled model, invalid output) becomes the audited Unknown/0.0 fallback. The managed baseline enables it against ai-service; with AI_MODEL_ENABLED=false the route answers 503 and the fallback holds. Cross-crate wire contract pinned by integration-tests/reply_classify_contract_tests.rs."
+      },
+      "scan_aliases": [
+        "AI reply classification",
+        "semantic reply classification",
+        "reply classifier"
+      ]
+    },
+    {
+      "capability": "inbound-reply-mirroring",
+      "crate": "crates/mta",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "inbound_reply_mirroring",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "not-applicable",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "env_gate": null,
+        "call_path": "crates/mta/src/servers/inbound.rs (parse_inbound_mirrors at the accept-time INSERT)",
+        "metrics": null,
+        "explanation": "The MTA parses each accepted message once and populates the inbound_messages mirror columns (from_email/to_email/message_id_header/subject/body_text/body_html/headers) the reply pipeline claims on. Always on; a MIME parse failure leaves the mirrors NULL and still accepts the message (never a 451)."
+      },
+      "scan_aliases": [
+        "inbound reply ingestion",
+        "reply pipeline ingestion"
+      ]
+    },
+    {
+      "capability": "mta-event-webhooks",
+      "crate": "crates/mta",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "mta_event_webhooks",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "not-applicable",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "mta",
+        "compose_service": "mta",
+        "env_gate": null,
+        "call_path": "crates/mta/src/servers/util.rs (queue_tenant_webhook_event) called from inbound.rs (message.inbound), bounce.rs (message.bounced), feedback_loop.rs (message.complained); rows land in the canonical webhook_queue the worker webhook processor drains",
+        "metrics": null,
+        "explanation": "MTA-observed events reach tenant webhooks through the canonical queue (retries, circuit breaker, SSRF guard). Replaces the mta:webhook_queue Redis list, which had no consumer anywhere \u2014 every such webhook was silently dropped."
+      },
+      "scan_aliases": [
+        "MTA webhook delivery",
+        "inbound webhook events"
+      ]
     }
   ],
   "stale_marker_exceptions": {

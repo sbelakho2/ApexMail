@@ -4732,10 +4732,36 @@ mod adversarial_db_tests {
         /// A pool URL for `db` routed through the proxy (TLS off — the
         /// statement bytes must stay scannable).
         fn url(&self, db: &str) -> String {
+            // The app role's password comes from TEST_DATABASE_URL when that
+            // URL authenticates as `apexmail` (the local/dev shape); CI's URL
+            // authenticates as the superuser, where the deployed CI image
+            // gives the app role the literal `apexmail` — so the fallback is
+            // kept for exactly that case.
+            let password = app_role_password();
             format!(
-                "postgres://apexmail:apexmail@{}/{}?sslmode=disable",
+                "postgres://apexmail:{password}@{}/{}?sslmode=disable",
                 self.local_addr, db
             )
+        }
+    }
+
+    /// The password for the `apexmail` app role: TEST_DATABASE_URL's when it
+    /// authenticates as that role, else the CI default.
+    fn app_role_password() -> String {
+        let base = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+        let authority = base
+            .split("//")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or_default();
+        let credentials = authority.split('@').next().unwrap_or_default();
+        let mut creds = credentials.splitn(2, ':');
+        let user = creds.next().unwrap_or_default();
+        let password = creds.next().unwrap_or_default();
+        if user == "apexmail" && !password.is_empty() {
+            password.to_string()
+        } else {
+            "apexmail".to_string()
         }
     }
 

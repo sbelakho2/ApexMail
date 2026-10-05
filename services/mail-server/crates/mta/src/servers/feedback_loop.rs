@@ -938,9 +938,9 @@ impl FeedbackLoopServer {
             }
         };
 
-        if let Some((tenant_id, recipient)) = suppression_target {
+        if let Some((tenant_id, recipient)) = suppression_target.as_ref() {
             if let Err(e) = self
-                .insert_suppression(&tenant_id, &recipient, "complaint")
+                .insert_suppression(tenant_id, recipient, "complaint")
                 .await
             {
                 warn!(error = %e, "Suppression write failed; continuing complaint processing");
@@ -952,7 +952,6 @@ impl FeedbackLoopServer {
 
         // Queue webhook (authoritative only)
         let payload = serde_json::json!({
-            "event": "complaint",
             "complaint_id": complaint_id,
             "original_message_id": original_id,
             "feedback_type": complaint.feedback_type,
@@ -962,14 +961,23 @@ impl FeedbackLoopServer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
-        if let Ok(mut conn) = self.redis.get().await {
-            // LPUSH + LTRIM: a dead consumer must not grow the list (and
-            // Redis memory) without bound.
-            if let Err(e) =
-                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
-            {
-                debug!(error = %e, "Failed to push complaint webhook to Redis queue");
-            }
+        // `message.complained` reaches the tenant webhooks through the
+        // canonical queue. Webhooks are tenant-scoped, so a complaint whose
+        // original message cannot be resolved to a tenant has no endpoint to
+        // deliver to — the durable reputation/suppression side still ran.
+        if let Some((tenant_id, _)) = suppression_target.as_ref() {
+            super::util::queue_tenant_webhook_event(
+                &self.pool,
+                tenant_id,
+                "message.complained",
+                &format!(
+                    "{}:{}",
+                    original_id.as_deref().unwrap_or_default(),
+                    complaint.original_recipient.as_deref().unwrap_or_default()
+                ),
+                &payload,
+            )
+            .await;
         }
 
         info!(
@@ -1949,16 +1957,24 @@ Original-Message-ID: <original@example.com>\r\n";
     }
 
     #[test]
-    fn webhook_push_is_trimmed_to_a_bounded_length() {
-        // The `mta:webhook_queue` Redis list must be trimmed after every
-        // LPUSH: with a dead consumer an unbounded list grows Redis memory
-        // without limit. Pinned against the compiled-in source (needles
-        // concat!-built so the test cannot match its own text).
+    fn webhook_events_go_to_the_canonical_consumer_queue() {
+        // Events used to be LPUSHed onto the `mta:webhook_queue` Redis list,
+        // which NO component ever consumed — every inbound/bounce/complaint
+        // webhook was silently dropped. They now enter the canonical
+        // `webhook_queue` table the worker's webhook processor drains
+        // (retries, circuit breaker, SSRF guard). Pinned against the
+        // compiled-in source (needles concat!-built so the test cannot match
+        // its own text).
         let source = include_str!("feedback_loop.rs");
-        let trim_needle = std::concat!("LT", "RIM");
+        let queue_call = std::concat!("super::util::queue_tenant_", "webhook_event");
+        let dead_push = std::concat!("super::util::push_", "webhook_bounded");
         assert!(
-            source.contains(trim_needle),
-            "the webhook push path must trim the queue to a bounded length"
+            source.contains(queue_call),
+            "the webhook path must enqueue into the canonical consumer queue"
+        );
+        assert!(
+            !source.contains(dead_push),
+            "the dead Redis-list push must not be called again"
         );
     }
 }
@@ -2111,6 +2127,34 @@ mod adversarial_db_tests {
             .expect("suppression count")
     }
 
+    /// Subscribe one enabled webhook to `event_type` for the tenant, so the
+    /// canonical-queue delivery path has an endpoint to fan out to.
+    async fn subscribe_webhook(pool: &PgPool, tenant: &str, event_type: &str) -> String {
+        let id = format!("whk_{}", &uuid::Uuid::new_v4().simple().to_string()[..22]);
+        sqlx::query(
+            r#"INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled)
+               VALUES ($1, $2, 'https://example.com/hook', 'whsec_test', $3::jsonb, true)"#,
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(serde_json::json!([event_type]).to_string())
+        .execute(pool)
+        .await
+        .expect("webhook fixture");
+        id
+    }
+
+    async fn queued_webhook_events(
+        pool: &PgPool,
+        tenant: &str,
+    ) -> Vec<(String, serde_json::Value)> {
+        sqlx::query_as("SELECT event_type, payload FROM webhook_queue WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_all(pool)
+            .await
+            .expect("webhook_queue")
+    }
+
     async fn reputation_complaints(pool: &PgPool, domain: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT COALESCE(SUM(complaints), 0)::bigint FROM sender_reputation WHERE domain = $1",
@@ -2153,6 +2197,7 @@ mod adversarial_db_tests {
         let tenant = unique_tenant();
         let recipient = "victim@example.test";
         let (queue_id, _message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        subscribe_webhook(&pool, &tenant, "message.complained").await;
         let report = arf(&queue_id, recipient, "reporter.test");
 
         let first = server
@@ -2175,19 +2220,14 @@ mod adversarial_db_tests {
         assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
         assert_eq!(reputation_complaints(&pool, "reporter.test").await, 1);
 
-        // The webhook payload was queued.
-        let mut conn = server.redis.get().await.unwrap();
-        let payloads: Vec<String> = redis::cmd("LRANGE")
-            .arg("mta:webhook_queue")
-            .arg(0)
-            .arg(9)
-            .query_async(&mut *conn)
-            .await
-            .unwrap();
-        assert!(
-            payloads.iter().any(|p| p.contains(&first)),
-            "the complaint webhook must be queued"
-        );
+        // The `message.complained` event reached the canonical queue the
+        // worker's webhook processor drains (the former Redis list had no
+        // consumer, so this assertion used to pass against a dead write).
+        let queued = queued_webhook_events(&pool, &tenant).await;
+        assert_eq!(queued.len(), 1, "exactly one queued event: {queued:?}");
+        assert_eq!(queued[0].0, "message.complained");
+        assert_eq!(queued[0].1["type"], "message.complained");
+        assert_eq!(queued[0].1["data"]["complaint_id"], first.as_str());
 
         // REPLAY: the same report must dedupe side effects (M55).
         let second = server
@@ -2257,6 +2297,9 @@ mod adversarial_db_tests {
         let tenant = unique_tenant();
         let recipient = "victim@example.test";
         let (queue_id, _message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        // Subscribe BEFORE processing: if the forged path queued anything,
+        // the assertion below would find it (no vacuous pass).
+        subscribe_webhook(&pool, &tenant, "message.complained").await;
         let report = arf(&queue_id, recipient, "forged-domain.test");
 
         let id = server
@@ -2287,18 +2330,12 @@ mod adversarial_db_tests {
             "non-authoritative reports must never move reputation"
         );
 
-        // No webhook payload may reference this complaint.
-        let mut conn = server.redis.get().await.unwrap();
-        let payloads: Vec<String> = redis::cmd("LRANGE")
-            .arg("mta:webhook_queue")
-            .arg(0)
-            .arg(9)
-            .query_async(&mut *conn)
-            .await
-            .unwrap();
+        // A forged complaint never reaches the canonical webhook queue —
+        // the subscribed endpoint above received nothing.
+        let _ = &id;
         assert!(
-            !payloads.iter().any(|p| p.contains(&id)),
-            "non-authoritative complaints must not push a webhook"
+            queued_webhook_events(&pool, &tenant).await.is_empty(),
+            "non-authoritative complaints must not queue a webhook"
         );
     }
 

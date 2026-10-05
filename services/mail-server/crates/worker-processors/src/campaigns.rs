@@ -28,7 +28,7 @@
 //!    (the ONE admission gate, explicit `marketing` category, rollback on
 //!    failure), per-contact template render, one transaction writing `messages`
 //!    (`status 'queued'`, idempotency key `campaign:{campaign_id}:{contact_id}`)
-//!    + `email_queue` (with `campaign_id`/`contact_id` back-references so
+//!    plus `email_queue` (with `campaign_id`/`contact_id` back-references so
 //!    downstream events carry the campaign). A poison recipient is recorded
 //!    `failed` with its error — it never blocks the batch.
 //! 4. **Converge** — a `sending`/`resending` campaign with no in-flight or
@@ -861,15 +861,13 @@ impl CampaignExecutor {
                 serde_json::Value,
                 bool,
                 bool,
-                Option<String>,
             )> = sqlx::query_as(
                 "SELECT id, tenant_id, COALESCE(subject, ''), from_email, from_name, \
                         reply_to, preview_text, html_body, text_body, template_id, \
                         COALESCE(variables, '{}'::jsonb), \
                         COALESCE(utm_params, '{}'::jsonb), \
                         COALESCE(settings, '{}'::jsonb), \
-                        track_opens, track_clicks, \
-                        ab_config->>'metric' \
+                        track_opens, track_clicks \
                  FROM campaigns WHERE id = ANY($1)",
             )
             .bind(&campaign_ids)
@@ -891,7 +889,6 @@ impl CampaignExecutor {
                 settings,
                 track_opens,
                 track_clicks,
-                ab_metric,
             ) in rows
             {
                 let template = match template_id.as_deref().filter(|id| !id.trim().is_empty()) {
@@ -1721,14 +1718,6 @@ fn urlencode_component(value: &str) -> String {
             }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
-    }
-    out
-}
-
-fn apply_vars(body: &str, vars: &[(&str, String)]) -> String {
-    let mut out = body.to_string();
-    for (name, value) in vars {
-        out = out.replace(&format!("{{{{{name}}}}}"), value);
     }
     out
 }

@@ -79,7 +79,7 @@ metrics-exporter-prometheus.workspace = true
 
 # Utils
 chrono.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["v5"] }
 thiserror.workspace = true
 anyhow.workspace = true
 bytes.workspace = true

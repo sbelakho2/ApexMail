@@ -1556,7 +1556,7 @@ mod tests {
     #[test]
     fn verify_reasonable_response_passes() {
         let ok = assess_draft(
-            "Hello John,\n\nThanks for reaching out. Your SPF record should include our servers; you can find the exact values under Dashboard → Domains. The Growth plan is €150 per month.\n\nBest regards,\nApexMail AI Assistant",
+            "Hello John,\n\nThanks for reaching out. Your SPF record should include our servers; you can find the exact values under Dashboard → Domains. The Growth plan is €229 per month.\n\nBest regards,\nApexMail AI Assistant",
         );
         assert!(ok.is_ok(), "a normal support reply must pass: {ok:?}");
     }

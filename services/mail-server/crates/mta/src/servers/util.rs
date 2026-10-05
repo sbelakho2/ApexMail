@@ -444,30 +444,90 @@ pub(crate) fn effective_max_recipients(server_max: usize, rate_limit_max: usize)
     server_max.min(rate_limit_max)
 }
 
-/// Hard cap on the `mta:webhook_queue` Redis list: LPUSH alone grows the
-/// list without bound when the consumer is dead; the paired LTRIM keeps
-/// only the newest entries so Redis memory stays bounded. 10_000 events is
-/// generous headroom for a consumer catching up after an outage.
-pub(crate) const WEBHOOK_QUEUE_MAX_LEN: i64 = 10_000;
+/// Namespace for the deterministic webhook-queue ids (v5 UUIDs), identical
+/// to the one the SES feedback path uses so an event observed by both
+/// pipelines collapses onto one queue row instead of double-delivering.
+const WEBHOOK_QUEUE_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
+    0x77, 0x31, 0x9c, 0x02, 0x64, 0x1d, 0x4e, 0x07, 0x9a, 0x55, 0x2e, 0x8b, 0x41, 0x90, 0x6d, 0x14,
+]);
 
-/// Push one serialized webhook event onto `mta:webhook_queue` and trim the
-/// list to the newest [`WEBHOOK_QUEUE_MAX_LEN`] entries (best-effort:
-/// errors propagate to the caller, which only logs them).
-pub(crate) async fn push_webhook_bounded<C: redis::aio::ConnectionLike>(
-    conn: &mut C,
-    payload: &str,
-) -> Result<(), redis::RedisError> {
-    redis::cmd("LPUSH")
-        .arg("mta:webhook_queue")
-        .arg(payload)
-        .query_async::<i64>(conn)
-        .await?;
-    redis::cmd("LTRIM")
-        .arg("mta:webhook_queue")
-        .arg(-(WEBHOOK_QUEUE_MAX_LEN as isize))
-        .arg(-1)
-        .query_async::<()>(conn)
+/// Enqueue one tenant webhook event into the CANONICAL `webhook_queue` table
+/// the worker's webhook processor drains (retries, circuit breaker, SSRF
+/// guard) — one row per subscribed, enabled webhook.
+///
+/// This replaces the former LPUSH onto the `mta:webhook_queue` Redis list:
+/// those events (inbound acceptance, authoritative bounces, ARF complaints)
+/// had NO consumer anywhere in the platform, so every one of them was
+/// silently dropped. The plan's rule is "a real consumer or nothing", and
+/// the canonical queue IS the real consumer.
+///
+/// Best-effort by contract: the caller has already committed the durable
+/// state (message row, suppression) and a queue failure must never fail the
+/// SMTP transaction; errors are logged and dropped.
+pub(crate) async fn queue_tenant_webhook_event(
+    pool: &sqlx::PgPool,
+    tenant_id: &str,
+    event_type: &str,
+    identity: &str,
+    payload: &serde_json::Value,
+) {
+    if tenant_id.trim().is_empty() {
+        return;
+    }
+    let subscribed: Vec<(String,)> = match sqlx::query_as(
+        "SELECT id FROM webhooks \
+         WHERE tenant_id = $1 AND enabled = true \
+           AND (events ? $2 OR events ? '*')",
+    )
+    .bind(tenant_id)
+    .bind(event_type)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(error = %error, event_type, "Webhook subscription lookup failed");
+            return;
+        }
+    };
+    if subscribed.is_empty() {
+        return;
+    }
+
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    for (webhook_id,) in subscribed {
+        let queue_id = format!(
+            "whj_{}",
+            uuid::Uuid::new_v5(
+                &WEBHOOK_QUEUE_NAMESPACE,
+                format!("{tenant_id}:{event_type}:{identity}:{webhook_id}").as_bytes(),
+            )
+            .simple()
+        );
+        let envelope = serde_json::json!({
+            "id": format!("evt_{}", uuid::Uuid::new_v4().simple()),
+            "type": event_type,
+            "tenantId": tenant_id,
+            "timestamp": timestamp,
+            "data": payload,
+        });
+        if let Err(error) = sqlx::query(
+            "INSERT INTO webhook_queue \
+             (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) \
+             VALUES ($1, $2, $3, $4, $5, 'pending', 1, NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&queue_id)
+        .bind(&webhook_id)
+        .bind(tenant_id)
+        .bind(event_type)
+        .bind(&envelope)
+        .execute(pool)
         .await
+        {
+            tracing::warn!(error = %error, event_type, "Failed to queue webhook event");
+        }
+    }
 }
 
 /// Build the `Received:` trace header for one SMTP hop (RFC 5321 §4.4),

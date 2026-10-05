@@ -394,8 +394,6 @@ struct CampaignWriteInput<'a> {
     list_ids: &'a Option<Vec<String>>,
     exclude_list_ids: &'a Option<Vec<String>>,
     segment_id: &'a Option<String>,
-    track_opens: Option<bool>,
-    track_clicks: Option<bool>,
     utm_params: &'a Option<Value>,
     settings: &'a Option<Value>,
     ab_test: &'a Option<Value>,
@@ -999,8 +997,6 @@ async fn create_campaign(
             list_ids: &body.list_ids,
             exclude_list_ids: &body.exclude_list_ids,
             segment_id: &body.segment_id,
-            track_opens: body.track_opens,
-            track_clicks: body.track_clicks,
             utm_params: &body.utm_params,
             settings: &body.settings,
             ab_test: &body.ab_test,
@@ -1342,8 +1338,6 @@ async fn update_campaign(
             list_ids: &body.list_ids,
             exclude_list_ids: &body.exclude_list_ids,
             segment_id: &body.segment_id,
-            track_opens: body.track_opens,
-            track_clicks: body.track_clicks,
             utm_params: &body.utm_params,
             settings: &body.settings,
             ab_test: &body.ab_test,
@@ -3076,7 +3070,7 @@ mod adversarial_tests {
         .expect("seed template");
 
         // Create the campaign referencing the audience.
-        let (_status, Json(mut created)) = create_campaign(
+        let (_status, Json(created)) = create_campaign(
             State(state.clone()),
             write.clone(),
             Json(CreateCampaignRequest {
