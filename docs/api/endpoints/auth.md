@@ -27,6 +27,8 @@ for the full session/CSRF contract.
 | GET | `/v1/auth/api-keys` | List API keys |
 | POST | `/v1/auth/api-keys` | Create API key |
 | DELETE | `/v1/auth/api-keys/:id` | Revoke API key |
+| POST | `/v1/auth/change-password` | Change password (revokes all OTHER sessions; current session stays signed in) |
+| POST | `/v1/auth/sessions/revoke` | Revoke sessions: `{"session_id"}` targets one session, `{}` revokes all others, `{"revoke_all": true}` revokes every session including the current one |
 
 ---
 
@@ -360,8 +362,12 @@ X-CSRF-Token: <token from GET /v1/auth/csrf>
 { "challenge_token": "mfa_...", "mfaCode": "123456" }
 ```
 
-Recovery codes are supplied as `"recoveryCode": "..."` (they are NOT
-accepted in the `mfaCode` field of this endpoint). On success the endpoint
+Recovery codes are supplied as `"recoveryCode": "..."` — a body may carry
+`mfaCode` (TOTP) or `recoveryCode`, not both being required. For
+compatibility a recovery code sent in the `mfaCode` field is also accepted
+(it fails the 6-digit TOTP format check and is then tried as a recovery
+code). Either way every challenge token is single-use: a failed or
+successful verification burns it. On success the endpoint
 returns the same session shape as login (`expires_at` + `user`) and sets
 the `am_session` cookie.
 
@@ -464,6 +470,47 @@ non-existent id returns `404 NOT_FOUND`.
 
 ---
 
+## Change Password
+
+```http
+POST /v1/auth/change-password
+X-CSRF-Token: <token>
+```
+
+```json
+{ "current_password": "...", "new_password": "..." }
+```
+
+Response `200`: `{ "changed": true }`.
+
+The session that performed the change STAYS signed in; every other session of
+the user is revoked immediately (per-session revocation — their JWTs and
+refresh attempts fail with `401 session has been revoked`). The new password
+takes effect on the next login.
+
+---
+
+## Revoke Sessions
+
+```http
+POST /v1/auth/sessions/revoke
+X-CSRF-Token: <token>
+```
+
+Three shapes, one endpoint:
+
+| Body | Effect | Current session |
+|------|--------|-----------------|
+| `{ "session_id": "<id>" }` | Revoke that one session (`404` if it does not exist or belongs to another user) | dies only if it IS the target |
+| `{}` | Revoke all of the user's OTHER sessions | survives |
+| `{ "revoke_all": true }` | Revoke every session of the user | dies |
+
+Response `200`: `{ "revoked": <n> }` — the number of session records deleted.
+Each revoked session is marked by its own `jti` in the revocation registry, so
+the request-scoped session is never collateral damage of a targeted revoke.
+
+---
+
 ## Available Scopes
 
 | Scope | Description |
@@ -492,6 +539,12 @@ non-existent id returns `404 NOT_FOUND`.
 | `support:read` | View support tickets |
 | `support:write` | Create and reply to support tickets |
 | `billing:read` | View billing information |
+| `billing:write` | Change plan, manage wallet (mintable but never role-granted — wildcard holders only) |
+| `scim:read` | List SCIM users (mintable but never role-granted — wildcard holders only) |
+| `scim:write` | Create/modify/delete SCIM users (mintable but never role-granted — wildcard holders only) |
+| `ai:read` | AI chat and insights (mintable but never role-granted — wildcard holders only) |
+| `api-keys:read` | List API keys (session-only — cannot be minted onto another key) |
+| `api-keys:write` | Create/revoke API keys (session-only — cannot be minted onto another key) |
 | `logs:read` | Access audit logs |
 
 ---

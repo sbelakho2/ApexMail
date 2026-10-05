@@ -46,7 +46,12 @@ const DUNNING_STATUS_CACHE_TTL_SECONDS: u64 = 300;
 
 static DUNNING_CONFIG_TABLE_ENSURED: OnceLock<()> = OnceLock::new();
 
-pub(crate) fn router() -> Router<Arc<AppState>> {
+/// The Stripe webhook ingest route. Mounted by the billing-service binary
+/// AND by api-server (which nests it on the public rate-limited stack when
+/// `STRIPE_WEBHOOK_SECRET` is configured) — the billing-service binary has
+/// no container in any deployed topology, so api-server is the live ingest
+/// surface (dogfood finding A, 2026-10-05).
+pub fn router() -> Router<Arc<AppState>> {
     Router::new().route("/webhooks/stripe", post(handle_stripe_webhook))
 }
 

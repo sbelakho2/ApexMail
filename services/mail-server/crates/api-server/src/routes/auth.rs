@@ -21,8 +21,8 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::middleware::auth::{
     invalidate_api_key_cache, invalidate_tenant_user_status_cache, issued_before_or_at_revocation,
-    lookup_session_revoked_after, require_scopes, session_revocation_key, validate_session_csrf,
-    AuthUser, JwtClaims,
+    lookup_session_revoked_after, require_scopes, revoke_session_marker, session_revocation_key,
+    validate_session_csrf, AuthUser, JwtClaims,
 };
 use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA};
 use crate::routes::csrf::validate_form_csrf;
@@ -822,7 +822,24 @@ pub(crate) fn registered_api_key_scopes() -> &'static [String] {
         // so the fail-closed default is that existing narrow credentials lose
         // invoice/finance access until an operator deliberately mints a key
         // (or a session user holds the wildcard).
-        let mut scopes: Vec<String> = vec!["*".into(), "billing:read".into()];
+        //
+        // The same mintable-but-not-role-granted treatment covers every
+        // other scope a route actively enforces (`require_scopes`) that no
+        // role grants: `billing:write` (plan switches, wallet debits),
+        // `scim:read`/`scim:write` (SCIM user provisioning) and `ai:read`
+        // (chat/insights). Leaving them out of the registry made those
+        // routes' own scope gates unreachable for scoped keys — no key could
+        // ever carry the exact scope the route demanded, so only wildcard
+        // holders could ever call them (the identical defect the
+        // `domains:write`/`automations:write` fix closed for domains).
+        let mut scopes: Vec<String> = vec![
+            "*".into(),
+            "billing:read".into(),
+            "billing:write".into(),
+            "scim:read".into(),
+            "scim:write".into(),
+            "ai:read".into(),
+        ];
         for role in ["admin", "developer", "viewer", "member"] {
             for scope in scopes_for_role(role) {
                 if !scopes.contains(&scope) {
@@ -1537,9 +1554,10 @@ async fn delete_mfa_challenge(
 
 // ─── F3: TOTP hardening (lockout, replay guard, single-use challenges) ──
 
-/// RFC 6238 time step used by `apexmail_lib::mfa` (30 s). Duplicated here
-/// because the lib keeps it private; the replay guard must key on the same
-/// windows the verifier accepts.
+/// RFC 6238 time step used by `apexmail_lib::mfa` (30 s) — shared by the
+/// test TOTP generators below; the replay guard itself keys on the step the
+/// verifier MATCHED (no current-step derivation needed).
+#[cfg(test)]
 const TOTP_STEP_SECS: u64 = 30;
 
 /// Replay-guard TTL: a code is accepted while the current step is within ±1
@@ -1565,19 +1583,26 @@ static TOTP_REPLAY_FALLBACK: std::sync::LazyLock<
     parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
-/// Atomic single-use claim of a TOTP code's ±1 acceptance windows (F3).
-/// KEYS = the three replay keys for the current step ±1,
+/// Atomic single-use claim of the MATCHED TOTP time-step window (F3).
+/// KEYS[1] = the replay key for the exact window the code matched,
 /// ARGV[1] = TTL seconds.
-/// Returns 1 when this caller is the first to use the window, 0 on replay.
+/// Returns 1 when this caller is the first to use that window, 0 on replay.
+///
+/// Only the matched window is claimed — NOT the whole ±1 acceptance span.
+/// Claiming all three windows (the previous scheme) made any two
+/// verifications within three steps of each other collide: the second login
+/// presented a genuinely fresh code for step N, but the ±1 claim written by
+/// the login at step N-2 covered step N-1, so the valid code was rejected
+/// as a "replay" (false rejection for every back-to-back login inside ~90s,
+/// and each false rejection fed the per-secret lockout). Claiming exactly
+/// the matched step keeps the RFC 6238 §5.2 guarantee — a second submission
+/// of the SAME code finds its own step already claimed — without inventing
+/// collisions between different codes.
 const TOTP_REPLAY_CLAIM_LUA: &str = r#"
-    for i = 1, #KEYS do
-        if redis.call('EXISTS', KEYS[i]) == 1 then
-            return 0
-        end
+    if redis.call('EXISTS', KEYS[1]) == 1 then
+        return 0
     end
-    for i = 1, #KEYS do
-        redis.call('SET', KEYS[i], '1', 'EX', ARGV[1])
-    end
+    redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
     return 1
 "#;
 
@@ -1605,20 +1630,13 @@ fn mfa_totp_secret_fingerprint(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
 }
 
-fn current_totp_step() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        / TOTP_STEP_SECS
-}
-
-/// Atomically claim the ±1 windows around the current step in Redis.
+/// Atomically claim the replay key for the MATCHED step of one TOTP secret.
 /// `Some(true)` = first use, `Some(false)` = replay, `None` = Redis
 /// unavailable (caller falls back to the in-process map).
 async fn claim_totp_window_redis(
     redis_pool: &deadpool_redis::Pool,
     secret_fingerprint: &str,
+    matched_step: u64,
 ) -> Option<bool> {
     let mut conn = match redis_pool.get().await {
         Ok(conn) => conn,
@@ -1628,17 +1646,10 @@ async fn claim_totp_window_redis(
         }
     };
 
-    let step = current_totp_step();
-    let keys = [
-        mfa_totp_replay_key(secret_fingerprint, step.saturating_sub(1)),
-        mfa_totp_replay_key(secret_fingerprint, step),
-        mfa_totp_replay_key(secret_fingerprint, step + 1),
-    ];
+    let key = mfa_totp_replay_key(secret_fingerprint, matched_step);
 
     let claimed: i64 = deadpool_redis::redis::Script::new(TOTP_REPLAY_CLAIM_LUA)
-        .key(&keys[0])
-        .key(&keys[1])
-        .key(&keys[2])
+        .key(&key)
         .arg(TOTP_REPLAY_TTL_SECS)
         .invoke_async(&mut conn)
         .await
@@ -1654,20 +1665,12 @@ async fn claim_totp_window_redis(
 /// Bounded in-process fallback for the replay claim while Redis is down.
 /// Expired entries are pruned on insert; the map is cleared if it is still
 /// at capacity, so memory stays bounded no matter how many secrets are seen.
-fn claim_totp_window_inprocess(secret_fingerprint: &str) -> bool {
+fn claim_totp_window_inprocess(secret_fingerprint: &str, matched_step: u64) -> bool {
     let mut map = TOTP_REPLAY_FALLBACK.lock();
     let now = std::time::Instant::now();
-    let step = current_totp_step();
-    let keys = [
-        mfa_totp_replay_key(secret_fingerprint, step.saturating_sub(1)),
-        mfa_totp_replay_key(secret_fingerprint, step),
-        mfa_totp_replay_key(secret_fingerprint, step + 1),
-    ];
+    let key = mfa_totp_replay_key(secret_fingerprint, matched_step);
 
-    if keys
-        .iter()
-        .any(|key| map.get(key).is_some_and(|expires| *expires > now))
-    {
+    if map.get(&key).is_some_and(|expires| *expires > now) {
         return false;
     }
 
@@ -1679,9 +1682,7 @@ fn claim_totp_window_inprocess(secret_fingerprint: &str) -> bool {
     }
 
     let expires = now + std::time::Duration::from_secs(TOTP_REPLAY_TTL_SECS);
-    for key in keys {
-        map.insert(key, expires);
-    }
+    map.insert(key, expires);
     true
 }
 
@@ -1700,19 +1701,24 @@ pub(crate) async fn verify_totp_code_guarded(
     secret: &str,
     code: &str,
 ) -> bool {
-    if !TOTP_VERIFIER.verify(secret, code) {
+    // In-process verdict first: lockout, format check, drift match, and the
+    // per-process RFC 6238 §5.2 replay guard (matched counter <= last used).
+    // `verify_matched` surfaces WHICH step the code matched so the shared
+    // (Redis) guard can claim exactly that window — see the Lua fn's doc
+    // comment for why claiming the whole ±1 span was wrong.
+    let Some(matched_step) = TOTP_VERIFIER.verify_matched(secret, code) else {
         return false;
-    }
+    };
 
     let fingerprint = mfa_totp_secret_fingerprint(secret);
-    match claim_totp_window_redis(redis_pool, &fingerprint).await {
+    match claim_totp_window_redis(redis_pool, &fingerprint, matched_step).await {
         Some(true) => true,
         Some(false) => {
             tracing::warn!("replayed TOTP code rejected");
             TOTP_VERIFIER.record_failure(secret);
             false
         }
-        None => claim_totp_window_inprocess(&fingerprint),
+        None => claim_totp_window_inprocess(&fingerprint, matched_step),
     }
 }
 
@@ -1942,7 +1948,13 @@ pub struct UserInfo {
 #[serde(deny_unknown_fields)]
 pub struct CompleteMfaChallengeRequest {
     pub challenge_token: String,
-    #[serde(rename = "mfaCode", alias = "mfa_code")]
+    /// Optional: the endpoint's documented contract is "either `mfaCode`
+    /// (TOTP) or `recoveryCode`", so a recovery-only body carries no
+    /// `mfaCode` at all. `default` + the `is_empty` treatment below keep a
+    /// blank field equivalent to an absent one. (The field used to be
+    /// REQUIRED, which made the documented recovery-only body a 422 before
+    /// the handler ever ran.)
+    #[serde(default, rename = "mfaCode", alias = "mfa_code")]
     pub mfa_code: String,
     #[serde(default, rename = "recoveryCode", alias = "recovery_code")]
     pub recovery_code: Option<String>,
@@ -2284,6 +2296,17 @@ async fn get_current_user(
     })))
 }
 
+/// Static Argon2id hash burned on the unknown-email login path so the
+/// failure costs the same as a wrong-password failure. The response BODIES
+/// for unknown email and wrong password are byte-identical, but skipping the
+/// hash verification for unknown users made the response LATENCY an account
+/// existence oracle (Argon2id ≈ tens of ms vs the sub-ms miss). One hash per
+/// process, same parameters as a real stored hash.
+static DUMMY_PASSWORD_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    apexmail_lib::hash_password("apexmail:unknown-user-timing-equalizer")
+        .expect("dummy password hash for login timing equalization")
+});
+
 async fn login(
     State(state): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
@@ -2390,6 +2413,10 @@ async fn login(
     .await?;
 
     let Some(mut user) = user else {
+        // Timing anti-enumeration: burn one Argon2id verification so this
+        // miss is indistinguishable in latency from the wrong-password miss
+        // below (the bodies are already byte-identical).
+        let _ = apexmail_lib::verify_password(&body.password, &DUMMY_PASSWORD_HASH);
         record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     };
@@ -2456,13 +2483,19 @@ async fn login(
                     .into(),
             ));
         }
-        // The authentication itself survived the policy — clear the lockout
-        // counter (its pre-ladder placement, preserved).
-        PasswordLoginVerdict::EmailUnverified
-        | PasswordLoginVerdict::MfaRequired { .. }
-        | PasswordLoginVerdict::Allowed => {
+        // The password half survived the policy. EmailUnverified and full
+        // Allowed clear the lockout counter; MfaRequired deliberately does
+        // NOT — clearing there reset the accumulator on every attempt, so an
+        // attacker holding a valid password could guess second factors
+        // forever (each login → challenge → wrong-code cycle wiped the
+        // count). The counter now survives the password step and is cleared
+        // only when the challenge is fully verified (see
+        // `complete_mfa_challenge`), so repeated second-factor failures
+        // reach the documented account lockout.
+        PasswordLoginVerdict::EmailUnverified | PasswordLoginVerdict::Allowed => {
             clear_login_failures(&state.redis, &login_identifier).await?;
         }
+        PasswordLoginVerdict::MfaRequired { .. } => {}
     }
 
     if let PasswordLoginVerdict::EmailUnverified = verdict {
@@ -2852,7 +2885,14 @@ async fn complete_mfa_challenge(
         }
     };
 
-    clear_login_failures(&state.redis, &login_identifier).await?;
+    // NOTE: the login-failure counter is deliberately NOT cleared here.
+    // Clearing it mid-challenge reset the lockout accumulator on every
+    // attempt, so an attacker holding a valid password could guess MFA codes
+    // forever — each cycle (login → challenge → wrong code) wiped the count
+    // the previous cycles had accumulated. The counter now survives the
+    // password step and is cleared only where the challenge is fully
+    // VERIFIED (both issuance arms below), so 5 failed second-factors from
+    // corroborating sources reach the documented account lockout.
 
     let mut user = sqlx::query_as::<_, UserRow>(
         "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret, mfa_recovery_hashes
@@ -2929,6 +2969,10 @@ async fn complete_mfa_challenge(
             user.mfa_enabled = true;
             user.mfa_secret = Some(challenge.secret.clone());
 
+            // The second factor fully verified: the lockout accumulator for
+            // this identifier can finally be cleared.
+            clear_login_failures(&state.redis, &login_identifier).await?;
+
             // AR-005: Rotate session after MFA setup (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
             let revoked_after =
@@ -2995,6 +3039,10 @@ async fn complete_mfa_challenge(
                 )
                 .await?;
             }
+
+            // The second factor fully verified: the lockout accumulator for
+            // this identifier can finally be cleared.
+            clear_login_failures(&state.redis, &login_identifier).await?;
 
             // AR-005: Rotate session after MFA verification (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
@@ -4282,6 +4330,14 @@ async fn refresh_token(
     // Check if the session has been revoked since the token was issued
     let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, &state).await?;
     if issued_before_or_at_revocation(old_claims.iat, revoked_after) {
+        return Err(ApiError::Unauthorized("session has been revoked".into()));
+    }
+
+    // Per-session revocation (targeted `POST /v1/auth/sessions/revoke`,
+    // password change): the user-wide marker above stays unset for those, so
+    // without this check the individually revoked session could still mint
+    // a fresh, unrevoked session here.
+    if crate::middleware::auth::lookup_session_revoked_pub(&old_claims.jti, &state).await? {
         return Err(ApiError::Unauthorized("session has been revoked".into()));
     }
 
@@ -6127,12 +6183,18 @@ mod tests {
         // not polluted by other tests claiming the same window.
         let fingerprint = mfa_totp_secret_fingerprint(&format!("window-{}", Uuid::new_v4()));
         assert!(
-            claim_totp_window_inprocess(&fingerprint),
+            claim_totp_window_inprocess(&fingerprint, 70_000_000),
             "first use of a window must be claimable"
         );
         assert!(
-            !claim_totp_window_inprocess(&fingerprint),
+            !claim_totp_window_inprocess(&fingerprint, 70_000_000),
             "the same window must not be claimable twice (replay)"
+        );
+        // A DIFFERENT step of the same secret is a different code: claiming
+        // one step must not block its neighbours (matched-window claims).
+        assert!(
+            claim_totp_window_inprocess(&fingerprint, 70_000_001),
+            "adjacent step of the same secret is an independent code"
         );
     }
 
@@ -6769,9 +6831,42 @@ async fn change_password(
         return Err(ApiError::Unauthorized("Invalid current password".into()));
     }
 
-    // Hash and update
+    // Hash the replacement up front (no DB writes yet).
     let new_hash = apexmail_lib::hash_password(&body.new_password)
         .map_err(|error| ApiError::Internal(format!("Password hashing failed: {error}")))?;
+
+    // Revoke all OTHER sessions so they must re-authenticate with the new
+    // password, while the session that just proved possession of the current
+    // password stays signed in (OWASP session-management guidance, and the
+    // contract the DELETE below has always spelt out with `id != $2`).
+    //
+    // Revocation is a PER-SESSION Redis marker on each revoked session's jti
+    // (checked in the auth middleware and on /refresh). The previous
+    // implementation wrote the USER-WIDE revocation marker here "so all
+    // existing JWTs are rejected immediately" — which also killed the
+    // CALLER's own session, contradicting the very DELETE that spares it:
+    // the user changed their password and was logged out mid-request.
+    let ttl = state.config.jwt_expiry.as_secs();
+    let revoked_ids: Vec<String> = if auth.session_id.is_some() {
+        sqlx::query_scalar(
+            "DELETE FROM sessions WHERE user_id = $1::uuid AND id != $2 RETURNING id::text",
+        )
+        .bind(user_id)
+        .bind(auth.session_id.as_deref().unwrap_or(""))
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1::uuid RETURNING id::text")
+            .bind(user_id)
+            .fetch_all(&state.db)
+            .await?
+    };
+    // Fail-closed ordering: the revocation markers land BEFORE the
+    // credential update, so a Redis outage aborts the change instead of
+    // leaving still-valid sessions on the old password.
+    for session_id in &revoked_ids {
+        revoke_session_marker(&state, session_id, ttl).await?;
+    }
 
     sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
         .bind(new_hash)
@@ -6779,28 +6874,8 @@ async fn change_password(
         .execute(&state.db)
         .await?;
 
-    // Revoke all other sessions to force re-authentication with new password
-    if let Some(current_session_id) = &auth.session_id {
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1::uuid AND id != $2")
-            .bind(user_id)
-            .bind(current_session_id)
-            .execute(&state.db)
-            .await?;
-    } else {
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1::uuid")
-            .bind(user_id)
-            .execute(&state.db)
-            .await?;
-    }
-
     // Invalidate user status cache so stale cached entries cannot bypass the password change
     invalidate_tenant_user_status_cache(&auth.tenant_id, &state).await;
-
-    // Set Redis revocation marker so all existing JWTs (including the current session's
-    // refresh token) are rejected immediately. Without this, a stolen old refresh token
-    // could still obtain new access tokens even after the password is changed.
-    let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &auth.tenant_id, user_id, ttl).await?;
 
     Ok(Json(serde_json::json!({ "changed": true })))
 }
@@ -6823,42 +6898,71 @@ async fn revoke_session(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = authenticated_user_id(&auth)?;
 
-    // Write the Redis revocation marker BEFORE deleting from Postgres.
-    // This closes the TOCTOU window where a revoked session's JWT could still
-    // obtain a new refresh token via the refresh_token endpoint.
     let ttl = state.config.jwt_expiry.as_secs();
-    revoke_user_sessions(&state.redis, &auth.tenant_id, user_id, ttl).await?;
-
     let affected = if body.revoke_all {
-        // Revoke ALL sessions including the current one
+        // Revoke ALL sessions including the current one. The USER-WIDE
+        // marker goes first (fail closed, closes the TOCTOU window where a
+        // revoked session's JWT could still refresh), then the rows go.
+        revoke_user_sessions(&state.redis, &auth.tenant_id, user_id, ttl).await?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1::uuid")
             .bind(user_id)
             .execute(&state.db)
             .await?
             .rows_affected()
     } else if let Some(session_id) = &body.session_id {
-        // Revoke single specific session
+        // Revoke a single, NAMED session: the marker is scoped to that
+        // session's own jti, so its siblings stay untouched. The previous
+        // implementation wrote the user-wide marker here, which silently
+        // killed EVERY session of the user — the targeted contract in
+        // `RevokeSessionRequest` was a lie.
+        //
+        // Ownership is checked BEFORE the marker write: a marker keyed by a
+        // foreign jti would kill that session even though the row delete
+        // below (user-scoped) matched nothing. Fail-closed: Redis down →
+        // error, nothing revoked.
+        let owned: Option<(String,)> =
+            sqlx::query_as("SELECT id::text FROM sessions WHERE id = $1 AND user_id = $2::uuid")
+                .bind(session_id)
+                .bind(user_id)
+                .fetch_optional(&state.db)
+                .await?;
+        if owned.is_none() {
+            return Err(ApiError::NotFound("session not found".into()));
+        }
+        revoke_session_marker(&state, session_id, ttl).await?;
         sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2::uuid")
             .bind(session_id)
             .bind(user_id)
             .execute(&state.db)
             .await?
             .rows_affected()
-    } else if let Some(current_session_id) = &auth.session_id {
-        // Default: revoke all sessions except the current one
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1::uuid AND id != $2")
-            .bind(user_id)
-            .bind(current_session_id)
-            .execute(&state.db)
-            .await?
-            .rows_affected()
+    } else if auth.session_id.is_some() {
+        // Default: revoke all sessions EXCEPT the current one — per-session
+        // markers on each revoked id, user-wide marker untouched, so the
+        // caller's own session survives exactly as this branch's SQL always
+        // promised.
+        let revoked_ids: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM sessions WHERE user_id = $1::uuid AND id != $2 RETURNING id::text",
+        )
+        .bind(user_id)
+        .bind(auth.session_id.as_deref().unwrap_or(""))
+        .fetch_all(&state.db)
+        .await?;
+        for session_id in &revoked_ids {
+            revoke_session_marker(&state, session_id, ttl).await?;
+        }
+        revoked_ids.len() as u64
     } else {
-        // No session context (e.g. API key auth) — revoke all sessions
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1::uuid")
-            .bind(user_id)
-            .execute(&state.db)
-            .await?
-            .rows_affected()
+        // No session context (e.g. API key auth) — revoke all sessions.
+        let revoked_ids: Vec<String> =
+            sqlx::query_scalar("DELETE FROM sessions WHERE user_id = $1::uuid RETURNING id::text")
+                .bind(user_id)
+                .fetch_all(&state.db)
+                .await?;
+        for session_id in &revoked_ids {
+            revoke_session_marker(&state, session_id, ttl).await?;
+        }
+        revoked_ids.len() as u64
     };
 
     Ok(Json(serde_json::json!({ "revoked": affected })))
@@ -8471,6 +8575,35 @@ mod adversarial_auth_tests_2 {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
 
+        // The failed second factor must ACCUMULATE in the lockout counter —
+        // the password step (and the challenge handler) no longer clears it,
+        // otherwise a valid password buys unlimited MFA guesses. A fresh
+        // challenge after a failure must build on the existing count.
+        let challenge = login_challenge(&fx, &email).await;
+        let token = challenge["challengeToken"].as_str().unwrap().to_string();
+        let (status, _, _) = call(
+            &fx.app,
+            Method::POST,
+            "/mfa/verify",
+            Some(json!({"challenge_token": token, "mfaCode": "000000"})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        {
+            let mut conn = fx.redis.get().await.unwrap();
+            let failures: i64 = deadpool_redis::redis::cmd("GET")
+                .arg(login_failure_key(&normalized_login_identifier(&email)))
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or_default();
+            assert!(
+                failures >= 2,
+                "failed MFA attempts must accumulate across login cycles, got {failures}"
+            );
+        }
+
         // Correct code completes login with a session; the token cannot be
         // replayed.
         let challenge = login_challenge(&fx, &email).await;
@@ -8534,6 +8667,38 @@ mod adversarial_auth_tests_2 {
                 .await
                 .unwrap();
         assert!(remaining.as_array().unwrap().is_empty());
+
+        // Documented recovery-only body shape: NO mfaCode field at all
+        // (the field used to be REQUIRED, which 422'd this body before the
+        // handler ran).
+        let rc_email2 = format!("verify-rc2-{}@example.com", Uuid::new_v4().simple());
+        let recovery2 = "第二条-9988".to_string();
+        let hashes2 = json!([apexmail_lib::mfa::hash_recovery_code(&recovery2)]);
+        seed_user(
+            &fx.pool,
+            &tenant,
+            &rc_email2,
+            "owner",
+            "active",
+            true,
+            true,
+            Some(&secret),
+            Some(hashes2),
+        )
+        .await;
+        let challenge = login_challenge(&fx, &rc_email2).await;
+        let token = challenge["challengeToken"].as_str().unwrap().to_string();
+        let (status, headers, body) = call(
+            &fx.app,
+            Method::POST,
+            "/mfa/verify",
+            Some(json!({"challenge_token": token, "recoveryCode": recovery2})),
+            Some(&fx.csrf),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "recovery-only body: {body}");
+        assert!(session_cookie(&headers).is_some());
 
         // Validation and unknown-token contracts.
         let (status, _, body) = call(
@@ -10545,21 +10710,16 @@ mod adversarial_auth_tests_3 {
             Err(ApiError::Unauthorized(message)) if message.contains("No password set")
         ));
 
-        // revoke_session: every branch returns the affected count (0 here —
-        // the canonical sessions table is empty for these fixtures).
+        // revoke_session: the wildcard branches return the affected count
+        // (0 here — the canonical sessions table is empty for these
+        // fixtures), while a TARGETED unknown session is an honest 404
+        // (ownership is checked before the revocation marker lands).
         for (auth, body) in [
             (
                 auth.clone(),
                 RevokeSessionRequest {
                     session_id: None,
                     revoke_all: true,
-                },
-            ),
-            (
-                auth.clone(),
-                RevokeSessionRequest {
-                    session_id: Some("some-session".into()),
-                    revoke_all: false,
                 },
             ),
             (
@@ -10585,6 +10745,55 @@ mod adversarial_auth_tests_3 {
                 .expect("revoke sessions");
             assert!(value.get("revoked").is_some(), "{value}");
         }
+        assert!(matches!(
+            revoke_session(
+                State(fx.state.clone()),
+                auth.clone(),
+                Json(RevokeSessionRequest {
+                    session_id: Some("no-such-session".into()),
+                    revoke_all: false,
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(message)) if message.contains("session not found")
+        ));
+
+        // Targeted revoke of a REAL session: the row goes (revoked: 1) and
+        // the per-session marker is written, so the JWT is dead even though
+        // the user-wide marker stays unset (the caller's other sessions —
+        // here: none — must survive).
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, tenant_id, expires_at) \
+             VALUES ('target-session', $1::uuid, $2, NOW() + INTERVAL '1 day')",
+        )
+        .bind(user_id)
+        .bind(&tenant)
+        .execute(&fx.state.db)
+        .await
+        .expect("seed session");
+        let Json(value) = revoke_session(
+            State(fx.state.clone()),
+            auth.clone(),
+            Json(RevokeSessionRequest {
+                session_id: Some("target-session".into()),
+                revoke_all: false,
+            }),
+        )
+        .await
+        .expect("targeted revoke");
+        assert_eq!(value["revoked"], 1, "{value}");
+        {
+            let mut conn = fx.redis.get().await.expect("redis");
+            let marked: bool = deadpool_redis::redis::cmd("EXISTS")
+                .arg(crate::middleware::auth::session_revoked_key(
+                    "target-session",
+                ))
+                .query_async(&mut *conn)
+                .await
+                .expect("marker exists");
+            assert!(marked, "targeted revoke must write the per-session marker");
+        }
+
         // No user identity → 401.
         assert!(matches!(
             revoke_session(
@@ -10658,12 +10867,24 @@ mod adversarial_auth_units {
     fn inprocess_totp_replay_claim_is_first_use_only() {
         let fingerprint = format!("adv-unit-{}", Uuid::new_v4().simple());
         assert!(
-            claim_totp_window_inprocess(&fingerprint),
+            claim_totp_window_inprocess(&fingerprint, 70_100_000),
             "first use claims"
         );
-        assert!(!claim_totp_window_inprocess(&fingerprint), "replay refused");
+        assert!(
+            !claim_totp_window_inprocess(&fingerprint, 70_100_000),
+            "replay refused"
+        );
+        // Matched-window semantics: the neighbouring step stays claimable —
+        // it carries a different code, so it is not a replay.
+        assert!(
+            claim_totp_window_inprocess(&fingerprint, 70_100_001),
+            "adjacent window independent"
+        );
         let other = format!("adv-unit-{}", Uuid::new_v4().simple());
-        assert!(claim_totp_window_inprocess(&other), "independent secret");
+        assert!(
+            claim_totp_window_inprocess(&other, 70_100_000),
+            "independent secret"
+        );
     }
 
     #[tokio::test]

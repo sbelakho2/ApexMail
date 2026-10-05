@@ -946,6 +946,68 @@ pub(crate) fn session_revocation_key(tenant_id: &str, user_id: &str) -> String {
     format!("{SESSION_REVOCATION_PREFIX}{tenant_id}:{user_id}")
 }
 
+/// Redis prefix for PER-SESSION revocation markers, keyed by the session's
+/// JWT id (`jti`). The user-wide marker above kills every session of a user
+/// at once (login rotation, logout, `revoke_all`); the per-session marker
+/// kills exactly one session — targeted `POST /v1/auth/sessions/revoke
+/// {session_id}` and "revoke all OTHER sessions" on password change — so
+/// the operator's own session survives.
+const SESSION_REVOKED_PREFIX: &str = "apexmail:session_revoked:";
+
+pub(crate) fn session_revoked_key(session_id: &str) -> String {
+    format!("{SESSION_REVOKED_PREFIX}{session_id}")
+}
+
+/// Write a per-session revocation marker with the given TTL (fail-closed:
+/// errors propagate so callers can refuse the operation before mutating
+/// credentials or rows).
+pub(crate) async fn revoke_session_marker(
+    state: &AppState,
+    session_id: &str,
+    ttl_secs: u64,
+) -> Result<(), ApiError> {
+    let mut conn = state.redis.get().await.map_err(|error| {
+        tracing::error!(error = %error, session_id, "redis unavailable for per-session revocation marker");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })?;
+    deadpool_redis::redis::cmd("SET")
+        .arg(session_revoked_key(session_id))
+        .arg("1")
+        .arg("EX")
+        .arg(ttl_secs)
+        .query_async::<Option<String>>(&mut *conn)
+        .await
+        .map(|_: Option<String>| ())
+        .map_err(|error| {
+            tracing::error!(error = %error, session_id, "redis SET failed for per-session revocation marker");
+            ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+        })
+}
+
+/// Whether a specific session has been individually revoked.
+pub(crate) async fn lookup_session_revoked_pub(
+    session_id: &str,
+    state: &AppState,
+) -> Result<bool, ApiError> {
+    lookup_session_revoked(session_id, state).await
+}
+
+/// Whether a specific session has been individually revoked.
+async fn lookup_session_revoked(session_id: &str, state: &AppState) -> Result<bool, ApiError> {
+    let mut conn = state.redis.get().await.map_err(|error| {
+        tracing::error!(error = %error, session_id, "redis unavailable for per-session revocation lookup");
+        ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+    })?;
+    let exists: bool = conn
+        .exists(session_revoked_key(session_id))
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, session_id, "redis EXISTS failed for per-session revocation lookup");
+            ApiError::ServiceUnavailable("authentication service temporarily unavailable".into())
+        })?;
+    Ok(exists)
+}
+
 pub(crate) fn issued_before_or_at_revocation(iat: i64, revoked_after: Option<i64>) -> bool {
     revoked_after.is_some_and(|timestamp| iat <= timestamp)
 }
@@ -1392,6 +1454,13 @@ pub(crate) async fn authenticate_jwt(
 
     let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, state).await?;
     if issued_before_or_at_revocation(claims.iat, revoked_after) {
+        return Err(ApiError::Unauthorized("session has been revoked".into()));
+    }
+
+    // Per-session revocation (targeted `POST /v1/auth/sessions/revoke` and
+    // password change): a marker on this session's own jti kills exactly
+    // this session, leaving its siblings alone.
+    if lookup_session_revoked(&claims.jti, state).await? {
         return Err(ApiError::Unauthorized("session has been revoked".into()));
     }
 

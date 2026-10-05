@@ -177,10 +177,22 @@ impl TOTPVerifier {
     /// out, and the code's time-step has not been used before (per this
     /// process — see the type-level SCOPE note).
     pub fn verify(&self, secret_base32: &str, code: &str) -> bool {
+        self.verify_matched(secret_base32, code).is_some()
+    }
+
+    /// [`Self::verify`] returning the MATCHED time-step counter on success.
+    ///
+    /// Callers that layer a shared (Redis) replay guard behind this
+    /// in-process one need the matched counter so the cross-pod claim marks
+    /// exactly the window that was consumed — see the api-server's
+    /// `verify_totp_code_guarded`. Semantics are identical to `verify`
+    /// (lockout, in-process replay, failure recording all applied); only the
+    /// matched counter is surfaced.
+    pub fn verify_matched(&self, secret_base32: &str, code: &str) -> Option<u64> {
         // Reject if locked
         if self.is_locked(secret_base32) {
             warn!("TOTP verification rejected — secret is locked out");
-            return false;
+            return None;
         }
 
         match match_totp_counter(secret_base32, code) {
@@ -193,17 +205,17 @@ impl TOTPVerifier {
                         warn!("TOTP verification rejected — replayed time-step {counter}");
                         drop(used);
                         self.record_failure(secret_base32);
-                        return false;
+                        return None;
                     }
                     prune_stale_counters(&mut used, counter);
                     used.insert(secret_base32.to_string(), counter);
                 }
                 self.reset(secret_base32);
-                true
+                Some(counter)
             }
             None => {
                 self.record_failure(secret_base32);
-                false
+                None
             }
         }
     }

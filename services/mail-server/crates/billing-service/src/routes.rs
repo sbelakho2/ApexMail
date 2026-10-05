@@ -1033,7 +1033,9 @@ fn preview_plan_proration(
         proration::prorated_amount(current_period_price, days_remaining, days_in_period)?;
     let charge_amount =
         proration::prorated_amount(new_period_price, days_remaining, days_in_period)?;
-    let net_amount = charge_amount - credit_amount;
+    // Overflow-checked (J7): plain-i64 subtraction wrapped past the guards
+    // with adversarial catalog prices.
+    let net_amount = proration::net_amount(charge_amount, credit_amount)?;
 
     if net_amount > config.max_proration_charge_cents {
         return Err(format!(

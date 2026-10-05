@@ -171,6 +171,7 @@ struct WorkerSettings {
     run_reply_handler: bool,
     run_webhook: bool,
     run_automations: bool,
+    run_billing_maintenance: bool,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -201,6 +202,7 @@ fn load_worker_settings() -> WorkerSettings {
         run_reply_handler: env_flag("WORKER_RUN_REPLY_HANDLER"),
         run_webhook: env_flag("WORKER_RUN_WEBHOOK"),
         run_automations: env_flag("WORKER_RUN_AUTOMATIONS"),
+        run_billing_maintenance: env_flag("WORKER_RUN_BILLING_MAINTENANCE"),
     }
 }
 
@@ -669,6 +671,68 @@ async fn run_worker(
         }));
     }
 
+    // ── Billing maintenance (overage/PAYG cycle-close, dedicated-IP billing,
+    // SLA credits) ─────────────────────────────────────────────────────────
+    // These periodic jobs previously ran ONLY in the billing-service binary,
+    // which has no container in any deployed topology — so cycle-close
+    // invoicing never executed live (dogfood finding A, 2026-10-05). The
+    // worker already depends on billing-service and is the platform's
+    // background-execution home, so the periodic jobs run here. A
+    // session-level Postgres advisory lock elects ONE runner across
+    // replicas: the jobs are idempotent per tenant+period, but duplicate
+    // Stripe dunning traffic is still worth preventing at the source.
+    if settings.run_billing_maintenance {
+        match std::env::var("DATABASE_URL") {
+            Ok(database_url) if !database_url.trim().is_empty() => {
+                tokio::spawn(async move {
+                    // Dedicated connection: the advisory lock is
+                    // session-scoped and must live as long as the loop.
+                    let conn = match sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(1)
+                        .acquire_timeout(std::time::Duration::from_secs(10))
+                        .connect(database_url.as_str())
+                        .await
+                    {
+                        Ok(pool) => pool,
+                        Err(e) => {
+                            error!(error = %e, "billing maintenance: cannot open lease connection");
+                            return;
+                        }
+                    };
+                    let conn = &conn;
+                    let acquired = sqlx::query_scalar::<_, bool>(
+                        "SELECT pg_try_advisory_lock(hashtext('apexmail:billing-maintenance'))",
+                    )
+                    .fetch_one(conn)
+                    .await
+                    .unwrap_or(false);
+                    if !acquired {
+                        info!("billing maintenance: another worker holds the lease; not starting");
+                        return;
+                    }
+                    info!("billing maintenance: lease acquired; starting periodic jobs");
+                    let billing_config = billing_service::config::BillingConfig {
+                        database_url,
+                        stripe_webhook_secret: std::env::var("STRIPE_WEBHOOK_SECRET")
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    };
+                    let state =
+                        billing_service::AppState::new(db.clone(), redis.clone(), billing_config);
+                    billing_service::maintenance::start_periodic_jobs(state);
+                    // `start_periodic_jobs` only spawns and returns; dropping
+                    // the lease pool here would close the session and release
+                    // the advisory lock. Leak it deliberately: the single
+                    // connection holds the process-lifetime lease.
+                    std::mem::forget(conn);
+                });
+            }
+            _ => {
+                warn!("billing maintenance enabled but DATABASE_URL is unset; skipping");
+            }
+        }
+    }
+
     info!("All processors running. Press Ctrl+C to stop.");
 
     Ok(WorkerProcesses {
@@ -1116,6 +1180,7 @@ mod tests {
             run_reply_handler: false,
             run_webhook: false,
             run_automations: false,
+            run_billing_maintenance: false,
         };
         let liveness = ProcessorLiveness::new();
         assert_eq!(
@@ -1128,6 +1193,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: true,
             run_automations: true,
+            run_billing_maintenance: false,
             ..base
         };
         // Nothing registered alive yet: enabled-but-dead processors must NOT
@@ -1508,6 +1574,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: true,
             run_automations: true,
+            run_billing_maintenance: false,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
             .await
@@ -1556,6 +1623,7 @@ mod tests {
             run_reply_handler: true,
             run_webhook: false,
             run_automations: false,
+            run_billing_maintenance: false,
         };
         let processes = run_worker(db.clone(), redis.clone(), &settings)
             .await

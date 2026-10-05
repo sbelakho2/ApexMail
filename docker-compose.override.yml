@@ -75,6 +75,10 @@ services:
       CSRF_SECRET: ${CSRF_SECRET:-local-dev-csrf-secret-32chars-min}
       IMPERSONATION_SECRET: ${IMPERSONATION_SECRET:-local-dev-impersonation-secret-32chars}
       CONTROL_PLANE_API_KEY: ${CONTROL_PLANE_API_KEY:-local-dev-control-plane-api-key-32chars}
+      # Dev Stripe webhook ingest parity (dogfood finding A, 2026-10-05):
+      # api-server mounts /webhooks/stripe only when this secret exists.
+      # Local-only literal; production supplies the real secret.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-dev-stripe-webhook-secret-local-only-0123456789}
       # Dev parity for local webhook listeners (docs dogfood): the api-server
       # refuses loopback webhook URLs unless this explicit override is set.
       # MFA_SECRET_ENCRYPTION_KEY pins the shared secret-at-rest key so

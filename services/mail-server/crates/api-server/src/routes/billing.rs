@@ -2466,7 +2466,9 @@ fn preview_plan_proration(
         proration::prorated_amount(current_price_numerator, days_remaining, days_in_period)?;
     let charge_amount =
         proration::prorated_amount(new_price_numerator, days_remaining, days_in_period)?;
-    let net_amount = charge_amount - credit_amount;
+    // Overflow-checked: adversarial catalog prices (i64 extremes) wrapped
+    // the plain-i64 subtraction past the guards as a bogus credit (J7).
+    let net_amount = proration::net_amount(charge_amount, credit_amount)?;
 
     if net_amount > config.max_proration_charge_cents {
         return Err(format!(
@@ -2977,13 +2979,29 @@ async fn estimate_overage_cost(
     // The flat `OVERAGE_RATE_MILLICENTS` default (40) is only a fallback for
     // plans without a ladder entry; quoting the flat rate for paid plans used
     // to understate a Pro overage by 40% versus the eventual invoice line.
-    let rate_millicents = resolved_plan
+    let ladder_rate = resolved_plan
         .as_ref()
         .map(|plan| plans::plan_overage_rate_millicents(&plan.name))
-        .unwrap_or(None)
-        .unwrap_or_else(billing_service::config::configured_overage_rate_millicents);
-    let overage_cost_cents =
-        plans::calculate_overage_cost_with_rate(emails_sent, email_limit, rate_millicents);
+        .unwrap_or(None);
+    // J4/J12 parity with the sweep: a KNOWN plan without a ladder entry
+    // (free, PAYG, custom catalog rows) is never invoiced for overage —
+    // `sweep_period_overage` marks the period skipped ("plan has no
+    // automatic overage"). Quoting the flat fallback rate for those plans
+    // told a downgraded/free tenant a €8 invoice was coming that the sweep
+    // will never raise. The flat rate stays ONLY for the unknown-plan
+    // legacy advisory path (no plan row resolved at all).
+    let (rate_millicents, overage_cost_cents, automatic_overage) = match ladder_rate {
+        Some(rate) => {
+            let cost = plans::calculate_overage_cost_with_rate(emails_sent, email_limit, rate);
+            (Some(rate), cost, true)
+        }
+        None if resolved_plan.is_some() => (None, 0, false),
+        None => {
+            let rate = billing_service::config::configured_overage_rate_millicents();
+            let cost = plans::calculate_overage_cost_with_rate(emails_sent, email_limit, rate);
+            (Some(rate), cost, true)
+        }
+    };
 
     Ok(billing_success_response(serde_json::json!({
         "usage": {
@@ -2991,6 +3009,7 @@ async fn estimate_overage_cost(
             "emailLimit": email_limit,
         },
         "overageRateMillicents": rate_millicents,
+        "automaticOverage": automatic_overage,
         "overageCostCents": overage_cost_cents,
         "overageCostUsd": cents_to_usd_string(overage_cost_cents),
     })))
@@ -6613,9 +6632,43 @@ mod adversarial_tests {
             body["data"]["usage"]["emailLimit"], 1000,
             "server-side plan limit must override the client value"
         );
-        // (1500 - 1000) * 40 millicents = 20 000 -> 20 cents.
-        assert_eq!(body["data"]["overageCostCents"], 20);
-        assert_eq!(body["data"]["overageCostUsd"], "€0.20");
+        // J4/J12 sweep parity: `advest` is a KNOWN plan without a ladder
+        // entry — the overage sweep marks those periods skipped and never
+        // raises an invoice, so the estimate must not fabricate a flat-rate
+        // fee for them (it used to quote (1500-1000) × 40 millicents = €0.20
+        // that could never be billed).
+        assert_eq!(body["data"]["overageCostCents"], 0, "{body}");
+        assert_eq!(body["data"]["automaticOverage"], false, "{body}");
+        assert!(body["data"]["overageRateMillicents"].is_null(), "{body}");
+
+        // A ladder plan keeps quoting the rate the sweep invoices with:
+        // `pro` → 60 millicents/email → (1500 - 1000) × 60 = 30 000 → 30c.
+        seed_plan(
+            &pool,
+            "pro",
+            1000,
+            10000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (ladder_tenant, ladder_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
+        let ladder_env = env_for(pool.clone(), ladder_key).await;
+        let (status, body) = post_json(
+            &ladder_env,
+            "/v1/billing/overage/estimate",
+            &json!({"emailsSent": 1500, "emailLimit": 1000, "tenantId": ladder_tenant}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["overageRateMillicents"], 60, "{body}");
+        assert_eq!(body["data"]["automaticOverage"], true, "{body}");
+        assert_eq!(body["data"]["overageCostCents"], 30, "{body}");
+        assert_eq!(body["data"]["overageCostUsd"], "€0.30");
 
         // Under-limit and exactly-at-limit produce zero overage.
         for emails in [0_i64, 999, 1000] {
@@ -7220,7 +7273,7 @@ mod adversarial_tests {
              (id, tenant_id, stripe_invoice_id, invoice_number, status, currency, amount,
               subtotal, vat_total, total, line_items, issued_at, due_at,
               period_start, period_end, created_at, updated_at)
-             VALUES ($1, $2, NULL, '2026-000042', 'paid', 'EUR', 5000, 5000, 0, 5000, $3,
+             VALUES ($1, $2, NULL, '2026-000042', 'paid', 'EUR', 5000, 5000, 0, 5000, $3::jsonb,
                      NOW(), NOW() + INTERVAL '14 days', NULL, NULL, NOW(), NOW())",
         )
         .bind(id)

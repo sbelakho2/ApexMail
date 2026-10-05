@@ -90,6 +90,20 @@ pub fn prorated_amount(
         .map_err(|_| "Proration amount overflowed supported billing range".to_string())
 }
 
+/// Compute the proration `net = charge - credit` with the same overflow
+/// discipline as [`prorated_amount`].
+///
+/// The subtraction ran in plain `i64` at both call sites (api-server
+/// `preview_plan_proration` and billing-service's twin). With adversarial
+/// catalog prices — an `i64::MAX`-priced target plan against an `i64::MIN`
+/// current plan — the wrapped result crossed the proration guards as a
+/// bogus multi-quadrillion *credit* (live dogfood J7: the guard then
+/// rejected with a fabricated magnitude instead of an honest error).
+pub fn net_amount(charge_cents: i64, credit_cents: i64) -> Result<i64, String> {
+    i64::try_from(i128::from(charge_cents) - i128::from(credit_cents))
+        .map_err(|_| "Proration net amount overflowed supported billing range".to_string())
+}
+
 /// Build a human-readable proration explanation string.
 #[allow(clippy::too_many_arguments)]
 pub fn build_proration_explanation(
@@ -230,6 +244,19 @@ mod tests {
     fn prorated_amount_rounding() {
         // 1000 cents over 30 days, 10 days remaining → 333 cents (rounded)
         assert_eq!(prorated_amount(1000, 10, 30).unwrap(), 333);
+    }
+
+    #[test]
+    fn net_amount_subtracts_normally_and_rejects_i64_wraparound() {
+        assert_eq!(net_amount(2666, 667).unwrap(), 1999);
+        assert_eq!(net_amount(0, 667).unwrap(), -667);
+        // Live dogfood J7: i64::MAX-priced target vs i64::MIN-priced current
+        // plan wrapped the plain-i64 subtraction into a bogus negative
+        // "credit" that sailed past the proration guards. The checked form
+        // must reject the combination instead.
+        let charge = prorated_amount(i64::MAX, 20, 30).unwrap();
+        let credit = prorated_amount(i64::MIN + 1, 20, 30).unwrap();
+        assert!(net_amount(charge, credit).is_err());
     }
 
     #[test]

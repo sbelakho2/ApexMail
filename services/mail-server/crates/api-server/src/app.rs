@@ -392,6 +392,13 @@ pub fn build_app(state: AppState) -> Router {
         // No-JS cookie consent endpoint (marketing banner links here).
         // Same public rate-limit stack = the light per-IP bucketing.
         .merge(routes::web::consent_router())
+        // Stripe webhook ingest — previously mounted ONLY by the
+        // billing-service binary, which has no container in any deployed
+        // topology, so signature-valid webhook deliveries 404'd and cycle
+        // close never saw provider events (dogfood finding A, 2026-10-05).
+        // The route is unauthenticated by design: the handler verifies the
+        // Stripe HMAC signature and is idempotent per event id.
+        .merge(stripe_webhook_router(&state))
         // Data-backed SSR detail pages (/domains/{id}, /campaigns/{id}).
         // Browser pages: the handlers resolve the session and redirect
         // anonymous visitors to /login?next=… (same contract as the SSR
@@ -5686,6 +5693,41 @@ mod tests {
             "a malformed cursor is a client error, not a database 500"
         );
     }
+
+    #[tokio::test]
+    async fn stripe_webhook_ingest_mounts_when_secret_configured() {
+        // Dogfood finding A (2026-10-05): /webhooks/stripe was mounted only
+        // by the billing-service binary, which has no container in any
+        // deployed topology — every provider delivery 404'd. With a secret
+        // configured the route must exist on the api-server and refuse a
+        // garbage signature (400, never 404/405); nextest runs one process
+        // per test, so the env pin is isolated.
+        std::env::set_var("STRIPE_WEBHOOK_SECRET", "whsec_dogfood_mount_probe");
+        let app = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/stripe")
+                    .header("content-type", "application/json")
+                    .header("stripe-signature", "t=1,v1=deadbeef")
+                    .body(Body::from("{\"id\":\"evt_probe\"}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "ingest route must be mounted when STRIPE_WEBHOOK_SECRET is set"
+        );
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a garbage signature must be signature-refused"
+        );
+        std::env::remove_var("STRIPE_WEBHOOK_SECRET");
+    }
 }
 // Build cache invalidation: 1785670948
 
@@ -6727,4 +6769,27 @@ mod adversarial_helper_tests {
             .get("access-control-allow-origin")
             .is_none());
     }
+}
+
+/// The Stripe webhook ingest, mounted on the public rate-limited stack when
+/// `STRIPE_WEBHOOK_SECRET` is configured. The handler authenticates purely
+/// by Stripe's HMAC signature (no session/API-key applies to provider
+/// callbacks) and is idempotent per event id, so replays and Stripe's
+/// at-least-once redelivery are safe. Without a secret the route stays
+/// absent — a 404 is honest, a signature-rejecting endpoint that can never
+/// succeed is not.
+fn stripe_webhook_router(state: &AppState) -> Router<AppState> {
+    let secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+    if secret.trim().is_empty() {
+        return Router::new();
+    }
+    let billing_state = billing_service::AppState::new(
+        state.db.clone(),
+        state.redis.clone(),
+        billing_service::config::BillingConfig {
+            stripe_webhook_secret: secret,
+            ..Default::default()
+        },
+    );
+    billing_service::stripe_webhooks::router().with_state(billing_state)
 }
