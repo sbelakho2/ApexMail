@@ -759,7 +759,11 @@ pub async fn enqueue_send_step_action(
             step_execution_id,
             &format!("sa-send:{step_execution_id}"),
             serde_json::json!({ "stepExecutionId": step_execution_id }),
-            chrono::Utc::now(),
+            // One second in the past: the action must be IMMEDIATELY
+            // actionable, and the claim compares `due_at <= NOW()` in SQL
+            // against the DATABASE clock — a Rust-clock `now()` races that
+            // sub-second window (the same reason `enqueue` clamps below).
+            chrono::Utc::now() - chrono::Duration::seconds(1),
             100,
             None,
         )

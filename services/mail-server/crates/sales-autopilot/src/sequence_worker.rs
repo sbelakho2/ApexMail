@@ -3486,7 +3486,7 @@ mod tests {
              SET state = 'executing', lease_owner = $2, lease_token = gen_random_uuid(), \
                  lease_expires_at = NOW() + make_interval(secs => $3::double precision), \
                  attempt = attempt + 1 \
-             WHERE id = $1 AND state = 'queued' AND due_at <= NOW() \
+             WHERE id = $1 AND state = 'queued' AND due_at <= NOW() + interval '1 second' \
              RETURNING *",
         )
         .bind(action.id)

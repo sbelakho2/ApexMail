@@ -417,9 +417,13 @@ impl ActionQueue {
     ) -> Result<Vec<LeasedAction>, SalesError> {
         let lease_secs = lease_secs.max(1);
         let rows: Vec<SalesActionRow> = sqlx::query_as::<_, SalesActionRow>(
+            // `due_at <= NOW() + 1s`: an immediately-due action (due_at was
+            // minted from the APP clock) must not be withheld because the
+            // DATABASE clock runs a few milliseconds behind — the enqueue
+            // path already clamps to "now - 1s" for the opposite skew.
             "WITH claimable AS ( \
                  SELECT id FROM sales_actions \
-                 WHERE state = 'queued' AND due_at <= NOW() \
+                 WHERE state = 'queued' AND due_at <= NOW() + interval '1 second' \
                    AND ($4::uuid[] IS NULL OR id = ANY($4)) \
                  ORDER BY priority DESC, due_at ASC \
                  FOR UPDATE SKIP LOCKED \
@@ -672,7 +676,7 @@ impl ActionQueue {
 
         let due_now: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)::bigint FROM sales_actions \
-             WHERE tenant_id = $1 AND state = 'queued' AND due_at <= NOW()",
+             WHERE tenant_id = $1 AND state = 'queued' AND due_at <= NOW() + interval '1 second'",
         )
         .bind(tenant_id)
         .fetch_one(&self.db)
