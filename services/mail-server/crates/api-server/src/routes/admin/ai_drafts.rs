@@ -157,6 +157,21 @@ async fn approve_draft(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
+    approve_draft_core(&state, &auth, &id, &note).await
+}
+
+/// The approval flow, shared by the JSON API and the control-plane review
+/// page's PRG handler: claim, enqueue on the (first-response aware) priority
+/// lane, close the request, write the actor-attributed audit — one
+/// transaction, exactly as the JSON contract documents.
+pub(crate) async fn approve_draft_core(
+    state: &AppState,
+    auth: &AuthUser,
+    id: &str,
+    note: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let note = note.to_string();
+    let id = id.to_string();
 
     // The reply/outbox rows, the decision evidence, and the approval
     // consumption commit together: the enqueue AND the audit row are
@@ -282,7 +297,8 @@ async fn approve_draft(
             // The request becomes terminal once its reply left the queue;
             // best-effort INSIDE the transaction so it commits with the send.
             let _ = sqlx::query(
-                "UPDATE first_response_requests SET state = 'drafted', updated_at = NOW() \
+                "UPDATE first_response_requests \
+                 SET state = 'drafted', updated_at = NOW(), queued_at = NOW() \
                  WHERE id = $1 AND state = 'pending'",
             )
             .bind(request_id)
@@ -302,7 +318,7 @@ async fn approve_draft(
     log_draft_audit_in_tx(
         &mut tx,
         state.config.environment.is_production(),
-        &auth,
+        auth,
         "control_plane.ai_draft.approved",
         &id,
         serde_json::json!({
@@ -351,6 +367,19 @@ async fn reject_draft(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["*"])?;
     let note = body.map(|Json(b)| b.note).unwrap_or_default();
+    reject_draft_core(&state, &auth, &id, &note).await
+}
+
+/// The rejection flow, shared by the JSON API and the control-plane review
+/// page's PRG handler.
+pub(crate) async fn reject_draft_core(
+    state: &AppState,
+    auth: &AuthUser,
+    id: &str,
+    note: &str,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let note = note.to_string();
+    let id = id.to_string();
 
     // Same guarantee as approve (external-audit P1): the rejection claim and
     // its actor-attributed evidence commit atomically — a failed audit
@@ -376,7 +405,7 @@ async fn reject_draft(
     log_draft_audit_in_tx(
         &mut tx,
         state.config.environment.is_production(),
-        &auth,
+        auth,
         "control_plane.ai_draft.rejected",
         &id,
         serde_json::json!({

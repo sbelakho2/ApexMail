@@ -49,6 +49,8 @@ pub struct RouteData {
     pub demos: Option<crate::view_data::DemosPageData>,
     /// Public demo viewer data (`/demo?token=…`).
     pub demo_viewer: Option<crate::view_data::DemoViewerData>,
+    /// Control-plane AI-drafts review data (`/reviews/ai-drafts`).
+    pub ai_drafts: Option<crate::view_data::AiDraftsPageData>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1959,6 +1961,9 @@ fn render_control_plane(
             data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
         }
         "/cp/demos" => leptos_views::web_demos_page(data.and_then(|d| d.demos.as_ref())),
+        "/reviews/ai-drafts" => {
+            leptos_views::web_ai_drafts_page(data.and_then(|d| d.ai_drafts.as_ref()))
+        }
         "/" => data_backed_inner("/", data).unwrap_or_else(leptos_views::control_plane_home_page),
         "/login" => leptos_views::control_plane_login_page(csrf_token),
         "/dashboard" => data_backed_inner("/dashboard", data)
@@ -2289,6 +2294,7 @@ mod tests {
         // With server-loaded values the form carries the hidden id and the
         // prefilled name so POST /web/lists/update can save.
         let data = RouteData {
+            ai_drafts: None,
             demos: None,
             demo_viewer: None,
             campaign_editor: None,
@@ -2874,6 +2880,7 @@ mod tests {
                 .collect(),
         });
         RouteData {
+            ai_drafts: None,
             demos: None,
             demo_viewer: None,
             list: Some(data),
@@ -2993,6 +3000,7 @@ mod tests {
     #[test]
     fn campaign_edit_with_values_updates_in_place() {
         let data = RouteData {
+            ai_drafts: None,
             demos: None,
             demo_viewer: None,
             list: None,
@@ -3025,6 +3033,7 @@ mod tests {
     #[test]
     fn mfa_setup_data_renders_qr_and_secret() {
         let data = RouteData {
+            ai_drafts: None,
             demos: None,
             demo_viewer: None,
             list: None,
@@ -3267,6 +3276,7 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
+                ai_drafts: None,
                 demos: None,
                 demo_viewer: None,
                 list: Some(data),
@@ -3331,6 +3341,7 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
+                ai_drafts: None,
                 demos: None,
                 demo_viewer: None,
                 list: Some(data),
@@ -4041,10 +4052,12 @@ mod tests {
     #[test]
     fn control_plane_sales_renders_live_data_or_honest_unavailable() {
         let data = RouteData {
+            ai_drafts: None,
             demos: None,
             demo_viewer: None,
             campaign_editor: None,
             sales: Some(crate::view_data::SalesPageData {
+                first_response: None,
                 csrf_token: "tok".into(),
                 overview: Some(crate::view_data::SalesOverviewData {
                     autonomy: crate::view_data::SalesAutonomyData {

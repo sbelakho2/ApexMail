@@ -905,6 +905,33 @@
         "server-driven demo",
         "demo walkthrough"
       ]
+    },
+    {
+      "capability": "first-response",
+      "crate": "crates/api-server",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "first_response_slo",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "measured (histogram + alert); drafts remain human-approved",
+        "monitored": true,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "env_gate": null,
+        "call_path": "leads write first_response_requests in the lead transaction (crates/api-server/src/routes/contact.rs); the mailbot drains them into grounded pending drafts (crates/ai-service/src/email_agent.rs); approval queues the reply on the priority lane and closes the request with queued_at (admin/ai_drafts.rs); the operator reviews at /reviews/ai-drafts; the /sales panel shows depth + p50/p95 vs target",
+        "metrics": "apexmail: first_response_latency_seconds (histogram) + FirstResponseSloBurn alert",
+        "explanation": "Instant response is measured, not claimed: the automated accept->enqueue interval is recorded per reply and published with its target, and the panel reads the same rows the metric counts. Human review time is excluded and the exclusion is documented."
+      },
+      "scan_aliases": [
+        "instant response",
+        "first-response SLO",
+        "first response latency"
+      ]
     }
   ],
   "stale_marker_exceptions": {

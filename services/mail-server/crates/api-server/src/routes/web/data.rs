@@ -688,6 +688,7 @@ async fn web_route_data(
         assistant,
         demos: None,
         demo_viewer: None,
+        ai_drafts: None,
     }
 }
 
@@ -777,6 +778,67 @@ async fn load_assistant(
         csrf_token: String::new(),
         session_id: Some(session_id),
         turns,
+        unavailable: false,
+    }
+}
+
+/// The AI-drafts review page's data: every pending draft with its
+/// classification and objection sub-label. `unavailable` on a read failure.
+async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDraftsPageData {
+    use ui_foundation::view_data::{AiDraftData, AiDraftsPageData};
+
+    let rows: Result<
+        Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT id, tenant_id, from_email, subject, ai_response, classification, \
+                suggested_action->>'objection_class', received_at \
+         FROM inbound_messages \
+         WHERE pending_approval = true AND ai_response IS NOT NULL \
+         ORDER BY received_at ASC LIMIT 100",
+    )
+    .fetch_all(&state.db)
+    .await;
+    let drafts = match rows {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(id, tenant, from, subject, reply, classification, objection, received_at)| {
+                    AiDraftData {
+                        id,
+                        tenant_id: tenant.unwrap_or_default(),
+                        from_email: from.unwrap_or_default(),
+                        subject: subject.unwrap_or_default(),
+                        draft_reply: reply.unwrap_or_default(),
+                        received_at: received_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        classification,
+                        objection_class: objection,
+                        first_response: false,
+                    }
+                },
+            )
+            .collect(),
+        Err(error) => {
+            tracing::error!(error = %error, "ai drafts review lookup failed");
+            return AiDraftsPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    AiDraftsPageData {
+        csrf_token: String::new(),
+        drafts,
         unavailable: false,
     }
 }
@@ -2907,6 +2969,11 @@ async fn control_plane_route_data(
     } else {
         None
     };
+    let ai_drafts = if path == "/reviews/ai-drafts" {
+        Some(load_ai_drafts_page(state).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit: None,
@@ -2917,6 +2984,7 @@ async fn control_plane_route_data(
         assistant: None,
         demos,
         demo_viewer: None,
+        ai_drafts,
     }
 }
 
@@ -2993,15 +3061,77 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
         .dead_letters
         .map(|rows| rows.into_iter().map(dead_letter_data).collect());
 
+    // First-response rail (plan §5.4): depth + the measured accept→enqueue
+    // percentiles over the last 24h, from the same rows the SLO metric counts.
+    let first_response = load_first_response_kpi(state).await;
+
     SalesPageData {
         // The render pipeline injects hidden `_csrf` inputs into every
         // POST /web/* form, so the page does not need to carry a token.
         csrf_token: String::new(),
+        first_response,
         overview,
         decisions,
         exceptions,
         dead_letters,
     }
+}
+
+/// The first-response KPI: pending depth, closed-in-window count and the
+/// p50/p95 of (queued_at - created_at). `None` when the query fails — the
+/// tile then says unknown, never zero.
+async fn load_first_response_kpi(
+    state: &AppState,
+) -> Option<ui_foundation::view_data::FirstResponseKpiData> {
+    use ui_foundation::view_data::FirstResponseKpiData;
+
+    const WINDOW_HOURS: i64 = 24;
+    const TARGET_SECONDS: f64 = 300.0;
+
+    let rows: Result<
+        Vec<(
+            i64,
+            Option<f64>,
+            Option<f64>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT \
+             (SELECT COUNT(*) FROM first_response_requests WHERE state = 'pending')::bigint AS pending, \
+             (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (queued_at - created_at))) \
+                FROM first_response_requests \
+               WHERE queued_at IS NOT NULL AND queued_at >= NOW() - make_interval(hours => $1::int)) AS p50, \
+             (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (queued_at - created_at))) \
+                FROM first_response_requests \
+               WHERE queued_at IS NOT NULL AND queued_at >= NOW() - make_interval(hours => $1::int)) AS p95",
+    )
+    .bind(WINDOW_HOURS)
+    .fetch_all(&state.db)
+    .await;
+    let (pending, p50, p95) = match rows {
+        Ok(rows) => rows.into_iter().next()?,
+        Err(error) => {
+            tracing::error!(error = %error, "first-response KPI lookup failed");
+            return None;
+        }
+    };
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM first_response_requests \
+         WHERE queued_at IS NOT NULL AND queued_at >= NOW() - make_interval(hours => $1::int)",
+    )
+    .bind(WINDOW_HOURS)
+    .fetch_one(&state.db)
+    .await
+    .ok()?;
+
+    Some(FirstResponseKpiData {
+        pending,
+        queued,
+        window_hours: WINDOW_HOURS,
+        p50_seconds: p50,
+        p95_seconds: p95,
+        target_seconds: TARGET_SECONDS,
+    })
 }
 
 /// Map one shared control-model decision row onto the page's view model. All

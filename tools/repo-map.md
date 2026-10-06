@@ -63,6 +63,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | ddos-middleware | runtime-wired | — |
 | email-draft-agent | runtime-wired | AI_EMAIL_AGENT_ENABLED |
 | fingerprint-library | runtime-wired | — |
+| first-response | runtime-wired | — |
 | inbound-reply-mirroring | runtime-wired | — |
 | intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |
 | mta-event-webhooks | runtime-wired | — |
@@ -97,7 +98,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **215 `*.sql` files**, latest `243_demo_sessions.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **216 `*.sql` files**, latest `244_first_response_queue_metrics.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 
@@ -108,8 +109,8 @@ Source of truth: `docs/development/ui-baseline-manifest.json` (the pinned counts
 | Surface | routeCount | Routes listed |
 |---|---|---|
 | web | 37 | 37 |
-| control-plane | 31 | 31 |
+| control-plane | 32 | 32 |
 | marketing | 19 | 19 |
 | marketing-zola | 38 | 38 |
 
-**Total: 125 routes.**
+**Total: 126 routes.**

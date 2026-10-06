@@ -236,7 +236,7 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 31,
+      "routeCount": 32,
       "routes": [
         {
           "path": "/login",
@@ -421,6 +421,12 @@
         {
           "path": "/cp/demos",
           "name": "Demos",
+          "category": "control-plane",
+          "authRequired": true
+        },
+        {
+          "path": "/reviews/ai-drafts",
+          "name": "AI Drafts",
           "category": "control-plane",
           "authRequired": true
         }

@@ -602,6 +602,8 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
         ("Overview", "/dashboard", "home"),
         ("Alerts", "/alerts", "bell"),
         ("Infrastructure", "/infrastructure", "server"),
+        // Plan §7: the human review queue for AI-drafted replies.
+        ("AI Drafts", "/reviews/ai-drafts", "sparkles"),
         ("Jobs", "/jobs", "clock"),
         ("Analytics", "/analytics", "bar-chart-3"),
     ];
@@ -1198,6 +1200,7 @@ mod tests {
         assert!(html.contains("href=\"/audit\""));
         assert!(html.contains("href=\"/jobs\""));
         assert!(html.contains("href=\"/cp/demos\""));
+        assert!(html.contains("href=\"/reviews/ai-drafts\""));
         // Sign-out is a real CSRF-protected POST.
         assert!(html.contains("action=\"/web/auth/logout\""));
         assert!(html.contains("name=\"_csrf\""));

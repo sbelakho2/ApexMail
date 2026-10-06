@@ -343,6 +343,14 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         .route("/web/assistant/message", post(form_assistant_message))
         .route("/web/admin/demos", post(form_demo_create))
         .route("/web/admin/demos/:id/advance", post(form_demo_advance))
+        .route(
+            "/web/admin/ai/drafts/:id/approve",
+            post(form_ai_draft_approve),
+        )
+        .route(
+            "/web/admin/ai/drafts/:id/reject",
+            post(form_ai_draft_reject),
+        )
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
         .layer(axum::middleware::from_fn_with_state(
@@ -5577,6 +5585,71 @@ async fn form_campaign_update(
     }
 }
 
+/// Approve one AI draft (PRG): the same transactional path the JSON API uses
+/// (`approve_draft_core`), reached through the control-plane review page.
+async fn form_ai_draft_approve(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/reviews/ai-drafts", &state.config);
+    }
+    let note = field(&form, "note");
+    match crate::routes::admin::ai_drafts::approve_draft_core(&state, &user, &id, &note).await {
+        Ok(_) => redirect_success(
+            "Draft approved — the reply is queued.",
+            "/reviews/ai-drafts",
+            &state.config,
+        ),
+        Err(crate::error::ApiError::NotFound(_)) => redirect_error(
+            "That draft was already handled.",
+            "/reviews/ai-drafts",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::warn!(error = %error, draft = %id, "draft approval failed");
+            redirect_error(
+                "The draft could not be approved. It is still pending.",
+                "/reviews/ai-drafts",
+                &state.config,
+            )
+        }
+    }
+}
+
+/// Reject one AI draft (PRG), with the operator's reason recorded.
+async fn form_ai_draft_reject(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/reviews/ai-drafts", &state.config);
+    }
+    let note = field(&form, "note");
+    match crate::routes::admin::ai_drafts::reject_draft_core(&state, &user, &id, &note).await {
+        Ok(_) => redirect_success("Draft rejected.", "/reviews/ai-drafts", &state.config),
+        Err(crate::error::ApiError::NotFound(_)) => redirect_error(
+            "That draft was already handled.",
+            "/reviews/ai-drafts",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::warn!(error = %error, draft = %id, "draft rejection failed");
+            redirect_error(
+                "The draft could not be rejected. It is still pending.",
+                "/reviews/ai-drafts",
+                &state.config,
+            )
+        }
+    }
+}
+
 /// Create a demo session (PRG). The viewer URL is revealed ONCE through the
 /// flash channel — the same reveal-once pattern secrets use — because the
 /// plaintext token is never stored.
@@ -10189,6 +10262,14 @@ mod tests {
                 )
                 .route("/web/contacts/import", post(form_contacts_import))
                 .route("/web/assistant/message", post(form_assistant_message))
+                .route(
+                    "/web/admin/ai/drafts/:id/approve",
+                    post(form_ai_draft_approve),
+                )
+                .route(
+                    "/web/admin/ai/drafts/:id/reject",
+                    post(form_ai_draft_reject),
+                )
                 .route("/web/auth/signup", post(form_signup))
                 .route("/web/auth/login", post(form_login))
                 .route("/web/auth/mfa/verify", post(form_mfa_verify))
@@ -10313,6 +10394,109 @@ mod tests {
             assert_eq!(turns[0].0, "user");
             assert_eq!(turns[1].0, "assistant");
             assert!(turns[1].1.contains("150,000 emails"));
+        }
+
+        /// The AI-drafts review page's approve/reject forms drive the SAME
+        /// transactional path as the JSON API: approving queues the reply,
+        /// rejecting records the decision, both through the browser.
+        #[tokio::test]
+        async fn ai_draft_review_queue_approve_and_reject_flow_through_the_page() {
+            let Some(state) = web_test_state("ai_draft_review_flow").await else {
+                return;
+            };
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1c7309d4f2b6a8",
+            );
+            seed_web_system_sender(&state.db).await;
+
+            let mk = |id: &str, from: &str| {
+                let db = state.db.clone();
+                let id = id.to_string();
+                let from = from.to_string();
+                async move {
+                    sqlx::query(
+                        "INSERT INTO inbound_messages
+                             (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                              is_verp_reply, received_at)
+                         VALUES ($1, 'system', $2, 'Re: demo', 'grounded reply', true, false, NOW())
+                         ON CONFLICT (id) DO NOTHING",
+                    )
+                    .bind(&id)
+                    .bind(&from)
+                    .execute(&db)
+                    .await
+                    .expect("seed draft");
+                }
+            };
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let approve_id = format!("inb_{}", &suffix[..22]);
+            let reject_id = format!("inb_{}", &suffix[10..32]);
+            let approve_from = format!("approve-{}@corp.example", &suffix[..8]);
+            let reject_from = format!("reject-{}@corp.example", &suffix[..8]);
+            mk(&approve_id, &approve_from).await;
+            mk(&reject_id, &reject_from).await;
+
+            let user = session_user("system");
+            let app = web_handlers(state.clone(), user);
+
+            // Approve through the page's form.
+            let body = csrf_body(&state, &[("note", "looks good")]);
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/admin/ai/drafts/{approve_id}/approve"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&approve_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("state");
+            assert!(!pending, "approval consumed the draft");
+            let queued: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE \"to\" = $1")
+                    .bind(&approve_from)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("queue");
+            assert_eq!(queued, 1, "the approved reply is queued");
+
+            // Reject through the page's form.
+            let body = csrf_body(&state, &[("note", "not our voice")]);
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    &format!("/web/admin/ai/drafts/{reject_id}/reject"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let (pending, processed): (bool, bool) = sqlx::query_as(
+                "SELECT pending_approval, processed_at IS NOT NULL FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&reject_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("state");
+            assert!(!pending && processed, "rejection consumed the draft");
+            let queued: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE \"to\" = $1")
+                    .bind(&reject_from)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("queue");
+            assert_eq!(queued, 0, "a rejected draft never queues a reply");
+
+            let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
+                .bind(vec![approve_id, reject_id])
+                .execute(&state.db)
+                .await;
         }
 
         /// A CSRF-invalid post never reaches the assistant or the store.

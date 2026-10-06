@@ -407,6 +407,10 @@ pub struct SalesPageData {
     /// Double-submit CSRF token for the SSR form posts (empty when the
     /// render pipeline had none).
     pub csrf_token: String,
+    /// First-response rail (plan §5.4): queue depth and the measured
+    /// accept→enqueue percentiles. `None` when the query could not answer —
+    /// the tile then renders the unavailable contract, never zeros.
+    pub first_response: Option<FirstResponseKpiData>,
     pub overview: Option<SalesOverviewData>,
     pub decisions: Option<Vec<SalesDecisionData>>,
     pub exceptions: Option<Vec<SalesDecisionData>>,
@@ -498,6 +502,48 @@ pub struct DemoViewerData {
     pub script: String,
     pub expires_at: String,
     pub steps: Vec<DemoViewerStep>,
+}
+
+/// One pending AI draft on the control-plane review page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AiDraftData {
+    pub id: String,
+    pub tenant_id: String,
+    pub from_email: String,
+    pub subject: String,
+    /// The drafted reply body (rendered inside an expandable block).
+    pub draft_reply: String,
+    pub received_at: String,
+    /// The reply pipeline's classification for this message, when recorded.
+    pub classification: Option<String>,
+    /// The objection sub-label when the classifier recorded one.
+    pub objection_class: Option<String>,
+    pub first_response: bool,
+}
+
+/// Control-plane AI-drafts review page (`/reviews/ai-drafts`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AiDraftsPageData {
+    pub csrf_token: String,
+    pub drafts: Vec<AiDraftData>,
+    pub unavailable: bool,
+}
+
+/// The first-response KPI tile's data.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FirstResponseKpiData {
+    /// Requests still waiting for a draft.
+    pub pending: i64,
+    /// Requests whose reply was enqueued in the window below.
+    pub queued: i64,
+    /// The window the percentiles cover, in hours.
+    pub window_hours: i64,
+    /// Median accept→enqueue seconds over the window (None when nothing
+    /// closed inside it).
+    pub p50_seconds: Option<f64>,
+    pub p95_seconds: Option<f64>,
+    /// The published target the percentiles are compared against.
+    pub target_seconds: f64,
 }
 
 /// Render a `<td>` for a [`DataCell`] (mirrors `Table` cell classes).

@@ -164,6 +164,13 @@ FACT_TREE_VERIFICATIONS = {
         ("services/mail-server/crates/worker-processors/src/reply_handler/types.rs", "objection_class", True),
         ("services/mail-server/crates/ai-service/src/reply_classify.rs", "OBJECTION_CLASSES", True),
     ],
+    "first_response": [
+        ("services/mail-server/migrations/241_first_response_requests.sql", "first_response_requests", True),
+        ("services/mail-server/crates/api-server/src/routes/contact.rs", "first_response_requests", True),
+        ("services/mail-server/crates/api-server/src/routes/admin/ai_drafts.rs", "first_response_latency_seconds", True),
+        ("deploy/alerting-rules.yml", "FirstResponseSloBurn", True),
+        ("docs/operations/first-response-slo.md", "p95", True),
+    ],
     "screen_share_demos": [
         ("services/mail-server/migrations/243_demo_sessions.sql", "token_hash", True),
         ("services/mail-server/crates/api-server/src/routes/demos/mod.rs", "advance_step", True),

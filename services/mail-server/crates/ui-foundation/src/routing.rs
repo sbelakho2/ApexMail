@@ -186,10 +186,11 @@ mod tests {
         // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
         // demo viewer (/demo) join the baseline — control-plane 30 → 31,
         // marketing 18 → 19, total 122 → 124.
-        assert_eq!(declared_route_count("control-plane"), Some(31));
+        // Plan §7: the AI-drafts review page joins the CP surface — 31 → 32.
+        assert_eq!(declared_route_count("control-plane"), Some(32));
         assert_eq!(declared_route_count("marketing"), Some(19));
         assert_eq!(declared_route_count("marketing-zola"), Some(38));
-        assert_eq!(total_route_count(), 125);
+        assert_eq!(total_route_count(), 126);
     }
 
     #[test]

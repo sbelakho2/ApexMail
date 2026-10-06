@@ -10,9 +10,9 @@ use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
 use crate::view_data::{
-    render_data_cell, AssistantPageData, AssistantTurnData, DemoViewerData, DemosPageData,
-    ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData, SalesOverviewData,
-    SalesPageData,
+    render_data_cell, AiDraftsPageData, AssistantPageData, AssistantTurnData, DemoViewerData,
+    DemosPageData, ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData,
+    SalesOverviewData, SalesPageData,
 };
 
 fn ui_icon(name: &str, class_name: &str) -> String {
@@ -2686,8 +2686,9 @@ fn sales_costs_section() -> String {
 pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
     let overview = data.overview.as_ref();
     format!(
-        r#"<section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
+        r#"<section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{first_response}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
         hero = sales_hero(data),
+        first_response = sales_first_response_section(data),
         revenue = sales_revenue_section(overview),
         autonomy = sales_autonomy_section(overview),
         stream = sales_decision_stream_section(data),
@@ -2697,6 +2698,45 @@ pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
         enrollments = sales_enrollments_section(data),
         compliance = sales_compliance_section(),
         costs = sales_costs_section(),
+    )
+}
+
+/// The first-response tile (plan §5.4): pending depth plus the measured
+/// accept→enqueue percentiles against the published target. `None` data is
+/// the honest unavailable contract — never zeros.
+fn sales_first_response_section(data: &SalesPageData) -> String {
+    let Some(kpi) = data.first_response.as_ref() else {
+        return "<section aria-label=\"First response\" class=\"rounded-sm border border-white/10 p-5\"><h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-white/60\">First response</h3><p class=\"mt-2 text-sm text-white/70\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
+    };
+    let pct = |value: Option<f64>| -> String {
+        match value {
+            Some(seconds) => format!("{seconds:.0}s"),
+            None => "—".to_string(),
+        }
+    };
+    let within_target = kpi
+        .p95_seconds
+        .map(|p95| p95 <= kpi.target_seconds)
+        .map(|ok| if ok { "within target" } else { "above target" })
+        .unwrap_or("no closed requests in the window");
+    format!(
+        "<section aria-label=\"First response\" class=\"rounded-sm border border-white/10 p-5\">\
+         <h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-white/60\">First response</h3>\
+         <div class=\"mt-3 grid gap-4 sm:grid-cols-4\">\
+         <div><p class=\"text-2xl font-bold\">{pending}</p><p class=\"text-xs text-white/60\">waiting for a draft</p></div>\
+         <div><p class=\"text-2xl font-bold\">{queued}</p><p class=\"text-xs text-white/60\">queued, last {window}h</p></div>\
+         <div><p class=\"text-2xl font-bold\">{p50}</p><p class=\"text-xs text-white/60\">p50 to queue</p></div>\
+         <div><p class=\"text-2xl font-bold\">{p95}</p><p class=\"text-xs text-white/60\">p95 to queue ({within})</p></div>\
+         </div>\
+         <p class=\"mt-3 text-xs text-white/50\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
+         </section>",
+        pending = kpi.pending,
+        queued = kpi.queued,
+        window = kpi.window_hours,
+        p50 = pct(kpi.p50_seconds),
+        p95 = pct(kpi.p95_seconds),
+        within = within_target,
+        target = kpi.target_seconds,
     )
 }
 
@@ -4251,6 +4291,90 @@ pub fn web_domains_page() -> String {
             action_href: Some("/domains/new"),
         }
         .render_html(),
+    )
+}
+
+/// The control-plane AI-drafts review page (`/reviews/ai-drafts`): every
+/// pending draft with its classification (and objection class when recorded),
+/// the drafted reply, and approve/reject forms. Approval queues the reply
+/// through the same transactional path the JSON API uses.
+pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
+    let unavailable = data.is_some_and(|d| d.unavailable);
+    let drafts = data.map(|d| d.drafts.as_slice()).unwrap_or(&[]);
+    let csrf = data.map(|d| d.csrf_token.clone()).unwrap_or_default();
+
+    let mut cards = String::new();
+    if unavailable {
+        cards.push_str(
+            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-6\">\
+             <p class=\"text-sm font-bold text-surface-900\">The review queue is unavailable</p>\
+             <p class=\"mt-2 text-sm text-surface-600\">The draft store could not be read just now. This is a service problem, not an empty queue.</p></div>",
+        );
+    } else if drafts.is_empty() {
+        cards.push_str(
+            "<div class=\"rounded-sm border p-8 text-center\">\
+             <p class=\"text-sm font-bold text-surface-900\">No drafts need review</p>\
+             <p class=\"mt-2 text-sm text-surface-600\">Drafts appear here when the assistant answers an inbound message and a human must approve the reply.</p></div>",
+        );
+    } else {
+        for draft in drafts {
+            let classification = draft
+                .classification
+                .as_deref()
+                .map(|value| match draft.objection_class.as_deref() {
+                    Some(objection) => format!("{} · objection: {objection}", html_escape(value)),
+                    None => html_escape(value),
+                })
+                .unwrap_or_else(|| "not classified".to_string());
+            let first_response = if draft.first_response {
+                "<span class=\"ml-2 rounded-sm bg-primary/10 px-2 py-0.5 text-[11px] font-bold text-primary\">first response</span>"
+            } else {
+                ""
+            };
+            cards.push_str(&format!(
+                "<article class=\"rounded-sm border p-5\">\
+                 <div class=\"flex items-baseline justify-between gap-4\">\
+                 <h2 class=\"text-sm font-bold text-surface-950\">{subject}</h2>\
+                 <span class=\"text-xs text-surface-500\">{received_at}</span>\
+                 </div>\
+                 <p class=\"mt-1 text-xs text-surface-500\">From {from} · Workspace {tenant} · {classification}{first_response}</p>\
+                 <details class=\"mt-3 text-sm text-surface-800\"><summary class=\"cursor-pointer font-bold\">Draft reply</summary>\
+                 <pre class=\"mt-2 whitespace-pre-wrap rounded-sm bg-surface-50 p-3 text-xs\">{reply}</pre></details>\
+                 <div class=\"mt-4 flex flex-wrap items-end gap-3\">\
+                 <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/approve\">\
+                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
+                 <div class=\"space-y-1\"><label class=\"block text-xs font-bold text-surface-700\" for=\"note-approve-{id}\">Approval note</label>\
+                 <input id=\"note-approve-{id}\" name=\"note\" class=\"rounded-sm border border-surface-300 px-2 py-1 text-xs\" /></div>\
+                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700\">Approve and queue</button>\
+                 </form>\
+                 <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/reject\">\
+                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
+                 <div class=\"space-y-1\"><label class=\"block text-xs font-bold text-surface-700\" for=\"note-reject-{id}\">Rejection reason</label>\
+                 <input id=\"note-reject-{id}\" name=\"note\" class=\"rounded-sm border border-surface-300 px-2 py-1 text-xs\" /></div>\
+                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 px-4 py-2 text-sm font-bold text-surface-800 hover:bg-surface-50\">Reject</button>\
+                 </form>\
+                 </div>\
+                 </article>",
+                subject = html_escape(&draft.subject),
+                received_at = html_escape(&draft.received_at),
+                from = html_escape(&draft.from_email),
+                tenant = html_escape(&draft.tenant_id),
+                classification = classification,
+                first_response = first_response,
+                reply = html_escape(&draft.draft_reply),
+                id = html_escape(&draft.id),
+                csrf = html_escape(&csrf),
+            ));
+        }
+    }
+
+    format!(
+        "<div class=\"space-y-6\">
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">AI drafts</h1>\
+<p class=\"text-sm text-surface-600\">Every drafted reply is written by the assistant, verified against the published documentation, and held here until a human approves or rejects it. Nothing sends itself.</p>\
+{cards}\
+</div>",
+        cards = cards,
     )
 }
 
@@ -6644,6 +6768,7 @@ mod tests {
     /// enough to exercise every section with real input data.
     fn sales_page_data_fixture() -> SalesPageData {
         SalesPageData {
+            first_response: None,
             csrf_token: "csrf-test-token".to_string(),
             overview: Some(SalesOverviewData {
                 autonomy: SalesAutonomyData {
@@ -6951,6 +7076,7 @@ mod tests {
     #[test]
     fn sales_page_empty_states_are_explicit_not_zero_rows() {
         let data = SalesPageData {
+            first_response: None,
             csrf_token: "t".to_string(),
             overview: Some(SalesOverviewData::default()),
             decisions: Some(Vec::new()),

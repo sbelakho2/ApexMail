@@ -383,6 +383,17 @@
       "advertised": false,
       "evidence": "migration 243_demo_sessions.sql (token stored SHA-256 hashed, mandatory expiry, unique (session, idx)); owner-gated presenter API + runtime crates/api-server/src/routes/demos/ (step kinds render_page / explorer_exec / grader / calculator / chat_narrate executing the live surfaces in-process); presenter page /cp/demos and public viewer /demo?token=\u2026 registered in the SSR manifest with goldens, a11y and link gates",
       "source": "services/mail-server/migrations/243_demo_sessions.sql + services/mail-server/crates/api-server/src/routes/demos/ + docs/demos/demo-script.md + docs/development/capability-registry.json (screen-share-demos)"
+    },
+    "first_response_slo": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": true,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "measured (histogram + alert); drafts remain human-approved",
+      "monitored": true,
+      "advertised": false,
+      "evidence": "first_response_latency_seconds recorded at approval/enqueue (crates/api-server/src/routes/admin/ai_drafts.rs), FirstResponseSloBurn alert in deploy/alerting-rules.yml, methodology and target in docs/operations/first-response-slo.md, and the /sales panel tile reading per-request percentiles from first_response_requests.queued_at (migration 244)",
+      "source": "docs/operations/first-response-slo.md + deploy/alerting-rules.yml + docs/development/capability-registry.json (first-response)"
     }
   }
 }

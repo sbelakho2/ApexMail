@@ -249,6 +249,9 @@ pub(crate) const REGISTERED_BROWSER_POST_ROUTES: &[&str] = &[
     // Plan §5.6: the CP demo presenter's create + advance forms (PRG).
     "/web/admin/demos",
     "/web/admin/demos/:id/advance",
+    // Plan §7: the AI-drafts review queue's approve/reject forms (PRG).
+    "/web/admin/ai/drafts/:id/approve",
+    "/web/admin/ai/drafts/:id/reject",
     "/web/confirm",
     // admin_router (system-tenant gated). The `/web/admin/sales/discovery`
     // + `/web/admin/sales/outreach` stub twins were removed in batch 2 —
