@@ -43,7 +43,13 @@ CATALOG = ROOT / "services/mail-server/crates/platform-catalog/src/lib.rs"
 BILLING_PLANS = ROOT / "services/mail-server/crates/billing-service/src/plans.rs"
 AI_KNOWLEDGE = ROOT / "services/mail-server/crates/ai-service/src/knowledge.rs"
 AI_VERIFIER = ROOT / "services/mail-server/crates/ai-service/src/verifier.rs"
-SALES_KB = ROOT / "services/mail-server/crates/sales-autopilot/src/knowledge.rs"
+# The sales KB implementation moved to the shared `sales-knowledge` crate
+# (plan §5.5); sales-autopilot re-exports it. The derivation check follows the
+# implementation; the re-export module is asserted separately below.
+SALES_KB = ROOT / "services/mail-server/crates/sales-knowledge/src/lib.rs"
+SALES_KB_REEXPORT = (
+    ROOT / "services/mail-server/crates/sales-autopilot/src/knowledge.rs"
+)
 DOCS_PRICING = ROOT / "docs/pricing.md"
 
 FAILURES: list[str] = []
@@ -364,6 +370,12 @@ def run_checks(root: Path) -> list[str]:
         )
         check_ai_knowledge_derives_from_catalog(production_only(knowledge_src))
         check_sales_kb_derives_from_catalog(production_only(sales_src))
+        reexport_src = (root / SALES_KB_REEXPORT.relative_to(ROOT)).read_text()
+        if "pub use sales_knowledge::*;" not in reexport_src:
+            fail(
+                "sales-autopilot/src/knowledge.rs must re-export the shared "
+                "sales-knowledge crate (pub use sales_knowledge::*;)"
+            )
         return sorted(set(FAILURES))
     finally:
         FAILURES = saved
@@ -373,7 +385,15 @@ def run_checks(root: Path) -> list[str]:
 # Self-test
 # ---------------------------------------------------------------------------
 
-_SOURCES = (CATALOG, BILLING_PLANS, AI_KNOWLEDGE, AI_VERIFIER, SALES_KB, DOCS_PRICING)
+_SOURCES = (
+    CATALOG,
+    BILLING_PLANS,
+    AI_KNOWLEDGE,
+    AI_VERIFIER,
+    SALES_KB,
+    SALES_KB_REEXPORT,
+    DOCS_PRICING,
+)
 
 
 def _self_test() -> int:

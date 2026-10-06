@@ -8,11 +8,11 @@
 
 ## 1. Cargo workspace (`services/mail-server`)
 
-53 workspace members: 23 binary crates, 30 library crates.
+54 workspace members: 23 binary crates, 31 library crates.
 
 **Binary crates:** `crates/mailstore-core`, `crates/tracking-service`, `crates/worker-processors`, `crates/mta`, `crates/outbound-mta`, `crates/imap-server`, `crates/edge-cases`, `crates/analytics`, `crates/compliance`, `crates/isolation`, `crates/ha`, `crates/enterprise`, `crates/template-renderer`, `crates/ai-embeddings`, `crates/api-server`, `crates/billing-service`, `crates/devex-service`, `crates/observability-service`, `crates/ui-foundation`, `crates/sales-autopilot`, `crates/ai-service`, `crates/pdf-renderer`, `crates/migrator`
 
-**Library crates:** `crates/mail-proto`, `crates/mail-common`, `crates/queue-provider`, `crates/pattern-matcher`, `crates/rate-limiter`, `crates/dns-resolver`, `crates/auth-server`, `crates/accounting-core`, `crates/billing-common`, `crates/billing-entitlements`, `crates/platform-catalog`, `crates/apexmail-db`, `crates/apexmail-lib`, `crates/smoke-tests`, `crates/functional-tests`, `crates/integration-tests`, `crates/perf-tests`, `crates/fuzz-tests`, `crates/load-tests`, `crates/ddos-protection`, `crates/fingerprint`, `crates/waf-engine`, `crates/ids-engine`, `crates/spam-filter`, `crates/sandbox`, `crates/ato-protection`, `crates/dlp-engine`, `crates/threat-intel`, `crates/email-grader`, `crates/inbox-placement`
+**Library crates:** `crates/mail-proto`, `crates/mail-common`, `crates/sales-knowledge`, `crates/queue-provider`, `crates/pattern-matcher`, `crates/rate-limiter`, `crates/dns-resolver`, `crates/auth-server`, `crates/accounting-core`, `crates/billing-common`, `crates/billing-entitlements`, `crates/platform-catalog`, `crates/apexmail-db`, `crates/apexmail-lib`, `crates/smoke-tests`, `crates/functional-tests`, `crates/integration-tests`, `crates/perf-tests`, `crates/fuzz-tests`, `crates/load-tests`, `crates/ddos-protection`, `crates/fingerprint`, `crates/waf-engine`, `crates/ids-engine`, `crates/spam-filter`, `crates/sandbox`, `crates/ato-protection`, `crates/dlp-engine`, `crates/threat-intel`, `crates/email-grader`, `crates/inbox-placement`
 
 ## 2. Dockerfile runtime targets
 

@@ -1,0 +1,11 @@
+[package]
+name = "sales-knowledge"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+platform-catalog = { path = "../platform-catalog" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true

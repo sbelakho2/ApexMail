@@ -17,6 +17,7 @@ members = [
     "crates/enterprise",
     "crates/template-renderer",
     "crates/ai-embeddings",
+    "crates/sales-knowledge",
     "crates/queue-provider",
     "crates/pattern-matcher",
     "crates/rate-limiter",

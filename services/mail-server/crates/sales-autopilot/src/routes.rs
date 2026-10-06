@@ -166,6 +166,11 @@ pub fn router(state: AppState) -> Router {
             get(list_conversions).post(create_conversion),
         )
         // ── Discovery (provider-backed; the CP proxies POST /discovery/jobs) ─
+        // ── Experiments (plan §5.5): arm authoring for objection classes ──
+        // The CP proxies this behind the OWNER gate (middleware::sales_owner
+        // at the control plane); the service itself authenticates with the
+        // internal token + tenant, exactly like every other sales route.
+        .route("/experiments/:key/arms", post(author_experiment_arms))
         .route("/discovery/jobs", post(create_discovery_job))
         .route("/discovery/jobs/:id", get(get_discovery_job))
         .route("/discovery/jobs/:id/run", post(run_discovery_job))
@@ -1159,6 +1164,108 @@ fn required_tenant_id(
         )),
         _ => Ok(header_tenant_id.to_string()),
     }
+}
+
+/// Author (or extend) one experiment's arms by KEY. Idempotent by
+/// `(tenant, key)`: the experiment is upserted in `draft` status, then the
+/// arms are ensured. Re-posting the same key with the same arms changes
+/// nothing; adding a new variant provisions it with the neutral prior.
+///
+/// Validation is the engine's (non-empty unique variants, bounded count,
+/// valid prior) plus one route-level rule: an arm whose variant names an
+/// objection class must use a class from the taxonomy, so a typo cannot mint
+/// a bucket nothing else matches.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorArmsBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default = "default_arms_context")]
+    context: serde_json::Value,
+    #[serde(default = "default_arms_budgets")]
+    budgets: serde_json::Value,
+    /// Arm variants in order; the first `is_control: true` arm is the control.
+    arms: Vec<crate::experiments::ArmSpec>,
+    tenant_id: Option<String>,
+}
+
+fn default_arms_context() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn default_arms_budgets() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+async fn author_experiment_arms(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    Json(body): Json<AuthorArmsBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err(SalesError::InvalidInput(
+            "experiment key is required".into(),
+        ));
+    }
+    if body.arms.is_empty() {
+        return Err(SalesError::InvalidInput(
+            "at least one arm is required".into(),
+        ));
+    }
+    // Route-level taxonomy rule: a variant that looks like an objection class
+    // must BE one (the dimension is a closed vocabulary).
+    for arm in &body.arms {
+        let variant = arm.variant.trim().to_ascii_lowercase();
+        let looks_like_class = !variant.is_empty()
+            && variant
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_' || c == '-');
+        if looks_like_class
+            && (variant.contains("price")
+                || variant.contains("timing")
+                || variant.contains("competitor")
+                || variant.contains("authority")
+                || variant.contains("trust"))
+            && !crate::experiments::ExperimentContext::OBJECTION_CLASSES.contains(&variant.as_str())
+        {
+            return Err(SalesError::InvalidInput(format!(
+                "arm variant '{variant}' names an objection class outside the taxonomy ({});                  use the canonical class as the variant, or a non-class label",
+                crate::experiments::ExperimentContext::OBJECTION_CLASSES.join(", ")
+            )));
+        }
+    }
+
+    let name = body
+        .name
+        .unwrap_or_else(|| format!("Objection experiment {key}"));
+    // The engine is a thin pool wrapper (same construction the sequence
+    // worker uses), so the route does not widen AppState.
+    let experiments = crate::experiments::ExperimentEngine::new(state.db.clone());
+    let experiment_id = experiments
+        .ensure_experiment(&tenant_id, &key, &name, &body.context, &body.budgets)
+        .await?;
+    experiments
+        .ensure_arms(&tenant_id, experiment_id, &body.arms)
+        .await?;
+    let arms = experiments.load_arms(&tenant_id, experiment_id).await?;
+    json_response(&serde_json::json!({
+        "experiment_id": experiment_id,
+        "key": key,
+        "arms": arms
+            .iter()
+            .map(|arm| serde_json::json!({
+                "variant": arm.variant,
+                "is_control": arm.is_control,
+                "alpha": arm.alpha,
+                "beta": arm.beta,
+                "trials": arm.trials,
+                "successes": arm.successes,
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2746,6 +2853,111 @@ mod tests {
                 .bind(tenant)
                 .bind(&emails)
                 .execute(&db)
+                .await;
+        }
+    }
+
+    /// Plan §5.5: arm authoring by experiment KEY. The route upserts the
+    /// experiment, provisions the arms idempotently, refuses a variant that
+    /// names an objection class outside the taxonomy, and returns the arms.
+    #[tokio::test]
+    async fn experiment_arms_authoring_is_idempotent_and_taxonomy_checked() {
+        let Some(app) = test_app_with_service_token(
+            "routes::tests::experiment_arms_authoring_is_idempotent_and_taxonomy_checked",
+            "test-key",
+        )
+        .await
+        else {
+            return;
+        };
+        // The service refuses any tenant but the system one (the middleware
+        // enforces it), exactly like every other route test here.
+        let tenant = crate::config::SYSTEM_TENANT_ID.to_string();
+
+        // A typo'd objection class is refused before anything is written.
+        let bad = serde_json::json!({
+            "arms": [{"variant": "control", "is_control": true}, {"variant": "pricey"}],
+            "tenant_id": tenant,
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/experiments/objections/arms")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .header("x-tenant-id", &tenant)
+                    .body(Body::from(serde_json::to_vec(&bad).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A canonical class set is authored, then re-posted (idempotent).
+        let good = serde_json::json!({
+            "name": "Objection rebuttals",
+            "arms": [
+                {"variant": "control", "is_control": true},
+                {"variant": "price"},
+                {"variant": "timing"}
+            ],
+            "tenant_id": tenant,
+        });
+        let mut arms_after_second_post = 0usize;
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/experiments/objections/arms")
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .header("x-tenant-id", &tenant)
+                        .body(Body::from(serde_json::to_vec(&good).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "arms authoring failed: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            arms_after_second_post = body["arms"].as_array().map(Vec::len).unwrap_or(0);
+        }
+        assert_eq!(
+            arms_after_second_post, 3,
+            "re-posting the same key and arms provisions nothing new"
+        );
+
+        // The bucketing dimension carries the class, and only the class.
+        let context = crate::experiments::ExperimentContext {
+            objection_class: Some("price".into()),
+            ..Default::default()
+        };
+        let key = context
+            .bucket_key(&["objection_class".to_string()])
+            .expect("a valid class buckets");
+        assert_eq!(key, "objection_class=price");
+        let unknown = crate::experiments::ExperimentContext {
+            objection_class: Some("vibes".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            unknown.bucket_key(&["objection_class".to_string()]),
+            None,
+            "an unknown class cannot mint a bucket"
+        );
+
+        if let Some(pool) = crate::test_db::canonical_test_pool("arms_cleanup").await {
+            let _ = sqlx::query("DELETE FROM sales_experiments WHERE tenant_id = $1")
+                .bind(&tenant)
+                .execute(&pool)
                 .await;
         }
     }

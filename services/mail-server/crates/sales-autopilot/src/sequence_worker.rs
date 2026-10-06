@@ -1638,6 +1638,9 @@ pub async fn select_and_persist_variant(
         language,
         step_kind: Some(step_kind),
         sender_type: Some(sender_pool),
+        // Objection replies bucket by class once the reply pipeline supplies
+        // one (plan §5.5); the send path has no reply context, so absent.
+        objection_class: None,
     };
     let context = VariantContext {
         dimensions,

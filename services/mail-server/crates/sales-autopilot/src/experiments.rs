@@ -353,9 +353,14 @@ impl ArmPosterior {
 }
 
 /// Arm specification for provisioning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serde-deserializable so the arm-authoring route can take the specs
+/// directly;  is required and  defaults to false (the
+/// caller marks exactly one control).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArmSpec {
     pub variant: String,
+    #[serde(default)]
     pub is_control: bool,
 }
 
@@ -543,11 +548,16 @@ pub struct ExperimentContext {
     pub language: Option<String>,
     pub step_kind: Option<String>,
     pub sender_type: Option<String>,
+    /// The reply's objection class (plan §5.5): price, timing, competitor,
+    /// authority, trust or need. Objection replies are the highest-signal
+    /// context a sequence experiment can bucket on, so the class joins the
+    /// documented dimensions.
+    pub objection_class: Option<String>,
 }
 
 impl ExperimentContext {
     /// Canonical dimension names, in bucket-key order.
-    pub const DIMENSIONS: [&'static str; 10] = [
+    pub const DIMENSIONS: [&'static str; 11] = [
         "icp_segment",
         "country",
         "company_size_band",
@@ -558,6 +568,20 @@ impl ExperimentContext {
         "language",
         "step_kind",
         "sender_type",
+        "objection_class",
+    ];
+
+    /// The objection taxonomy the dimension accepts (plan §5.5), mirrored
+    /// from the classifier. A value outside it is dropped rather than
+    /// bucketed: an unknown class would create a dimension value nothing
+    /// else can ever match.
+    pub const OBJECTION_CLASSES: [&'static str; 6] = [
+        "price",
+        "timing",
+        "competitor",
+        "authority",
+        "trust",
+        "need",
     ];
 
     fn value(&self, dimension: &str) -> Option<&str> {
@@ -572,6 +596,7 @@ impl ExperimentContext {
             "language" => self.language.as_deref(),
             "step_kind" => self.step_kind.as_deref(),
             "sender_type" => self.sender_type.as_deref(),
+            "objection_class" => self.objection_class.as_deref(),
             _ => None,
         };
         value.map(str::trim).filter(|value| !value.is_empty())
@@ -593,8 +618,21 @@ impl ExperimentContext {
         };
         let mut parts: Vec<String> = Vec::new();
         for dimension in selected {
-            if let Some(value) = self.value(dimension) {
-                parts.push(format!("{}={}", dimension, sanitize_context_value(value)));
+            // The objection dimension is a CLOSED vocabulary: lowercase it and
+            // drop anything outside the taxonomy, so an unknown class cannot
+            // create a bucket no other reply can ever match.
+            let value = if dimension == "objection_class" {
+                self.value(dimension).and_then(|value| {
+                    let lower = value.to_ascii_lowercase();
+                    Self::OBJECTION_CLASSES
+                        .contains(&lower.as_str())
+                        .then_some(lower)
+                })
+            } else {
+                self.value(dimension).map(str::to_string)
+            };
+            if let Some(value) = value {
+                parts.push(format!("{}={}", dimension, sanitize_context_value(&value)));
             }
         }
         if parts.is_empty() {
