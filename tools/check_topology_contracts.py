@@ -133,13 +133,17 @@ check(
     "delivery-transport.md does not mention the outbound-mta crate/daemon",
 )
 
-# 4. The sales owner gate is mounted on exactly the sales routers.
+# 4. The owner gate is mounted on exactly the owner-run routers: the sales
+# brain (sales + autopilot) and — since the SalesCloser plan §5.6 — the demo
+# presenter API, which executes real machinery and mints viewer links. A new
+# mount is a deliberate security-surface decision, so the count is pinned.
 APP = (ROOT / "services/mail-server/crates/api-server/src/app.rs").read_text()
 production = APP.split("#[cfg(test)]")[0]
 check(
-    "sales-owner-gate:exactly-two-mounts",
-    production.count("require_sales_owner") == 2,
-    f"expected 2 mounts (sales + autopilot), found {production.count('require_sales_owner')}",
+    "owner-gate:exactly-three-mounts",
+    production.count("require_sales_owner") == 3,
+    "expected 3 mounts (sales + autopilot + demos), "
+    f"found {production.count('require_sales_owner')}",
 )
 
 # 5. Retired gap markers are gone from live source.

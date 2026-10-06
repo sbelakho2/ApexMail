@@ -67,6 +67,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |
 | mta-event-webhooks | runtime-wired | — |
 | objection-handling | runtime-wired | — |
+| screen-share-demos | runtime-wired | — |
 | smtp-starttls | runtime-wired | — |
 | spam-phishing-filtering | runtime-wired | MTA_SPAM_FILTER_ENABLED |
 | threat-intelligence-feeds | runtime-wired | — |
