@@ -663,6 +663,11 @@ async fn web_route_data(
     } else {
         None
     };
+    let assistant = if path == "/assistant" {
+        Some(load_assistant(state, &tenant, user).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit,
@@ -670,6 +675,97 @@ async fn web_route_data(
         list_edit,
         mfa_setup: None,
         sales: None,
+        assistant,
+    }
+}
+
+/// Load the console assistant page: the caller's newest session and its last
+/// turns, or the empty state when no session exists yet (the form creates
+/// one on the first message). A read failure is the `unavailable` state —
+/// never an empty conversation, and never a zero-filled transcript.
+async fn load_assistant(
+    state: &AppState,
+    tenant: &str,
+    user: &AuthUser,
+) -> ui_foundation::view_data::AssistantPageData {
+    use ui_foundation::view_data::{AssistantPageData, AssistantTurnData};
+
+    let user_key = user.user_id.clone().unwrap_or_else(|| tenant.to_string());
+
+    let session: Result<Option<(String, chrono::DateTime<chrono::Utc>)>, sqlx::Error> =
+        sqlx::query_as(
+            "SELECT id, updated_at FROM ai_chat_sessions \
+             WHERE tenant_id = $1 AND user_id = $2 \
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(tenant)
+        .bind(&user_key)
+        .fetch_optional(&state.db)
+        .await;
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::error!(error = %error, "assistant session lookup failed");
+            return AssistantPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+    let Some((session_id, _updated_at)) = session else {
+        // No conversation yet: the form renders and the first message
+        // creates the session.
+        return AssistantPageData::default();
+    };
+
+    let window: Result<
+        Vec<(
+            String,
+            String,
+            bool,
+            serde_json::Value,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT role, content, escalated, citations, created_at \
+         FROM ai_chat_session_turns \
+         WHERE session_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at DESC LIMIT 12",
+    )
+    .bind(&session_id)
+    .bind(tenant)
+    .fetch_all(&state.db)
+    .await
+    .map(|rows| rows.into_iter().rev().collect());
+    let turns = match window {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(role, content, escalated, citations, created_at)| AssistantTurnData {
+                    role,
+                    escalated,
+                    content,
+                    citations: citations.as_array().cloned().unwrap_or_default(),
+                    created_at: created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                },
+            )
+            .collect(),
+        Err(error) => {
+            tracing::error!(error = %error, "assistant turn window lookup failed");
+            return AssistantPageData {
+                session_id: Some(session_id),
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    AssistantPageData {
+        csrf_token: String::new(),
+        session_id: Some(session_id),
+        turns,
+        unavailable: false,
     }
 }
 
@@ -2576,6 +2672,7 @@ async fn control_plane_route_data(
         list_edit: None,
         mfa_setup: None,
         sales,
+        assistant: None,
     }
 }
 

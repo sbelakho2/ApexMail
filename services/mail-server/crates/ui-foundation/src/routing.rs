@@ -179,11 +179,14 @@ mod tests {
         // Data-locations fix: the footer-linked /data-locations page joined
         // the marketing-zola baseline (its MARKETING_DEAD_LINK_ALLOWLIST
         // entry is emptied) — marketing-zola 36 → 37.
-        assert_eq!(declared_route_count("web"), Some(36));
+        // SalesCloser plan §5.2: the console assistant joins the web manifest
+        // (data-backed conversation page, nav entry under Account) — web
+        // 36 → 37, total 121 → 122.
+        assert_eq!(declared_route_count("web"), Some(37));
         assert_eq!(declared_route_count("control-plane"), Some(30));
         assert_eq!(declared_route_count("marketing"), Some(18));
         assert_eq!(declared_route_count("marketing-zola"), Some(37));
-        assert_eq!(total_route_count(), 121);
+        assert_eq!(total_route_count(), 122);
     }
 
     #[test]

@@ -2285,6 +2285,17 @@ pub(crate) mod test_support {
                 pool: sqlx::PgPool,
                 role: &str,
             ) -> Option<(AdvEnv, String, String)> {
+                Self::session_with_config(pool, role, super::test_config()).await
+            }
+
+            /// A session env with a caller-supplied Config (e.g. an
+            /// ai_service_base_url pointing at a mock), otherwise identical
+            /// to [`Self::session`].
+            pub(crate) async fn session_with_config(
+                pool: sqlx::PgPool,
+                role: &str,
+                config: crate::config::Config,
+            ) -> Option<(AdvEnv, String, String)> {
                 crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
                 let redis_url = std::env::var("TEST_REDIS_URL")
                     .ok()
@@ -2307,7 +2318,7 @@ pub(crate) mod test_support {
                 let private_key =
                     rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
                         .expect("valid PKCS8 private key");
-                let mut config = super::test_config();
+                let mut config = config;
                 config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
                 config.jwt_public_key_pem = private_key
                     .to_public_key()

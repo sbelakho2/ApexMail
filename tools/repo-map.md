@@ -58,6 +58,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | ai-reply-classification | runtime-wired | WORKER_REPLY_CLASSIFIER_AI_ENABLED |
 | arc-sealing | runtime-wired | — |
 | attachment-sandboxing | runtime-wired | MTA_ATTACHMENT_SCAN_ENABLED |
+| console-assistant | runtime-wired | — |
 | data-loss-prevention | runtime-wired | WORKER_DLP_ENABLED |
 | ddos-middleware | runtime-wired | — |
 | email-draft-agent | runtime-wired | AI_EMAIL_AGENT_ENABLED |
@@ -94,7 +95,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **211 `*.sql` files**, latest `239_analytics_domain_id_width.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **212 `*.sql` files**, latest `240_ai_chat_sessions.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 
@@ -104,9 +105,9 @@ Source of truth: `docs/development/ui-baseline-manifest.json` (the pinned counts
 
 | Surface | routeCount | Routes listed |
 |---|---|---|
-| web | 36 | 36 |
+| web | 37 | 37 |
 | control-plane | 30 | 30 |
 | marketing | 18 | 18 |
 | marketing-zola | 37 | 37 |
 
-**Total: 121 routes.**
+**Total: 122 routes.**

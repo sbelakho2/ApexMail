@@ -3,7 +3,7 @@
   "surfaces": [
     {
       "id": "web",
-      "routeCount": 36,
+      "routeCount": 37,
       "routes": [
         {
           "path": "/",
@@ -223,6 +223,12 @@
         {
           "path": "/settings/profile",
           "name": "Profile",
+          "category": "dashboard",
+          "authRequired": true
+        },
+        {
+          "path": "/assistant",
+          "name": "Assistant",
           "category": "dashboard",
           "authRequired": true
         }

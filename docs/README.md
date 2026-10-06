@@ -46,7 +46,7 @@ docs/
 ├── tool-contracts/         # Internal per-tool engineering contracts (postgres, redis, clickhouse,
 │                           #   hetzner, ses, stripe, prometheus, zone-ee)
 ├── user-guide/             # End-user docs (getting-started, contacts, delivery-options, glossary,
-│                           #   inbox-placement-testing, troubleshooting)
+│                           #   assistant, inbox-placement-testing, troubleshooting)
 ├── pricing.md, pricing-authority.md, sla.md, quickstart.md
 ├── ddos_analysis_report.md, api-route-audit-report.md, recovered-files-analysis.md
 └── README.md               # This index

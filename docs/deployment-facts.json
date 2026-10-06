@@ -350,6 +350,17 @@
       "advertised": false,
       "evidence": "ai-service bin/server.rs spawns EmailAnswerer over the process pool/LLM/governor when AI_EMAIL_AGENT_ENABLED=true (crates/ai-service/src/email_agent.rs); compose + .env.production.example set the managed baseline ON with AI_REPLY_FROM and the poll cadence; drafts are grounded against knowledge::shared_knowledge_markdown() via verifier::verify_grounded and reviewed through /v1/admin/ai/drafts",
       "source": ".env.production.example + docker-compose.yml (ai-service) + docs/development/capability-registry.json (email-draft-agent)"
+    },
+    "console_assistant": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": true,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "not-applicable",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "console page /assistant (crates/ui-foundation leptos_views::web_assistant_page + the SSR manifest route), server-side sessions in migration 240_ai_chat_sessions.sql, PRG handler crates/api-server/src/routes/web.rs::form_assistant_message over the shared proxy crates/api-server/src/routes/ai_chat.rs::session_turn_inner (4,000-char cap, per-user Redis limiter, tenant-scoped account context); per-tenant feature flag ai_chat",
+      "source": "docs/development/ui-baseline-manifest.json + services/mail-server/migrations/240_ai_chat_sessions.sql + docs/development/capability-registry.json (console-assistant)"
     }
   }
 }

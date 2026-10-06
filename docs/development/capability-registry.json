@@ -824,6 +824,33 @@
         "mailbot",
         "draft reply agent"
       ]
+    },
+    {
+      "capability": "console-assistant",
+      "crate": "crates/api-server",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "console_assistant",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "not-applicable",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "env_gate": null,
+        "call_path": "GET /assistant renders the conversation from ai_chat_sessions/ai_chat_session_turns (crates/api-server/src/routes/web/data.rs::load_assistant); POST /web/assistant/message runs the turn through ai_chat::session_turn_inner (same caps/limiter/account-context as the JSON API) and redirects (PRG)",
+        "metrics": null,
+        "explanation": "The chat engine and /v1/ai/chat proxy already existed; this is the console surface: SSR conversation, server-side sessions (a client cannot inject history), citations as details, explicit empty/escalated/unavailable states. Reads and writes are tenant- and user-scoped (a cross-owner probe is a 404)."
+      },
+      "scan_aliases": [
+        "console assistant",
+        "assistant page",
+        "workspace Q&A"
+      ]
     }
   ],
   "stale_marker_exceptions": {

@@ -539,6 +539,9 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
         ("Suppressions", "/settings/suppressions", "ban"),
     ];
     let account_items = [
+        // SalesCloser plan §5.2: the console assistant lives with the
+        // account surfaces (it answers questions about this workspace).
+        ("Assistant", "/assistant", "message-square"),
         ("Billing", "/settings/billing", "credit-card"),
         ("Settings", "/settings", "settings"),
     ];
@@ -1167,6 +1170,7 @@ mod tests {
             "/settings/dedicated-ips",
             "/settings/billing",
             "/settings",
+            "/assistant",
         ] {
             assert!(
                 html.contains(&format!("href=\"{href}\"")),

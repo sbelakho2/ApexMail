@@ -10,8 +10,8 @@ use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
 use crate::view_data::{
-    render_data_cell, ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData,
-    SalesOverviewData, SalesPageData,
+    render_data_cell, AssistantPageData, AssistantTurnData, ListPageData, SalesAutonomyData,
+    SalesDeadLetterData, SalesDecisionData, SalesOverviewData, SalesPageData,
 };
 
 fn ui_icon(name: &str, class_name: &str) -> String {
@@ -4249,6 +4249,119 @@ pub fn web_domains_page() -> String {
             action_href: Some("/domains/new"),
         }
         .render_html(),
+    )
+}
+
+/// The console assistant (`/assistant`): a server-rendered conversation with
+/// its input form. Zero JS: each turn posts through `/web/assistant/message`,
+/// the handler stores both turns and redirects back here (PRG).
+///
+/// States: empty (`data.turns` empty, session optional), populated,
+/// escalated answers (the human-handoff notice), and unavailable (the
+/// session store could not be read — never an empty-conversation illusion).
+pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
+    // No server data means the SSR skeleton (an empty conversation with the
+    // prompt starters); `Some(data.unavailable)` is the loader's explicit
+    // failure state and renders the honest copy instead.
+    let unavailable = data.is_some_and(|d| d.unavailable);
+    let turns = data.map(|d| d.turns.as_slice()).unwrap_or(&[]);
+
+    let mut transcript = String::new();
+    if unavailable {
+        transcript.push_str(
+            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-6\">\
+             <h2 class=\"text-sm font-bold text-surface-900\">Conversation unavailable</h2>\
+             <p class=\"mt-2 text-sm text-surface-600\">The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again.</p></div>",
+        );
+    } else if turns.is_empty() {
+        transcript.push_str(
+            "<div class=\"rounded-sm border p-8 text-center\">\
+             <h2 class=\"text-sm font-bold text-surface-900\">Ask about your workspace</h2>\
+             <p class=\"mt-2 text-sm text-surface-600\">Pricing, deliverability, domains, compliance or the API — answers come from the published ApexMail documentation, and anything the assistant cannot verify is escalated to a human.</p></div>",
+        );
+    } else {
+        transcript.push_str("<div class=\"space-y-6\">");
+        for turn in turns {
+            transcript.push_str(&assistant_turn_html(turn));
+        }
+        transcript.push_str("</div>");
+    }
+
+    let citations_script = "";
+    format!(
+        "<div class=\"max-w-3xl space-y-6\">
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Assistant</h1>\
+<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. The assistant never guesses: unverifiable questions are escalated to a human.</p>\
+{transcript}\
+<h2 class=\"text-lg font-bold text-surface-950\" id=\"ask\">Ask a question</h2>\
+<form class=\"space-y-4\" method=\"post\" action=\"/web/assistant/message\">\
+<div class=\"space-y-2\">\
+<label class=\"block text-sm font-bold text-surface-900\" for=\"assistant-message\">Message <span class=\"text-surface-500 font-normal\">(up to 4,000 characters)</span></label>\
+<textarea id=\"assistant-message\" name=\"message\" rows=\"4\" maxlength=\"4000\" required class=\"w-full rounded-sm border border-surface-300 bg-white px-3 py-2 text-sm text-surface-900\" placeholder=\"What does the Pro plan include?\"></textarea>\
+</div>\
+<div class=\"flex items-center gap-3\">\
+<button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Send</button>\
+<span class=\"text-xs text-surface-500\">AI-generated answers; cited when grounded.</span>\
+</div>\
+</form>\
+{citations_script}\
+</div>",
+        transcript = transcript,
+    )
+}
+
+/// One conversation turn. Role headings keep the transcript a definition-style
+/// list; citations render as keyboard-operable `<details>` so the page needs
+/// no JavaScript.
+fn assistant_turn_html(turn: &AssistantTurnData) -> String {
+    let (role_label, frame) = if turn.role == "user" {
+        (
+            "You",
+            "rounded-sm border border-surface-200 bg-surface-50 p-5",
+        )
+    } else {
+        (
+            "ApexMail Assistant",
+            "rounded-sm border border-surface-200 p-5",
+        )
+    };
+    let mut citations = String::new();
+    if turn.role != "user" && !turn.citations.is_empty() {
+        citations.push_str("<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Sources</summary><ul class=\"mt-2 space-y-1\">");
+        for citation in &turn.citations {
+            let title = citation
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ApexMail documentation");
+            match citation.get("url").and_then(|v| v.as_str()) {
+                Some(url) => citations.push_str(&format!(
+                    "<li><a class=\"underline\" href=\"{}\" rel=\"noopener\">{}</a></li>",
+                    html_escape(url),
+                    html_escape(title)
+                )),
+                None => citations.push_str(&format!("<li>{}</li>", html_escape(title))),
+            }
+        }
+        citations.push_str("</ul></details>");
+    }
+    let escalation = if turn.role != "user" && turn.escalated {
+        "<p class=\"mt-3 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-surface-800\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</p>"
+    } else {
+        ""
+    };
+    format!(
+        "<article class=\"{frame}\">\
+<h2 class=\"text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">{role}</h2>\
+<p class=\"mt-3 whitespace-pre-wrap text-sm text-surface-900\">{content}</p>\
+{citations}{escalation}\
+<p class=\"mt-3 text-xs text-surface-400\">{created_at}</p>\
+</article>",
+        frame = frame,
+        role = html_escape(role_label),
+        content = html_escape(&turn.content),
+        citations = citations,
+        escalation = escalation,
+        created_at = html_escape(&turn.created_at),
     )
 }
 

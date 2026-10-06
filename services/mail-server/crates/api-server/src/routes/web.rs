@@ -340,6 +340,7 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
             post(form_campaign_recipients),
         )
         .route("/web/inbox-placement/tests", post(form_placement_create))
+        .route("/web/assistant/message", post(form_assistant_message))
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
         .layer(axum::middleware::from_fn_with_state(
@@ -5571,6 +5572,110 @@ async fn form_campaign_update(
     }
 }
 
+/// Post one console-assistant message (PRG): resolve or create the caller's
+/// session, run the turn through the SAME proxy path the JSON API uses
+/// (caps, rate limit, account context, ai-service), and redirect back to the
+/// conversation. Failures land as flash errors — never a silent no-op.
+async fn form_assistant_message(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/assistant", &state.config);
+    }
+    let message = field(&form, "message").trim().to_string();
+    if message.is_empty() {
+        return redirect_error(
+            "Enter a question for the assistant.",
+            "/assistant",
+            &state.config,
+        );
+    }
+    if message.len() > crate::routes::ai_chat::MAX_MESSAGE_CHARS {
+        return redirect_error(
+            "Messages are limited to 4,000 characters.",
+            "/assistant",
+            &state.config,
+        );
+    }
+
+    let tenant = user.tenant_id.clone();
+    let user_key = user.user_id.clone().unwrap_or_else(|| tenant.clone());
+
+    // The active session is the newest for this (tenant, user); the first
+    // message creates one. Both calls are tenant+user scoped.
+    let existing: Result<Option<(String,)>, sqlx::Error> = sqlx::query_as(
+        "SELECT id FROM ai_chat_sessions \
+         WHERE tenant_id = $1 AND user_id = $2 \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(&tenant)
+    .bind(&user_key)
+    .fetch_optional(&state.db)
+    .await;
+    let session_id = match existing {
+        Ok(Some((id,))) => id,
+        Ok(None) => {
+            let id = apexmail_lib::id::generate_id("chat", 21);
+            if let Err(error) = sqlx::query(
+                "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)",
+            )
+            .bind(&id)
+            .bind(&tenant)
+            .bind(&user_key)
+            .execute(&state.db)
+            .await
+            {
+                return temporary_storage_failure(
+                    &WebActionError::Database(error),
+                    "/assistant",
+                    &state.config,
+                );
+            }
+            id
+        }
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/assistant",
+                &state.config,
+            );
+        }
+    };
+
+    match crate::routes::ai_chat::session_turn_inner(
+        &state,
+        &tenant,
+        &user_key,
+        &session_id,
+        &message,
+    )
+    .await
+    {
+        Ok(_) => redirect_success("The assistant answered.", "/assistant", &state.config),
+        Err(crate::error::ApiError::RateLimitedMessage(_)) => redirect_error(
+            "The assistant is receiving too many questions right now. Please retry in a minute.",
+            "/assistant",
+            &state.config,
+        ),
+        Err(crate::error::ApiError::Validation(_)) => redirect_error(
+            "Enter a question up to 4,000 characters.",
+            "/assistant",
+            &state.config,
+        ),
+        Err(error) => {
+            tracing::warn!(error = %error, "assistant message failed");
+            redirect_error(
+                "The assistant is temporarily unavailable. Please try again.",
+                "/assistant",
+                &state.config,
+            )
+        }
+    }
+}
+
 async fn form_placement_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -9957,6 +10062,7 @@ mod tests {
                     post(form_campaigns_delete_bulk),
                 )
                 .route("/web/contacts/import", post(form_contacts_import))
+                .route("/web/assistant/message", post(form_assistant_message))
                 .route("/web/auth/signup", post(form_signup))
                 .route("/web/auth/login", post(form_login))
                 .route("/web/auth/mfa/verify", post(form_mfa_verify))
@@ -9995,6 +10101,118 @@ mod tests {
                     },
                 ))
                 .with_state(state)
+        }
+
+        /// The console assistant's PRG flow end-to-end over the web
+        /// handlers: a CSRF-valid post creates the caller's session, stores
+        /// both turns (through the same proxy path the JSON API uses) and
+        /// redirects back to the conversation.
+        #[tokio::test]
+        async fn assistant_message_posts_a_session_turn_and_redirects() {
+            let Some(state) = web_test_state("assistant_prg").await else {
+                return;
+            };
+            let tenant = apexmail_lib::id::generate_id("asst", 20);
+            seed_tenant(&state, &tenant).await;
+
+            // Mock ai-service so the flow exercises the real proxy call.
+            let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            let mock = axum::Router::new().route(
+                "/chat",
+                axum::routing::post(
+                    move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        sink.lock().unwrap().push(body);
+                        axum::Json(serde_json::json!({
+                            "answer": "The Pro plan includes 150,000 emails.",
+                            "citations": [{"title": "Pricing"}],
+                            "escalated": false,
+                            "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
+                            "docs_version": "v42",
+                        }))
+                    },
+                ),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ai_url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, mock).await;
+            });
+
+            let user = session_user(&tenant);
+            let user_id = user.user_id.clone().expect("session user id");
+            // The same pool, an ai_service_base_url pointed at the mock.
+            let mut config = state.config.clone();
+            config.ai_service_base_url = ai_url;
+            let state =
+                crate::app::test_support::test_state_over_with_config(state.db.clone(), config)
+                    .await;
+
+            let app = web_handlers(state.clone(), user);
+            let body = csrf_body(&state, &[("message", "What does the Pro plan include?")]);
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/assistant/message", &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+            // The model saw the message with NO prior history…
+            let requests = seen.lock().unwrap().clone();
+            assert_eq!(requests.len(), 1, "one model call");
+            assert_eq!(requests[0]["message"], "What does the Pro plan include?");
+            assert!(
+                requests[0]["history"].as_array().is_some_and(Vec::is_empty),
+                "first turn carries no history"
+            );
+
+            // …and both turns are persisted for the caller's (tenant, user).
+            let session_id: String = sqlx::query_scalar(
+                "SELECT id FROM ai_chat_sessions WHERE tenant_id = $1 AND user_id = $2",
+            )
+            .bind(&tenant)
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("session created");
+            let turns: Vec<(String, String)> = sqlx::query_as(
+                "SELECT role, content FROM ai_chat_session_turns WHERE session_id = $1 ORDER BY created_at",
+            )
+            .bind(&session_id)
+            .fetch_all(&state.db)
+            .await
+            .expect("turns");
+            assert_eq!(turns.len(), 2, "{turns:?}");
+            assert_eq!(turns[0].0, "user");
+            assert_eq!(turns[1].0, "assistant");
+            assert!(turns[1].1.contains("150,000 emails"));
+        }
+
+        /// A CSRF-invalid post never reaches the assistant or the store.
+        #[tokio::test]
+        async fn assistant_message_rejects_a_missing_csrf_token() {
+            let Some(state) = web_test_state("assistant_csrf").await else {
+                return;
+            };
+            let tenant = apexmail_lib::id::generate_id("asstc", 19);
+            seed_tenant(&state, &tenant).await;
+            let app = web_handlers(state.clone(), session_user(&tenant));
+            let response = app
+                .oneshot(post_form(
+                    "/web/assistant/message",
+                    "message=hello&_csrf=forged",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let sessions: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM ai_chat_sessions WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("count");
+            assert_eq!(sessions, 0, "a rejected post must not create a session");
         }
 
         fn csrf_body(state: &AppState, extra: &[(&str, &str)]) -> String {

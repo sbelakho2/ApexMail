@@ -413,6 +413,34 @@ pub struct SalesPageData {
     pub dead_letters: Option<Vec<SalesDeadLetterData>>,
 }
 
+/// One assistant conversation turn for the console page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AssistantTurnData {
+    pub role: String,
+    /// Assistant answers only: the claim was escalated to a human.
+    pub escalated: bool,
+    pub content: String,
+    /// Citation objects as returned by the verifier (`{"title","url",...}`).
+    pub citations: Vec<serde_json::Value>,
+    pub created_at: String,
+}
+
+/// Console assistant page data (the SSR conversation + its input form).
+///
+/// `session_id` is `None` before the first message: the form still renders
+/// (posting creates the session), so the empty state and the popuated state
+/// share one page. `unavailable` is the honest failure state — the loader
+/// could not reach the session store, which is NOT an empty conversation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AssistantPageData {
+    /// Double-submit CSRF token for the SSR form post (empty when the render
+    /// pipeline had none).
+    pub csrf_token: String,
+    pub session_id: Option<String>,
+    pub turns: Vec<AssistantTurnData>,
+    pub unavailable: bool,
+}
+
 /// Render a `<td>` for a [`DataCell`] (mirrors `Table` cell classes).
 pub fn render_data_cell(cell: &DataCell) -> String {
     match cell {

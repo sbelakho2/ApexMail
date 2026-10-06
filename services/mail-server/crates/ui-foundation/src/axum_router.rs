@@ -39,6 +39,12 @@ pub struct RouteData {
     /// Absent means the loader could not answer — the page then renders an
     /// explicit unavailable state rather than a zero-filled dashboard.
     pub sales: Option<SalesPageData>,
+    /// Console assistant conversation (`/assistant`).
+    ///
+    /// Present means the loader read the session store (or found no session
+    /// yet — the empty state). The page renders `unavailable` explicitly when
+    /// the store could not be read.
+    pub assistant: Option<crate::view_data::AssistantPageData>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1826,6 +1832,9 @@ fn render_web(
         }
         "/inbox-placement" => data_backed_inner("/inbox-placement", data)
             .unwrap_or_else(leptos_views::web_inbox_placement_page),
+        "/assistant" => leptos_views::web_assistant_page(
+            data.and_then(|route_data| route_data.assistant.as_ref()),
+        ),
         "/inbox-placement/new" => leptos_views::web_inbox_placement_new_page(),
         "/events" => {
             data_backed_inner("/events", data).unwrap_or_else(leptos_views::web_events_page)
@@ -2849,6 +2858,7 @@ mod tests {
             campaign_editor: None,
             list_edit: None,
             mfa_setup: None,
+            assistant: None,
         }
     }
 
@@ -2961,6 +2971,7 @@ mod tests {
         let data = RouteData {
             list: None,
             sales: None,
+            assistant: None,
             campaign_editor: None,
             campaign_edit: Some(CampaignEditData {
                 id: "c_123".into(),
@@ -2990,6 +3001,7 @@ mod tests {
         let data = RouteData {
             list: None,
             sales: None,
+            assistant: None,
             campaign_edit: None,
             campaign_editor: None,
             list_edit: None,
@@ -3233,6 +3245,7 @@ mod tests {
                 campaign_editor: None,
                 list_edit: None,
                 mfa_setup: None,
+                assistant: None,
             }),
         )
         .unwrap();
@@ -3294,6 +3307,7 @@ mod tests {
                 campaign_editor: None,
                 list_edit: None,
                 mfa_setup: None,
+                assistant: None,
             }),
         )
         .unwrap();

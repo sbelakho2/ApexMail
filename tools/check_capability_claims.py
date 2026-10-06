@@ -158,6 +158,12 @@ FACT_TREE_VERIFICATIONS = {
         ("services/mail-server/crates/mta/src/servers/inbound.rs", "parse_inbound_mirrors", True),
         ("services/mail-server/crates/worker-processors/src/reply_handler/processor.rs", "from_email IS NOT NULL", True),
     ],
+    "console_assistant": [
+        ("services/mail-server/crates/ui-foundation/src/leptos_views.rs", "pub fn web_assistant_page", True),
+        ("services/mail-server/crates/api-server/src/routes/web.rs", "async fn form_assistant_message", True),
+        ("services/mail-server/migrations/240_ai_chat_sessions.sql", "ai_chat_sessions", True),
+        ("docs/development/ui-baseline-manifest.json", "\"/assistant\"", True),
+    ],
     "email_draft_agent": [
         ("services/mail-server/crates/ai-service/src/bin/server.rs", "EmailAnswerer::from_env_with_runtime", True),
         ("services/mail-server/crates/ai-service/src/email_agent.rs", "assess_grounded_draft", True),

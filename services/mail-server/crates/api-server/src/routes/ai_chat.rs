@@ -21,6 +21,13 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/chat", post(chat))
         .route("/chat/history", get(chat_history))
+        // Console assistant sessions (plan §5.2): server-side conversations
+        // instead of a client-supplied history array.
+        .route("/chat/sessions", post(create_session).get(list_sessions))
+        .route(
+            "/chat/sessions/:id/turns",
+            post(post_session_turn).get(read_session_turns),
+        )
 }
 
 /// Feature-flag name managing the customer-facing assistant capability.
@@ -71,37 +78,47 @@ pub struct ChatOut {
 
 /// Conversation history cap enforced server-side (the client may send more).
 const MAX_HISTORY: usize = 12;
+/// Per-message character cap (the plan's 4,000-char contract).
+pub(crate) const MAX_MESSAGE_CHARS: usize = 4000;
+/// Console session window: how many turns the page/API returns by default.
+pub(crate) const SESSION_WINDOW_TURNS: i64 = 12;
 /// Per-user chat rate limit (Redis sliding window), independent of the
 /// tenant-wide API bucket: chat is expensive and per-person.
 const CHAT_RATE_LIMIT: i64 = 20;
 const CHAT_RATE_WINDOW_SECS: i64 = 60;
 
-pub(crate) async fn chat(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(body): Json<ChatBody>,
-) -> Result<Json<ChatOut>, ApiError> {
-    require_scopes(&auth, &["ai:read"])?;
-    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+/// One assistant exchange, normalized for every caller (the JSON API and
+/// the console's PRG handler share this path so caps, scopes and account
+/// context cannot diverge).
+pub(crate) struct AssistantOutcome {
+    pub answer: String,
+    pub citations: serde_json::Value,
+    pub escalated: bool,
+    pub disclosure: String,
+    pub docs_version: String,
+}
 
-    let message = body.message.trim().to_string();
+/// Validate + forward one message. The caller has already checked scopes,
+/// the feature flag and the rate limit (each entry point needs those in a
+/// different order for its own error surface).
+pub(crate) async fn ask_assistant(
+    state: &AppState,
+    tenant_id: &str,
+    user_key: &str,
+    message: &str,
+    history: Vec<HistoryTurn>,
+) -> Result<AssistantOutcome, ApiError> {
+    let message = message.trim().to_string();
     if message.is_empty() {
         return Err(ApiError::Validation(vec![
             "message must not be empty".into()
         ]));
     }
-    if message.len() > 4000 {
+    if message.len() > MAX_MESSAGE_CHARS {
         return Err(ApiError::Validation(vec![
             "message too long (max 4000 chars)".into(),
         ]));
     }
-
-    // Per-user chat rate limit.
-    let user_key = auth
-        .user_id
-        .clone()
-        .unwrap_or_else(|| auth.tenant_id.clone());
-    chat_rate_limit(&state, &auth.tenant_id, &user_key).await?;
 
     let ai_url = state.config.ai_service_base_url.trim().to_string();
     if ai_url.is_empty() {
@@ -112,17 +129,16 @@ pub(crate) async fn chat(
 
     // Account context assembled HERE, from tenant-scoped queries — the
     // trusted half of the design. ai-service treats it as display data.
-    let account_context = account_context(&state, &auth.tenant_id).await;
+    let account_context = account_context(state, tenant_id).await;
 
-    let history: Vec<HistoryTurn> = body
-        .history
+    let history: Vec<HistoryTurn> = history
         .into_iter()
         .take(MAX_HISTORY)
         .filter(|t| matches!(t.role.as_str(), "user" | "assistant") && !t.content.is_empty())
         .collect();
 
     let payload = serde_json::json!({
-        "tenant_id": auth.tenant_id,
+        "tenant_id": tenant_id,
         "user_id": user_key,
         "message": message,
         "account_context": account_context,
@@ -138,10 +154,10 @@ pub(crate) async fn chat(
         request = request.header("x-api-key", token);
     }
     // The end user's tenant for ai-service's per-tenant governor.
-    request = request.header("x-apexmail-tenant-id", &auth.tenant_id);
+    request = request.header("x-apexmail-tenant-id", tenant_id);
 
     let response = request.send().await.map_err(|e| {
-        tracing::warn!(error = %e, tenant_id = %auth.tenant_id, "ai chat: service unreachable");
+        tracing::warn!(error = %e, tenant_id = %tenant_id, "ai chat: service unreachable");
         ApiError::Internal("assistant unavailable; contact support@apexmail.ee".into())
     })?;
 
@@ -151,7 +167,7 @@ pub(crate) async fn chat(
                 tracing::warn!(error = %e, "ai chat: malformed response");
                 ApiError::Internal("assistant returned an invalid response".into())
             })?;
-            Ok(Json(ChatOut {
+            Ok(AssistantOutcome {
                 answer: out["answer"].as_str().unwrap_or_default().to_string(),
                 citations: out.get("citations").cloned().unwrap_or_default(),
                 escalated: out["escalated"].as_bool().unwrap_or(false),
@@ -160,7 +176,7 @@ pub(crate) async fn chat(
                     .unwrap_or("This assistant is AI-powered. Escalation: support@apexmail.ee.")
                     .to_string(),
                 docs_version: out["docs_version"].as_str().unwrap_or_default().to_string(),
-            }))
+            })
         }
         StatusCode::TOO_MANY_REQUESTS => Err(ApiError::RateLimitedMessage(
             "assistant rate limit reached — please retry in a minute".into(),
@@ -172,6 +188,34 @@ pub(crate) async fn chat(
             ))
         }
     }
+}
+
+pub(crate) async fn chat(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ChatBody>,
+) -> Result<Json<ChatOut>, ApiError> {
+    require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+
+    let user_key = user_key_of(&auth);
+    chat_rate_limit(&state, &auth.tenant_id, &user_key).await?;
+
+    let out = ask_assistant(
+        &state,
+        &auth.tenant_id,
+        &user_key,
+        &body.message,
+        body.history,
+    )
+    .await?;
+    Ok(Json(ChatOut {
+        answer: out.answer,
+        citations: out.citations,
+        escalated: out.escalated,
+        disclosure: out.disclosure,
+        docs_version: out.docs_version,
+    }))
 }
 
 pub(crate) async fn chat_history(
@@ -267,6 +311,359 @@ async fn account_context(state: &AppState, tenant_id: &str) -> serde_json::Value
         "hard_bounces_last_7d": bounces.map(|(b,)| b),
         "verified_domains": domains.map(|(d,)| d),
     })
+}
+
+/// The rate-limit / governor identity for one console user: the user id
+/// when present, else the tenant (an API-key caller has no user).
+pub(crate) fn user_key_of(auth: &AuthUser) -> String {
+    auth.user_id
+        .clone()
+        .unwrap_or_else(|| auth.tenant_id.clone())
+}
+
+/// The retention window for console sessions, aligned with the ai-service's
+/// `AI_CHAT_RETENTION_DAYS` so both halves of the assistant's memory expire
+/// together. Unparseable/absent/zero values fall back to 90 days.
+pub(crate) fn retention_days() -> i64 {
+    std::env::var("AI_CHAT_RETENTION_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|days| *days > 0)
+        .unwrap_or(90)
+}
+
+/// Delete this owner's sessions that fell out of the retention window. Runs
+/// on session creation (the only writer of new sessions), so the prune cost
+/// is paid when the user is already touching the database.
+async fn prune_expired_sessions(state: &AppState, tenant_id: &str, user_key: &str) {
+    if let Err(error) = sqlx::query(
+        "DELETE FROM ai_chat_sessions \
+         WHERE tenant_id = $1 AND user_id = $2 \
+           AND updated_at < NOW() - make_interval(days => $3::int)",
+    )
+    .bind(tenant_id)
+    .bind(user_key)
+    .bind(retention_days())
+    .execute(&state.db)
+    .await
+    {
+        // Best-effort: a failed prune must never fail the user's request.
+        tracing::warn!(error = %error, "ai chat: session prune failed");
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionOut {
+    pub id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TurnBody {
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TurnOut {
+    pub role: String,
+    pub content: String,
+    pub escalated: bool,
+    pub citations: serde_json::Value,
+    pub disclosure: Option<String>,
+    pub docs_version: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TurnsQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Create a fresh conversation for the authenticated user, pruning sessions
+/// that fell out of the retention window first.
+pub(crate) async fn create_session(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<SessionOut>, ApiError> {
+    require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+    let user_key = user_key_of(&auth);
+    prune_expired_sessions(&state, &auth.tenant_id, &user_key).await;
+
+    let id = apexmail_lib::id::generate_id("chat", 21);
+    let row: (
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    ) = sqlx::query_as(
+        "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) \
+             VALUES ($1, $2, $3) \
+             RETURNING id, created_at, updated_at",
+    )
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .bind(&user_key)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(SessionOut {
+        id: row.0,
+        created_at: row.1,
+        updated_at: row.2,
+    }))
+}
+
+/// The user's conversations, newest first (bounded).
+pub(crate) async fn list_sessions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+    let user_key = user_key_of(&auth);
+
+    let rows: Vec<(
+        String,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT id, created_at, updated_at FROM ai_chat_sessions \
+             WHERE tenant_id = $1 AND user_id = $2 \
+             ORDER BY updated_at DESC LIMIT 20",
+    )
+    .bind(&auth.tenant_id)
+    .bind(&user_key)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(serde_json::json!({
+        "sessions": rows
+            .into_iter()
+            .map(|(id, created_at, updated_at)| serde_json::json!({
+                "id": id,
+                "created_at": created_at.to_rfc3339(),
+                "updated_at": updated_at.to_rfc3339(),
+            }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// Read one session's turn window (tenant+user scoped; a cross-tenant or
+/// cross-user probe is a 404, never a leak).
+pub(crate) async fn read_session_turns(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<TurnsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+    let user_key = user_key_of(&auth);
+    ensure_session_owned(&state, &auth.tenant_id, &user_key, &session_id).await?;
+
+    let limit = query.limit.unwrap_or(SESSION_WINDOW_TURNS).clamp(1, 50);
+    let rows: Vec<(
+        String,
+        String,
+        bool,
+        serde_json::Value,
+        Option<String>,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT role, content, escalated, citations, disclosure, docs_version, created_at \
+         FROM ai_chat_session_turns WHERE session_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at ASC LIMIT $3",
+    )
+    .bind(&session_id)
+    .bind(&auth.tenant_id)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(serde_json::json!({
+        "session_id": session_id,
+        "turns": rows
+            .into_iter()
+            .map(|(role, content, escalated, citations, disclosure, docs_version, created_at)| {
+                serde_json::json!({
+                    "role": role,
+                    "content": content,
+                    "escalated": escalated,
+                    "citations": citations,
+                    "disclosure": disclosure,
+                    "docs_version": docs_version,
+                    "created_at": created_at.to_rfc3339(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// The assistant's SESSION history: the user's turns from this session,
+/// oldest first, as the model context. Only persisted turns travel — a
+/// client cannot inject history into a session.
+async fn session_history(
+    state: &AppState,
+    tenant_id: &str,
+    session_id: &str,
+) -> Result<Vec<HistoryTurn>, ApiError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT role, content FROM ai_chat_session_turns \
+         WHERE session_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at DESC LIMIT $3",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(MAX_HISTORY as i64)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .rev()
+        .map(|(role, content)| HistoryTurn { role, content })
+        .collect())
+}
+
+/// Session ownership check: the session must belong to this tenant AND this
+/// user. A miss is a 404 so a probe cannot distinguish "not yours" from
+/// "does not exist".
+pub(crate) async fn ensure_session_owned(
+    state: &AppState,
+    tenant_id: &str,
+    user_key: &str,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    let found: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM ai_chat_sessions \
+         WHERE id = $1 AND tenant_id = $2 AND user_id = $3",
+    )
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(user_key)
+    .fetch_optional(&state.db)
+    .await?;
+    if found.is_none() {
+        return Err(ApiError::NotFound("no such session".into()));
+    }
+    Ok(())
+}
+
+/// Post one user turn: persist it FIRST (a failed answer never loses the
+/// question), ask the assistant with the session's own history, persist the
+/// assistant turn, and return both.
+pub(crate) async fn post_session_turn(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    axum::extract::Path(session_id): axum::extract::Path<String>,
+    Json(body): Json<TurnBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
+    let user_key = user_key_of(&auth);
+    chat_rate_limit(&state, &auth.tenant_id, &user_key).await?;
+    ensure_session_owned(&state, &auth.tenant_id, &user_key, &session_id).await?;
+
+    Ok(Json(
+        session_turn_inner(
+            &state,
+            &auth.tenant_id,
+            &user_key,
+            &session_id,
+            &body.message,
+        )
+        .await?,
+    ))
+}
+
+/// The session-turn flow, reusable by the console's PRG handler (which
+/// renders the outcome instead of returning JSON).
+pub(crate) async fn session_turn_inner(
+    state: &AppState,
+    tenant_id: &str,
+    user_key: &str,
+    session_id: &str,
+    message: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Err(ApiError::Validation(vec![
+            "message must not be empty".into()
+        ]));
+    }
+    if message.len() > MAX_MESSAGE_CHARS {
+        return Err(ApiError::Validation(vec![
+            "message too long (max 4000 chars)".into(),
+        ]));
+    }
+
+    let user_turn_id = apexmail_lib::id::generate_id("turn", 21);
+    let user_created_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO ai_chat_session_turns (id, session_id, tenant_id, role, content) \
+         VALUES ($1, $2, $3, 'user', $4) RETURNING created_at",
+    )
+    .bind(&user_turn_id)
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(&message)
+    .fetch_one(&state.db)
+    .await?;
+
+    let history = session_history(state, tenant_id, session_id).await?;
+    // The just-persisted user turn is part of history; the model receives the
+    // current message separately, so drop the duplicate tail.
+    let mut history_without_tail = history;
+    if history_without_tail
+        .last()
+        .is_some_and(|turn| turn.role == "user" && turn.content == message)
+    {
+        history_without_tail.pop();
+    }
+
+    let outcome = ask_assistant(state, tenant_id, user_key, &message, history_without_tail).await?;
+
+    let assistant_turn_id = apexmail_lib::id::generate_id("turn", 21);
+    let assistant_created_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "INSERT INTO ai_chat_session_turns \
+             (id, session_id, tenant_id, role, content, escalated, citations, docs_version, disclosure) \
+         VALUES ($1, $2, $3, 'assistant', $4, $5, $6, $7, $8) RETURNING created_at",
+    )
+    .bind(&assistant_turn_id)
+    .bind(session_id)
+    .bind(tenant_id)
+    .bind(&outcome.answer)
+    .bind(outcome.escalated)
+    .bind(&outcome.citations)
+    .bind(&outcome.docs_version)
+    .bind(&outcome.disclosure)
+    .fetch_one(&state.db)
+    .await?;
+
+    let _ = sqlx::query("UPDATE ai_chat_sessions SET updated_at = NOW() WHERE id = $1")
+        .bind(session_id)
+        .execute(&state.db)
+        .await;
+
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "user_turn": {
+            "id": user_turn_id,
+            "role": "user",
+            "content": message,
+            "created_at": user_created_at.to_rfc3339(),
+        },
+        "assistant_turn": {
+            "id": assistant_turn_id,
+            "role": "assistant",
+            "content": outcome.answer,
+            "escalated": outcome.escalated,
+            "citations": outcome.citations,
+            "disclosure": outcome.disclosure,
+            "docs_version": outcome.docs_version,
+            "created_at": assistant_created_at.to_rfc3339(),
+        },
+        // The plan's window contract for the console: the page re-reads the
+        // session, so the ids are the useful return values.
+    }))
 }
 
 async fn chat_rate_limit(
@@ -563,5 +960,261 @@ mod adversarial_tests {
             AdvEnv::tenant_with_config(pool, &["ai:read"], ai_config("http://127.0.0.1:1")).await;
         let (status, _body) = dead.get("/v1/ai/chat/history").await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    /// Minimal ai-service twin for the session flow: echoes the history it
+    /// received so the test can prove only PERSISTED turns travel.
+    async fn start_mock_ai() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let state = seen.clone();
+        let app = axum::Router::new().route(
+            "/chat",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let history_len = body["history"].as_array().map(Vec::len).unwrap_or(0);
+                    state.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({
+                        "answer": format!("answer #{history_len}"),
+                        "citations": [{"title": "ApexMail docs"}],
+                        "escalated": false,
+                        "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
+                        "docs_version": "v42",
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (base_url, seen)
+    }
+
+    fn ai_config(ai_url: &str) -> crate::config::Config {
+        let mut config = crate::app::test_support::test_config();
+        config.ai_service_base_url = ai_url.into();
+        config
+    }
+
+    /// The test's own session id (`chat_` + 21) from a create call.
+    fn session_id(body: &serde_json::Value) -> String {
+        body["id"].as_str().expect("session id").to_string()
+    }
+
+    #[tokio::test]
+    async fn session_turn_persists_both_turns_and_reuses_its_own_history() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_flow").await else {
+            return;
+        };
+        let (ai_url, seen) = start_mock_ai().await;
+        let Some((env, tenant, user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+
+        // Create + first turn: the model sees NO prior turns (nothing was
+        // persisted yet, and a client cannot inject any).
+        let (status, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = session_id(&created);
+
+        let (status, out) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"How do I verify a domain?"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        assert_eq!(out["user_turn"]["content"], "How do I verify a domain?");
+        assert_eq!(out["assistant_turn"]["content"], "answer #0");
+
+        // Second turn: the session's own two turns are the model context.
+        let (status, out2) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"And DKIM?"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{out2}");
+        assert_eq!(out2["assistant_turn"]["content"], "answer #2");
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]["history"].as_array().is_some_and(Vec::is_empty),
+            "first turn must carry no history: {}",
+            requests[0]["history"]
+        );
+        let history = requests[1]["history"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(history.len(), 2, "second turn carries the persisted pair");
+        assert_eq!(history[0]["role"], "user");
+        assert_eq!(history[1]["role"], "assistant");
+
+        // Both turns are readable back through the window endpoint, in order.
+        let (status, window) = env.get(&format!("/v1/ai/chat/sessions/{id}/turns")).await;
+        assert_eq!(status, StatusCode::OK, "{window}");
+        let turns = window["turns"].as_array().cloned().unwrap_or_default();
+        assert_eq!(turns.len(), 4, "two exchanges: {window}");
+        assert_eq!(turns[0]["role"], "user");
+        assert_eq!(turns[3]["role"], "assistant");
+
+        // The rows are tenant- AND user-scoped in the database.
+        let persisted: Vec<(String, String)> = sqlx::query_as(
+            "SELECT role, content FROM ai_chat_session_turns WHERE session_id = $1 ORDER BY created_at",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .expect("read turns");
+        assert_eq!(persisted.len(), 4);
+        let owners: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ai_chat_sessions WHERE id = $1 AND tenant_id = $2 AND user_id = $3",
+        )
+        .bind(&id)
+        .bind(&tenant)
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .expect("owner check");
+        assert_eq!(owners, 1, "the session belongs to its creator");
+    }
+
+    #[tokio::test]
+    async fn session_reads_and_turns_are_scoped_to_their_owner() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_scope").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((owner, owner_tenant, _owner_user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (status, created) = owner.post("/v1/ai/chat/sessions", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = session_id(&created);
+
+        // A DIFFERENT tenant must not read or post to the session.
+        let Some((other, _other_tenant, _)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (status, body) = other.get(&format!("/v1/ai/chat/sessions/{id}/turns")).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "cross-tenant read must be a 404, not a leak: {body}"
+        );
+        let (status, body) = other
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"hi"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // A second USER in the same tenant: sessions are per-user too. The
+        // owner's session id is known, so this is the strongest probe.
+        let (status, leaked) = other.get("/v1/ai/chat/sessions").await;
+        assert_eq!(status, StatusCode::OK, "{leaked}");
+        assert!(
+            leaked["sessions"].as_array().is_some_and(Vec::is_empty),
+            "a different owner sees no sessions: {leaked}"
+        );
+        let _ = owner_tenant;
+    }
+
+    #[tokio::test]
+    async fn session_turns_enforce_the_cap_and_reject_empty_messages() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_caps").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((env, _tenant, _user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (_, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        let id = session_id(&created);
+
+        let long = "x".repeat(4001);
+        let (status, body) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                &serde_json::json!({ "message": long }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"   "}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // A rejected message must not have persisted a turn.
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ai_chat_session_turns WHERE session_id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("count turns");
+        assert_eq!(rows, 0, "rejected turns are never stored");
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_pruned_on_the_next_create() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_prune").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((env, tenant, user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+
+        // A stale session from beyond the retention window (91 days, the
+        // default is 90).
+        let stale_id = apexmail_lib::id::generate_id("chat", 21);
+        sqlx::query(
+            "INSERT INTO ai_chat_sessions (id, tenant_id, user_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, NOW() - interval '91 days', NOW() - interval '91 days')",
+        )
+        .bind(&stale_id)
+        .bind(&tenant)
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .expect("stale session");
+
+        let (status, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+
+        let stale: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_chat_sessions WHERE id = $1")
+            .bind(&stale_id)
+            .fetch_one(&pool)
+            .await
+            .expect("stale lookup");
+        assert_eq!(stale, 0, "sessions past the retention window are pruned");
     }
 }
