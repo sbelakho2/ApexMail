@@ -452,6 +452,109 @@ fn stop_request_verdict(input: &ReplyInput) -> Option<DeterministicVerdict> {
 }
 
 // ---------------------------------------------------------------------------
+// Objection families (plan §5.5) — the LABELLING fallback
+// ---------------------------------------------------------------------------
+//
+// These families never change a disposition. They run only when the AI layer
+// already decided `not_interested` / `question` and returned NO objection
+// class, and they only ATTACH a class when the sender's words match a
+// family. A disposition change from a keyword match would risk suppressing a
+// prospect on a false positive; labelling carries no such consequence, and
+// the persisted class feeds the experiment dimensions.
+
+/// (objection class, keyword family). Lowercase; matched against the same
+/// haystack the other families use.
+const OBJECTION_FAMILIES: [(&str, &[&str]); 6] = [
+    (
+        "price",
+        &[
+            "too expensive",
+            "too pricey",
+            "no budget",
+            "out of budget",
+            "can't afford",
+            "cannot afford",
+            "cost is too high",
+            "cheaper option",
+            "lower price",
+            "pricing is high",
+        ],
+    ),
+    (
+        "timing",
+        &[
+            "not right now",
+            "bad timing",
+            "circle back",
+            "revisit next quarter",
+            "next quarter",
+            "in a few months",
+            "too busy right now",
+            "after the holidays",
+        ],
+    ),
+    (
+        "competitor",
+        &[
+            "already use",
+            "already using",
+            "we use ",
+            "happy with our current",
+            "under contract with",
+            "switching cost",
+        ],
+    ),
+    (
+        "authority",
+        &[
+            "not the decision maker",
+            "not my decision",
+            "need approval",
+            "have to ask",
+            "our team handles",
+            "speak to my manager",
+        ],
+    ),
+    (
+        "trust",
+        &[
+            "never heard of",
+            "don't trust",
+            "do not trust",
+            "seems risky",
+            "worried about",
+            "scam",
+        ],
+    ),
+    (
+        "need",
+        &[
+            "don't need",
+            "do not need",
+            "not interested in this",
+            "no need",
+            "already solved",
+            "we handle it in house",
+        ],
+    ),
+];
+
+/// The objection class a reply's words support, if any. Returns the FIRST
+/// family in taxonomy order — one class, deterministically chosen, with the
+/// matched token as evidence.
+pub fn label_objection_class(input: &ReplyInput) -> Option<(&'static str, String)> {
+    let text = haystack(input);
+    for (class, tokens) in OBJECTION_FAMILIES {
+        for token in tokens {
+            if text.contains(token) {
+                return Some((class, (*token).to_string()));
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // OOO return-date extraction (bounded)
 // ---------------------------------------------------------------------------
 
@@ -1230,5 +1333,40 @@ mod month_and_pattern_batch {
         }
         assert_eq!(month_number("januari"), None, "near-miss refused");
         assert_eq!(month_number(""), None);
+    }
+}
+
+#[cfg(test)]
+mod objection_family_tests {
+    use super::*;
+
+    #[test]
+    fn families_label_the_canonical_classes_deterministically() {
+        let cases: &[(&str, &str)] = &[
+            ("This is too expensive for us right now.", "price"),
+            ("Bad timing, we are heads down this quarter.", "timing"),
+            ("We already use a competitor for this.", "competitor"),
+            ("I am not the decision maker here.", "authority"),
+            ("Honestly, we do not trust a new vendor.", "trust"),
+            ("We do not need another sending platform.", "need"),
+        ];
+        for (body, expected) in cases {
+            let input = ReplyInput::new("Re: proposal", *body);
+            let labelled = label_objection_class(&input).map(|(class, _)| class);
+            assert_eq!(labelled, Some(*expected), "body: {body}");
+        }
+        // No family matches → no label (never a guess).
+        let quiet = ReplyInput::new("Re: proposal", "Thanks, we will review it.");
+        assert_eq!(label_objection_class(&quiet), None);
+    }
+
+    #[test]
+    fn family_order_is_taxonomy_order_and_case_insensitive() {
+        // A body naming both price and timing resolves to price (first in
+        // taxonomy order), deterministically.
+        let input = ReplyInput::new("Re: pricing", "Too expensive, and bad timing.");
+        assert_eq!(label_objection_class(&input).map(|(c, _)| c), Some("price"));
+        let upper = ReplyInput::new("Re: pricing", "TOO EXPENSIVE");
+        assert_eq!(label_objection_class(&upper).map(|(c, _)| c), Some("price"));
     }
 }

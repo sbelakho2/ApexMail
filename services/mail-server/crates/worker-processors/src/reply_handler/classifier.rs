@@ -207,7 +207,7 @@ pub async fn classify_full(ai: &dyn ReplyClassifier, input: &ReplyInput) -> Clas
     }
 
     let classification = ai::classify_or_fallback(ai, input).await;
-    outcome_from_ai(classification)
+    outcome_from_ai(classification, Some(input))
 }
 
 /// Build the legacy-shaped result for a deterministic verdict.
@@ -252,7 +252,10 @@ fn outcome_from_verdict(verdict: DeterministicVerdict) -> ClassificationOutcome 
     }
 }
 
-fn outcome_from_ai(classification: AiClassification) -> ClassificationOutcome {
+fn outcome_from_ai(
+    classification: AiClassification,
+    input: Option<&ReplyInput>,
+) -> ClassificationOutcome {
     // The never-guessing fallback is itself deterministic (it is a pure
     // function of the outage), so an outage result is recorded as
     // `deterministic` with the outage named in the reasoning — never as a
@@ -265,9 +268,23 @@ fn outcome_from_ai(classification: AiClassification) -> ClassificationOutcome {
         chrono::Utc::now(),
     );
     let downgraded_from = decision.downgraded.map(|_| classification.disposition);
+    // The objection sub-label: the AI's own label wins; when it returned
+    // none and the verdict stands at not_interested/question, the
+    // deterministic families try to LABEL it (never to re-disposition — a
+    // keyword match must not suppress anyone the model did not).
     let objection_class = match decision.downgraded {
         Some(_) => None,
-        None => classification.objection_class,
+        None => match classification.objection_class {
+            Some(class) => Some(class),
+            None => match decision.disposition {
+                ReplyDisposition::NotInterested | ReplyDisposition::Question => input
+                    .and_then(|input| {
+                        crate::reply_handler::deterministic::label_objection_class(input)
+                    })
+                    .map(|(class, _token)| class.to_string()),
+                _ => None,
+            },
+        },
     };
     let reasoning = match decision.downgraded {
         Some(reason) => format!(
