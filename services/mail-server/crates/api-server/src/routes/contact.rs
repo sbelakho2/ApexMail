@@ -326,6 +326,20 @@ fn contact_respond(
 ///   is no bare-lead fallback, so no lead row can be created with a NULL
 ///   canonical link while the canonical rows are writable.
 async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(), ApiError> {
+    store_lead_with_kind(db, form, source, "contact_form").await
+}
+
+/// The canonical lead write, with the first-response request's `kind`
+/// supplied by the caller: the marketing forms use `contact_form`, the
+/// console assistant's contact-intent write-back uses `chat_lead`. Every
+/// other guarantee (one transaction, idempotent repeat submissions, the
+/// request row, the advisory lock) is identical for both.
+pub(crate) async fn store_lead_with_kind(
+    db: &PgPool,
+    form: &ContactForm,
+    source: &str,
+    kind: &str,
+) -> Result<(), ApiError> {
     let email = form
         .work_email
         .as_deref()
@@ -574,6 +588,31 @@ async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(),
     .bind(&notes)
     .bind(contact_id)
     .bind(system_tenant)
+    .execute(&mut *tx)
+    .await
+    .map_err(store_lead_failure)?;
+
+    // 5. First-response request (SalesCloser plan §5.4): the lead and its
+    //    reply work item commit TOGETHER, so a lead can never exist without
+    //    the promise to answer it. The unique key collapses a double-submit
+    //    onto the same request. The mailbot claims pending requests and
+    //    produces a grounded, draft-only reply.
+    sqlx::query(
+        "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload) \
+         VALUES ($1, $2, $5, $3, $4::jsonb) \
+         ON CONFLICT (tenant_id, kind, subject_ref) DO NOTHING",
+    )
+    .bind(apexmail_lib::id::generate_id("frr", 22))
+    .bind(system_tenant)
+    .bind(contact_id.to_string())
+    .bind(serde_json::json!({
+        "email": email,
+        "company": company,
+        "notes": notes,
+        "source": source,
+        "lead_id": id,
+    }))
+    .bind(kind)
     .execute(&mut *tx)
     .await
     .map_err(store_lead_failure)?;
@@ -1177,5 +1216,95 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// SalesCloser plan §5.4: the lead and its first-response request commit
+    /// together — a lead can never exist without the promise to answer it,
+    /// and a double-submitted form collapses onto one request.
+    #[tokio::test]
+    async fn lead_write_enqueues_the_first_response_request_in_the_same_transaction() {
+        let Some(pool) = crate::test_db::canonical_pool("contact_first_response").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let form = ContactForm {
+            email: Some(format!("lead-{}@example.com", &suffix[..12])),
+            name: Some("First Response".into()),
+            company: Some("Response Co".into()),
+            message: Some("Please tell me about the Growth plan.".into()),
+            ..ContactForm::default()
+        };
+
+        super::store_lead(&state.db, &form, "sales")
+            .await
+            .expect("lead stored");
+
+        // The request exists, pending, keyed to the lead's contact…
+        let rows: Vec<(String, String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT state, kind, subject_ref, payload FROM first_response_requests \
+             WHERE tenant_id = 'system' AND payload->>'email' = $1",
+        )
+        .bind(form.email.clone().unwrap_or_default())
+        .fetch_all(&pool)
+        .await
+        .expect("request rows");
+        assert_eq!(rows.len(), 1, "exactly one request per lead: {rows:?}");
+        assert_eq!(rows[0].0, "pending");
+        assert_eq!(rows[0].1, "contact_form");
+        assert_eq!(rows[0].3["company"], "Response Co");
+
+        // …and its subject_ref is the canonical contact the lead maps to.
+        let contact_id: Option<String> = sqlx::query_scalar(
+            "SELECT id::text FROM sales_contacts WHERE tenant_id = 'system' AND legacy_lead_email = $1",
+        )
+        .bind(form.email.clone().unwrap_or_default())
+        .fetch_optional(&pool)
+        .await
+        .expect("contact lookup");
+        assert_eq!(Some(rows[0].2.clone()), contact_id);
+
+        // A repeat submission (the same contact) must not queue a second
+        // request: the unique key collapses it.
+        super::store_lead(&state.db, &form, "sales")
+            .await
+            .expect("repeat submission succeeds");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM first_response_requests WHERE subject_ref = $1",
+        )
+        .bind(&rows[0].2)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 1, "a double-submit collapses onto one request");
+
+        // Cleanup (the lead write created canonical sales rows).
+        if let Some(contact_id) = contact_id {
+            let account_id: Option<uuid::Uuid> =
+                sqlx::query_scalar("SELECT account_id FROM sales_contacts WHERE id = $1::uuid")
+                    .bind(&contact_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .ok()
+                    .flatten();
+            let _ = sqlx::query("DELETE FROM first_response_requests WHERE subject_ref = $1")
+                .bind(&contact_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_contact_points WHERE contact_id = $1::uuid")
+                .bind(&contact_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_contacts WHERE id = $1::uuid")
+                .bind(&contact_id)
+                .execute(&pool)
+                .await;
+            if let Some(account_id) = account_id {
+                let _ = sqlx::query("DELETE FROM sales_accounts WHERE id = $1")
+                    .bind(account_id)
+                    .execute(&pool)
+                    .await;
+            }
+        }
     }
 }

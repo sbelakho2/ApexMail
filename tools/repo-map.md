@@ -95,7 +95,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **212 `*.sql` files**, latest `240_ai_chat_sessions.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **213 `*.sql` files**, latest `241_first_response_requests.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

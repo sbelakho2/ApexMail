@@ -10365,6 +10365,61 @@ mod end_to_end_db_tests {
     /// A replayed logical send (the ledger already records acceptance) is
     /// NEVER submitted again: the row is completed as possibly-sent and the
     /// double stays untouched.
+    /// SalesCloser plan §5.4: the claim is `ORDER BY priority DESC,
+    /// created_at ASC`, so a first-response send (priority 100) is
+    /// claimed ahead of an older default-priority (5) row — the lane is
+    /// what makes "instant response" instant under backlog.
+    #[tokio::test]
+    async fn the_priority_lane_claims_first_response_mail_before_the_backlog(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_priority_lane").await else { return Ok(()) };
+        let fixture = seed(&pool, "priority_lane").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+
+        // An OLDER default-priority row and a NEWER first-response row.
+        insert_queue_row(&pool, &fixture, "bulk@example.com", 5, 600).await;
+        insert_queue_row(&pool, &fixture, "lead@example.com", 100, 0).await;
+
+        let jobs = processor.fetch_jobs(1).await.expect("claim");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].to, "lead@example.com",
+            "the first-response row must win the single claim slot despite being newer"
+        );
+        Ok(())
+    }
+
+    /// Insert one pending queue row with the given priority and age
+    /// (seconds in the past).
+    async fn insert_queue_row(
+        pool: &sqlx::PgPool,
+        fixture: &E2eFixture,
+        recipient: &str,
+        priority: i32,
+        age_secs: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category, priority, \
+                  created_at, updated_at) \
+             VALUES (gen_random_uuid(), $1, ARRAY[$2], 'lane', 'pending', $3, \
+                     gen_random_uuid(), $4, $2, 'body', '{}'::jsonb, 0, 'marketing', $5, \
+                     NOW() - make_interval(secs => $6::int), NOW())",
+        )
+        .bind(&fixture.sender)
+        .bind(recipient)
+        .bind(&fixture.tenant_id)
+        .bind(fixture.domain_id)
+        .bind(priority)
+        .bind(age_secs)
+        .execute(pool)
+        .await
+        .expect("insert queue row");
+    }
+
     #[tokio::test]
     async fn replayed_send_is_completed_without_a_second_submission(
     ) -> Result<(), Box<dyn std::error::Error>> {

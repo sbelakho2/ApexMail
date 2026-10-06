@@ -124,10 +124,42 @@ pub(crate) async fn queue_system_email(
     text_body: &str,
     tags: Vec<String>,
 ) -> Result<Uuid, ApiError> {
+    queue_system_email_with_priority(
+        db,
+        recipient,
+        subject,
+        html_body,
+        text_body,
+        tags,
+        QUEUE_PRIORITY_DEFAULT,
+    )
+    .await
+}
+
+/// The default queue priority for platform mail, matching every existing
+/// producer. The worker claims `ORDER BY priority DESC`, so first-response
+/// mail (priority [`QUEUE_PRIORITY_FIRST_RESPONSE`]) is drained first.
+pub(crate) const QUEUE_PRIORITY_DEFAULT: i32 = 5;
+/// First-response mail outranks ordinary platform mail (verification, reset
+/// links) so an inbound lead is answered ahead of the backlog. Within the
+/// `email_queue.priority` CHECK (0..=100).
+pub(crate) const QUEUE_PRIORITY_FIRST_RESPONSE: i32 = 100;
+
+/// [`queue_system_email`] with an explicit queue priority.
+pub(crate) async fn queue_system_email_with_priority(
+    db: &PgPool,
+    recipient: &str,
+    subject: &str,
+    html_body: &str,
+    text_body: &str,
+    tags: Vec<String>,
+    priority: i32,
+) -> Result<Uuid, ApiError> {
     let mut tx = db.begin().await?;
-    let message_id =
-        queue_system_email_in_transaction(&mut tx, recipient, subject, html_body, text_body, tags)
-            .await?;
+    let message_id = queue_system_email_in_transaction(
+        &mut tx, recipient, subject, html_body, text_body, tags, priority,
+    )
+    .await?;
     tx.commit().await?;
     Ok(message_id)
 }
@@ -143,6 +175,7 @@ pub(crate) async fn queue_system_email_in_transaction(
     html_body: &str,
     text_body: &str,
     tags: Vec<String>,
+    priority: i32,
 ) -> Result<Uuid, ApiError> {
     let sender = fetch_system_sender(&mut **tx, true).await?;
     let message_id = Uuid::new_v4();
@@ -169,7 +202,7 @@ pub(crate) async fn queue_system_email_in_transaction(
             \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at\
          ) VALUES (\
             $1, $2, $3, $4::uuid, $5, ARRAY[$6], $7, \
-            $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13\
+            $5, $6, $8, $9, $10, $11, $12, $14, 'pending', $13, $13\
          )",
     )
     .bind(Uuid::new_v4())
@@ -185,6 +218,7 @@ pub(crate) async fn queue_system_email_in_transaction(
     .bind(Option::<serde_json::Value>::None)
     .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
     .bind(now)
+    .bind(priority)
     .execute(&mut **tx)
     .await?;
 

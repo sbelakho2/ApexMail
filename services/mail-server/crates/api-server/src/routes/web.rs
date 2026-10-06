@@ -2990,6 +2990,7 @@ async fn form_signup(
             &html_body,
             &text_body,
             vec!["system".into(), "verification".into()],
+            crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
         )
         .await
         .map_err(|error| {
@@ -3132,6 +3133,7 @@ async fn form_forgot_password(
                 &html_body,
                 &text_body,
                 vec!["system".into(), "password-reset".into()],
+                crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
             )
             .await?;
             tx.commit().await?;
@@ -3341,6 +3343,7 @@ async fn form_resend_verification(
                 &html_body,
                 &text_body,
                 vec!["system".into(), "verification".into()],
+                crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
             )
             .await?;
             tx.commit().await?;

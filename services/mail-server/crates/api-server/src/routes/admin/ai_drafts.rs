@@ -109,7 +109,10 @@ const CLAIM_DRAFT_FOR_APPROVAL_SQL: &str = r#"
     WHERE id = $1
       AND pending_approval = true
       AND ai_response IS NOT NULL
-    RETURNING tenant_id, from_email, subject, ai_response
+    RETURNING tenant_id, from_email, subject, ai_response,
+              (suggested_action->>'first_response') = 'true',
+              received_at,
+              suggested_action->>'first_response_request_id'
 "#;
 
 /// Actor-attributed audit for AI-draft decisions (P1-4/P2-2 + external-audit
@@ -169,12 +172,24 @@ async fn approve_draft(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<bool>,
+        chrono::DateTime<chrono::Utc>,
+        Option<String>,
     )> = sqlx::query_as(CLAIM_DRAFT_FOR_APPROVAL_SQL)
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await?;
 
-    let Some((tenant_id, from_email, subject, reply)) = row else {
+    let Some((
+        tenant_id,
+        from_email,
+        subject,
+        reply,
+        is_first_response,
+        accepted_at,
+        first_response_request_id,
+    )) = row
+    else {
         // Dropping the transaction rolls the claim back — nothing consumed.
         return Err(ApiError::NotFound(
             "draft not found or already handled".into(),
@@ -224,6 +239,14 @@ async fn approve_draft(
     // DKIM alignment broken) nor sent the mail. `queue_system_email`
     // enforces system-sender readiness under lock and attributes the queue
     // row to the system tenant that actually owns the sending domain.
+    // A first-response draft rides the priority lane (plan §5.4): the lead
+    // promise outranks ordinary platform mail, and the enqueue moment is
+    // where the measured accept->enqueue latency lands.
+    let priority = if is_first_response.unwrap_or(false) {
+        crate::routes::system_sender::QUEUE_PRIORITY_FIRST_RESPONSE
+    } else {
+        crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT
+    };
     let message_uuid = match crate::routes::system_sender::queue_system_email_in_transaction(
         &mut tx,
         &from_email,
@@ -231,6 +254,7 @@ async fn approve_draft(
         "",
         &reply,
         vec!["ai-draft-approval".to_string()],
+        priority,
     )
     .await
     {
@@ -245,6 +269,27 @@ async fn approve_draft(
             ));
         }
     };
+
+    if is_first_response.unwrap_or(false) {
+        // The SLO's measured interval: from the platform ACCEPTING the lead
+        // (the synthesized row's received_at) to the reply being durably
+        // enqueued. Human review time is deliberately excluded — this is the
+        // automated portion the platform controls (docs/operations/
+        // first-response-slo.md).
+        let latency = (chrono::Utc::now() - accepted_at).num_seconds().max(0) as f64;
+        metrics::histogram!("first_response_latency_seconds").record(latency);
+        if let Some(request_id) = first_response_request_id.as_deref() {
+            // The request becomes terminal once its reply left the queue;
+            // best-effort INSIDE the transaction so it commits with the send.
+            let _ = sqlx::query(
+                "UPDATE first_response_requests SET state = 'drafted', updated_at = NOW() \
+                 WHERE id = $1 AND state = 'pending'",
+            )
+            .bind(request_id)
+            .execute(&mut *tx)
+            .await;
+        }
+    }
 
     // External-audit P1: the decision evidence is written INSIDE the same
     // transaction, BEFORE the commit — approval claim, queued reply, and
@@ -381,7 +426,9 @@ mod approval_db_tests {
             ai_response      TEXT,
             pending_approval BOOLEAN NOT NULL DEFAULT false,
             processed_at     TIMESTAMPTZ,
-            received_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            received_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            -- The first-response marker the claim reads (plan §5.4).
+            suggested_action JSONB
         )"#;
 
     /// The claim and reject statements must never regain a `::uuid` cast:
@@ -475,6 +522,9 @@ mod approval_db_tests {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<bool>,
+                chrono::DateTime<chrono::Utc>,
+                Option<String>,
             )>,
         ),
         sqlx::Error,
@@ -486,6 +536,9 @@ mod approval_db_tests {
                 Option<String>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
+                Option<bool>,
+                chrono::DateTime<chrono::Utc>,
                 Option<String>,
             ),
         >(CLAIM_DRAFT_FOR_APPROVAL_SQL)
@@ -512,7 +565,12 @@ mod approval_db_tests {
         let (tx, row) = claim(&pool, &id)
             .await
             .expect("claim must bind a varchar id");
-        let (tenant, from, subject, reply) = row.expect("pending draft must be claimable");
+        let (tenant, from, subject, reply, first_response, _accepted_at, request_ref) =
+            row.expect("pending draft must be claimable");
+        // SQL three-valued logic: a NULL suggested_action yields NULL here,
+        // which the handler treats as not-a-first-response.
+        assert_eq!(first_response, None, "an ordinary draft has no marker");
+        assert_eq!(request_ref, None);
         assert_eq!(tenant.as_deref(), Some("test-f11-tenant"));
         assert_eq!(from.as_deref(), Some("customer@x.ee"));
         assert_eq!(subject.as_deref(), Some("Re: invoice"));
@@ -685,6 +743,104 @@ mod approval_http_tests {
 
     fn draft_id() -> String {
         format!("inb_{}", &uuid::Uuid::new_v4().simple().to_string()[..22])
+    }
+
+    /// SalesCloser plan §5.4: approving a first-response draft queues the
+    /// reply on the PRIORITY lane (100 over the default 5) and closes its
+    /// request — the two halves of the instant-response chain that meet in
+    /// this handler.
+    #[test]
+    fn first_response_approval_uses_the_priority_lane_and_closes_the_request() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_first_response").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = "ten_first_response_00000";
+            let from_email = format!(
+                "lead-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+
+            // The request this draft answers.
+            let request_id = format!("frr_{}", &uuid::Uuid::new_v4().simple().to_string()[..22]);
+            sqlx::query(
+                "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload) \
+                 VALUES ($1, 'system', 'contact_form', $2, '{}'::jsonb)",
+            )
+            .bind(&request_id)
+            .bind(format!("lead-{}", &request_id[..10]))
+            .execute(&pool)
+            .await
+            .expect("request row");
+
+            // A pending draft marked as first-response.
+            let id = draft_id();
+            sqlx::query(
+                "INSERT INTO inbound_messages
+                     (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                      is_verp_reply, received_at, suggested_action)
+                 VALUES ($1, $2, $3, 'Contact form: Acme', 'the grounded reply', true, false,
+                         NOW() - interval '45 seconds', $4::jsonb)
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&id)
+            .bind(tenant)
+            .bind(&from_email)
+            .bind(serde_json::json!({
+                "first_response": true,
+                "first_response_request_id": request_id,
+            }))
+            .execute(&pool)
+            .await
+            .expect("seed first-response draft");
+
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+            // The reply is on the queue at the first-response priority…
+            let priorities: Vec<i32> = sqlx::query_scalar(
+                "SELECT priority FROM email_queue WHERE \"to\" = $1 \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&from_email)
+            .fetch_all(&pool)
+            .await
+            .expect("queue rows");
+            assert_eq!(
+                priorities,
+                vec![crate::routes::system_sender::QUEUE_PRIORITY_FIRST_RESPONSE],
+                "a first-response reply rides the priority lane"
+            );
+
+            // …and the request it answers is closed.
+            let request_state: String =
+                sqlx::query_scalar("SELECT state FROM first_response_requests WHERE id = $1")
+                    .bind(&request_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("request state");
+            assert_eq!(request_state, "drafted");
+
+            let _ = sqlx::query("DELETE FROM first_response_requests WHERE id = $1")
+                .bind(&request_id)
+                .execute(&pool)
+                .await;
+        });
     }
 
     /// The DKIM env var is process-global: under nextest each test owns a

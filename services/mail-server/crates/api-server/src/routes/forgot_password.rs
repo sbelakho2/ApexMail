@@ -226,6 +226,7 @@ async fn forgot_password(
             &html_body,
             &text_body,
             vec!["system".into(), "password-reset".into()],
+            crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
         )
         .await?;
 

@@ -1825,6 +1825,7 @@ async fn enqueue_verification_email(
         &html_body,
         &text_body,
         vec!["system".into(), "verification".into()],
+        crate::routes::system_sender::QUEUE_PRIORITY_DEFAULT,
     )
     .await
     .map(|_| ())

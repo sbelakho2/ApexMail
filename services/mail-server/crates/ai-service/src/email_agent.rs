@@ -158,6 +158,45 @@ const CLAIM_UNPROCESSED_SQL: &str = r#"
                                   inbound.classification, inbound.suggested_action
             "#;
 
+/// Claim due first-response requests the same way inbound rows are claimed:
+/// a 15-minute stale claim is re-claimable, so a crashed worker cannot
+/// strand a lead's promise to answer it.
+const CLAIM_FIRST_RESPONSE_SQL: &str = r#"
+                        WITH candidates AS (
+                                SELECT id
+                                FROM first_response_requests
+                                WHERE state = 'pending'
+                                    AND due_at <= NOW()
+                                    AND (ai_claimed_at IS NULL
+                                         OR ai_claimed_at < NOW() - INTERVAL '15 minutes')
+                                ORDER BY created_at ASC
+                                LIMIT 5
+                                FOR UPDATE SKIP LOCKED
+                        )
+                        UPDATE first_response_requests AS req
+                        SET ai_claimed_at = NOW()
+                        FROM candidates
+                        WHERE req.id = candidates.id
+                        RETURNING req.id, req.tenant_id, req.kind, req.subject_ref, req.payload
+            "#;
+
+/// Terminal state for one first-response request after the draft attempt.
+const MARK_FIRST_RESPONSE_SQL: &str = r#"
+            UPDATE first_response_requests
+            SET state = $2, updated_at = NOW()
+            WHERE id = $1 AND state = 'pending'
+        "#;
+
+/// One due first-response request, as claimed above.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct FirstResponseRow {
+    id: String,
+    tenant_id: String,
+    kind: String,
+    subject_ref: String,
+    payload: serde_json::Value,
+}
+
 /// Release a claimed-but-unprocessed row back to the poller. The claim query
 /// ([`CLAIM_UNPROCESSED_SQL`]) re-claims rows whose `ai_claimed_at` is NULL
 /// or stale, so releasing must clear the marker: resetting only `processing`
@@ -204,6 +243,9 @@ pub struct EmailAnsweringConfig {
     /// Must remain true. The agent is draft-only until the control plane queues
     /// an approved reply through the normal sender-readiness path.
     pub require_approval: bool,
+    /// Address the synthesized first-response lead mail is addressed to (the
+    /// review queue keys on it). Defaults to the agent's own reply address.
+    pub first_response_to: String,
 }
 
 impl EmailAnsweringConfig {
@@ -246,6 +288,8 @@ impl EmailAnsweringConfig {
             require_approval: std::env::var("AI_EMAIL_REQUIRE_APPROVAL")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(true),
+            first_response_to: std::env::var("AI_FIRST_RESPONSE_TO")
+                .unwrap_or_else(|_| "sales@apexmail.ee".into()),
         }
     }
 }
@@ -659,8 +703,152 @@ impl EmailAnswerer {
                     tracing::error!(error = %e, "Error in email agent poll loop");
                 }
             }
+            match self.process_first_response_batch().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(count, "Processed first-response requests");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "Error in first-response poll");
+                }
+            }
 
             sleep(Duration::from_secs(self.config.poll_interval_secs)).await;
+        }
+    }
+
+    /// Claim and process due first-response requests. Each becomes a real
+    /// inbound row (so guards, grounding, the draft store and the review
+    /// queue apply unchanged) carrying the `first_response` marker the
+    /// approval path uses to pick the priority lane.
+    async fn process_first_response_batch(&self) -> Result<usize, sqlx::Error> {
+        let rows: Vec<FirstResponseRow> = sqlx::query_as(CLAIM_FIRST_RESPONSE_SQL)
+            .fetch_all(&self.pool)
+            .await?;
+        let count = rows.len();
+        for request in &rows {
+            match self.materialize_first_response(request).await {
+                Ok(drafted) => {
+                    let state = if drafted { "drafted" } else { "declined" };
+                    let _ = sqlx::query(MARK_FIRST_RESPONSE_SQL)
+                        .bind(&request.id)
+                        .bind(state)
+                        .execute(&self.pool)
+                        .await;
+                    tracing::info!(
+                        request_id = %request.id,
+                        kind = %request.kind,
+                        state,
+                        "first-response request processed"
+                    );
+                }
+                Err(error) => {
+                    // Leave the request pending (its claim expires): the next
+                    // poll retries, exactly like inbound processing.
+                    tracing::warn!(
+                        request_id = %request.id,
+                        error = %error,
+                        "first-response request failed; will retry on a later poll"
+                    );
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// Turn one request into an inbound row and run the draft chain over it.
+    /// Returns whether a DRAFT was stored (false = declined to human review).
+    async fn materialize_first_response(&self, request: &FirstResponseRow) -> anyhow::Result<bool> {
+        let subject_ref = request.subject_ref.clone();
+        let email = request
+            .payload
+            .get("email")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let company = request
+            .payload
+            .get("company")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let notes = request
+            .payload
+            .get("notes")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let source = request
+            .payload
+            .get("source")
+            .and_then(|value| value.as_str())
+            .unwrap_or("contact_form")
+            .to_string();
+        if email.is_empty() {
+            anyhow::bail!("first-response request has no submitter address");
+        }
+
+        let message_id = apexmail_lib::id::generate_id("inb", 22);
+        let raw = build_lead_mime(
+            &message_id,
+            &email,
+            &self.config.first_response_to,
+            &company,
+            &source,
+            &notes,
+        );
+        let subject = format!("Contact form: {company}");
+        let headers = serde_json::json!({
+            "x-apexmail-source": source,
+            "x-apexmail-company": company,
+        });
+        sqlx::query(
+            r#"INSERT INTO inbound_messages (
+                id, tenant_id, mail_from, rcpt_to, raw_message, raw_size,
+                disposition, from_email, to_email, subject, body_text, headers,
+                suggested_action, received_at
+            ) VALUES ($1, $2, $3, ARRAY[$4], $5, $6, 'accept', $3, $4, $7, $8, $9, $10, NOW())
+            ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(&message_id)
+        .bind(&request.tenant_id)
+        .bind(&email)
+        .bind(&self.config.first_response_to)
+        .bind(&raw)
+        .bind(raw.len() as i64)
+        .bind(&subject)
+        .bind(&notes)
+        .bind(&headers)
+        .bind(serde_json::json!({
+            "first_response": true,
+            "first_response_request_id": request.id,
+            "first_response_kind": request.kind,
+            "subject_ref": subject_ref,
+        }))
+        .execute(&self.pool)
+        .await?;
+
+        let row = InboundRow {
+            id: message_id.clone(),
+            tenant_id: Some(request.tenant_id.clone()),
+            raw_message: raw,
+            classification: None,
+            suggested_action: Some(serde_json::json!({"first_response": true})),
+        };
+        let outcome = self.process_message(&row).await;
+        match outcome {
+            Ok(()) => {
+                let drafted: bool = sqlx::query_scalar(
+                    "SELECT COALESCE(pending_approval, false) FROM inbound_messages WHERE id = $1",
+                )
+                .bind(&message_id)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(false);
+                Ok(drafted)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1256,6 +1444,41 @@ pub(crate) fn build_prompt(
     prompt.push_str(&sanitized_body);
     prompt.push_str("\n\nYour response:");
     prompt
+}
+
+/// Synthesize the RFC 5322 message for one first-response lead. Header
+/// values are stripped of CR/LF (a form field cannot forge structure) and the
+/// body carries the submitted notes verbatim after the source lines, so the
+/// draft chain sees exactly what the visitor wrote.
+fn build_lead_mime(
+    message_id: &str,
+    from: &str,
+    to: &str,
+    company: &str,
+    source: &str,
+    notes: &str,
+) -> Vec<u8> {
+    let one_line =
+        |value: &str| -> String { value.chars().filter(|c| *c != '\r' && *c != '\n').collect() };
+    let body = format!(
+        "{notes}\n\n--\nContact form submission\nCompany: {company}\nSource: {source}\n",
+        notes = notes,
+        company = one_line(company),
+        source = one_line(source),
+    );
+    format!(
+        "From: {from}\r\nTo: {to}\r\nSubject: Contact form: {company}\r\n\
+         Message-ID: <{message_id}@apexmail.ee>\r\n\
+         X-ApexMail-Source: {source}\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\r\n{body}",
+        from = one_line(from),
+        to = one_line(to),
+        company = one_line(company),
+        source = one_line(source),
+        message_id = one_line(message_id),
+    )
+    .into_bytes()
 }
 
 /// SM9 #7c: neutralize attacker-controlled header text (`From`, `Subject`)

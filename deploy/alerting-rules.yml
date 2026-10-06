@@ -171,6 +171,19 @@ groups:
           description: "Fewer than 95% of API requests are completing within 1s over the 30-day SLO window."
           runbook_url: "https://apexmail.ee/docs/alerts#api-latency-slo-burn"
 
+      # First-response SLO (SalesCloser plan §5.4): the measured interval
+      # is accept -> enqueue of the first reply (docs/operations/
+      # first-response-slo.md). p95 target: 300s.
+      - alert: FirstResponseSloBurn
+        expr: histogram_quantile(0.95, rate(first_response_latency_seconds_bucket[30m])) > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "First-response p95 above the 5-minute target"
+          description: "p95 first-response latency is {{ $value }}s over the last 30 minutes (target 300s); check the first-response queue depth and the mailbot runtime."
+          runbook_url: "https://apexmail.ee/docs/alerts#first-response-slo-burn"
+
       # High API latency
       - alert: HighApiLatency
         expr: histogram_quantile(0.95, rate(apexmail_http_request_duration_seconds_bucket{job="apexmail-api"}[5m])) > 1

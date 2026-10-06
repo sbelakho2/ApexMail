@@ -251,6 +251,7 @@ fn agent_config(db_url: &str) -> EmailAnsweringConfig {
         reply_from: "ai@apexmail.ee".into(),
         max_body_chars: 4000,
         require_approval: true,
+        first_response_to: "sales@apexmail.ee".into(),
     }
 }
 
@@ -954,4 +955,102 @@ fn prompt_builder_sanitizes_hostile_fields() {
     // The hostile field content is DATA inside the prompt, not structure:
     // its length is bounded by the per-field caps.
     assert!(prompt.chars().count() < 8_000);
+}
+
+/// The first-response lane end-to-end: a pending request becomes a real
+/// inbound row, a grounded pending-approval draft, and a terminal request
+/// state — the plan's "instant response" chain, draft-only.
+#[tokio::test]
+async fn first_response_request_becomes_a_pending_approval_draft() {
+    let Some(db_url) = crate::test_support::test_db_url() else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let db = crate::test_support::shared_pool().await.expect("pool");
+    // Serialized like every other email-agent DB test: another process's
+    // claim scan must not claim this test's synthesized row with ITS mock.
+    let _serial_db = serial_lock(&db_url).await;
+    let port = spawn_mock_llm(GOOD_REPLY).await;
+    let _env = EnvGuard::with_mock_llm(port);
+    let cfg = agent_config(&db_url);
+    let answerer = Arc::new(EmailAnswerer::new(cfg).expect("agent"));
+
+    let tenant = unique("tn_fr");
+    let request_id = unique("frr");
+    let submitter = unique_sender("lead");
+    sqlx::query(
+        "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload) \
+         VALUES ($1, $2, 'contact_form', $3, $4::jsonb)",
+    )
+    .bind(&request_id)
+    .bind(&tenant)
+    .bind(format!("lead-{}", &request_id[..8]))
+    .bind(serde_json::json!({
+        "email": submitter,
+        "company": "Acme",
+        "notes": "How do I check my SPF record?",
+        "source": "contact_form",
+    }))
+    .execute(&db)
+    .await
+    .expect("insert request");
+
+    let processed = answerer
+        .process_first_response_batch()
+        .await
+        .expect("first-response batch");
+    assert_eq!(processed, 1);
+
+    // The request is terminal…
+    let (state,): (String,) =
+        sqlx::query_as("SELECT state FROM first_response_requests WHERE id = $1")
+            .bind(&request_id)
+            .fetch_one(&db)
+            .await
+            .expect("request state");
+    assert_eq!(state, "drafted");
+
+    // …and the lead exists as a real inbound row with a draft awaiting
+    // human approval, carrying the first-response marker the approval path
+    // reads for the priority lane.
+    /// `(from_email, pending_approval, ai_response, first_response_marker,
+    /// first_response_request_id)`.
+    type FirstResponseDraftRow = (String, bool, Option<String>, bool, Option<String>);
+    let rows: Vec<FirstResponseDraftRow> = sqlx::query_as(
+        "SELECT from_email, pending_approval, ai_response, \
+                (suggested_action->>'first_response') = 'true', \
+                suggested_action->>'first_response_request_id' \
+         FROM inbound_messages WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_all(&db)
+    .await
+    .expect("inbound row");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let (from_email, pending, response, marked, request_ref) = &rows[0];
+    assert_eq!(from_email, &submitter);
+    assert!(*pending, "the first-response draft needs human approval");
+    assert!(marked, "the row must carry the first-response marker");
+    assert_eq!(request_ref.as_deref(), Some(request_id.as_str()));
+    let response = response.as_deref().expect("draft stored");
+    assert!(
+        response.contains("SPF record should include our servers"),
+        "grounded draft expected: {response}"
+    );
+
+    // Replaying the batch does not draft the request twice.
+    let again = answerer
+        .process_first_response_batch()
+        .await
+        .expect("replay");
+    assert_eq!(again, 0, "a terminal request is not re-claimed");
+
+    let _ = sqlx::query("DELETE FROM inbound_messages WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&db)
+        .await;
+    let _ = sqlx::query("DELETE FROM first_response_requests WHERE id = $1")
+        .bind(&request_id)
+        .execute(&db)
+        .await;
 }

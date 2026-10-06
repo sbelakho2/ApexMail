@@ -524,6 +524,76 @@ async fn session_history(
         .collect())
 }
 
+/// Deterministic contact-intent detection for the chat write-back. Returns
+/// the lead's email address ONLY when the message both names an intent to be
+/// contacted and an address can be established (from the message, else from
+/// the account owner's own account). No LLM involvement: a false positive
+/// would spam the CRM, so the phrase list is deliberately small and matched
+/// case-insensitively.
+async fn contact_intent_lead(
+    state: &AppState,
+    tenant_id: &str,
+    user_key: &str,
+    message: &str,
+) -> Option<String> {
+    const INTENT_PHRASES: [&str; 8] = [
+        "contact me",
+        "call me",
+        "reach me",
+        "email me",
+        "talk to sales",
+        "speak to sales",
+        "book a demo",
+        "schedule a demo",
+    ];
+    let lower = message.to_lowercase();
+    if !INTENT_PHRASES.iter().any(|phrase| lower.contains(phrase)) {
+        return None;
+    }
+    if let Some(address) = extract_email_address(message) {
+        return Some(address);
+    }
+    // No address in the message: the account owner's own address, when the
+    // user key is a real user id (a session always is). Best-effort.
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT email FROM users WHERE id::text = $1 AND tenant_id = $2")
+            .bind(user_key)
+            .bind(tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    owner.filter(|email| !email.trim().is_empty())
+}
+
+/// The first email address in `text`, lowercased, crude but deterministic
+/// (local@domain.tld characters only). Public so the boundary is testable.
+pub(crate) fn extract_email_address(text: &str) -> Option<String> {
+    let mut candidate = String::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '<' | '>' | '"' | '\'')
+    }) {
+        let trimmed = token.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?'));
+        if let Some(at) = trimmed.find('@') {
+            let (local, domain) = trimmed.split_at(at);
+            let domain = &domain[1..];
+            let valid_local = !local.is_empty()
+                && local
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'));
+            let valid_domain = domain.contains('.')
+                && domain
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+            if valid_local && valid_domain {
+                candidate = trimmed.to_lowercase();
+                break;
+            }
+        }
+    }
+    (!candidate.is_empty()).then_some(candidate)
+}
+
 /// Session ownership check: the session must belong to this tenant AND this
 /// user. A miss is a 404 so a probe cannot distinguish "not yours" from
 /// "does not exist".
@@ -642,6 +712,33 @@ pub(crate) async fn session_turn_inner(
         .bind(session_id)
         .execute(&state.db)
         .await;
+
+    // Chat -> CRM (plan §5.4): when a VERIFIER-GATED answer (not escalated)
+    // answers a message that deterministically asks for contact, the lead is
+    // captured through the ONE canonical lead write (same transaction
+    // semantics, same first-response request row). Extraction is strictly
+    // deterministic: an email address from the message, or the account
+    // owner's own address, plus an intent phrase. No free-form writes, and a
+    // failed capture never fails the answer.
+    if !outcome.escalated {
+        if let Some(lead_email) = contact_intent_lead(state, tenant_id, user_key, &message).await {
+            let form = crate::routes::contact::ContactForm {
+                email: Some(lead_email),
+                name: None,
+                company: None,
+                message: Some(message.clone()),
+                ..Default::default()
+            };
+            if let Err(error) =
+                crate::routes::contact::store_lead_with_kind(&state.db, &form, "chat", "chat_lead")
+                    .await
+            {
+                tracing::warn!(error = %error, "chat contact-intent lead capture failed");
+            } else {
+                tracing::info!(tenant_id = %tenant_id, "chat contact intent captured as a lead");
+            }
+        }
+    }
 
     Ok(serde_json::json!({
         "session_id": session_id,
@@ -1093,6 +1190,96 @@ mod session_tests {
         .await
         .expect("owner check");
         assert_eq!(owners, 1, "the session belongs to its creator");
+    }
+
+    #[test]
+    fn contact_intent_extraction_is_deterministic() {
+        assert_eq!(
+            super::extract_email_address("please contact me at Jane.Doe@Example.COM, thanks"),
+            Some("jane.doe@example.com".to_string())
+        );
+        assert_eq!(super::extract_email_address("no address here"), None);
+        assert_eq!(
+            super::extract_email_address("version 2@3 is fine"),
+            None,
+            "a domainless token is not an address"
+        );
+    }
+
+    /// Chat -> CRM (plan §5.4): a grounded answer to a contact-intent message
+    /// captures the lead through the canonical lead write — and the lead is
+    /// recorded as a `chat_lead` request, not a contact-form one.
+    #[tokio::test]
+    async fn contact_intent_message_captures_a_chat_lead_once() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_lead").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((env, tenant, _user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (_, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        let id = session_id(&created);
+
+        let lead_email = format!(
+            "lead-{}@corp.example",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let (status, body) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                &serde_json::json!({
+                    "message": format!("Please contact me at {lead_email} about pricing.")
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT kind, payload->>'email' FROM first_response_requests \
+             WHERE tenant_id = 'system' AND payload->>'email' = $1",
+        )
+        .bind(&lead_email)
+        .fetch_all(&pool)
+        .await
+        .expect("lead rows");
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one lead per intent message: {rows:?}"
+        );
+        assert_eq!(rows[0].0, "chat_lead");
+
+        // An ordinary question writes nothing.
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM first_response_requests")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        let (status, body) = env
+            .post(
+                &format!("/v1/ai/chat/sessions/{id}/turns"),
+                r#"{"message":"What does the Pro plan include?"}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM first_response_requests")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(before, after, "ordinary questions write no lead");
+
+        let _ = sqlx::query("DELETE FROM first_response_requests WHERE payload->>'email' = $1")
+            .bind(&lead_email)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_contacts WHERE legacy_lead_email = $1")
+            .bind(&lead_email)
+            .execute(&pool)
+            .await;
+        let _ = tenant;
     }
 
     #[tokio::test]
