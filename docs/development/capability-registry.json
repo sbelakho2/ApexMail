@@ -878,6 +878,33 @@
         "objection handling",
         "objection taxonomy"
       ]
+    },
+    {
+      "capability": "screen-share-demos",
+      "crate": "crates/api-server",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "screen_share_demos",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "not-applicable",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "api-server",
+        "compose_service": "api-server",
+        "env_gate": null,
+        "call_path": "POST /v1/admin/demos (owner-gated) creates a session from a script; /:id/advance runs the next step through the real render/explorer/grader/calculator/chat paths; GET /view/:token serves the viewer read; the CP page /cp/demos posts through /web/admin/demos{,/:id/advance} and the public /demo?token= page renders the same session server-side",
+        "metrics": null,
+        "explanation": "Every step executes real machinery: the console renderer, the API sandbox's actual dispatch, the grader engine, the canonical pricing catalog and the verifier-gated assistant. Viewer tokens are hashed at rest and expire; step execution is idempotent by (session, idx). The script's tests pin that each kind is executable and that the tour exercises all of them."
+      },
+      "scan_aliases": [
+        "screen-share demo",
+        "server-driven demo",
+        "demo walkthrough"
+      ]
     }
   ],
   "stale_marker_exceptions": {

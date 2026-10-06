@@ -236,7 +236,7 @@
     },
     {
       "id": "control-plane",
-      "routeCount": 30,
+      "routeCount": 31,
       "routes": [
         {
           "path": "/login",
@@ -417,12 +417,18 @@
           "name": "Control Plane Security",
           "category": "admin",
           "authRequired": true
+        },
+        {
+          "path": "/cp/demos",
+          "name": "Demos",
+          "category": "control-plane",
+          "authRequired": true
         }
       ]
     },
     {
       "id": "marketing",
-      "routeCount": 18,
+      "routeCount": 19,
       "routes": [
         {
           "path": "/",
@@ -531,12 +537,18 @@
           "name": "SLA",
           "category": "marketing",
           "authRequired": false
+        },
+        {
+          "path": "/demo",
+          "name": "Demo",
+          "category": "marketing",
+          "authRequired": false
         }
       ]
     },
     {
       "id": "marketing-zola",
-      "routeCount": 37,
+      "routeCount": 38,
       "routes": [
         {
           "path": "/",
@@ -757,6 +769,12 @@
         {
           "path": "/sla",
           "name": "SLA",
+          "category": "marketing",
+          "authRequired": false
+        },
+        {
+          "path": "/demo",
+          "name": "Demo",
           "category": "marketing",
           "authRequired": false
         }

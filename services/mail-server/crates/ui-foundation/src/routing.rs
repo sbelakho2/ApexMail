@@ -183,10 +183,13 @@ mod tests {
         // (data-backed conversation page, nav entry under Account) — web
         // 36 → 37, total 121 → 122.
         assert_eq!(declared_route_count("web"), Some(37));
-        assert_eq!(declared_route_count("control-plane"), Some(30));
-        assert_eq!(declared_route_count("marketing"), Some(18));
-        assert_eq!(declared_route_count("marketing-zola"), Some(37));
-        assert_eq!(total_route_count(), 122);
+        // SalesCloser plan §5.6: the CP presenter (/cp/demos) and the public
+        // demo viewer (/demo) join the baseline — control-plane 30 → 31,
+        // marketing 18 → 19, total 122 → 124.
+        assert_eq!(declared_route_count("control-plane"), Some(31));
+        assert_eq!(declared_route_count("marketing"), Some(19));
+        assert_eq!(declared_route_count("marketing-zola"), Some(38));
+        assert_eq!(total_route_count(), 125);
     }
 
     #[test]

@@ -164,6 +164,13 @@ FACT_TREE_VERIFICATIONS = {
         ("services/mail-server/crates/worker-processors/src/reply_handler/types.rs", "objection_class", True),
         ("services/mail-server/crates/ai-service/src/reply_classify.rs", "OBJECTION_CLASSES", True),
     ],
+    "screen_share_demos": [
+        ("services/mail-server/migrations/243_demo_sessions.sql", "token_hash", True),
+        ("services/mail-server/crates/api-server/src/routes/demos/mod.rs", "advance_step", True),
+        ("services/mail-server/crates/api-server/src/routes/demos/script.rs", "PLATFORM_TOUR", True),
+        ("services/mail-server/crates/ui-foundation/src/leptos_views.rs", "pub fn web_demos_page", True),
+        ("docs/demos/demo-script.md", "platform tour", True),
+    ],
     "console_assistant": [
         ("services/mail-server/crates/ui-foundation/src/leptos_views.rs", "pub fn web_assistant_page", True),
         ("services/mail-server/crates/api-server/src/routes/web.rs", "async fn form_assistant_message", True),

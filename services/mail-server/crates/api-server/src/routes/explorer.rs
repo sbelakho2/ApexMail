@@ -569,6 +569,96 @@ pub struct ExplorerForm {
     pub body: String,
 }
 
+/// The lane → real-API-request mapping, shared by the public explorer
+/// handler and the demo runtime (plan §5.6): one definition of what a lane
+/// does, so a demo can never drift from the explorer.
+async fn lane_outcome(
+    state: &AppState,
+    sandbox: &Sandbox,
+    lane: &str,
+    raw_body: &str,
+) -> (&'static str, &'static str, u16, serde_json::Value) {
+    match lane {
+        "send" => match serde_json::from_str::<serde_json::Value>(raw_body) {
+            Err(e) => {
+                let body = serde_json::json!({"error": {"code": "invalid_json", "message": format!("{e}")}});
+                ("POST", "/v1/messages", 400u16, body)
+            }
+            Ok(parsed) => match all_recipients_example_com(&parsed) {
+                Ok(()) => {
+                    // Force from= the sandbox domain when absent (the real
+                    // handler enforces ownership of example.com anyway).
+                    let mut payload = parsed;
+                    if payload
+                        .get("from")
+                        .and_then(|f| f.as_str())
+                        .is_none_or(|f| f.trim().is_empty())
+                    {
+                        payload["from"] = serde_json::json!("sandbox@example.com");
+                    }
+                    let json = payload.to_string();
+                    let (status, body) = dispatch(
+                        state,
+                        Method::POST,
+                        "/v1/messages",
+                        &sandbox.api_key,
+                        Some(&json),
+                    )
+                    .await;
+                    ("POST", "/v1/messages", status, body)
+                }
+                Err(reason) => {
+                    let body = serde_json::json!({"error": {"code": "sandbox_recipient_policy", "message": reason}});
+                    ("POST", "/v1/messages", 422, body)
+                }
+            },
+        },
+        "messages" => {
+            let (status, body) = dispatch(
+                state,
+                Method::GET,
+                "/v1/messages?limit=20",
+                &sandbox.api_key,
+                None,
+            )
+            .await;
+            ("GET", "/v1/messages?limit=20", status, body)
+        }
+        "domains" => {
+            let (status, body) =
+                dispatch(state, Method::GET, "/v1/domains", &sandbox.api_key, None).await;
+            ("GET", "/v1/domains", status, body)
+        }
+        "add_domain" => match serde_json::from_str::<serde_json::Value>(raw_body) {
+            Err(e) => {
+                let body = serde_json::json!({"error": {"code": "invalid_json", "message": format!("{e}")}});
+                ("POST", "/v1/domains", 400u16, body)
+            }
+            Ok(parsed) => {
+                if !is_example_com_domain(&parsed) {
+                    let body = serde_json::json!({"error": {"code": "sandbox_domain_policy", "message": "The explorer sandbox registers subdomains of example.com only."}});
+                    ("POST", "/v1/domains", 422, body)
+                } else {
+                    let json = parsed.to_string();
+                    let (status, body) = dispatch(
+                        state,
+                        Method::POST,
+                        "/v1/domains",
+                        &sandbox.api_key,
+                        Some(&json),
+                    )
+                    .await;
+                    ("POST", "/v1/domains", status, body)
+                }
+            }
+        },
+        other => {
+            let body = serde_json::json!({"error": {"code": "unknown_lane", "message": format!("unknown lane {other:?}")}});
+            ("POST", "/explorer/exec", 400, body)
+        }
+    }
+}
+
 pub async fn exec(
     State(state): State<AppState>,
     connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
@@ -611,85 +701,7 @@ pub async fn exec(
     };
 
     let started = std::time::Instant::now();
-    let (method, path, status, body) = match form.lane.as_str() {
-        "send" => match serde_json::from_str::<serde_json::Value>(&form.body) {
-            Err(e) => {
-                let body = serde_json::json!({"error": {"code": "invalid_json", "message": format!("{e}")}});
-                ("POST", "/v1/messages", 400u16, body)
-            }
-            Ok(parsed) => match all_recipients_example_com(&parsed) {
-                Ok(()) => {
-                    // Force from= the sandbox domain when absent (the real
-                    // handler enforces ownership of example.com anyway).
-                    let mut payload = parsed;
-                    if payload
-                        .get("from")
-                        .and_then(|f| f.as_str())
-                        .is_none_or(|f| f.trim().is_empty())
-                    {
-                        payload["from"] = serde_json::json!("sandbox@example.com");
-                    }
-                    let json = payload.to_string();
-                    let (status, body) = dispatch(
-                        &state,
-                        Method::POST,
-                        "/v1/messages",
-                        &sandbox.api_key,
-                        Some(&json),
-                    )
-                    .await;
-                    ("POST", "/v1/messages", status, body)
-                }
-                Err(reason) => {
-                    let body = serde_json::json!({"error": {"code": "sandbox_recipient_policy", "message": reason}});
-                    ("POST", "/v1/messages", 422, body)
-                }
-            },
-        },
-        "messages" => {
-            let (status, body) = dispatch(
-                &state,
-                Method::GET,
-                "/v1/messages?limit=20",
-                &sandbox.api_key,
-                None,
-            )
-            .await;
-            ("GET", "/v1/messages?limit=20", status, body)
-        }
-        "domains" => {
-            let (status, body) =
-                dispatch(&state, Method::GET, "/v1/domains", &sandbox.api_key, None).await;
-            ("GET", "/v1/domains", status, body)
-        }
-        "add_domain" => match serde_json::from_str::<serde_json::Value>(&form.body) {
-            Err(e) => {
-                let body = serde_json::json!({"error": {"code": "invalid_json", "message": format!("{e}")}});
-                ("POST", "/v1/domains", 400u16, body)
-            }
-            Ok(parsed) => {
-                if !is_example_com_domain(&parsed) {
-                    let body = serde_json::json!({"error": {"code": "sandbox_domain_policy", "message": "The explorer sandbox registers subdomains of example.com only."}});
-                    ("POST", "/v1/domains", 422, body)
-                } else {
-                    let json = parsed.to_string();
-                    let (status, body) = dispatch(
-                        &state,
-                        Method::POST,
-                        "/v1/domains",
-                        &sandbox.api_key,
-                        Some(&json),
-                    )
-                    .await;
-                    ("POST", "/v1/domains", status, body)
-                }
-            }
-        },
-        other => {
-            let body = serde_json::json!({"error": {"code": "unknown_lane", "message": format!("unknown lane {other:?}")}});
-            ("POST", "/explorer/exec", 400, body)
-        }
-    };
+    let (method, path, status, body) = lane_outcome(&state, &sandbox, &form.lane, &form.body).await;
     let latency = started.elapsed().as_millis();
     let outcome = ui_foundation::explorer::ExplorerOutcome {
         method,
@@ -951,6 +963,111 @@ fn format_int(n: i64) -> String {
         i -= 3;
     }
     s
+}
+
+/// ── Demo runtime support (plan §5.6) ────────────────────────────────────────
+///
+/// The demo sessions API executes REAL machinery; these wrappers expose the
+/// explorer's own cores so a demo runs exactly what the public explorer runs,
+/// with the same sandbox tenant, the same recipient/domain policies and the
+/// same calculator source. The explorer's own handlers keep their per-IP
+/// limiter and HTML rendering; the demo path is owner-gated instead.
+/// Run one explorer lane and return the verbatim outcome as JSON.
+pub(crate) async fn demo_run_lane(
+    state: &AppState,
+    lane: &str,
+    raw_body: &str,
+) -> serde_json::Value {
+    if raw_body.len() > MAX_BODY_BYTES {
+        return serde_json::json!({
+            "kind": "explorer_exec",
+            "status": 413,
+            "error": "Request body exceeds the 8 KiB sandbox limit.",
+        });
+    }
+    let sandbox = match sandbox(state).await {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            tracing::error!(error = %error, "demo sandbox provisioning failed");
+            return serde_json::json!({
+                "kind": "explorer_exec",
+                "status": 503,
+                "error": "The API sandbox is temporarily unavailable.",
+            });
+        }
+    };
+    let (method, path, status, body) = lane_outcome(state, &sandbox, lane, raw_body).await;
+    serde_json::json!({
+        "kind": "explorer_exec",
+        "lane": lane,
+        "method": method,
+        "path": path,
+        "status": status,
+        "body": body,
+    })
+}
+
+/// Grade a domain through the SAME transport-agnostic grader handler the
+/// public grader and the `/v1/grader/check` API use.
+pub(crate) async fn demo_run_grade(state: &AppState, domain: &str) -> serde_json::Value {
+    let domain = clean_domain_input(domain);
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return serde_json::json!({
+            "kind": "grader",
+            "status": 400,
+            "error": "Enter a real domain, like yourcompany.com.",
+        });
+    }
+    let Some(gs) = state.grader_state.clone() else {
+        return serde_json::json!({
+            "kind": "grader",
+            "status": 503,
+            "error": "The Email Grader is temporarily unavailable.",
+        });
+    };
+    let ip: std::net::IpAddr = "0.0.0.0".parse().expect("static ip literal");
+    let (status, axum::Json(value)) = email_grader::routes::check_domain(
+        gs,
+        ip,
+        email_grader::DomainCheckRequest {
+            domain: domain.clone(),
+            selectors: Vec::new(),
+        },
+    )
+    .await;
+    serde_json::json!({
+        "kind": "grader",
+        "status": status.as_u16(),
+        "domain": domain,
+        "report": value,
+    })
+}
+
+/// Compute calculator rows from the canonical pricing source. Params come
+/// from the demo script's JSON; unknown or hostile values fall back to the
+/// calculator's own defaults via the sanitizer.
+pub(crate) fn demo_run_calculator(params: &serde_json::Value) -> Vec<(String, String, bool)> {
+    let defaults = CalculatorForm::default();
+    let read_i64 = |key: &str, fallback: i64| -> i64 {
+        params.get(key).and_then(|v| v.as_i64()).unwrap_or(fallback)
+    };
+    let form = CalculatorForm {
+        volume: read_i64("volume", defaults.volume),
+        peak_daily: read_i64("peak_daily", defaults.peak_daily),
+        domains: read_i64("domains", defaults.domains),
+        team_users: read_i64("team_users", defaults.team_users),
+        dedicated_ips: read_i64("dedicated_ips", defaults.dedicated_ips),
+        support: params
+            .get("support")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        billing_cycle: params
+            .get("billing_cycle")
+            .and_then(|v| v.as_str())
+            .unwrap_or("monthly")
+            .to_string(),
+    };
+    compute_calculator(&sanitize_calculator(form))
 }
 
 pub fn router() -> Router<AppState> {

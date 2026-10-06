@@ -594,6 +594,16 @@ pub(crate) async fn load_page_data(
             Some(user) => web_route_data(state, path, &list_query, user, &correlation_id).await,
             None => RouteData::default(),
         },
+        // Public marketing pages are static except the demo viewer, which is
+        // authenticated by its ?token= value (never by a session).
+        "marketing" | "marketing-zola" => RouteData {
+            demo_viewer: if path == "/demo" {
+                Some(load_demo_viewer(state, query).await)
+            } else {
+                None
+            },
+            ..Default::default()
+        },
         "control-plane" => match user {
             Some(user) => {
                 control_plane_route_data(state, path, &list_query, user, &correlation_id).await
@@ -676,6 +686,8 @@ async fn web_route_data(
         mfa_setup: None,
         sales: None,
         assistant,
+        demos: None,
+        demo_viewer: None,
     }
 }
 
@@ -766,6 +778,231 @@ async fn load_assistant(
         session_id: Some(session_id),
         turns,
         unavailable: false,
+    }
+}
+
+/// The presenter page's data: the scripts the runtime can run, and this
+/// operator's sessions with their progress. `unavailable` on a read failure
+/// (never a silently empty list).
+async fn load_demos_page(
+    state: &AppState,
+    _q: &ListQuery,
+) -> ui_foundation::view_data::DemosPageData {
+    use ui_foundation::view_data::{DemoScriptData, DemoSessionData, DemosPageData};
+
+    let scripts: Vec<DemoScriptData> = crate::routes::demos::script::SCRIPTS
+        .iter()
+        .map(|script| DemoScriptData {
+            key: script.key.to_string(),
+            name: script.name.to_string(),
+            steps: script.steps.len(),
+        })
+        .collect();
+
+    let sessions: Result<
+        Vec<(
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+            i64,
+            i64,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        "SELECT s.id, s.script_key, s.state, s.created_at, s.expires_at, \
+                COUNT(st.id) FILTER (WHERE st.result IS NOT NULL)::bigint, \
+                COUNT(st.id)::bigint \
+         FROM demo_sessions s \
+         LEFT JOIN demo_session_steps st ON st.session_id = s.id \
+         GROUP BY s.id \
+         ORDER BY s.created_at DESC LIMIT 25",
+    )
+    .fetch_all(&state.db)
+    .await;
+    let sessions = match sessions {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(id, script, session_state, created, expires, done, total)| DemoSessionData {
+                    id,
+                    script,
+                    state: session_state,
+                    created_at: created.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    expires_at: expires.format("%Y-%m-%d %H:%M UTC").to_string(),
+                    steps_done: done.max(0) as usize,
+                    steps_total: total.max(0) as usize,
+                },
+            )
+            .collect(),
+        Err(error) => {
+            tracing::error!(error = %error, "demos list lookup failed");
+            return DemosPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    };
+
+    DemosPageData {
+        csrf_token: String::new(),
+        scripts,
+        sessions,
+        unavailable: false,
+        viewer_url: None,
+    }
+}
+
+/// The public viewer's data: `?token=` → the session's steps. An unknown
+/// token, an expired session and a missing token are all the honest states
+/// the page renders, never an error page.
+async fn load_demo_viewer(
+    state: &AppState,
+    query: Option<&str>,
+) -> ui_foundation::view_data::DemoViewerData {
+    use ui_foundation::view_data::{DemoViewerData, DemoViewerStep};
+
+    let token = query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        .map(|value| {
+            value
+                .replace("%3D", "=")
+                .replace("%2B", "+")
+                .replace("%2F", "/")
+        })
+        .filter(|value| !value.is_empty());
+    let Some(token) = token else {
+        return DemoViewerData {
+            state: "invalid".into(),
+            ..Default::default()
+        };
+    };
+
+    let row: Result<Option<(String, String, String, chrono::DateTime<chrono::Utc>)>, sqlx::Error> =
+        sqlx::query_as(
+            "SELECT id, script_key, state, expires_at FROM demo_sessions WHERE token_hash = $1",
+        )
+        .bind(crate::routes::demos::token_hash_public(&token))
+        .fetch_optional(&state.db)
+        .await;
+    let session = match row {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return DemoViewerData {
+                state: "invalid".into(),
+                ..Default::default()
+            }
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "demo viewer lookup failed");
+            return DemoViewerData {
+                state: "invalid".into(),
+                ..Default::default()
+            };
+        }
+    };
+    let (id, script_key, session_state, expires_at) = session;
+    let expired = expires_at <= chrono::Utc::now();
+    let script_name = crate::routes::demos::script::by_key(&script_key)
+        .map(|script| script.name.to_string())
+        .unwrap_or(script_key);
+    if expired {
+        return DemoViewerData {
+            state: "expired".into(),
+            script: script_name,
+            expires_at: expires_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+            steps: Vec::new(),
+        };
+    }
+
+    let steps: Vec<(
+        i32,
+        String,
+        serde_json::Value,
+        Option<serde_json::Value>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        "SELECT idx, kind, input, result, ran_at FROM demo_session_steps \
+             WHERE session_id = $1 ORDER BY idx ASC",
+    )
+    .bind(&id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    DemoViewerData {
+        state: session_state,
+        script: script_name,
+        expires_at: expires_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        steps: steps
+            .into_iter()
+            .map(|(idx, kind, input, result, ran_at)| {
+                let title = input
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Step")
+                    .to_string();
+                let (status, summary, detail) = match result.as_ref() {
+                    Some(result) => (
+                        result.get("status").and_then(|v| v.as_i64()),
+                        summarize_demo_result(&kind, result),
+                        serde_json::to_string_pretty(result).unwrap_or_default(),
+                    ),
+                    None => (None, "Not run yet.".to_string(), String::new()),
+                };
+                DemoViewerStep {
+                    idx,
+                    kind,
+                    title,
+                    status,
+                    summary,
+                    detail,
+                    ran_at: ran_at.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// A one-line, human-readable summary of a step result for the viewer.
+fn summarize_demo_result(kind: &str, result: &serde_json::Value) -> String {
+    match kind {
+        "render_page" => result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|title| format!("Rendered “{title}” from the live console."))
+            .unwrap_or_else(|| "Rendered a console page.".to_string()),
+        "explorer_exec" => format!(
+            "The API answered {} {} with HTTP {}.",
+            result
+                .get("method")
+                .and_then(|v| v.as_str())
+                .unwrap_or("POST"),
+            result.get("path").and_then(|v| v.as_str()).unwrap_or("/v1"),
+            result.get("status").and_then(|v| v.as_i64()).unwrap_or(0),
+        ),
+        "grader" => result
+            .pointer("/report/score")
+            .and_then(|v| v.as_i64())
+            .map(|score| format!("Deliverability grade: {score}/100."))
+            .unwrap_or_else(|| "Domain graded.".to_string()),
+        "calculator" => result
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .and_then(|rows| rows.last())
+            .and_then(|row| row.get(1))
+            .and_then(|v| v.as_str())
+            .map(|total| format!("Priced from the public catalog: {total}."))
+            .unwrap_or_else(|| "Priced from the public catalog.".to_string()),
+        "chat_narrate" => result
+            .get("answer")
+            .and_then(|v| v.as_str())
+            .map(|answer| format!("The grounded assistant answered: {answer}"))
+            .unwrap_or_else(|| "The assistant answered.".to_string()),
+        _ => "Step executed.".to_string(),
     }
 }
 
@@ -2665,6 +2902,11 @@ async fn control_plane_route_data(
         _ => None,
     };
 
+    let demos = if path == "/cp/demos" {
+        Some(load_demos_page(state, q).await)
+    } else {
+        None
+    };
     RouteData {
         list,
         campaign_edit: None,
@@ -2673,6 +2915,8 @@ async fn control_plane_route_data(
         mfa_setup: None,
         sales,
         assistant: None,
+        demos,
+        demo_viewer: None,
     }
 }
 

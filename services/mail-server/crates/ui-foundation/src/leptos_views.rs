@@ -10,8 +10,9 @@ use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
 use crate::view_data::{
-    render_data_cell, AssistantPageData, AssistantTurnData, ListPageData, SalesAutonomyData,
-    SalesDeadLetterData, SalesDecisionData, SalesOverviewData, SalesPageData,
+    render_data_cell, AssistantPageData, AssistantTurnData, DemoViewerData, DemosPageData,
+    ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData, SalesOverviewData,
+    SalesPageData,
 };
 
 fn ui_icon(name: &str, class_name: &str) -> String {
@@ -2722,9 +2723,10 @@ pub fn marketing_page(child_html: &str) -> String {
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
 <title>Transactional Email API &amp; SMTP Infrastructure | ApexMail</title>\
-<link rel=\"stylesheet\" href=\"/assets/marketing.css\"></head>\
+<link rel=\"stylesheet\" href=\"/assets/marketing.css\">\
+<link rel=\"stylesheet\" href=\"/css/styles.css\"></head>\
 <body class=\"font-apex antialiased\">{header}<main class=\"flex-1\">{child}</main>\
-<footer data-marketing-shell=\"footer\"></footer></body></html>",
+<footer class=\"marketing-footer\" data-marketing-shell=\"footer\"></footer></body></html>",
         header = header.render_html(),
         child = child_html,
     )
@@ -4249,6 +4251,201 @@ pub fn web_domains_page() -> String {
             action_href: Some("/domains/new"),
         }
         .render_html(),
+    )
+}
+
+/// The control-plane presenter page (`/cp/demos`): pick a script, create a
+/// session, get the viewer link ONCE, then advance step by step.
+pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
+    let unavailable = data.is_some_and(|d| d.unavailable);
+    let scripts = data.map(|d| d.scripts.as_slice()).unwrap_or(&[]);
+    let sessions = data.map(|d| d.sessions.as_slice()).unwrap_or(&[]);
+
+    let mut script_options = String::new();
+    for script in scripts {
+        script_options.push_str(&format!(
+            "<option value=\"{}\" data-steps=\"{}\" selected>{}</option>",
+            html_escape(&script.key),
+            script.steps,
+            html_escape(&script.name),
+        ));
+    }
+    if script_options.is_empty() {
+        script_options.push_str("<option value=\"platform-tour\">ApexMail platform tour</option>");
+    }
+
+    let viewer_url = data
+        .and_then(|d| d.viewer_url.as_deref())
+        .map(|url| {
+            format!(
+                "<div class=\"rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4\">\
+                 <p class=\"text-sm font-bold text-surface-900\">Viewer link — shown once</p>\
+                 <p class=\"mt-1 text-xs text-surface-600\">Share this with the prospect. It is not stored in plaintext, so copy it now.</p>\
+                 <code class=\"mt-2 block break-all font-mono text-xs\">{}</code>\
+                 </div>",
+                html_escape(url)
+            )
+        })
+        .unwrap_or_default();
+
+    let mut rows = String::new();
+    if unavailable {
+        rows.push_str(
+            "<tr><td colspan=\"4\" class=\"p-4 text-sm text-surface-600\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+        );
+    } else if sessions.is_empty() {
+        rows.push_str(
+            "<tr><td colspan=\"4\" class=\"p-4 text-sm text-surface-600\">No demo sessions yet. Create one above.</td></tr>",
+        );
+    } else {
+        for session in sessions {
+            rows.push_str(&format!(
+                "<tr class=\"border-b\">\
+                 <td class=\"p-3 font-mono text-xs\">{id}</td>\
+                 <td class=\"p-3 text-sm\">{script}</td>\
+                 <td class=\"p-3 text-sm\">{state}</td>\
+                 <td class=\"p-3 text-sm\">{done}/{total} steps</td>\
+                 <td class=\"p-3\"><form method=\"post\" action=\"/web/admin/demos/{id}/advance\">\
+                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
+                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700\">Run next step</button>\
+                 </form></td>\
+                 </tr>",
+                id = html_escape(&session.id),
+                script = html_escape(&session.script),
+                state = html_escape(&session.state),
+                done = session.steps_done,
+                total = session.steps_total,
+                csrf = html_escape(&data.map(|d| d.csrf_token.clone()).unwrap_or_default()),
+            ));
+        }
+    }
+
+    format!(
+        "<div class=\"space-y-6\">
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Demos</h1>\
+<p class=\"text-sm text-surface-600\">Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
+{viewer_url}\
+<form class=\"space-y-4 rounded-sm border p-6\" method=\"post\" action=\"/web/admin/demos\">\
+<div class=\"space-y-2\">\
+<label class=\"block text-sm font-bold text-surface-900\" for=\"demo-script\">Script</label>\
+<select id=\"demo-script\" name=\"script\" class=\"w-full rounded-sm border border-surface-300 bg-white px-3 py-2 text-sm\">{scripts}</select>\
+</div>\
+<button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Create demo session</button>\
+</form>\
+<h2 class=\"text-lg font-bold text-surface-950\">Sessions</h2>\
+<div class=\"overflow-x-auto rounded-sm border\"><table class=\"w-full text-left\"><thead><tr class=\"border-b bg-surface-50\">\
+<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Session</th>\
+<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Script</th>\
+<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">State</th>\
+<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Progress</th>\
+<th class=\"p-3\"></th></tr></thead><tbody>{rows}</tbody></table></div>\
+</div>",
+        viewer_url = viewer_url,
+        scripts = script_options,
+        rows = rows,
+    )
+}
+
+/// The public-with-token viewer (`/demo?token=…`): the ordered step list with
+/// each step's live result, an explicit replay banner once complete, and
+/// honest invalid/expired states.
+pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
+    let state = data.map(|d| d.state.as_str()).unwrap_or("invalid");
+    let script = data.map(|d| d.script.clone()).unwrap_or_default();
+    let expires = data.map(|d| d.expires_at.clone()).unwrap_or_default();
+    let steps = data.map(|d| d.steps.as_slice()).unwrap_or(&[]);
+
+    let banner = match state {
+        "completed" => {
+            "<div class=\"rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4\">\
+             <p class=\"text-sm font-bold text-surface-900\">This demo has finished</p>\
+             <p class=\"mt-1 text-xs text-surface-600\">You are viewing a replay of every step and its result.</p></div>"
+                .to_string()
+        }
+        "expired" => {
+            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-4\">\
+             <p class=\"text-sm font-bold text-surface-900\">This demo link has expired</p>\
+             <p class=\"mt-1 text-xs text-surface-600\">Ask the ApexMail team for a fresh link to see the walkthrough.</p></div>"
+                .to_string()
+        }
+        "invalid" => {
+            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-4\">\
+             <p class=\"text-sm font-bold text-surface-900\">This demo link is not valid</p>\
+             <p class=\"mt-1 text-xs text-surface-600\">Check the link, or ask the ApexMail team for a new one.</p></div>"
+                .to_string()
+        }
+        _ => String::new(),
+    };
+
+    let mut list = String::new();
+    if steps.is_empty() && state != "invalid" {
+        list.push_str(
+            "<p class=\"text-sm text-surface-600\">Nothing has been shown yet — the presenter has not started the walkthrough.</p>",
+        );
+    } else {
+        list.push_str("<ol class=\"space-y-6\">");
+        for step in steps {
+            let status = step
+                .status
+                .map(|s| {
+                    format!(
+                        "<span class=\"ml-2 text-xs font-bold text-surface-500\">HTTP {s}</span>"
+                    )
+                })
+                .unwrap_or_default();
+            let detail = if step.detail.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-sm bg-surface-50 p-3 font-mono text-[11px]\">{}</pre></details>",
+                    html_escape(&step.detail)
+                )
+            };
+            let ran = step
+                .ran_at
+                .as_deref()
+                .map(|ts| {
+                    format!(
+                        "<p class=\"mt-2 text-xs text-surface-400\">{}</p>",
+                        html_escape(ts)
+                    )
+                })
+                .unwrap_or_default();
+            list.push_str(&format!(
+                "<li class=\"rounded-sm border p-5\" aria-current=\"false\">\
+                 <div class=\"flex items-baseline justify-between gap-4\">\
+                 <h2 class=\"text-sm font-bold text-surface-950\">{idx}. {title}{status}</h2>\
+                 <span class=\"text-xs font-mono text-surface-400\">{kind}</span>\
+                 </div>\
+                 <p class=\"mt-2 text-sm text-surface-700\">{summary}</p>\
+                 {detail}{ran}\
+                 </li>",
+                idx = step.idx + 1,
+                title = html_escape(&step.title),
+                status = status,
+                kind = html_escape(&step.kind),
+                summary = html_escape(&step.summary),
+            ));
+        }
+        list.push_str("</ol>");
+    }
+
+    format!(
+        "<div class=\"mx-auto max-w-3xl space-y-6 py-8\">
+<p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">ApexMail walkthrough</p>\
+<h1 class=\"text-3xl font-bold tracking-tighter text-surface-950\">{script}</h1>\
+{banner}\
+{list}\
+<p class=\"text-xs text-surface-500\">Every step above executed the real product. This link is valid until {expires}.</p>\
+</div>",
+        script = if script.is_empty() {
+            "ApexMail demo".to_string()
+        } else {
+            html_escape(&script)
+        },
+        banner = banner,
+        list = list,
+        expires = html_escape(&expires),
     )
 }
 

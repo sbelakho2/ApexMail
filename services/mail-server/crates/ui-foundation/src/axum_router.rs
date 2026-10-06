@@ -45,6 +45,10 @@ pub struct RouteData {
     /// yet — the empty state). The page renders `unavailable` explicitly when
     /// the store could not be read.
     pub assistant: Option<crate::view_data::AssistantPageData>,
+    /// Control-plane presenter data (`/cp/demos`).
+    pub demos: Option<crate::view_data::DemosPageData>,
+    /// Public demo viewer data (`/demo?token=…`).
+    pub demo_viewer: Option<crate::view_data::DemoViewerData>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1666,7 +1670,7 @@ fn render_inner(
             }
             render_control_plane(path, csrf_secret, data, csrf_token)
         }
-        "marketing" | "marketing-zola" => render_marketing(surface, path),
+        "marketing" | "marketing-zola" => render_marketing_with_data(surface, path, data),
         _ => None,
     }
 }
@@ -1954,6 +1958,7 @@ fn render_control_plane(
         "/cp/sales" => {
             data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
         }
+        "/cp/demos" => leptos_views::web_demos_page(data.and_then(|d| d.demos.as_ref())),
         "/" => data_backed_inner("/", data).unwrap_or_else(leptos_views::control_plane_home_page),
         "/login" => leptos_views::control_plane_login_page(csrf_token),
         "/dashboard" => data_backed_inner("/dashboard", data)
@@ -2012,6 +2017,21 @@ fn render_control_plane(
         }
         _ => return None,
     })
+}
+
+/// Marketing render with server data for the ONE data-backed marketing page
+/// (the demo viewer); everything else ignores it.
+fn render_marketing_with_data(
+    surface: &str,
+    path: &str,
+    data: Option<&RouteData>,
+) -> Option<String> {
+    if path == "/demo" {
+        return Some(leptos_views::web_demo_viewer_page(
+            data.and_then(|d| d.demo_viewer.as_ref()),
+        ));
+    }
+    render_marketing(surface, path)
 }
 
 fn render_marketing(surface: &str, path: &str) -> Option<String> {
@@ -2269,6 +2289,8 @@ mod tests {
         // With server-loaded values the form carries the hidden id and the
         // prefilled name so POST /web/lists/update can save.
         let data = RouteData {
+            demos: None,
+            demo_viewer: None,
             campaign_editor: None,
             list_edit: Some(ListEditData {
                 id: "3f9d6fbe-6bd8-4e04-9c0d-1a2b3c4d5e6f".into(),
@@ -2852,6 +2874,8 @@ mod tests {
                 .collect(),
         });
         RouteData {
+            demos: None,
+            demo_viewer: None,
             list: Some(data),
             sales: None,
             campaign_edit: None,
@@ -2969,6 +2993,8 @@ mod tests {
     #[test]
     fn campaign_edit_with_values_updates_in_place() {
         let data = RouteData {
+            demos: None,
+            demo_viewer: None,
             list: None,
             sales: None,
             assistant: None,
@@ -2999,6 +3025,8 @@ mod tests {
     #[test]
     fn mfa_setup_data_renders_qr_and_secret() {
         let data = RouteData {
+            demos: None,
+            demo_viewer: None,
             list: None,
             sales: None,
             assistant: None,
@@ -3239,6 +3267,8 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
+                demos: None,
+                demo_viewer: None,
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
@@ -3301,6 +3331,8 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
+                demos: None,
+                demo_viewer: None,
                 list: Some(data),
                 sales: None,
                 campaign_edit: None,
@@ -4009,6 +4041,8 @@ mod tests {
     #[test]
     fn control_plane_sales_renders_live_data_or_honest_unavailable() {
         let data = RouteData {
+            demos: None,
+            demo_viewer: None,
             campaign_editor: None,
             sales: Some(crate::view_data::SalesPageData {
                 csrf_token: "tok".into(),

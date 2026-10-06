@@ -562,6 +562,16 @@ pub fn build_app(state: AppState) -> Router {
                 crate::middleware::sales_owner::require_sales_owner,
             )),
         )
+        // Demos are OWNER-run: the presenter API executes real machinery and
+        // mints viewer links, so it sits behind the same structural owner
+        // gate as the sales brain.
+        .nest(
+            "/v1/admin/demos",
+            routes::demos::router().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::sales_owner::require_sales_owner,
+            )),
+        )
         .nest("/v1/admin/operators", routes::admin::operators::router())
         .nest("/v1/admin/proxy", routes::admin::proxy::router())
         .nest(

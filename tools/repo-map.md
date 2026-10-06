@@ -96,7 +96,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **214 `*.sql` files**, latest `242_objection_library.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **215 `*.sql` files**, latest `243_demo_sessions.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 
@@ -107,8 +107,8 @@ Source of truth: `docs/development/ui-baseline-manifest.json` (the pinned counts
 | Surface | routeCount | Routes listed |
 |---|---|---|
 | web | 37 | 37 |
-| control-plane | 30 | 30 |
-| marketing | 18 | 18 |
-| marketing-zola | 37 | 37 |
+| control-plane | 31 | 31 |
+| marketing | 19 | 19 |
+| marketing-zola | 38 | 38 |
 
-**Total: 122 routes.**
+**Total: 125 routes.**

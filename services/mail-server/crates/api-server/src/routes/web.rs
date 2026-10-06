@@ -341,6 +341,8 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         )
         .route("/web/inbox-placement/tests", post(form_placement_create))
         .route("/web/assistant/message", post(form_assistant_message))
+        .route("/web/admin/demos", post(form_demo_create))
+        .route("/web/admin/demos/:id/advance", post(form_demo_advance))
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
         .layer(axum::middleware::from_fn_with_state(
@@ -5572,6 +5574,127 @@ async fn form_campaign_update(
             tracing::error!(error = %error, "web campaign update failed");
             temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
         }
+    }
+}
+
+/// Create a demo session (PRG). The viewer URL is revealed ONCE through the
+/// flash channel — the same reveal-once pattern secrets use — because the
+/// plaintext token is never stored.
+async fn form_demo_create(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/cp/demos", &state.config);
+    }
+    let script = field(&form, "script").trim().to_string();
+    if crate::routes::demos::script::by_key(&script).is_none() {
+        return redirect_error("Choose a demo script.", "/cp/demos", &state.config);
+    }
+
+    let tenant_id = user.tenant_id.clone();
+    let created_by = user.user_id.clone().unwrap_or_else(|| tenant_id.clone());
+    let id = apexmail_lib::id::generate_id("dmo", 22);
+    let token = crate::routes::demos::new_token_public();
+    let inserted = sqlx::query(
+        "INSERT INTO demo_sessions (id, token_hash, script_key, state, created_by, expires_at) \
+         VALUES ($1, $2, $3, 'created', $4, NOW() + interval '48 hours')",
+    )
+    .bind(&id)
+    .bind(crate::routes::demos::token_hash_public(&token))
+    .bind(&script)
+    .bind(&created_by)
+    .execute(&state.db)
+    .await;
+    if let Err(error) = inserted {
+        return temporary_storage_failure(
+            &WebActionError::Database(error),
+            "/cp/demos",
+            &state.config,
+        );
+    }
+    let steps = crate::routes::demos::script::by_key(&script)
+        .map(|script| script.steps.len())
+        .unwrap_or(0);
+    for idx in 0..steps {
+        let step = &crate::routes::demos::script::by_key(&script)
+            .expect("checked above")
+            .steps[idx];
+        if let Err(error) = sqlx::query(
+            "INSERT INTO demo_session_steps (id, session_id, idx, kind, input) \
+             VALUES ($1, $2, $3, $4, $5::jsonb)",
+        )
+        .bind(apexmail_lib::id::generate_id("dms", 22))
+        .bind(&id)
+        .bind(idx as i32)
+        .bind(step.kind)
+        .bind(serde_json::json!({
+            "title": step.title,
+            "tenant_id": tenant_id,
+            "params": step.params.iter().cloned().collect::<std::collections::HashMap<_, _>>(),
+        }))
+        .execute(&state.db)
+        .await
+        {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/cp/demos",
+                &state.config,
+            );
+        }
+    }
+
+    // The one-time viewer URL rides the flash cookie; only the hash is stored.
+    let viewer_url = format!("/demo?token={token}");
+    redirect_success(
+        &format!("Demo session created. Viewer link (shown once): {viewer_url}"),
+        "/cp/demos",
+        &state.config,
+    )
+}
+
+/// Advance a demo by one step (PRG). Idempotent at the database: the step
+/// runs only while its result is NULL.
+async fn form_demo_advance(
+    State(state): State<AppState>,
+    axum::Extension(_user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, "/cp/demos", &state.config);
+    }
+    let session: Result<Option<(String, chrono::DateTime<chrono::Utc>)>, sqlx::Error> =
+        sqlx::query_as("SELECT state, expires_at FROM demo_sessions WHERE id = $1")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await;
+    match session {
+        Ok(Some((session_state, expires_at))) => {
+            if session_state == "expired" || expires_at <= chrono::Utc::now() {
+                return redirect_error(
+                    "That demo link has expired. Create a new session.",
+                    "/cp/demos",
+                    &state.config,
+                );
+            }
+        }
+        Ok(None) => return redirect_error("No such demo session.", "/cp/demos", &state.config),
+        Err(error) => {
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                "/cp/demos",
+                &state.config,
+            )
+        }
+    }
+
+    match crate::routes::demos::advance_step_for_browser(&state, &id).await {
+        Ok(()) => redirect_success("Step executed.", "/cp/demos", &state.config),
+        Err(message) => redirect_error(&message, "/cp/demos", &state.config),
     }
 }
 

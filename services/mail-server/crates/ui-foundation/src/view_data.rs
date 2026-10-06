@@ -441,6 +441,65 @@ pub struct AssistantPageData {
     pub unavailable: bool,
 }
 
+/// One demo script as the presenter page shows it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DemoScriptData {
+    pub key: String,
+    pub name: String,
+    pub steps: usize,
+}
+
+/// One presenter session row.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DemoSessionData {
+    pub id: String,
+    pub script: String,
+    pub state: String,
+    pub created_at: String,
+    pub expires_at: String,
+    /// Proportion of steps already executed, for the progress column.
+    pub steps_done: usize,
+    pub steps_total: usize,
+}
+
+/// Control-plane presenter page (`/cp/demos`).
+///
+/// `viewer_url` is the reveal-once value from a just-created session — the
+/// only place the plaintext token ever appears. `unavailable` is the honest
+/// failure state of the list query.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DemosPageData {
+    pub csrf_token: String,
+    pub scripts: Vec<DemoScriptData>,
+    pub sessions: Vec<DemoSessionData>,
+    pub unavailable: bool,
+    pub viewer_url: Option<String>,
+}
+
+/// One step of a demo as the public viewer renders it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DemoViewerStep {
+    pub idx: i32,
+    pub kind: String,
+    pub title: String,
+    pub status: Option<i64>,
+    /// A short human-readable summary line derived from the stored result.
+    pub summary: String,
+    /// Pretty-printed result JSON for the expandable detail block.
+    pub detail: String,
+    pub ran_at: Option<String>,
+}
+
+/// The public-with-token viewer page (`/demo?token=…`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DemoViewerData {
+    /// `created` | `running` | `completed` | `expired` | `invalid`.
+    pub state: String,
+    pub script: String,
+    pub expires_at: String,
+    pub steps: Vec<DemoViewerStep>,
+}
+
 /// Render a `<td>` for a [`DataCell`] (mirrors `Table` cell classes).
 pub fn render_data_cell(cell: &DataCell) -> String {
     match cell {
