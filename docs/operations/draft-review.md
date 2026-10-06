@@ -5,13 +5,12 @@ how to review it, and what each decision does.
 
 ## What lands in the queue
 
-The mailbot drafts a reply when an inbound message needs one. A draft appears
-here when:
+The mailbot drafts a reply when an inbound message needs one. A draft
+appears here in three cases:
 
-- an inbound message was answered by the assistant and needs human approval,
+- an inbound message was answered by the assistant, pending approval,
 - a lead arrived through the contact form and a first response was drafted,
-- the assistant could not verify an answer and left a human-review note
-  instead.
+- the assistant could not verify an answer and left a review note instead.
 
 The queue lives at AI Drafts in the control plane. Nothing in it has been
 sent: drafts are held until a person decides.
@@ -50,7 +49,7 @@ operators cannot both decide the same draft: the claim is transactional.
 - The queue itself will not load: the page says the queue is unavailable. That
   is a service problem, not an empty queue.
 
-## Related
+## Where to read more
 
 - First-response SLO: `docs/operations/first-response-slo.md`
 - Assistant behaviour: `docs/user-guide/assistant.md`
