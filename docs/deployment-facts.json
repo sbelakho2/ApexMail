@@ -361,6 +361,17 @@
       "advertised": false,
       "evidence": "console page /assistant (crates/ui-foundation leptos_views::web_assistant_page + the SSR manifest route), server-side sessions in migration 240_ai_chat_sessions.sql, PRG handler crates/api-server/src/routes/web.rs::form_assistant_message over the shared proxy crates/api-server/src/routes/ai_chat.rs::session_turn_inner (4,000-char cap, per-user Redis limiter, tenant-scoped account context); per-tenant feature flag ai_chat",
       "source": "docs/development/ui-baseline-manifest.json + services/mail-server/migrations/240_ai_chat_sessions.sql + docs/development/capability-registry.json (console-assistant)"
+    },
+    "objection_handling": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": true,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "advisory (drafts are generated only from an owner/counsel-approved, in-window library entry plus the canonical facts; every draft still requires human approval)",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "migration 242_objection_library.sql (taxonomy CHECK + the evidence gate: an external-copy-eligible entry without evidence is refused by the schema); ai-service crates/ai-service/src/reply_classify.rs emits/validates the sub-label (OBJECTION_CLASSES); the worker parses it (crates/worker-processors/src/reply_handler/ai.rs) and persists it on the classification row (sales_reply_classifications.objection_class); the mailbot loads the approved entry (crates/ai-service/src/email_agent.rs::load_objection_guidance) into the prompt and the grounding sources, so guidance text is grounded while anything else still needs canonical facts",
+      "source": "services/mail-server/migrations/242_objection_library.sql + crates/ai-service/src/email_agent.rs + docs/development/capability-registry.json (objection-handling)"
     }
   }
 }

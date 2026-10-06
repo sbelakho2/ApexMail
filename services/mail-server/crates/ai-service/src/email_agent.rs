@@ -1125,11 +1125,35 @@ impl EmailAnswerer {
         }
 
         let body = extract_body(row, self.config.max_body_chars);
-        let grounding_facts = crate::knowledge::shared_knowledge_markdown();
+        let mut grounding_facts = crate::knowledge::shared_knowledge_markdown();
+        // Objection handling (plan §5.5): an approved library entry shapes
+        // the reply, and its text joins the grounding sources so a sentence
+        // taken from the guidance is supported, while anything else still
+        // has to come from the canonical facts.
+        let objection_guidance = match row
+            .suggested_action
+            .as_ref()
+            .and_then(|action| action.get("objection_class"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|class| !class.is_empty())
+        {
+            Some(class) => match row.tenant_id.as_deref() {
+                Some(tenant) => load_objection_guidance(&self.pool, tenant, class).await,
+                None => None,
+            },
+            None => None,
+        };
+        if let Some(guidance) = objection_guidance.as_deref() {
+            grounding_facts.push_str("\n\nApproved objection guidance:\n");
+            grounding_facts.push_str(guidance);
+            grounding_facts.push('\n');
+        }
         let prompt = build_prompt(
             &grounding_facts,
             row.classification.as_deref(),
             row.suggested_action.as_ref(),
+            objection_guidance.as_deref(),
             &row.from_email,
             &row.subject,
             &body,
@@ -1400,6 +1424,7 @@ pub(crate) fn build_prompt(
     canonical_facts: &str,
     classification: Option<&str>,
     suggested_action: Option<&serde_json::Value>,
+    objection_guidance: Option<&str>,
     from: &str,
     subject: &str,
     body: &str,
@@ -1436,6 +1461,15 @@ pub(crate) fn build_prompt(
              canonical facts.\n\n",
         );
     }
+    if let Some(guidance) = objection_guidance.map(str::trim).filter(|g| !g.is_empty()) {
+        prompt.push_str(
+            "Approved response guidance for this objection (owner-approved \
+             library entry; use it as the shape of the reply, and keep every \
+             factual statement inside it or the canonical facts):\n",
+        );
+        prompt.push_str(guidance);
+        prompt.push_str("\n\n");
+    }
     prompt.push_str("From: ");
     prompt.push_str(&sanitized_from);
     prompt.push_str("\nSubject: ");
@@ -1444,6 +1478,33 @@ pub(crate) fn build_prompt(
     prompt.push_str(&sanitized_body);
     prompt.push_str("\n\nYour response:");
     prompt
+}
+
+/// The approved objection-library guidance applicable to `class`, if any:
+/// tenant-specific entries win over platform-wide ones, and only APPROVED,
+/// in-window, non-empty entries are usable — an unapproved or expired entry
+/// is treated as absent rather than as advice.
+pub(crate) async fn load_objection_guidance(
+    pool: &PgPool,
+    tenant_id: &str,
+    class: &str,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT response_guidance FROM objection_library \
+         WHERE objection_class = $1 \
+           AND (tenant_id = $2 OR tenant_id IS NULL) \
+           AND approved_by IS NOT NULL AND approved_at IS NOT NULL \
+           AND valid_from <= NOW() AND (valid_until IS NULL OR valid_until > NOW()) \
+           AND length(trim(response_guidance)) > 0 \
+         ORDER BY (tenant_id = $2) DESC, version DESC, valid_from DESC \
+         LIMIT 1",
+    )
+    .bind(class)
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Synthesize the RFC 5322 message for one first-response lead. Header
@@ -1556,7 +1617,7 @@ pub async fn generate_email_reply(
     max_tokens: usize,
 ) -> anyhow::Result<ProcessEmailResult> {
     let facts = crate::knowledge::shared_knowledge_markdown();
-    let prompt = build_prompt(&facts, None, None, from, subject, body);
+    let prompt = build_prompt(&facts, None, None, None, from, subject, body);
     let system_prompt = grounded_system_prompt(system_prompt, &facts);
     let response = llm
         .generate(&system_prompt, &prompt, max_tokens as u32)
@@ -1602,6 +1663,7 @@ mod tests {
             "FACTS",
             None,
             None,
+            None,
             "user@example.com",
             "Test Subject",
             "Hello, how are you?",
@@ -1628,6 +1690,7 @@ mod tests {
             "FACTS",
             Some("not_interested"),
             Some(&action),
+            None,
             "user@example.com",
             "Re: pricing",
             "too expensive",

@@ -66,6 +66,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | inbound-reply-mirroring | runtime-wired | — |
 | intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |
 | mta-event-webhooks | runtime-wired | — |
+| objection-handling | runtime-wired | — |
 | smtp-starttls | runtime-wired | — |
 | spam-phishing-filtering | runtime-wired | MTA_SPAM_FILTER_ENABLED |
 | threat-intelligence-feeds | runtime-wired | — |
@@ -95,7 +96,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **213 `*.sql` files**, latest `241_first_response_requests.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **214 `*.sql` files**, latest `242_objection_library.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

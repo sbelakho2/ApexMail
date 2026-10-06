@@ -367,6 +367,11 @@ pub struct AiClassification {
     pub model_version: Option<String>,
     pub prompt_version: Option<String>,
     pub evidence: Vec<Evidence>,
+    /// Objection sub-label under `not_interested` / `question` (plan §5.5):
+    /// the six-value taxonomy the ai-service classifier emits and validates.
+    /// Desktop clients never sent it; it is additive, so its absence stays
+    /// `None` rather than an error.
+    pub objection_class: Option<String>,
 }
 
 impl AiClassification {
@@ -380,6 +385,7 @@ impl AiClassification {
             model_version: None,
             prompt_version: None,
             evidence: Vec::new(),
+            objection_class: None,
         }
     }
 
@@ -415,6 +421,11 @@ pub struct ClassificationOutcome {
     /// Set when the policy downgraded the observed disposition (low
     /// confidence / non-finite confidence) to `Unknown`.
     pub downgraded_from: Option<ReplyDisposition>,
+    /// Objection sub-label (plan §5.5) when the classifier produced one for a
+    /// `not_interested` / `question` reply. Cleared with the disposition when
+    /// the policy downgrades the verdict to `Unknown`: a downgraded verdict
+    /// carries no labels.
+    pub objection_class: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

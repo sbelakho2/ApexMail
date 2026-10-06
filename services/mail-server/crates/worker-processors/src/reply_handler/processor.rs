@@ -765,6 +765,7 @@ impl ReplyHandler {
             suggested_action: Some(decision.suggested_action.to_string()),
             actual_action: Some(actual_action.clone()),
             operator_correction: None,
+            objection_class: outcome.objection_class.clone(),
         };
         let classification_id = persist_classification(&self.db, &record).await?;
         debug!(
@@ -1112,6 +1113,9 @@ pub struct ClassificationRecord {
     pub suggested_action: Option<String>,
     pub actual_action: Option<String>,
     pub operator_correction: Option<String>,
+    /// Objection sub-label under `not_interested` / `question` (plan §5.5),
+    /// NULL for every other disposition.
+    pub objection_class: Option<String>,
 }
 
 /// Persist one classification row, idempotently.
@@ -1136,6 +1140,10 @@ pub async fn persist_classification(
                 .bind(record.disposition.as_str())
                 .fetch_optional(db)
                 .await?;
+            // ACHTUNG: the probe above keys on (inbound, classifier,
+            // disposition); an objection sub-label rides on the same row and
+            // is written below, so a relabelled reply upserts rather than
+            // duplicating.
             if let Some(existing) = existing {
                 return Ok(existing);
             }
@@ -1150,8 +1158,9 @@ pub async fn persist_classification(
              (id, tenant_id, enrollment_id, contact_id, contact_point_id, \
               inbound_message_id, disposition, confidence, classifier, reasoning, \
               model_version, prompt_version, evidence, suggested_action, actual_action, \
-              operator_correction, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())",
+              operator_correction, objection_class, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+                 NOW())",
     )
     .bind(id)
     .bind(&record.tenant_id)
@@ -1169,6 +1178,7 @@ pub async fn persist_classification(
     .bind(record.suggested_action.as_deref())
     .bind(record.actual_action.as_deref())
     .bind(record.operator_correction.as_deref())
+    .bind(record.objection_class.as_deref())
     .execute(db)
     .await?;
     Ok(id)
@@ -1207,11 +1217,13 @@ pub async fn record_action_outcome(
         contact_id: Option<Uuid>,
         contact_point_id: Option<Uuid>,
         inbound_message_id: Option<String>,
+        objection_class: Option<String>,
     }
 
     let row: Option<Row> = sqlx::query_as(
         "SELECT disposition, confidence, reasoning, model_version, prompt_version, \
                 evidence, suggested_action, enrollment_id, contact_id, contact_point_id, \
+                objection_class, \
                 inbound_message_id \
          FROM sales_reply_classifications \
          WHERE id = $1 AND tenant_id = $2",
@@ -1250,8 +1262,10 @@ pub async fn record_action_outcome(
         "INSERT INTO sales_reply_classifications \
              (id, tenant_id, enrollment_id, contact_id, contact_point_id, inbound_message_id, \
               disposition, confidence, classifier, reasoning, model_version, prompt_version, \
-              evidence, suggested_action, actual_action, operator_correction, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'operator', $9, $10, $11, $12, $13, $14, $15, NOW())",
+              evidence, suggested_action, actual_action, operator_correction, \
+              objection_class, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'operator', $9, $10, $11, $12, $13, $14, $15, \
+                 $16, NOW())",
     )
     .bind(id)
     .bind(tenant_id)
@@ -1268,6 +1282,7 @@ pub async fn record_action_outcome(
     .bind(row.suggested_action.as_deref())
     .bind(actual_action)
     .bind(&correction)
+    .bind(row.objection_class.as_deref())
     .execute(db)
     .await?;
     Ok(Some(id))
@@ -2066,6 +2081,7 @@ mod tests {
                 model_version: Some("scripted-v1".to_string()),
                 prompt_version: Some("test".to_string()),
                 evidence: vec![Evidence::new("token", "scripted", "test")],
+                objection_class: None,
             })
         }
         fn name(&self) -> &'static str {
@@ -3472,6 +3488,7 @@ mod tests {
                 model_version: Some("probe-v1".to_string()),
                 prompt_version: Some("probe".to_string()),
                 evidence: vec![],
+                objection_class: None,
             })
         }
         fn name(&self) -> &'static str {
@@ -3711,6 +3728,7 @@ mod orchestration_and_actions {
                 model_version: Some("orch-v1".to_string()),
                 prompt_version: Some("test".to_string()),
                 evidence: vec![Evidence::new("token", "orch", "test")],
+                objection_class: None,
             })
         }
         fn name(&self) -> &'static str {
@@ -4222,6 +4240,7 @@ mod residual_arms {
                 model_version: Some("scripted-v1".to_string()),
                 prompt_version: Some("test".to_string()),
                 evidence: vec![Evidence::new("token", "unsubscribe", "test")],
+                objection_class: None,
             })
         }
 

@@ -851,6 +851,33 @@
         "assistant page",
         "workspace Q&A"
       ]
+    },
+    {
+      "capability": "objection-handling",
+      "crate": "crates/ai-service",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "objection_handling",
+        "implementation_stage": "runtime-wired",
+        "binary_default": true,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "advisory (drafts are generated only from an owner/counsel-approved, in-window library entry plus the canonical facts; every draft still requires human approval)",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "ai-service",
+        "compose_service": "ai-service",
+        "env_gate": null,
+        "call_path": "classifier sub-label: ai-service reply_classify -> worker reply_handler/ai.rs -> sales_reply_classifications.objection_class; generation: crates/ai-service/src/email_agent.rs (load_objection_guidance -> prompt + grounding -> verify_grounded -> pending_approval draft)",
+        "metrics": null,
+        "explanation": "The objection taxonomy (price, timing, competitor, authority, trust, need) is code on both sides and pinned by the cross-crate contract test; the library is owner-authored content, so nothing is seeded and an entry without evidence can never enter customer copy. Drafts remain human-approved; the persisted sub-label feeds the experiment arm dimensions next."
+      },
+      "scan_aliases": [
+        "objection library",
+        "objection handling",
+        "objection taxonomy"
+      ]
     }
   ],
   "stale_marker_exceptions": {

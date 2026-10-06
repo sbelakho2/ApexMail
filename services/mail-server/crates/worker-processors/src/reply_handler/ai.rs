@@ -65,6 +65,18 @@ use crate::common::ReplyHandlerConfig;
 /// request. Bump when the prompt/contract changes.
 pub const AI_PROMPT_VERSION: &str = "reply-classifier-v1";
 
+/// The objection sub-label taxonomy (plan §5.5), byte-for-byte the values
+/// the ai-service classifier emits (`ai_service::reply_classify::OBJECTION_CLASSES`
+/// is the source; the cross-crate contract test pins the two together).
+pub const OBJECTION_CLASSES: [&str; 6] = [
+    "price",
+    "timing",
+    "competitor",
+    "authority",
+    "trust",
+    "need",
+];
+
 /// Prefix of the reasoning recorded when the AI layer is unavailable. Tests
 /// and operators key on it; keep it stable.
 pub const AI_OUTAGE_REASON_PREFIX: &str = "ai classifier outage";
@@ -264,6 +276,20 @@ impl HttpReplyClassifier {
             })
             .unwrap_or_default();
 
+        // Additive per plan §5.5: only the two dispositions that carry
+        // objections accept a sub-label, and only from the six-value
+        // taxonomy — anything else is dropped rather than trusted.
+        let objection_class = payload
+            .get("objection_class")
+            .and_then(|value| value.as_str())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| {
+                matches!(
+                    disposition,
+                    ReplyDisposition::NotInterested | ReplyDisposition::Question
+                ) && OBJECTION_CLASSES.contains(&value.as_str())
+            });
+
         Ok(sanitize_classification(AiClassification {
             disposition,
             confidence,
@@ -271,6 +297,7 @@ impl HttpReplyClassifier {
             model_version,
             prompt_version,
             evidence,
+            objection_class,
         }))
     }
 }
@@ -396,6 +423,7 @@ mod tests {
                 model_version: None,
                 prompt_version: None,
                 evidence: vec![],
+                objection_class: None,
             })
         }
     }
@@ -474,6 +502,7 @@ mod tests {
                     model_version: None,
                     prompt_version: None,
                     evidence: vec![],
+                    objection_class: None,
                 })
             }
         }
@@ -639,6 +668,7 @@ mod tests {
             model_version: None,
             prompt_version: None,
             evidence: Vec::new(),
+            objection_class: None,
         };
         assert_eq!(sanitize_classification(over).confidence, 1.0);
         let under = AiClassification {
@@ -648,6 +678,7 @@ mod tests {
             model_version: None,
             prompt_version: None,
             evidence: Vec::new(),
+            objection_class: None,
         };
         assert_eq!(sanitize_classification(under).confidence, 0.0);
         let nan = AiClassification {
@@ -657,6 +688,7 @@ mod tests {
             model_version: None,
             prompt_version: None,
             evidence: Vec::new(),
+            objection_class: None,
         };
         assert_eq!(
             sanitize_classification(nan).confidence,
@@ -670,6 +702,7 @@ mod tests {
             model_version: None,
             prompt_version: None,
             evidence: Vec::new(),
+            objection_class: None,
         };
         assert_eq!(
             sanitize_classification(inf).confidence,

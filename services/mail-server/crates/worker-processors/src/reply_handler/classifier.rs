@@ -248,6 +248,7 @@ fn outcome_from_verdict(verdict: DeterministicVerdict) -> ClassificationOutcome 
         prompt_version: None,
         return_date: verdict.return_date,
         downgraded_from: None,
+        objection_class: None,
     }
 }
 
@@ -264,6 +265,10 @@ fn outcome_from_ai(classification: AiClassification) -> ClassificationOutcome {
         chrono::Utc::now(),
     );
     let downgraded_from = decision.downgraded.map(|_| classification.disposition);
+    let objection_class = match decision.downgraded {
+        Some(_) => None,
+        None => classification.objection_class,
+    };
     let reasoning = match decision.downgraded {
         Some(reason) => format!(
             "{} (observed '{}' at confidence {:.2}, downgraded: {})",
@@ -294,6 +299,7 @@ fn outcome_from_ai(classification: AiClassification) -> ClassificationOutcome {
         prompt_version: classification.prompt_version,
         return_date: None,
         downgraded_from,
+        objection_class,
     }
 }
 
@@ -768,6 +774,7 @@ mod tests {
                     model_version: None,
                     prompt_version: None,
                     evidence: vec![],
+                    objection_class: None,
                 })
             }
         }
@@ -793,6 +800,7 @@ mod tests {
                     model_version: Some("test".into()),
                     prompt_version: None,
                     evidence: vec![],
+                    objection_class: None,
                 })
             }
         }

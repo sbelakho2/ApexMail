@@ -158,6 +158,12 @@ FACT_TREE_VERIFICATIONS = {
         ("services/mail-server/crates/mta/src/servers/inbound.rs", "parse_inbound_mirrors", True),
         ("services/mail-server/crates/worker-processors/src/reply_handler/processor.rs", "from_email IS NOT NULL", True),
     ],
+    "objection_handling": [
+        ("services/mail-server/migrations/242_objection_library.sql", "objection_library_evidence_required", True),
+        ("services/mail-server/crates/ai-service/src/email_agent.rs", "load_objection_guidance", True),
+        ("services/mail-server/crates/worker-processors/src/reply_handler/types.rs", "objection_class", True),
+        ("services/mail-server/crates/ai-service/src/reply_classify.rs", "OBJECTION_CLASSES", True),
+    ],
     "console_assistant": [
         ("services/mail-server/crates/ui-foundation/src/leptos_views.rs", "pub fn web_assistant_page", True),
         ("services/mail-server/crates/api-server/src/routes/web.rs", "async fn form_assistant_message", True),
