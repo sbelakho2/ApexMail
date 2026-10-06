@@ -339,6 +339,17 @@
       "advertised": false,
       "evidence": "crates/mta/src/servers/util.rs queue_tenant_webhook_event fans message.inbound (inbound.rs), message.bounced (bounce.rs) and message.complained (feedback_loop.rs) into the canonical webhook_queue table the worker's webhook processor drains (retries, circuit breaker, SSRF guard); docs/api/webhooks.md documents message.inbound; the former mta:webhook_queue Redis list is deleted (no consumer ever existed)",
       "source": "crates/mta/src/servers/util.rs + docs/api/webhooks.md + docs/development/capability-registry.json (mta-event-webhooks)"
+    },
+    "email_draft_agent": {
+      "value": true,
+      "implementation_stage": "runtime-wired",
+      "binary_default": false,
+      "managed_cloud_enabled": true,
+      "enforcement_mode": "draft-only (every reply is stored pending_approval=true for human review; the agent refuses to start when AI_EMAIL_REQUIRE_APPROVAL is not set)",
+      "monitored": false,
+      "advertised": false,
+      "evidence": "ai-service bin/server.rs spawns EmailAnswerer over the process pool/LLM/governor when AI_EMAIL_AGENT_ENABLED=true (crates/ai-service/src/email_agent.rs); compose + .env.production.example set the managed baseline ON with AI_REPLY_FROM and the poll cadence; drafts are grounded against knowledge::shared_knowledge_markdown() via verifier::verify_grounded and reviewed through /v1/admin/ai/drafts",
+      "source": ".env.production.example + docker-compose.yml (ai-service) + docs/development/capability-registry.json (email-draft-agent)"
     }
   }
 }

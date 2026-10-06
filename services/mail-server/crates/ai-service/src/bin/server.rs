@@ -41,6 +41,28 @@ async fn main() {
             return;
         }
     };
+    // Mailbot runtime (SalesCloser plan §5.3): the DRAFT-ONLY email agent
+    // runs in THIS process, over the same pool, model client and inference
+    // governor the HTTP surfaces use. Opt-in (AI_EMAIL_AGENT_ENABLED); it
+    // refuses to start without mandatory human approval — every generated
+    // reply is stored as a pending draft for the review queue, never sent.
+    match ai_service::email_agent::EmailAnswerer::from_env_with_runtime(
+        state.docs_pool.clone(),
+        state.llm.clone(),
+        state.rate_governor.clone(),
+    ) {
+        Ok(Some(answerer)) => {
+            let answerer = std::sync::Arc::new(answerer);
+            if answerer.clone().start() {
+                tracing::info!("email answering agent started (draft-only, approval required)");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, "email answering agent not started");
+        }
+    }
+
     let app = routes::build_router(state);
 
     let bind = std::env::var("AI_BIND").unwrap_or_else(|_| "0.0.0.0:3012".into());

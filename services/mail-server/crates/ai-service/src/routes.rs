@@ -37,7 +37,7 @@ pub struct AppState {
     pub assistant: AiAssistant,
     pub content: ContentOptimizer,
     pub sto: SendTimeOptimizer,
-    pub llm: LlmClient,
+    pub llm: Arc<LlmClient>,
     /// Grounded chat (docs retrieval + verifier + escalation). Built from
     /// the same inference config as `llm`.
     pub chat: crate::chat::ChatService,
@@ -58,7 +58,7 @@ pub struct AppState {
     pub ai_admin_token: String,
     /// Enforces `inference_rate_limit` per `inference_rate_limit_window_secs`
     /// for model-inference routes, keyed by the authenticated tenant identity.
-    pub rate_governor: RateGovernor,
+    pub rate_governor: Arc<RateGovernor>,
 }
 
 impl AppState {
@@ -104,7 +104,7 @@ impl AppState {
             sto: SendTimeOptimizer::new(),
             chat,
             docs_pool,
-            llm: LlmClient::new(inference),
+            llm: Arc::new(LlmClient::new(inference)),
             training: TrainingManager::new(&config),
             domain_dns,
             model_name,
@@ -116,10 +116,10 @@ impl AppState {
             // deployment config (refused at boot in production when unset —
             // see `AiConfig::validate`).
             ai_admin_token: config.ai_admin_token.clone(),
-            rate_governor: RateGovernor::new(
+            rate_governor: Arc::new(RateGovernor::new(
                 config.inference_rate_limit,
                 Duration::from_secs(config.inference_rate_limit_window_secs),
-            ),
+            )),
         })
     }
 

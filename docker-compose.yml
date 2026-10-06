@@ -1012,6 +1012,16 @@ services:
       AI_MODEL_NAME: ${AI_MODEL_NAME:-apexmail-assistant}
       AI_MODEL_API_KEY: ${AI_MODEL_API_KEY:-}
       AI_CHAT_RETENTION_DAYS: ${AI_CHAT_RETENTION_DAYS:-90}
+      # ── Mailbot runtime (SalesCloser plan §5.3) ─────────────────────────
+      # DRAFT-ONLY: every generated reply is stored as a pending draft for the
+      # review queue; the agent refuses to start if approval is not required
+      # (AI_EMAIL_REQUIRE_APPROVAL defaults to true and must stay true).
+      # It runs in-process over the SAME pool, model client and inference
+      # governor as the HTTP surfaces, and only does work when
+      # AI_MODEL_ENABLED is on — otherwise it declines to human review.
+      AI_EMAIL_AGENT_ENABLED: ${AI_EMAIL_AGENT_ENABLED:-true}
+      AI_REPLY_FROM: ${AI_REPLY_FROM:-ai@apexmail.ee}
+      AI_EMAIL_POLL_INTERVAL_SECS: ${AI_EMAIL_POLL_INTERVAL_SECS:-30}
       # URLs assembled by the entrypoint wrapper from the DB_* parts.
       DB_HOST: postgres
       DB_PORT: 5432

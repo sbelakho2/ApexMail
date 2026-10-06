@@ -3134,7 +3134,7 @@ mod tests {
                  (id, jurisdiction, channel, contact_type, decision, basis, version, \
                   approved_by, approved_at, valid_from) \
              VALUES (gen_random_uuid(), $1, 'email', 'b2b_professional', $2, $3, 1, \
-                     'lib-test', NOW(), NOW()) \
+                     'lib-test', NOW() - interval '1 second', NOW() - interval '1 second') \
              ON CONFLICT (jurisdiction, channel, contact_type, version) DO UPDATE SET \
                  decision = EXCLUDED.decision, \
                  basis = EXCLUDED.basis, \

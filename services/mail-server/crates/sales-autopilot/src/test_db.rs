@@ -190,7 +190,7 @@ pub(crate) async fn insert_unique_jurisdiction_policy_returning_id(
                  (id, jurisdiction, channel, contact_type, decision, basis, version, approved_by, \
                   approved_at, valid_from) \
              VALUES (gen_random_uuid(), $1, 'email', 'b2b_professional', $2, $3, 1, 'fixture', \
-                     NOW(), NOW()) \
+                     NOW() - interval '1 second', NOW() - interval '1 second') \
              ON CONFLICT (jurisdiction, channel, contact_type, version) DO NOTHING \
              RETURNING id",
         )

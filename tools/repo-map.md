@@ -60,6 +60,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 | attachment-sandboxing | runtime-wired | MTA_ATTACHMENT_SCAN_ENABLED |
 | data-loss-prevention | runtime-wired | WORKER_DLP_ENABLED |
 | ddos-middleware | runtime-wired | — |
+| email-draft-agent | runtime-wired | AI_EMAIL_AGENT_ENABLED |
 | fingerprint-library | runtime-wired | — |
 | inbound-reply-mirroring | runtime-wired | — |
 | intrusion-detection-prevention | runtime-wired | MTA_IDS_ENABLED |

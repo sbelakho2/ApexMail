@@ -1323,7 +1323,14 @@ mod tests {
             "a released action gets a fresh attempt budget"
         );
         assert_eq!(row.last_error, None);
-        assert!(row.due_at <= chrono::Utc::now());
+        // The claim predicate is `due_at <= NOW()` in SQL, so the assertion
+        // uses the DB clock rather than the test process's (sub-second skew
+        // between the two made this flake).
+        let db_now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(row.due_at <= db_now);
         assert_eq!(row.lease_owner, None);
         assert_eq!(row.lease_token, None);
         assert_eq!(row.lease_expires_at, None);

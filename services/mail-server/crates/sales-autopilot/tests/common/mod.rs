@@ -302,7 +302,7 @@ pub async fn ensure_allowed_jurisdiction_policy(pool: &PgPool) -> Uuid {
              (id, jurisdiction, channel, contact_type, decision, basis, version, \
               approved_by, approved_at, valid_from) \
          VALUES ($1, $2, 'email', 'b2b_professional', 'allowed', 'legitimate_interest', 1, \
-                 'integration-fixture', NOW(), NOW()) \
+                 'integration-fixture', NOW() - interval '1 second', NOW() - interval '1 second') \
          ON CONFLICT (jurisdiction, channel, contact_type, version) DO NOTHING",
     )
     .bind(Uuid::new_v4())

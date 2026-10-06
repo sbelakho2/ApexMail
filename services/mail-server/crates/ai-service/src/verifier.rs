@@ -294,6 +294,20 @@ impl ResponseVerifier {
             if !claim.is_factual() {
                 continue;
             }
+            // Formulaic fragments — greetings ("Hello John,"), sign-offs
+            // ("Best regards,"), signature lines ("ApexMail AI Assistant") —
+            // are not checkable assertions: a claim needs a complete
+            // sentence. Without this, every legitimate email draft opened
+            // and closed with lines the checker flagged as unsupported
+            // claims, so the mailbot declined all of its own drafts. The
+            // exemption is narrow by construction: any digit, any absolute
+            // quantifier, or a terminating '.' keeps the sentence checked
+            // (and the policy/pricing/PII checks never skip anything).
+            let trimmed = sentence.trim_end();
+            if claim.numbers.is_empty() && !claim.has_absolute_quantifier && !trimmed.ends_with('.')
+            {
+                continue;
+            }
             if supported_by_source(&claim, &canonical)
                 || supported_by_source(&claim, &account)
                 || supported_by_source(&claim, &tool)

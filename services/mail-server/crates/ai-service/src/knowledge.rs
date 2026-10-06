@@ -124,6 +124,17 @@ protection on login routes (web and control plane), per-tenant rate limits \
 and quotas, signed audit logs, EU/EEA hosting, encrypted daily backups with \
 verified restores.";
 
+/// Deliverability: the canonical answer to "what do I put in my SPF/DKIM
+/// records". The exact selector/values are per-domain and served by the
+/// workspace UI and the `POST /v1/domains/dns-records` endpoint, so the
+/// fact names the mechanism rather than inventing values.
+pub const DELIVERABILITY_FACTS: &str = "Deliverability: verify each sending \
+domain first. The workspace's Domains page (and POST /v1/domains/dns-records) \
+returns the exact DNS records to publish: a DKIM record per domain plus SPF \
+entries that include ApexMail's sending hosts; DMARC is optional but \
+recommended. Inbound authentication (SPF/DKIM/DMARC) is evaluated on every \
+accepted message and surfaced in headers.";
+
 /// SDK availability — packages are NOT on public registries yet.
 pub const SDK_FACTS: &str = "SDKs exist for Python, Go, PHP, Ruby and Java but \
 are not yet published to public registries; source drops are provided on \
@@ -162,8 +173,9 @@ pub fn shared_knowledge_markdown() -> String {
 first 100K API calls/month free, then €0.10/1K. Subscription overage per 1,000 emails beyond \
 the included volume: Developer €0.80, Pro €0.60, Growth/Business €0.35 (Enterprise Cloud \
 contractual, €0.35 runtime default) — paid plans keep sending into a +{}% allowance and the \
-excess is invoiced at period end; free plans stop at the limit.\n\n{}\n\n{}\n\n{}\n",
+excess is invoiced at period end; free plans stop at the limit.\n\n{}\n\n{}\n\n{}\n\n{}\n",
         OVERAGE_ALLOWANCE_PERCENT,
+        DELIVERABILITY_FACTS,
         COMPLIANCE_FACTS,
         SECURITY_FACTS,
         SDK_FACTS

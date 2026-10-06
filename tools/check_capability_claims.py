@@ -107,6 +107,7 @@ FACT_ENV_VARS = {
     "intrusion_detection_prevention": "MTA_IDS_ENABLED",
     "attachment_sandboxing": "MTA_ATTACHMENT_SCAN_ENABLED",
     "ai_reply_classification": "WORKER_REPLY_CLASSIFIER_AI_ENABLED",
+    "email_draft_agent": "AI_EMAIL_AGENT_ENABLED",
 }
 
 # Tree-evidence verifications for individual facts. Each entry lists
@@ -156,6 +157,11 @@ FACT_TREE_VERIFICATIONS = {
     "inbound_reply_mirroring": [
         ("services/mail-server/crates/mta/src/servers/inbound.rs", "parse_inbound_mirrors", True),
         ("services/mail-server/crates/worker-processors/src/reply_handler/processor.rs", "from_email IS NOT NULL", True),
+    ],
+    "email_draft_agent": [
+        ("services/mail-server/crates/ai-service/src/bin/server.rs", "EmailAnswerer::from_env_with_runtime", True),
+        ("services/mail-server/crates/ai-service/src/email_agent.rs", "assess_grounded_draft", True),
+        (".env.production.example", "AI_EMAIL_AGENT_ENABLED=true", True),
     ],
     "mta_event_webhooks": [
         ("services/mail-server/crates/mta/src/servers/util.rs", "queue_tenant_webhook_event", True),

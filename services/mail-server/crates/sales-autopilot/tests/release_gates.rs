@@ -198,7 +198,7 @@ async fn upsert_email_policy(db: &PgPool, jurisdiction: &str, decision: &str, ba
              (id, jurisdiction, channel, contact_type, decision, basis, version, \
               approved_by, approved_at, valid_from) \
          VALUES (gen_random_uuid(), $1, 'email', 'b2b_professional', $2, $3, 1, \
-                 'release-gate-test', NOW(), NOW()) \
+                 'release-gate-test', NOW() - interval '1 second', NOW() - interval '1 second') \
          ON CONFLICT (jurisdiction, channel, contact_type, version) DO UPDATE \
              SET decision = EXCLUDED.decision, basis = EXCLUDED.basis, \
                  approved_by = EXCLUDED.approved_by, approved_at = EXCLUDED.approved_at, \
@@ -333,6 +333,35 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
     .expect("point the fixture contact at the prohibited account's domain");
 
     // ── Route 1: the canonical outreach command (`POST /enrollments`) ──────
+    // A FRESH contact on the same (prohibited) account: the fixture's own
+    // contact is already enrolled (Route 3 needs its step execution), and an
+    // already-enrolled contact is correctly reported as `already_enrolled`
+    // before the legal ladder — which would mask the gate under test here.
+    let fresh_contact_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
+         VALUES ($1, $2, $3, 'Fresh Prohibited Prospect', 'XR')",
+    )
+    .bind(fresh_contact_id)
+    .bind(&tenant_id)
+    .bind(seq.account_id)
+    .execute(&db)
+    .await
+    .expect("insert a fresh contact on the prohibited account");
+    let fresh_email = format!("fresh-prohibited@{account_domain}");
+    sqlx::query(
+        "INSERT INTO sales_contact_points \
+             (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+         VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant_id)
+    .bind(fresh_contact_id)
+    .bind(&fresh_email)
+    .execute(&db)
+    .await
+    .expect("insert the fresh contact point");
+
     let queue = ActionQueue::new(db.clone(), format!("gate01-enroll-{tenant_id}"));
     let response = sales_autopilot::enrollments::start_outreach(
         &db,
@@ -340,7 +369,7 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
         &tenant_id,
         &sales_autopilot::enrollments::StartOutreachRequest {
             sequence_id: seq.sequence_id,
-            contact_ids: vec![seq.contact_id],
+            contact_ids: vec![fresh_contact_id],
             // Deprecated rolling-deploy field: the machine resolves the policy
             // per contact. A contradicting value would still be stale_policy.
             autonomy_policy_id: Some(seq.policy_id),

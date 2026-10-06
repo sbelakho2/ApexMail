@@ -793,6 +793,37 @@
         "MTA webhook delivery",
         "inbound webhook events"
       ]
+    },
+    {
+      "capability": "email-draft-agent",
+      "crate": "crates/ai-service",
+      "stage": "runtime-wired",
+      "deployment": {
+        "fact": "email_draft_agent",
+        "implementation_stage": "runtime-wired",
+        "binary_default": false,
+        "managed_cloud_enabled": true,
+        "enforcement_mode": "draft-only (every reply is stored pending_approval=true for human review; the agent refuses to start when AI_EMAIL_REQUIRE_APPROVAL is not set)",
+        "monitored": false,
+        "advertised": false
+      },
+      "evidence": {
+        "docker_target": "ai-service",
+        "compose_service": "ai-service",
+        "env_gate": {
+          "name": "AI_EMAIL_AGENT_ENABLED",
+          "crate": "crates/ai-service",
+          "default": "false"
+        },
+        "call_path": "crates/ai-service/src/bin/server.rs (spawn) -> crates/ai-service/src/email_agent.rs (EmailAnswerer::from_env_with_runtime over the process pool/LLM/governor; grounded verify + loop guards + per-tenant caps); approval queue at crates/api-server/src/routes/admin/ai_drafts.rs",
+        "metrics": null,
+        "explanation": "Draft-only by construction: the agent refuses to start without mandatory human approval, and a generation failure is never turned into a canned customer reply. Grounded against the canonical knowledge block; the reply pipeline's classification for the same message row steers the draft (joined by message id). No auto-send exists anywhere in this path."
+      },
+      "scan_aliases": [
+        "AI email drafts",
+        "mailbot",
+        "draft reply agent"
+      ]
     }
   ],
   "stale_marker_exceptions": {

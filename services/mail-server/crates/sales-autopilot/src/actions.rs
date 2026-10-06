@@ -2326,7 +2326,15 @@ mod tests {
         assert_eq!(attempt, 0, "replay grants a fresh attempt budget");
         assert_eq!(last_error, None);
         assert_eq!(completed_at, None);
-        assert!(due_at <= Utc::now(), "replay is immediately due");
+        // Compared against the DB clock: the claim predicate is
+        // `due_at <= NOW()` in SQL, and comparing a DB-set timestamp with the
+        // test process's clock is exactly the cross-clock race that used to
+        // make this assertion flake on sub-second skew.
+        let db_now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(due_at <= db_now, "replay is immediately due");
 
         // Replay is scoped to the owning tenant.
         let other_tenant = crate::test_db::unique_test_tenant("act-replay-other");

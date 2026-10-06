@@ -823,8 +823,13 @@ async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
         step_execution_id,
     )
     .await;
+    // The step-claim guard (audit SM7 F2) refuses to enqueue a second time
+    // while the step is `executing` with a lease that may still be live: the
+    // outcome is a RETRY, never a fabricated success for an unsent touch.
+    // What matters for crash-replay idempotency is the absence of a second
+    // message (asserted below), which holds on both paths.
     assert!(
-        matches!(replay, ActionOutcome::Succeeded),
+        matches!(replay, ActionOutcome::Retry(ref reason) if reason.contains("claim lost")),
         "an in-flight step must not enqueue again: {replay:?}"
     );
     assert_eq!(
