@@ -1,0 +1,39 @@
+{
+  "cases": [
+    {
+      "question": "What does the Pro plan cost?",
+      "must_contain": [
+        "89"
+      ],
+      "must_not_contain": [
+        "65"
+      ]
+    },
+    {
+      "question": "How many emails does Growth include?",
+      "must_contain": [
+        "500,000"
+      ],
+      "must_not_contain": [
+        "150,000"
+      ]
+    },
+    {
+      "question": "Do you offer HIPAA?",
+      "must_contain": [
+        "not currently offered"
+      ],
+      "must_not_contain": [
+        "HIPAA compliant",
+        "BAA available"
+      ]
+    },
+    {
+      "question": "What is your uptime SLA for Business?",
+      "must_contain": [],
+      "must_not_contain": [
+        "99.99"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "message": "This is too expensive for us right now.",
+      "expect": {
+        "disposition": [
+          "not_interested",
+          "question"
+        ],
+        "objection_class": "price"
+      }
+    },
+    {
+      "message": "Bad timing, we are heads down this quarter.",
+      "expect": {
+        "disposition": [
+          "not_interested",
+          "question"
+        ],
+        "objection_class": "timing"
+      }
+    },
+    {
+      "message": "We already use another vendor for sending.",
+      "expect": {
+        "disposition": [
+          "not_interested",
+          "question"
+        ],
+        "objection_class": "competitor"
+      }
+    },
+    {
+      "message": "I am not the decision maker here.",
+      "expect": {
+        "disposition": [
+          "not_interested",
+          "question"
+        ],
+        "objection_class": "authority"
+      }
+    },
+    {
+      "message": "Can we talk Thursday at 10?",
+      "expect": {
+        "disposition": [
+          "meeting_request"
+        ],
+        "objection_class": null
+      }
+    },
+    {
+      "message": "Please remove me from this list.",
+      "expect": {
+        "disposition": [
+          "unsubscribe"
+        ],
+        "objection_class": null
+      }
+    },
+    {
+      "message": "Out of office until Monday.",
+      "expect": {
+        "disposition": [
+          "ooo"
+        ],
+        "objection_class": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "objection_class": "price",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "discount",
+        "custom pricing below catalog",
+        "free forever"
+      ]
+    },
+    {
+      "objection_class": "timing",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "guaranteed onboarding date"
+      ]
+    },
+    {
+      "objection_class": "competitor",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "competitor is shutting down",
+        "we are cheaper than"
+      ]
+    }
+  ]
+}
