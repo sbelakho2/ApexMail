@@ -1074,6 +1074,25 @@ pub async fn rollback_usage_record(
         .await
         .map_err(UsageError::Db)?;
 
+    // F3 (audit): releasing the quota reservation must also release the
+    // logical-operation CLAIM. `claim_usage_operation_in_tx` inserts the
+    // canonical `usage_operations` fence BEFORE the metering row; deleting
+    // only the meter row left the claim behind, so a retry of the same
+    // idempotency key hit `UsageOperationClaim::Replay` and was admitted as
+    // `duplicate: true` — allowed, unmetered and unquota'd forever (both
+    // the REST route and SMTP submission retry the same logical send).
+    // Same transaction: the meter row, its claim and the quota counter all
+    // stand or fall together, so the retry re-claims and IS metered.
+    sqlx::query("DELETE FROM usage_operations WHERE operation_key = $1")
+        .bind(usage_operation_key(
+            tenant_id,
+            event_type_to_str(event_type),
+            event_id,
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(UsageError::Db)?;
+
     let mut audit_metadata = build_metering_audit_metadata(
         event_type_to_str(event_type),
         quantity,

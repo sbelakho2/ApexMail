@@ -40,7 +40,7 @@ MOCK_TOOL_RESULTS = {
     "search_events": '{"events": [{"message_id": "msg_test1", "status": "delivered", "opened": false}]}',
     "get_suppression_status": '{"email": "test@example.com", "suppressed": true, "reason": "unsubscribe"}',
     "list_webhooks": '{"webhooks": [{"id": "wh_1", "url": "https://example.com/webhook", "status": "failing", "last_status_code": 404}]}',
-    "get_usage_stats": '{"plan": "Scale", "emails": {"used": 425000, "limit": 2000000}, "api_calls": {"used": 3200000, "limit": 20000000}, "days_remaining": 10}',
+    "get_usage_stats": '{"plan": "Business", "emails": {"used": 425000, "limit": 2000000}, "api_calls": {"used": 3200000, "limit": 20000000}, "days_remaining": 10}',
     "get_deliverability_report": '{"overall_score": 62, "delivery_rate": 92.0, "bounce_rate": 4.7, "complaint_rate": 0.13}',
     "check_blocklist": '{"ip": "198.51.100.12", "listings": [{"blocklist": "Spamhaus SBL", "listed": true}]}',
     "get_analytics_dashboard": '{"emails_sent": 1450000, "delivery_rate": 99.0, "bounce_rate": 0.5}',

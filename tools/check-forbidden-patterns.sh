@@ -46,8 +46,17 @@ FORBIDDEN_PATTERNS+=(
 FOUND=0
 HTML_FILES=$(find apps/marketing-zola/public -name "*.html" 2>/dev/null || true)
 
+# The gate scans the BUILT site, so it is meaningful only after a zola build
+# (CI runs it in zola_gates, after the build). "No input" must not silently
+# read as "no violations": --require-build (used by CI) turns the absent-site
+# case into a hard failure; without it (the pre-commit hook, a fresh
+# checkout) the skip is announced explicitly.
 if [ -z "$HTML_FILES" ]; then
-  echo "No HTML files found in public/ directory."
+  if [ "${1:-}" = "--require-build" ]; then
+    echo "ERROR: no built HTML under apps/marketing-zola/public — run the zola build first (CI runs this gate right after the zola_gates build)." >&2
+    exit 1
+  fi
+  echo "No HTML files found in public/ directory — gate SKIPPED (needs a built site; run the zola build, or pass --require-build to fail instead)."
   exit 0
 fi
 

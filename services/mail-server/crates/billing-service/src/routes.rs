@@ -644,11 +644,21 @@ async fn seed_plans(
     if let Err(response) = require_any_scope(&scope) {
         return Ok(response);
     }
-    for plan in plans::default_plans() {
-        plans::upsert_plan(&state.db, &plan).await?;
-    }
+    // F1 (audit): seeding is RECONCILIATION, not insert-only. The old
+    // upsert loop preserved every drifted row (`COALESCE(plans.x, EXCLUDED.x)`)
+    // and never deactivated foreign/test rows, so the live table kept serving
+    // Free 30k / Pro €10 / Business €50 and active `DF5 Small` rows forever.
+    // The reconcile forces the canonical catalog values and deactivates rows
+    // whose name is not a catalog plan; stripe price ids survive.
+    let report = plans::reconcile_plans_with_catalog(&state.db).await?;
 
-    Ok(Json(serde_json::json!({ "message": "Default plans seeded" })).into_response())
+    Ok(Json(serde_json::json!({
+        "message": "Default plans reconciled with the canonical catalog",
+        "inserted": report.inserted,
+        "repaired": report.repaired,
+        "deactivated": report.deactivated,
+    }))
+    .into_response())
 }
 
 const LEGACY_PAYG_MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;

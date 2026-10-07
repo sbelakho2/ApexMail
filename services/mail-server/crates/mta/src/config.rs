@@ -1296,6 +1296,79 @@ mod tests {
         );
     }
 
+    /// Regression (dogfood 2026-10-06, P1): the production gates in
+    /// `MtaConfig::validate` and `worker-processors/bin/worker.rs` require
+    /// `VERP_HMAC_SECRET`, but no deploy artifact set it — a deployment built
+    /// from the shipped example crash-looped the MTA or silently stopped
+    /// authenticating bounces. This pins the wire-through: the example env
+    /// declares it (>= 32 bytes), the production compose mounts it into BOTH
+    /// the mta-server and the worker, and the entrypoint wrapper bridges the
+    /// Docker secret to the native env var both binaries read.
+    #[test]
+    fn production_deploy_artifacts_carry_the_required_verp_hmac_secret() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+
+        let example = std::fs::read_to_string(root.join(".env.production.example"))
+            .expect(".env.production.example must be readable");
+        let declared = example
+            .lines()
+            .find_map(|line| line.strip_prefix("VERP_HMAC_SECRET="))
+            .expect("the production env template must declare VERP_HMAC_SECRET");
+        assert!(
+            declared.trim().len() >= apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN,
+            "the documented value must satisfy the >= {} byte gate, got {declared:?}",
+            apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+        );
+        assert!(
+            example.contains("openssl rand -base64 48"),
+            "the template must carry the generator command for the secret"
+        );
+
+        let compose = std::fs::read_to_string(root.join("docker-compose.prod.yml"))
+            .expect("docker-compose.prod.yml must be readable");
+        assert!(
+            compose.contains("verp_hmac_secret:"),
+            "the production compose must define the verp_hmac_secret Docker secret"
+        );
+        assert!(
+            compose.contains("PROD_VERP_HMAC_SECRET_FILE"),
+            "the compose secret must be sourced from PROD_VERP_HMAC_SECRET_FILE"
+        );
+        assert_eq!(
+            compose
+                .matches("VERP_HMAC_SECRET_FILE: /run/secrets/verp_hmac_secret")
+                .count(),
+            2,
+            "BOTH the mta-server and the worker must mount the shared secret"
+        );
+        assert_eq!(
+            compose.matches("- verp_hmac_secret").count(),
+            2,
+            "both services must list the verp_hmac_secret in their secrets block"
+        );
+
+        let wrapper = std::fs::read_to_string(root.join("deploy/scripts/entrypoint-wrapper.sh"))
+            .expect("the entrypoint wrapper must be readable");
+        assert!(
+            wrapper.contains("export_from_file VERP_HMAC_SECRET"),
+            "the wrapper must bridge VERP_HMAC_SECRET_FILE to VERP_HMAC_SECRET"
+        );
+
+        // The value shape documented by the template satisfies this crate's
+        // production validation (only the VERP rule is under test here).
+        let mut config = MtaConfig {
+            node_env: "production".into(),
+            ..Default::default()
+        };
+        config.verp.hmac_secret = Some(declared.trim().to_string());
+        if let Err(errors) = config.validate() {
+            assert!(
+                !errors.to_string().contains("VERP_HMAC_SECRET"),
+                "the template's documented value must satisfy the production gate: {errors}"
+            );
+        }
+    }
+
     #[test]
     fn short_verp_secret_is_rejected_everywhere() {
         let mut config = MtaConfig::default();

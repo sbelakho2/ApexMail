@@ -45,3 +45,20 @@ case normalize through the 064 helpers.
 - Idempotent guards (`to_regclass`/`IF NOT EXISTS`) — follow 101-108.
 - Never edit an applied migration; add a new one.
 - Long-running type changes: see 064's batching pattern and 066's notes.
+
+## Long-lived hosts: reclaim the test-database clones
+
+Every DB-backed suite provisions an `apexmail_*` clone of the canonical
+template and leaves it behind (CI is one-shot, so nothing cleans up). On a
+developer or long-lived CI host the clones grow without bound — the
+2026-10-07 whole-repo dogfood found 1,096 of them (~55 GB) and the resulting
+disk pressure crashed Postgres mid-suite. Reclaim them with:
+
+```bash
+DATABASE_URL=postgresql://… cargo run -p migrator -- --gc-test-databases
+```
+
+The mode drops `apexmail_%` databases other than the protected base
+(`apexmail`; extend protection with `MIGRATOR_GC_KEEP=name1,name2`), skips
+databases with live connections, and reports every failure. Run it after a
+test wave, before the next one.

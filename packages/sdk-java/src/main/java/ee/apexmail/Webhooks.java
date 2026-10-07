@@ -40,6 +40,9 @@ public final class Webhooks {
         "message.clicked",
         "message.cancelled",
         "recipient.unsubscribed",
+        "campaign.started",
+        "campaign.ab_winner_selected",
+        "campaign.completed",
         "placement_test.completed",
         "inbound",
         "*"

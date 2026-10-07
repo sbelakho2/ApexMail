@@ -2788,6 +2788,24 @@ impl EmailProcessor {
                 self.handle_success(job, &result).await
             }
             Err(e) => {
+                // P1 split-brain fix (dogfood 2026-10-06): the relay durably
+                // queued this send and owns its retry/DSN ladder. DEFER the
+                // queue row (no attempt consumed, never dead-lettered) and
+                // observe the relay's terminal state on a later claim.
+                // Continuing down the failure path used to fail a message the
+                // relay still held and could deliver.
+                if matches!(e, ProcessorError::RelayDeliveryPending(_)) {
+                    info!(
+                        job_id = %job.id,
+                        recipient = %job.to,
+                        route = %route,
+                        reason = %e,
+                        "outbound MTA holds the send — deferring until the relay terminalizes"
+                    );
+                    self.requeue_job(job, "relay_delivery_pending").await?;
+                    return Ok(());
+                }
+
                 self.smtp_circuit_breaker.record_failure();
 
                 // F-21: classify by the structured SMTP reply code when the
@@ -3064,9 +3082,11 @@ impl EmailProcessor {
         Ok(domain)
     }
 
-    /// Prepare email for sending. DKIM follows the ROUTE, not the process-wide
-    /// `transport_type`: a dedicated (relay SMTP) send must carry the local
-    /// signature, while a shared SES send is signed by SES BYODKIM.
+    /// Prepare email for sending. DKIM follows the ACTUAL transport backend,
+    /// not the route or the process-wide `transport_type` alone: a dedicated
+    /// (relay SMTP) send must carry the local signature, a shared-route send
+    /// whose backend is the SMTP relay (SMTP mode) must ALSO carry it, and
+    /// only the shared SES client path is signed downstream by SES BYODKIM.
     fn prepare_email(
         &self,
         job: &EmailJob,
@@ -3222,18 +3242,51 @@ impl EmailProcessor {
             headers.push((key, value));
         }
 
-        // Dedicated (relay SMTP) delivery signs with the key whose public half
-        // was displayed in the dashboard. Shared SES delivery is signed by SES
-        // BYODKIM using that same key, so it intentionally does not attach a
-        // second local signature.
-        let dkim = if route.is_dedicated() {
+        // DKIM follows the ACTUAL backend that will put bytes on the wire,
+        // not merely the route: a dedicated relay send must carry the local
+        // signature, AND so must a shared-route send when the shared backend
+        // is the SMTP relay (`EMAIL_TRANSPORT_TYPE=smtp` / Mailpit / an
+        // operator relay) — nothing downstream signs there. Only the SES
+        // client path is skipped: SES signs with BYODKIM using the same key.
+        // Dogfood finding 2026-10-06 P1: keyed off the route alone, an
+        // SMTP-mode deployment shipped 100% unsigned mail while the
+        // dashboards reported the domain verified with DKIM enabled.
+        let shared_backend_is_smtp = self.transport.shared_backend_name() == Some("smtp");
+        let needs_local_signature = route.is_dedicated() || shared_backend_is_smtp;
+        let dkim = if needs_local_signature {
             if !self.config.dkim.enabled {
-                return Err(ProcessorError::Config(
-                    "DKIM is required for dedicated SMTP delivery of verified domains".into(),
-                ));
+                if route.is_dedicated() {
+                    return Err(ProcessorError::Config(
+                        "DKIM is required for dedicated SMTP delivery of verified domains".into(),
+                    ));
+                }
+                // Shared SMTP route with the global DKIM switch off: the
+                // operator explicitly opted out; keep the legacy unsigned
+                // behavior rather than dead-lettering unverified domains.
+                tracing::warn!(
+                    job_id = %job.id,
+                    "SMTP-mode shared route with DKIM disabled — sending unsigned (DKIM_ENABLED=false)"
+                );
+                None
+            } else {
+                match smtp_dkim_config_for_domain(domain) {
+                    Ok(config) => Some(config),
+                    // A dedicated send has no legitimate unsigned shape.
+                    Err(error) if route.is_dedicated() => return Err(error),
+                    // Shared SMTP route on a domain without key material:
+                    // there is nothing to sign with (e.g. an unverified
+                    // domain that may ride the relay outside SES mode).
+                    Err(error) => {
+                        tracing::warn!(
+                            job_id = %job.id,
+                            domain_id = %domain.id,
+                            error = %error,
+                            "SMTP-mode shared route has no usable DKIM key for this domain — sending unsigned"
+                        );
+                        None
+                    }
+                }
             }
-
-            Some(smtp_dkim_config_for_domain(domain)?)
         } else {
             None
         };
@@ -3948,9 +4001,18 @@ impl EmailProcessor {
         // delivery time for this recipient-send onto the bounce, so outcome
         // events never lose provenance. When nothing was persisted (the
         // MX was never resolved) both fields stay NULL — never inferred.
+        //
+        // Best-effort BY CONTRACT, exactly like `handle_success`'s sent
+        // event: the durable terminal transition (row → bounced, suppression
+        // insert) has already committed above. A `?` here used to abort the
+        // function before `record_sales_feedback` ran, so a bounce-analytics
+        // INSERT failure silently skipped the sales feedback ledger AND made
+        // `process_job` classify the outcome as `TransportError` instead of
+        // `HardBounce` (skewing the error-rate circuit breaker). Log + metric;
+        // the bounce stands.
         let (recipient_provider, provider_source) =
             carried_recipient_provider(&self.db, &job.tenant_id, &job.message_id, &job.to).await;
-        insert_recipient_event(
+        if let Err(e) = insert_recipient_event(
             &self.db,
             RecipientEvent {
                 tenant_id: &job.tenant_id,
@@ -3963,7 +4025,17 @@ impl EmailProcessor {
                 provider_source: provider_source.as_deref(),
             },
         )
-        .await?;
+        .await
+        {
+            metrics::counter!("email.bounced_event_write_failed").increment(1);
+            error!(
+                job_id = %job.id,
+                recipient = %job.to,
+                error = %e,
+                "bounce event INSERT failed — the recipient IS bounced (row already terminal); \
+                 analytics event lost, not the bounce"
+            );
+        }
 
         // Audit items 10/12: feed the sales feedback loop. ONE
         // `sales_sender_events` row (`hard_bounce`) plus the `bounce` outcome
@@ -4225,14 +4297,35 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
         return SplitMimeHeaders::default();
     };
 
+    // F26: the structured Reply-To may ride the canonical `reply_to` key or
+    // the RFC 5322 hyphenated spelling (`reply-to`) the MTA submission
+    // parser used before it was unified — both are the SAME queue contract
+    // key and neither is ever a custom header (a raw `reply-to` would be
+    // dropped by PROTECTED_HEADERS, silently losing the sender's Reply-To).
+    let reply_to_key = |key: &str| -> bool {
+        let key = key.to_ascii_lowercase();
+        key == apexmail_lib::email_headers::QUEUE_HEADER_REPLY_TO
+            || key == apexmail_lib::email_headers::MIME_HEADER_REPLY_TO
+    };
+
     // Legacy flat custom-header map (no reserved keys)?
     let is_server_shape = obj.contains_key("to") || obj.contains_key("custom");
     if !is_server_shape {
+        let mut custom: Vec<(String, String)> = Vec::new();
+        let mut reply_to: Option<Mailbox> = None;
+        for (key, value) in obj {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            if reply_to_key(key) {
+                reply_to = Mailbox::parse(value);
+                continue;
+            }
+            custom.push((key.clone(), value.to_string()));
+        }
         return SplitMimeHeaders {
-            custom: obj
-                .iter()
-                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
-                .collect(),
+            reply_to,
+            custom,
             ..SplitMimeHeaders::default()
         };
     }
@@ -4278,7 +4371,9 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
             .and_then(Mailbox::parse)
     };
     // F48: the structured reply_to_mailbox object is authoritative when
-    // present; the joined string remains the legacy fallback.
+    // present; the joined string remains the legacy fallback. The RFC 5322
+    // hyphenated alias is accepted last so a foreign writer's flat key is
+    // never silently turned into a `<something>_to` custom header.
     let reply_to_field = || -> Option<Mailbox> {
         obj.get("reply_to_mailbox")
             .and_then(|v| v.as_object())
@@ -4289,7 +4384,8 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
                     email: email.to_string(),
                 })
             })
-            .or_else(|| str_field("reply_to"))
+            .or_else(|| str_field(apexmail_lib::email_headers::QUEUE_HEADER_REPLY_TO))
+            .or_else(|| str_field(apexmail_lib::email_headers::MIME_HEADER_REPLY_TO))
     };
 
     SplitMimeHeaders {
@@ -4601,12 +4697,17 @@ fn dlp_annotation(verdict: &PreSendVerdict, disposition: &str) -> JsonValue {
     })
 }
 
-/// Append one DLP enforcement row to the canonical `audit_logs` hash chain
-/// (previous_hash → hash, the same discipline as
-/// `crate::common::graduation`). `details` names the RULE CLASS(es) of every
-/// finding so a refusal/hold is reviewable without re-running the engine.
-/// Runs INSIDE the caller's transaction: the enforcement write and its
-/// evidence commit together or not at all.
+/// Append one DLP enforcement row to the canonical `audit_logs` hash chain.
+/// `details` names the RULE CLASS(es) of every finding so a refusal/hold is
+/// reviewable without re-running the engine.
+///
+/// Routed through [`crate::common::audit::append_audit_log`] (migration 105):
+/// the entry advances the single `audit_chain_head` row in the SAME
+/// transaction as the insert, so concurrent worker transactions cannot fork
+/// the chain and the platform sequencer sees the worker's rows. The previous
+/// `SELECT hash ... ORDER BY timestamp DESC` pattern had both defects and is
+/// deliberately gone. Runs INSIDE the caller's transaction: the enforcement
+/// write and its evidence commit together or not at all.
 async fn record_dlp_audit(
     conn: &mut sqlx::PgConnection,
     job: &EmailJob,
@@ -4614,11 +4715,6 @@ async fn record_dlp_audit(
     action: &str,
     outcome: &str,
 ) -> Result<(), sqlx::Error> {
-    let previous_hash: Option<String> =
-        sqlx::query_scalar("SELECT hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
-            .fetch_optional(&mut *conn)
-            .await?
-            .flatten();
     let details = serde_json::json!({
         "disposition": outcome,
         "rule_classes": verdict.rule_classes,
@@ -4629,43 +4725,19 @@ async fn record_dlp_audit(
         "send_unit": send_unit_of(job),
         "gate": "worker_pre_send",
         "engine": "dlp-engine",
-    })
-    .to_string();
-    let timestamp = Utc::now();
-    let mut hasher = sha2::Sha256::new();
-    use sha2::Digest as _;
-    hasher.update(job.tenant_id.as_bytes());
-    hasher.update(b"|");
-    hasher.update(action.as_bytes());
-    hasher.update(b"|");
-    hasher.update(job.id.as_bytes());
-    hasher.update(details.as_bytes());
-    hasher.update(timestamp.to_rfc3339().as_bytes());
-    if let Some(previous) = &previous_hash {
-        hasher.update(previous.as_bytes());
-    }
-    let hash = hasher.finalize();
-    let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    sqlx::query(
-        r#"
-        INSERT INTO audit_logs
-            (id, tenant_id, action, resource, resource_id, details,
-             outcome, timestamp, hash, previous_hash, signature)
-        VALUES (gen_random_uuid(), $1, $2, 'email_queue', $3, $4::jsonb, $5, $6, $7, $8, $9)
-        "#,
+    });
+    crate::common::audit::append_audit_log(
+        conn,
+        crate::common::audit::AuditEntry {
+            tenant_id: Some(&job.tenant_id),
+            action,
+            resource: "email_queue",
+            resource_id: Some(&job.id),
+            details,
+            outcome,
+        },
     )
-    .bind(&job.tenant_id)
-    .bind(action)
-    .bind(&job.id)
-    .bind(&details)
-    .bind(outcome)
-    .bind(timestamp)
-    .bind(&hash_hex)
-    .bind(&previous_hash)
-    .bind(format!("dlp:{hash_hex}"))
-    .execute(&mut *conn)
     .await
-    .map(|_| ())
 }
 
 /// The recipient-provider pair already persisted for this recipient-send
@@ -5736,6 +5808,132 @@ mod tests {
             smtp_dkim_config_for_domain(&domain),
             Err(ProcessorError::Dkim(message)) if message.contains("does not match")
         ));
+    }
+
+    /// Regression (dogfood 2026-10-06, P1): in SMTP mode the SHARED route is
+    /// the local relay, which signs nothing — the DKIM decision keyed off the
+    /// route alone, so every self-hosted message left unsigned (DMARC fail /
+    /// spam foldering) while dashboards showed the domain verified with DKIM
+    /// enabled. The shared route on an SMTP backend must carry the domain's
+    /// local signature, and the wire must show a real `DKIM-Signature`.
+    #[tokio::test]
+    async fn smtp_mode_shared_route_is_dkim_signed_on_the_wire() {
+        use std::io::{BufRead, BufReader, Write};
+
+        // Install the ring crypto provider for rustls (required by
+        // mail-send's SmtpClientBuilder, which the SMTP transport exercises).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("keypair");
+        let domain = Domain {
+            id: "domain-1".into(),
+            tenant_id: "tenant-1".into(),
+            domain: "example.com".into(),
+            dkim_selector: Some("am-test".into()),
+            dkim_public_key: Some(key_pair.public_key),
+            dkim_private_key: Some(key_pair.private_key_pem.to_string()),
+            warmup_enabled: false,
+            warmup_day: 0,
+            ses_verified: true,
+            dedicated_ips: vec![],
+            return_path: None,
+        };
+
+        // Minimal SMTP capture stub: greeting, EHLO, MAIL/RCPT, DATA capture.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
+        let port = listener.local_addr().expect("addr").port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            stream.write_all(b"220 stub.example ESMTP\r\n").unwrap();
+            let mut captured = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let upper = line.to_ascii_uppercase();
+                if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                    stream.write_all(b"250 stub.example\r\n").unwrap();
+                } else if upper.starts_with("MAIL") || upper.starts_with("RCPT") {
+                    stream.write_all(b"250 2.0.0 Ok\r\n").unwrap();
+                } else if upper.starts_with("DATA") {
+                    stream
+                        .write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
+                        .unwrap();
+                    loop {
+                        let mut chunk = String::new();
+                        if reader.read_line(&mut chunk).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if chunk == ".\r\n" {
+                            break;
+                        }
+                        captured.push_str(&chunk);
+                    }
+                    stream.write_all(b"250 2.0.0 Ok: queued\r\n").unwrap();
+                } else if upper.starts_with("QUIT") {
+                    stream.write_all(b"221 2.0.0 Bye\r\n").unwrap();
+                    break;
+                } else {
+                    stream.write_all(b"250 2.0.0 Ok\r\n").unwrap();
+                }
+            }
+            captured
+        });
+
+        let smtp = crate::common::SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            secure: false,
+            username: None,
+            password: None,
+            ..Default::default()
+        };
+        let smtp_transport: Arc<dyn EmailTransport> =
+            Arc::new(crate::email::transport::SmtpTransport::new(smtp.clone()));
+        let mut config = EmailConfig {
+            transport_type: TransportType::Smtp,
+            smtp,
+            ..Default::default()
+        };
+        config.dkim.enabled = true;
+        config.tracking.enabled = false;
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let hybrid = HybridTransport::new(Some(smtp_transport.clone()), None);
+        let processor = EmailProcessor::with_transport(db, redis, config, hybrid)
+            .await
+            .expect("processor");
+        assert_eq!(
+            processor.transport.shared_backend_name(),
+            Some("smtp"),
+            "the shared route must be bound to the SMTP relay for this test"
+        );
+
+        let prepared = processor
+            .prepare_email(&tracking_gate_job(), &domain, &DeliveryRoute::SesShared)
+            .expect("prepare");
+        assert!(
+            prepared.dkim.is_some(),
+            "an SMTP-mode shared send must carry the domain's local DKIM config"
+        );
+
+        smtp_transport
+            .send(&prepared, &DeliveryRoute::SesShared)
+            .await
+            .expect("the stub relay accepts");
+        let raw = server.join().expect("stub server thread");
+        assert!(
+            raw.contains("DKIM-Signature:"),
+            "the SMTP-mode send must emit a DKIM-Signature header: {raw}"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -8065,6 +8263,74 @@ mod tests {
         assert_eq!(custom, vec![("X-Old".to_string(), "shape".to_string())]);
     }
 
+    /// Regression (dogfood 2026-10-06, P2): the MTA's SMTP-submission parser
+    /// writes Reply-To into the FLAT queue-header map under the canonical
+    /// `reply_to` key. The flat-map branch used to hand it back as a custom
+    /// header — which the protected list then dropped — so an SMTP-submitted
+    /// Reply-To was silently lost. Both spellings must produce the structured
+    /// Reply-To, and it must reach the built MIME as a real `Reply-To` header.
+    #[tokio::test]
+    async fn flat_queue_map_reply_to_survives_to_the_built_mime() {
+        for key in [
+            apexmail_lib::email_headers::QUEUE_HEADER_REPLY_TO,
+            apexmail_lib::email_headers::MIME_HEADER_REPLY_TO,
+        ] {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                key.to_string(),
+                serde_json::Value::String("Helpdesk <helpdesk@example.com>".into()),
+            );
+            map.insert(
+                "x-campaign".to_string(),
+                serde_json::Value::String("summer".into()),
+            );
+            let headers = serde_json::Value::Object(map);
+
+            let split = split_mime_headers(Some(&headers));
+            assert_eq!(
+                split.reply_to,
+                Some(Mailbox {
+                    name: Some("Helpdesk".into()),
+                    email: "helpdesk@example.com".into(),
+                }),
+                "key {key:?} must produce the structured Reply-To"
+            );
+            assert_eq!(
+                split.custom,
+                vec![("x-campaign".to_string(), "summer".to_string())],
+                "only genuine custom headers stay custom (key {key:?})"
+            );
+
+            let job = EmailJob {
+                headers: Some(headers),
+                ..tracking_gate_job()
+            };
+            let processor =
+                make_processor_with_tracking(crate::common::TrackingConfig::default()).await;
+            let prepared = processor
+                .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+                .expect("prepare");
+            let raw = String::from_utf8_lossy(&crate::email::transport::build_raw_mime(&prepared))
+                .to_string();
+            // mail-builder quotes a display name ("Helpdesk" <addr>), so assert
+            // the header LINE and the address, not one exact spelling.
+            let reply_to_line = raw
+                .lines()
+                .find(|line| line.starts_with("Reply-To:"))
+                .unwrap_or_else(|| {
+                    panic!("the built MIME must carry the Reply-To header for key {key:?}: {raw}")
+                });
+            assert!(
+                reply_to_line.contains("helpdesk@example.com"),
+                "the Reply-To header must carry the submitted mailbox (key {key:?}): {reply_to_line}"
+            );
+            assert!(
+                raw.contains("x-campaign: summer"),
+                "genuine custom headers still pass through for key {key:?}: {raw}"
+            );
+        }
+    }
+
     #[test]
     fn split_mime_headers_absent_metadata_is_all_empty() {
         let SplitMimeHeaders {
@@ -10387,6 +10653,45 @@ mod end_to_end_db_tests {
         assert_eq!(
             jobs[0].to, "lead@example.com",
             "the first-response row must win the single claim slot despite being newer"
+        );
+        Ok(())
+    }
+
+    /// Perf smoke (plan §9): under a seeded backlog the first-response lane
+    /// must clear the response rows within the FIRST claim batch — a bounded,
+    /// deterministic assertion that "instant response" is not starved by
+    /// ordinary mail. (The latency SLO itself is measured at enqueue; this
+    /// pins the queueing behaviour that bounds it.)
+    #[tokio::test]
+    async fn perf_first_response_priority_lane_clears_a_seeded_burst(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_first_response_burst").await else { return Ok(()) };
+        let fixture = seed(&pool, "first_response_burst").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+
+        // 500 default-priority rows (the backlog) and 10 first responses.
+        for _ in 0..500 {
+            insert_queue_row(&pool, &fixture, "backlog@example.com", 5, 600).await;
+        }
+        for index in 0..10 {
+            insert_queue_row(
+                &pool,
+                &fixture,
+                &format!("lead-{index}@example.com"),
+                100,
+                0,
+            )
+            .await;
+        }
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        assert_eq!(jobs.len(), 10);
+        assert!(
+            jobs.iter().all(|job| job.to.starts_with("lead-")),
+            "every slot in the first batch must be a first response, got: {:?}",
+            jobs.iter().map(|job| job.to.clone()).collect::<Vec<_>>()
         );
         Ok(())
     }
@@ -13063,6 +13368,89 @@ mod orchestration_tests {
         Ok(())
     }
 
+    /// Regression (dogfood 2026-10-06, P1 split-brain): when the relay holds
+    /// the send (its own durable retry ladder owns delivery), the processor
+    /// DEFERS the queue row — no attempt consumed, never dead-lettered — and
+    /// observes the terminal state on a later claim. The old failure path
+    /// dead-lettered the row at the retry ceiling while the relay could still
+    /// deliver it.
+    #[tokio::test]
+    async fn relay_delivery_pending_defers_instead_of_dead_lettering(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        struct RelayPendingTransport;
+
+        #[async_trait::async_trait]
+        impl EmailTransport for RelayPendingTransport {
+            fn transport_name(&self) -> &str {
+                "relay-pending"
+            }
+            fn supports_source_binding(&self) -> bool {
+                true
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+            async fn send(
+                &self,
+                _email: &PreparedEmail,
+                _route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                Err(ProcessorError::RelayDeliveryPending(
+                    "relay already holds the send unit".into(),
+                ))
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_relay_pending").await else { return Ok(()) };
+        let fixture = seed(&pool, "relay-pending").await;
+        let processor = build(
+            &pool,
+            Arc::new(RelayPendingTransport) as Arc<dyn EmailTransport>,
+            orch_config(1, 20),
+        )
+        .await;
+        let mut job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        // Exhausted retry budget: the old failure path would dead-letter here.
+        job.attempt = processor.config.base.max_retries as i32;
+
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("a relay-held send is a deferral, not a job error");
+
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "pending",
+            "the row must be deferred, never failed"
+        );
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("relay_delivery_pending"),
+            "the deferral must name its reason"
+        );
+        let dlq: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_dlq WHERE job_id = $1")
+            .bind(fixture.queue_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("dlq");
+        assert_eq!(
+            dlq, 0,
+            "a relay-held send must never be dead-lettered (split-brain)"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
     // ── 7. Dispatch-time gate refusal arms ────────────────────────────────
 
     /// Tenant identity gaps defer at the policy gate: an empty tenant id and
@@ -13454,6 +13842,119 @@ mod orchestration_tests {
         .fetch_optional(pool)
         .await
         .expect("audit row read")
+    }
+
+    /// Regression (dogfood 2026-10-06, P1): DLP audit rows used to chain onto
+    /// the newest `audit_logs` row without a lock and never advanced
+    /// `audit_chain_head` — forking the canonical chain (migration 105 exists
+    /// to prevent exactly this). The canonical writer must make the DLP row
+    /// the chain head, sequence it, and re-derive under the shared byte
+    /// contract.
+    #[tokio::test]
+    async fn dlp_audit_append_advances_the_canonical_chain_head_and_re_derives(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_dlp_audit_chain").await else { return Ok(()) };
+        let fixture = seed(&pool, "dlp-audit-chain").await;
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            ..bare_orch_job()
+        };
+        let verdict = PreSendVerdict {
+            action: DlpAction::Block,
+            risk_score: 9.0,
+            rule_classes: vec!["pii:ssn".into()],
+            summary: "regression fixture finding".into(),
+        };
+
+        let before: Option<i64> =
+            sqlx::query_scalar("SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_optional(&pool)
+                .await
+                .expect("head seq before");
+        let mut tx = pool.begin().await?;
+        record_dlp_audit(&mut tx, &job, &verdict, "dlp.outbound_block", "refused")
+            .await
+            .expect("the canonical DLP append must succeed");
+        tx.commit().await?;
+
+        let after: i64 =
+            sqlx::query_scalar("SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_one(&pool)
+                .await
+                .expect("head seq after");
+        assert_eq!(
+            after,
+            before.unwrap_or(0) + 1,
+            "the DLP append must advance the canonical sequencer"
+        );
+
+        let resource_id = fixture.queue_id.to_string();
+        let (head_hash, row_hash, details, timestamp): (
+            String,
+            String,
+            JsonValue,
+            chrono::DateTime<Utc>,
+        ) = sqlx::query_as(
+            "SELECT h.head_hash, a.hash, a.details, a.timestamp \
+             FROM audit_chain_head h, audit_logs a \
+             WHERE h.chain_id = 'global' \
+               AND a.action = 'dlp.outbound_block' AND a.resource_id = $1",
+        )
+        .bind(&resource_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the DLP audit row and the chain head");
+        assert_eq!(
+            head_hash, row_hash,
+            "the DLP row IS the canonical chain head, not a fork"
+        );
+        assert_eq!(
+            row_hash,
+            apexmail_lib::audit::audit_hash(
+                Some(&fixture.tenant_id),
+                None,
+                "dlp.outbound_block",
+                "email_queue",
+                Some(&resource_id),
+                &details,
+                timestamp,
+            ),
+            "the row hash must follow the shared canonical byte contract"
+        );
+        // The stored HMAC verifies against the chain link with the test
+        // deployment's fallback signing key (NODE_ENV is not production).
+        let signature: String = sqlx::query_scalar(
+            "SELECT signature FROM audit_logs WHERE resource_id = $1 AND action = 'dlp.outbound_block'",
+        )
+        .bind(&resource_id)
+        .fetch_one(&pool)
+        .await
+        .expect("signature");
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT previous_hash FROM audit_logs WHERE resource_id = $1 AND action = 'dlp.outbound_block'",
+        )
+        .bind(&resource_id)
+        .fetch_one(&pool)
+        .await
+        .expect("previous hash");
+        let expected_signature = apexmail_lib::audit::audit_log_signature(
+            previous.as_deref(),
+            &row_hash,
+            "apexmail-audit-fallback-key",
+        )
+        .expect("signature");
+        assert_eq!(
+            signature, expected_signature,
+            "the DLP row's chain link must be signed like every canonical writer's"
+        );
+
+        pool.close().await;
+        Ok(())
     }
 
     async fn queue_metadata(pool: &PgPool, queue_id: uuid::Uuid) -> JsonValue {
@@ -16187,6 +16688,98 @@ mod residual_arms_db_tests {
             .record_sales_feedback(&job, SalesDeliveryEvent::SoftBounce, "smtp")
             .await;
         set_fault(&pool, "sender_event", false).await;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Regression (dogfood 2026-10-06, P2): the hard-bounce `events` INSERT
+    /// used to be `?`-propagated. The durable terminal transition (row →
+    /// bounced, suppression) has already committed by then, so an analytics
+    /// failure aborted the function BEFORE `record_sales_feedback` ran: the
+    /// bounce never reached `sales_outcomes`/`sales_sender_events`, and
+    /// `process_job` classified the outcome as a transport error instead of
+    /// `HardBounce`. Force ONLY the analytics INSERT to fail (trigger-based
+    /// fault injection on `events`) and prove the bounce still completes and
+    /// the sales feedback ledger receives the fact.
+    #[tokio::test]
+    async fn hard_bounce_event_failure_does_not_skip_the_sales_feedback_ledger(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_hb_event_fail").await else { return Ok(()) };
+        let seed = seed_sales(&pool, "hb-event-fail").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+
+        // Claim the sales-linked row so the handler's lease fence matches.
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        assert_eq!(job.id, seed.queue_id.to_string());
+        assert_eq!(
+            job.sales_step_execution_id.as_deref(),
+            Some(seed.step_execution_id.to_string().as_str()),
+            "the claimed job must carry the typed sales provenance"
+        );
+
+        // Force ONLY the analytics INSERT to fail.
+        install_fault(&pool, "bounce_event", "events", "INSERT").await;
+        set_fault(&pool, "bounce_event", true).await;
+
+        let hard = ProcessorError::Smtp {
+            code: 550,
+            enhanced: Some("5.1.1".into()),
+            message: "user unknown".into(),
+        };
+        processor
+            .handle_hard_bounce(&job, &hard, &DeliveryRoute::SesShared)
+            .await
+            .expect("a bounce-analytics INSERT failure must not fail the bounce");
+        set_fault(&pool, "bounce_event", false).await;
+
+        // The durable terminal transition stands...
+        let (status, _) = row_state(&pool, seed.queue_id).await;
+        assert_eq!(status, "bounced", "the row is terminally bounced");
+        // ...and the sales feedback ledger received the hard bounce, which the
+        // old `?` skipped.
+        let outcomes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_outcomes \
+             WHERE tenant_id = $1 AND outcome = 'bounce' AND step_execution_id = $2",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.step_execution_id)
+        .fetch_one(&pool)
+        .await
+        .expect("sales outcomes");
+        assert_eq!(
+            outcomes, 1,
+            "the hard bounce must reach sales_outcomes despite the events failure"
+        );
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_events \
+             WHERE tenant_id = $1 AND sender_identity_id = $2 AND event_type = 'hard_bounce'",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.sender_id)
+        .fetch_one(&pool)
+        .await
+        .expect("sender ledger");
+        assert_eq!(
+            ledger, 1,
+            "the sender-health ledger must also receive the hard bounce"
+        );
+        // The injected fault really did suppress the analytics row.
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1")
+                .bind(&seed.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("events");
+        assert_eq!(events, 0, "the analytics INSERT failure was real");
+
         pool.close().await;
         Ok(())
     }

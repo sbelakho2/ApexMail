@@ -26,6 +26,18 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
         )
 
 
+def _reject_cursor(cursor: Optional[Any]) -> None:
+    """ListEventsQuery accepts {limit, offset, event_type, message_id} only
+    (deny_unknown_fields): a `cursor` parameter is rejected by the server
+    with HTTP 400. Fail fast client-side instead of emitting a 400."""
+    if cursor is not None:
+        raise ValidationError(
+            "/v1/events does not support cursor pagination "
+            "(the server rejects `cursor` with HTTP 400); use limit/offset",
+            code="UNSUPPORTED_PAGINATION",
+        )
+
+
 def _extract_list(data: Any, key: str) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
@@ -54,17 +66,16 @@ class EventsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
         event_type: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> list[Event]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         if event_type:
             params["event_type"] = event_type
         if message_id:
@@ -113,17 +124,16 @@ class AsyncEventsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
         event_type: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> list[Event]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         if event_type:
             params["event_type"] = event_type
         if message_id:

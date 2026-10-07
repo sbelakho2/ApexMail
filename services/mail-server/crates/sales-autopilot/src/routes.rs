@@ -3010,7 +3010,7 @@ mod tests {
         // With no fallback provided (None), it still degrades open without panicking.
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379") // wrong port
+            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // dead-end port (16379 is the live test Redis)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("failed to create redis pool");
 
@@ -3030,7 +3030,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new()));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379") // wrong port
+            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // dead-end port (16379 is the live test Redis)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("failed to create redis pool");
 

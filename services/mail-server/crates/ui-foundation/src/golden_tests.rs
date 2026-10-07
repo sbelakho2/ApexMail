@@ -94,6 +94,15 @@ fn replace_until(owned: &mut String, needle: &str, terminators: &[char], replace
 /// normalize to byte-identical output — asserted by the suites.
 pub(crate) fn normalize_for_golden(html: &str, csrf_token: &str) -> String {
     let mut normalized = html.replace(csrf_token, "<csrf-token>");
+    // The stylesheet link carries a content hash: normalize the VERSION so a
+    // CSS change does not rewrite every golden (the hash is asserted by the
+    // class-integrity/lib tests, not by 100+ golden files).
+    replace_until(
+        &mut normalized,
+        "/assets/globals.css?v=",
+        &['"'],
+        "/assets/globals.css?v=<css-version>",
+    );
     // The double-submit contract embeds the token in name="_csrf" hidden
     // inputs (auth forms, sidebar sign-out, the injected form token).
     replace_until(

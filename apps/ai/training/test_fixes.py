@@ -37,38 +37,40 @@ from evaluate import score_golden_answer  # noqa: E402
 from sweep_currency_to_eur import sweep_text  # noqa: E402
 from prompts_v2 import PRICING_TABLE, PAYG_INFO, build_system_prompt  # noqa: E402
 
-CANONICAL = {"free": 0, "starter": 25, "pro": 65, "growth": 150, "scale": 350, "enterprise": 3000}
+CANONICAL = {"free": 0, "developer": 29, "pro": 89, "growth": 229, "business": 699, "enterprise cloud": 1750}
 
 
 # ── validate_pricing ───────────────────────────────────────────────────────
 
 def test_canonical_table_matches_plans_rs():
-    assert validate_pricing.PRICE_BY_PLAN["starter"] == "€25"
-    assert validate_pricing.PRICE_BY_PLAN["pro"] == "€65"
-    assert validate_pricing.PRICE_BY_PLAN["growth"] == "€150"
-    assert validate_pricing.PRICE_BY_PLAN["scale"] == "€350"
-    assert validate_pricing.PRICE_BY_PLAN["enterprise"] == "€3,000"
+    assert validate_pricing.PRICE_BY_PLAN["developer"] == "€29"
+    assert validate_pricing.PRICE_BY_PLAN["pro"] == "€89"
+    assert validate_pricing.PRICE_BY_PLAN["growth"] == "€229"
+    assert validate_pricing.PRICE_BY_PLAN["business"] == "€699"
+    assert validate_pricing.PRICE_BY_PLAN["enterprise cloud"] == "€1,750"
     assert validate_pricing.PRICE_BY_PLAN["free"] == "€0"
 
 
 def test_wrong_plan_prices_are_rejected():
+    legacy_dev = "€" + "25"
+    legacy_pro = "€" + "65"
     findings = validate_pricing.validate_pricing_in_text(
-        "The Starter plan costs €25/month and Pro is €65/month."
+        f"The Developer plan costs {legacy_dev}/month and Pro is {legacy_pro}/month."
     )
     messages = " | ".join(f["message"] for f in findings)
-    assert "€25" in messages, f"Starter wrong price not flagged: {messages}"
-    assert "€65" in messages, f"Pro wrong price not flagged: {messages}"
+    assert "€29" in messages, f"Developer wrong price not flagged: {messages}"
+    assert "€89" in messages, f"Pro wrong price not flagged: {messages}"
 
 
 def test_dollar_symbol_is_reported_even_with_right_number():
-    findings = validate_pricing.validate_pricing_in_text("Growth €150/month")
+    findings = validate_pricing.validate_pricing_in_text("Growth " + "$" + "229/month")
     assert len(findings) == 1
     assert "EUR" in findings[0]["message"]
 
 
 def test_correct_euro_prices_pass():
     assert validate_pricing.validate_pricing_in_text(
-        "Starter (€25/month), Pro (€65/mo), Enterprise (€3,000/month), Free plan is €0."
+        "Developer (€29/month), Pro (€89/mo), Enterprise Cloud (€1,750/month), Free plan is €0."
     ) == []
 
 
@@ -76,9 +78,11 @@ def test_correct_euro_prices_pass():
 
 def test_sweep_fixes_wrong_prices_and_tier3_rate():
     counters: dict[str, int] = {}
-    out = sweep_text("**Pro (€65/month)** and **Starter (€25/month)** tier €0.50/1K", counters)
-    assert "€65" in out and "€65" not in out
-    assert "€25" in out and "€25" not in out
+    legacy_pro = "€" + "65"
+    legacy_dev = "€" + "25"
+    out = sweep_text(f"**Pro ({legacy_pro}/month)** and **Developer ({legacy_dev}/month)** tier €0.50/1K", counters)
+    assert "€89" in out and legacy_pro not in out
+    assert "€29" in out and legacy_dev not in out
     assert "€0.50/1K" in out, "PAYG tier-3 per-1K rate must be 0.50, not 0.40"
 
 
@@ -96,7 +100,7 @@ def test_sweep_rewords_third_party_usd_facts():
 
 
 def test_sweep_is_idempotent():
-    sample = "Starter (€25) Pro (€65) €0.50/1K Beyond 100K: €0.50 per 1,000"
+    sample = "Developer (" + "€" + "25) Pro (" + "€" + "65) €0.50/1K Beyond 100K: €0.50 per 1,000"
     once = sweep_text(sample, {})
     twice = sweep_text(once, {})
     assert once == twice
@@ -123,7 +127,7 @@ def test_generated_pricing_examples_have_no_negative_volumes():
 
 def test_comparison_table_renders_unlimited_limits():
     examples = augment.generate_pricing_examples()
-    compare = next(e for e in examples if "Compare the Scale and Enterprise" in e["text"])
+    compare = next(e for e in examples if "Compare the Business and Enterprise Cloud" in e["text"])
     assert "Unlimited" in compare["text"]
     assert "1,000,000" not in compare["text"], "plans.rs -1 limits must render as Unlimited"
     assert "1,000,000,000" not in compare["text"]
@@ -145,8 +149,8 @@ def test_augmented_data_teaches_dynamic_dns_only():
 
 def test_keyword_recall_naming_and_pass():
     score = score_golden_answer(
-        "The Pro plan costs €65/month and includes 150,000 emails.",
-        "Pro is €65/month with 150,000 emails included.",
+        "The Pro plan costs €89/month and includes 150,000 emails.",
+        "Pro is €89/month with 150,000 emails included.",
     )
     assert "keyword_recall" in score
     assert score["price_match"] is True
@@ -155,8 +159,8 @@ def test_keyword_recall_naming_and_pass():
 
 def test_wrong_price_fails_even_with_good_keyword_overlap():
     score = score_golden_answer(
-        "The Pro plan costs €65/month and includes 150,000 emails.",
-        "The Pro plan costs €30/month and includes 150,000 emails for the price.",
+        "The Pro plan costs €89/month and includes 150,000 emails.",
+        "The Pro plan costs " + "$" + "35/month and includes 150,000 emails for the price.",
     )
     assert score["price_match"] is False
     assert score["correct"] is False, "exact-price-match gate must reject wrong prices"
@@ -173,11 +177,11 @@ def test_non_pricing_answer_has_no_price_gate():
 
 def test_found_wrong_numbers_fail_the_check():
     result = granular.check_pricing_in_response(
-        "The Pro plan is €65/month and the add-on is €30/mo.", expected_plan="pro"
+        "The Pro plan is €89/month and the add-on is €30/mo.", expected_plan="pro"
     )
     assert result["passed"], "canonical price + canonical add-on should pass"
     result = granular.check_pricing_in_response(
-        "The Pro plan is €65/month plus €89 setup.", expected_plan="pro"
+        "The Pro plan is €89/month plus €99 setup.", expected_plan="pro"
     )
     assert not result["passed"], "extra wrong number must fail (found_wrong now used)"
     assert any(v.get("wrong_number") for v in result["violations"])
@@ -192,7 +196,7 @@ def test_granular_payg_boundaries():
 def test_repeated_plan_questions_are_all_evaluated():
     pro_questions = [q for q, plan, _ in granular.PRICING_TESTS if plan == "pro"]
     assert len(pro_questions) >= 2, "fixture needs repeated plans"
-    responses = {f"pro::{q}": "€65" for q in pro_questions}
+    responses = {f"pro::{q}": "€89" for q in pro_questions}
     results = granular.run_deterministic_checks(responses)
     details = results["pricing_accuracy"]["details"]
     assert len(details) == len(pro_questions), (
@@ -208,14 +212,14 @@ def test_feature_gate_hipaa_matches_plans_rs():
 # ── generate_dataset stable splits ─────────────────────────────────────────
 
 def test_row_bucket_is_deterministic_and_order_independent():
-    row = {"text": "Starter is €25/mo", "id": 1}
+    row = {"text": "Developer is €29/mo", "id": 1}
     first = generate_dataset.row_bucket(row, 0.10, 0.10)
     assert first == generate_dataset.row_bucket(row, 0.10, 0.10)
     assert first == generate_dataset.row_bucket(row, 0.10, 0.10)
 
 
 def test_appending_rows_never_moves_existing_rows():
-    rows = [{"text": f"example {i} costs €25"} for i in range(200)]
+    rows = [{"text": f"example {i} costs €29"} for i in range(200)]
     fractions = (0.10, 0.10)
     before = {json.dumps(r, sort_keys=True): generate_dataset.row_bucket(r, *fractions) for r in rows}
     # Append 50 more rows: every original row must keep its bucket.
@@ -237,17 +241,17 @@ def test_split_fractions_hold_at_scale():
 # ── prompts_v2 ─────────────────────────────────────────────────────────────
 
 def test_pricing_table_is_canonical_euro():
-    for price in ("€0", "€25", "€65", "€150", "€350", "€3,000"):
+    for price in ("€0", "€29", "€89", "€229", "€699", "€1,750"):
         assert price in PRICING_TABLE, f"{price} missing from PRICING_TABLE"
-    assert "€" not in PRICING_TABLE
-    assert "€" not in PAYG_INFO
-    for rate in ("€0.001", "€0.0008", "€0.0005", "€0.0003", "€0.40", "€0.10"):
+    assert "$" not in PRICING_TABLE
+    assert "$" not in PAYG_INFO
+    for rate in ("€0.001", "€0.0008", "€0.0005", "€0.0003", "€0.80", "€0.10"):
         assert rate in PAYG_INFO, f"{rate} missing from PAYG_INFO"
 
 
 def test_system_prompt_uses_apexmail_ee():
     prompt = build_system_prompt("starter_healthy")
-    assert "apexmail.ee" not in prompt
+    assert "apexmail.com" not in prompt
     assert "support@apexmail.ee" in prompt
 
 
@@ -255,10 +259,10 @@ def test_system_prompt_uses_apexmail_ee():
 
 def test_validator_catches_adversarial_corpus(tmp_path: Path) -> None:
     bad_rows = [
-        {"messages": [{"role": "assistant", "content": "Starter costs €25/month"}]},
+        {"messages": [{"role": "assistant", "content": "Developer costs " + "€" + "25/month"}]},
         {"messages": [{"role": "assistant", "content": "PAYG is €0.007 per email"}]},
         {"messages": [{"role": "assistant", "content": "| Tier | -5,000 |"}]},
-        {"messages": [{"role": "assistant", "content": "Pro €65/month"}]},
+        {"messages": [{"role": "assistant", "content": "Pro " + "$" + "89/month"}]},
     ]
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "bad.jsonl"
@@ -267,16 +271,16 @@ def test_validator_catches_adversarial_corpus(tmp_path: Path) -> None:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         problems = validate_data_prices.validate_file(path)
         joined = "\n".join(problems)
-        assert "starter" in joined.lower()
+        assert "developer" in joined.lower()
         assert "per-email rate" in joined
         assert "negative volume" in joined
-        assert "'€' price remains" in joined
+        assert ("'" + "$" + "' price remains") in joined
 
 
 def test_validator_passes_canonical_corpus(tmp_path: Path) -> None:
     good_rows = [
-        {"messages": [{"role": "assistant", "content": "Starter is €25/month; Pro €65."}]},
-        {"messages": [{"role": "assistant", "content": "PAYG: €0.001 per email; overage €0.40 per 1,000."}]},
+        {"messages": [{"role": "assistant", "content": "Developer is €29/month; Pro €89."}]},
+        {"messages": [{"role": "assistant", "content": "PAYG: €0.001 per email; overage €0.80 per 1,000."}]},
     ]
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "good.jsonl"

@@ -1740,34 +1740,71 @@ async fn start_outreach(
     let result =
         proxy_to_sales_service(&state, reqwest::Method::POST, "/enrollments", Some(payload)).await;
     let upstream_status = result.as_ref().ok().map(UpstreamResponse::status_u16);
-    let batch_id = result
-        .as_ref()
-        .ok()
-        .and_then(UpstreamResponse::body_json)
-        .and_then(|value| {
-            value
-                .get("enrollmentBatchId")
-                .and_then(|id| id.as_str())
-                .map(str::to_string)
-        });
+    // The sales-autopilot refuses the command when its execution plane is
+    // unconfigured (the outbound action worker is disabled without
+    // SALES_CAMPAIGN_FROM_EMAIL + SALES_UNSUBSCRIBE_SECRET) and this path
+    // forwards that NAMED refusal verbatim. A refusal is NOT a started
+    // outreach: the audit records it as a refusal (with the engine's reason)
+    // rather than claiming work the execution plane rejected, and no
+    // `enrollmentBatchId` is extracted from an error body.
+    let refused = match &result {
+        Ok(upstream) => upstream.status_u16() >= 400,
+        Err(_) => true,
+    };
+    let batch_id = if refused {
+        None
+    } else {
+        result
+            .as_ref()
+            .ok()
+            .and_then(UpstreamResponse::body_json)
+            .and_then(|value| {
+                value
+                    .get("enrollmentBatchId")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+    };
+    let refusal_reason = if refused {
+        result
+            .as_ref()
+            .ok()
+            .and_then(UpstreamResponse::body_json)
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(|error| error.as_str())
+                    .map(str::to_string)
+            })
+    } else {
+        None
+    };
 
+    let mut metadata = json!({
+        "sequenceId": body.sequence_id,
+        "contactCount": body.contact_ids.len(),
+        "autonomyPolicyId": body.autonomy_policy_id,
+        "experimentId": body.experiment_id,
+        "upstreamStatus": upstream_status,
+    });
+    if let Some(reason) = refusal_reason {
+        metadata["reason"] = json!(reason);
+    }
     log_sales_audit(
         &state.db,
         &auth,
-        "control_plane.sales.outreach_started",
+        if refused {
+            "control_plane.sales.outreach_refused"
+        } else {
+            "control_plane.sales.outreach_started"
+        },
         "sales_enrollment_batch",
         batch_id.as_deref(),
-        json!({
-            "sequenceId": body.sequence_id,
-            "contactCount": body.contact_ids.len(),
-            "autonomyPolicyId": body.autonomy_policy_id,
-            "experimentId": body.experiment_id,
-            "upstreamStatus": upstream_status,
-        }),
+        metadata,
     )
     .await;
 
-    if result.is_ok() {
+    if !refused {
         crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
     }
 
@@ -2784,23 +2821,43 @@ mod adversarial_handler_tests {
     }
 
     type Calls = Arc<Mutex<Vec<MockCall>>>;
+    /// When set, the mock mirrors sales-autopilot with its execution plane
+    /// unconfigured: POST /enrollments answers the NAMED 503.
+    type RefuseEnrollments = Arc<std::sync::atomic::AtomicBool>;
 
     #[derive(Clone)]
     struct MockEngine {
         base_url: String,
         calls: Calls,
+        refuse_enrollments: RefuseEnrollments,
     }
 
     impl MockEngine {
         fn take_calls(&self) -> Vec<MockCall> {
             std::mem::take(&mut *self.calls.lock().expect("mock calls lock"))
         }
+
+        /// Flip the mock into the "execution plane unconfigured" shape the
+        /// real sales-autopilot returns when its outbound action worker is
+        /// disabled (empty `SALES_CAMPAIGN_FROM_EMAIL` / missing
+        /// `SALES_UNSUBSCRIBE_SECRET`).
+        fn refuse_enrollments(&self) {
+            self.refuse_enrollments
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockState {
+        calls: Calls,
+        refuse_enrollments: RefuseEnrollments,
     }
 
     async fn mock_engine_handler(
-        State(calls): State<Calls>,
+        State(state): State<MockState>,
         request: axum::extract::Request,
     ) -> Response {
+        let calls = state.calls.clone();
         let method = request.method().to_string();
         let path = request.uri().path().to_string();
         let api_key = request
@@ -2844,6 +2901,26 @@ mod adversarial_handler_tests {
                 (StatusCode::CREATED, Json(json!({ "jobId": "job_mock" }))).into_response()
             }
             ("POST", "/enrollments") => {
+                if state
+                    .refuse_enrollments
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    // The exact shape sales-autopilot's
+                    // `SalesError::ServiceUnavailable` produces for a disabled
+                    // execution plane: 503 + `{"error": "service unavailable:
+                    // the sales execution plane is not configured: …"}`.
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "service unavailable: the sales execution plane is not \
+                                      configured: the outbound action worker is disabled without \
+                                      SALES_CAMPAIGN_FROM_EMAIL and SALES_UNSUBSCRIBE_SECRET, so \
+                                      queued outreach could never execute. Outreach was NOT \
+                                      accepted; configure the dispatcher and retry."
+                        })),
+                    )
+                        .into_response();
+                }
                 Json(json!({ "enrollmentBatchId": "batch_mock" })).into_response()
             }
             ("POST", _) if path.starts_with("/enrollments/") => {
@@ -2855,17 +2932,26 @@ mod adversarial_handler_tests {
 
     async fn start_mock_engine() -> MockEngine {
         let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let refuse_enrollments: RefuseEnrollments =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock engine");
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new()
             .fallback(mock_engine_handler)
-            .with_state(calls.clone());
+            .with_state(MockState {
+                calls: calls.clone(),
+                refuse_enrollments: refuse_enrollments.clone(),
+            });
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        MockEngine { base_url, calls }
+        MockEngine {
+            base_url,
+            calls,
+            refuse_enrollments,
+        }
     }
 
     // ── Honest refusals with no database ─────────────────────────
@@ -4013,6 +4099,94 @@ mod adversarial_handler_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Dogfood 2026-10-06 P1 (item 6): with the execution plane unconfigured
+    /// (empty `SALES_CAMPAIGN_FROM_EMAIL`, so the outbound action worker is
+    /// disabled), `POST /v1/admin/sales/outreach/start` must REFUSE with the
+    /// named reason — never accept work no worker can execute — and the
+    /// audit trail must record the refusal, not a started outreach.
+    ///
+    /// The real sales-autopilot answers this shape with 503 + the named
+    /// error (its `POST /enrollments` gate); this test pins the CP contract
+    /// against a mock carrying exactly that response.
+    #[tokio::test]
+    async fn outreach_refuses_with_the_named_reason_when_the_execution_plane_is_unconfigured() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_outreach_refusal").await
+        else {
+            return;
+        };
+        let engine = start_mock_engine().await;
+        engine.refuse_enrollments();
+        let state = state_with_engine(pool.clone(), &engine.base_url, Some("internal-token")).await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let key = build_outreach_rate_limit_key("system");
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut *conn).await;
+        // The canonical-schema test database is reused across runs; clear any
+        // refusal rows a previous run left behind so the count below is
+        // exactly this request's audit.
+        sqlx::query(
+            "DELETE FROM audit_logs \
+             WHERE action = 'control_plane.sales.outreach_refused' AND tenant_id = 'system'",
+        )
+        .execute(&pool)
+        .await
+        .expect("clean stale refusal audit rows");
+
+        let app = sales_app(&state);
+        let response = app
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/outreach/start",
+                Some(json!({
+                    "sequenceId": "11111111-1111-1111-1111-111111111111",
+                    "contactIds": ["22222222-2222-2222-2222-222222222222"],
+                    "autonomyPolicyId": "33333333-3333-3333-3333-333333333333",
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unconfigured execution plane must refuse, never accept"
+        );
+        let body = json_body(response).await;
+        let reason = body["error"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("the sales execution plane is not configured")
+                && reason.contains("SALES_CAMPAIGN_FROM_EMAIL"),
+            "the refusal must name the reason and the missing variable: {body}"
+        );
+        assert!(
+            body.get("enrollmentBatchId").is_none(),
+            "a refused outreach must not report an enrollment batch: {body}"
+        );
+
+        // The engine was asked exactly once and the audit trail records the
+        // REFUSAL (with its reason) — not a started outreach.
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/enrollments");
+        let refused_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs \
+             WHERE action = 'control_plane.sales.outreach_refused' \
+               AND details->>'reason' LIKE '%execution plane is not configured%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            refused_audits, 1,
+            "the refusal is audited as a refusal with its reason"
+        );
+        sqlx::query("DELETE FROM audit_logs WHERE action = 'control_plane.sales.outreach_refused'")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     // ── Settings ─────────────────────────────────────────────────

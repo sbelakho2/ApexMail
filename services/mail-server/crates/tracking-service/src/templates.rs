@@ -56,6 +56,46 @@ pub fn render_error_page(message: &str) -> String {
     )
 }
 
+/// The honest destination-refused page (dogfood 2026-10-06 P1): a click to a
+/// host this tenant has not authorized used to 302 to the vendor homepage and
+/// record nothing — the recipient landed somewhere they never asked for and
+/// the operator saw no trace. Now the recipient is told exactly why the link
+/// was refused, and the refusal is recorded as an explicit `click_refused`
+/// event for the operator.
+pub fn render_click_refused_page(reason: &str) -> String {
+    let msg = escape_html(reason);
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Link not allowed - ApexMail</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: ui-monospace, "JetBrains Mono", monospace;
+      background-color: #ffffff; color: #000000;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }}
+    .card {{ background: #FFF; border: 1px solid #e4e4e7; border-radius: 0px; padding: 40px; max-width: 440px; text-align: center; }}
+    .icon {{ font-size: 48px; margin-bottom: 20px; }}
+    h1 {{ font-size: 24px; margin-bottom: 16px; font-weight: 700; color: #000000; letter-spacing: -0.01em; }}
+    p {{ color: #52525b; line-height: 1.6; font-weight: 400; }}
+    .back-link {{ margin-top: 24px; }}
+    .back-link a {{ color: #000000; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">&#128683;</div>
+    <h1>This link is not allowed</h1>
+    <p>{msg}</p>
+    {BACK_LINK_HTML}
+  </div>
+</body>
+</html>"#
+    )
+}
+
 pub fn render_success_page(email: &str) -> String {
     let email_safe = escape_html(email);
     format!(

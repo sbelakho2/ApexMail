@@ -535,10 +535,14 @@ mod fingerprint_tests {
         assert_ne!(f1, outbound_mta::relay_fingerprint(&other_env));
     }
 
-    /// The typed conflict: the same send_unit with a different contract is
-    /// REFUSED (never a silent inheritance of the stored state).
+    /// The send_unit contract: while the stored row is NON-TERMINAL a
+    /// repeated submission with a different contract ADOPTS the stored row
+    /// (the worker rebuilds identical MIME byte-differently on every retry —
+    /// rejecting that was the dogfood split-brain). Once the stored row is
+    /// TERMINAL, the same mismatch is a typed conflict (never a silent
+    /// inheritance of a terminal outcome).
     #[tokio::test]
-    async fn same_unit_with_a_different_contract_is_a_typed_conflict() {
+    async fn different_contract_adopts_while_queued_and_conflicts_once_terminal() {
         let Some(db) = fp_db().await else {
             eprintln!("skipping: set TEST_DATABASE_URL");
             return;
@@ -574,19 +578,45 @@ mod fingerprint_tests {
         .execute(&db)
         .await;
 
+        // Non-terminal: a rebuilt replay adopts the stored row.
         let second = NewSubmission {
             request_fingerprint: Some("fingerprint-b".into()),
             send_unit: unit.clone(),
             ..duplicate_of(&unit)
         };
-        let conflict = ledger
+        let adopted = ledger
             .claim_submission(
                 second,
                 chrono::Utc::now(),
                 std::time::Duration::from_secs(60),
             )
             .await
-            .expect_err("a different contract under the same key must conflict");
+            .expect("a rebuilt replay while the row is queued must adopt it");
+        assert!(
+            matches!(adopted, ClaimOutcome::AlreadyQueued { .. }),
+            "expected AlreadyQueued, got {adopted:?}"
+        );
+
+        // Terminal: the strict conflict is back.
+        let _ = sqlx::query(
+            "UPDATE outbound_relay_ledger SET state='failed', last_error='terminal' \
+             WHERE send_unit=$1",
+        )
+        .bind(&unit)
+        .execute(&db)
+        .await;
+        let conflict = ledger
+            .claim_submission(
+                NewSubmission {
+                    request_fingerprint: Some("fingerprint-b".into()),
+                    send_unit: unit.clone(),
+                    ..duplicate_of(&unit)
+                },
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect_err("a terminal row with a different contract must conflict");
         assert!(
             conflict.to_string().contains("idempotency conflict"),
             "{conflict}"
@@ -661,7 +691,15 @@ mod fingerprint_tests {
         .expect("read pin");
         assert_eq!(pinned.as_deref(), Some("pinned"));
 
-        // A third submission with a DIFFERENT fingerprint now conflicts.
+        // A third submission with a DIFFERENT fingerprint conflicts once the
+        // row is terminal (while it is queued the replay ADOPTS the row).
+        let _ = sqlx::query(
+            "UPDATE outbound_relay_ledger SET state='failed', last_error='terminal' \
+             WHERE send_unit=$1",
+        )
+        .bind(&unit)
+        .execute(&db)
+        .await;
         let mut conflict = duplicate_of(&unit);
         conflict.request_fingerprint = Some("different".into());
         let error = ledger

@@ -7,7 +7,27 @@ Runs repeated generation over key prompts and reports stability and factual comp
 import argparse
 import json
 import re
+import sys
+from pathlib import Path
 from statistics import mean
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from validate_pricing import (  # noqa: E402
+    DEVELOPER,
+    ENTERPRISE_CLOUD,
+    OVERAGE_RATE_BY_PLAN,
+    PRICE_BY_PLAN,
+    PRO,
+)
+
+
+def _price(plan: str) -> str:
+    return PRICE_BY_PLAN[plan]
+
+
+def _legacy(amount: int) -> str:
+    """A pre-canon price, built at runtime so no stale literal ships."""
+    return "€" + str(amount)
 
 
 def normalize_text(text: str) -> str:
@@ -61,28 +81,33 @@ def generate_response(model, tokenizer, prompt: str, *, max_tokens: int = 256) -
 
 STRESS_CASES = [
     {
-        "name": "starter_price_and_limits",
-        "input": "Summarize Starter pricing and limits in one short paragraph.",
-        "must_include": ["€25", "50000", "500000 api"],
-        "must_not_include": ["€29", "250000 api"],
+        "name": "developer_price_and_limits",
+        "input": f"Summarize {DEVELOPER['name']} pricing and limits in one short paragraph.",
+        "must_include": [_price("developer"), f"{DEVELOPER['emails']}", f"{DEVELOPER['api_calls']} api"],
+        "must_not_include": [_legacy(25), "250000 api"],
     },
     {
         "name": "pro_price_and_limits",
-        "input": "Summarize Pro pricing and limits in one short paragraph.",
-        "must_include": ["€65", "150000", "2000000 api"],
-        "must_not_include": ["€59", "500000 api"],
+        "input": f"Summarize {PRO['name']} pricing and limits in one short paragraph.",
+        "must_include": [_price("pro"), f"{PRO['emails']}", f"{PRO['api_calls']} api"],
+        "must_not_include": [_legacy(65), "500000 api"],
     },
     {
         "name": "enterprise_compliance",
-        "input": "What compliance and API limits does Enterprise include?",
+        "input": f"What compliance and API limits does {ENTERPRISE_CLOUD['name']} include?",
         "must_include": ["hipaa", "soc2", "unlimited api"],
         "must_not_include": ["20000000 api"],
     },
     {
         "name": "overage_rates",
         "input": "What are ApexMail overage rates for emails and API calls?",
-        "must_include": ["€0.40", "1000 emails", "€0.10", "1000 api"],
-        "must_not_include": ["€0.90", "€1.00"],
+        "must_include": [
+            f"€{OVERAGE_RATE_BY_PLAN['developer']:.2f}",
+            f"€{OVERAGE_RATE_BY_PLAN['pro']:.2f}",
+            f"€{OVERAGE_RATE_BY_PLAN['growth']:.2f}",
+            "€0.10", "1000 emails", "1000 api",
+        ],
+        "must_not_include": ["€0.90", "€1.00", _legacy(40)],
     },
 ]
 

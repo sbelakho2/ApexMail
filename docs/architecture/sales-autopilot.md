@@ -12,7 +12,7 @@ The server binary lives at `services/mail-server/crates/sales-autopilot/src/bin/
 
 - Separate process from the main API server; internal-only, protected by `INTERNAL_SERVICE_TOKEN` (`x-api-key` or `Authorization: Bearer …`) on every route except `/health` and the public unsubscribe path `/u/:token`.
 - Requires `DATABASE_URL` at startup. Schema is **migration-owned**: the canonical chain in `services/mail-server/migrations/` (embedded at compile time by the `migrator` crate) is the only writer of schema. There is no runtime DDL in this crate.
-- Startup VERIFIES the schema instead of creating it: `schema.rs` holds a required-table list and a required-view list, and a missing or wrong-shaped object refuses startup naming the object. The schema contract is also asserted by `crates/functional-tests/tests/schema_contract_tests.rs`.
+- Startup VERIFIES the schema instead of creating it: `schema.rs` holds a required-table list and a required-view list, and a missing or wrong-shaped object refuses startup naming the object. The schema contract is also asserted by `crates/integration-tests/tests/schema_contract_tests.rs`.
 - A `256 KB` body limit and a `30-second` request timeout apply; `/health` reports degraded/503 when PostgreSQL is unreachable.
 
 ## The canonical model: accounts and contacts, not leads
@@ -130,5 +130,5 @@ In-memory state exists only in tests and in `crm.rs` for self-contained local fl
 - `src/crm_pg.rs`, `src/schema.rs` — canonical persistence and the startup schema contract
 - `src/control.rs`, `src/control_read.rs`, `src/routes.rs` — the control surface and HTTP routing
 - `src/experiments.rs`, `src/outcome_projector.rs` — experiment arms and reward projection
-- `src/enrichment.rs`, `src/discovery.rs`, `src/calendar.rs`, `src/inbox.rs` — the supporting workflows
-- `../../worker-processors/src/automations.rs` — the customer automation executor (runs in the worker fleet)
+- `src/enrichment/`, `src/discovery/`, `src/calendar/`, `src/inbox.rs` — the supporting workflows
+- `../../services/mail-server/crates/worker-processors/src/automations.rs` — the customer automation executor (runs in the worker fleet)

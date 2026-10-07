@@ -82,7 +82,11 @@ pub async fn build_state(
     }
     let secret_manager = SecretManager::new(db.clone(), config.secrets.clone())
         .map_err(|e| format!("secret manager init failed: {e}"))?;
-    let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());
+    // F5: DSR lifecycle transitions are written on the tenant's chained
+    // audit trail, so the GDPR automation must own the same logger instance
+    // the rest of the compliance service appends through.
+    let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone())
+        .with_audit_logger(audit_logger.clone());
     let soc2 = Soc2Service::new(db.clone());
     let hipaa = HipaaService::new(db.clone(), config.auth_token.as_bytes().to_vec());
     let trust = TrustPortalService::new(db.clone());

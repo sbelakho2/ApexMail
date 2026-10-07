@@ -167,9 +167,64 @@ fn output_of(child: &mut Child) -> String {
 /// to exit code 0 on SIGTERM — the container stop signal.
 #[test]
 fn api_server_serves_health_and_metrics_and_sigterm_exits_cleanly() {
+    // Self-provisioning: the server boots against a canonical-schema
+    // database created HERE (previously the test pointed at a hardcoded
+    // `apexmail_scratch_base` that nothing in the repo creates, so it only
+    // passed on hosts where someone had left that database behind).
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let Some(base_url) = std::env::var("TEST_DATABASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        migrator::test_support::assert_soft_skip_allowed("TEST_DATABASE_URL");
+        eprintln!("skipping api_server_serves_health...: TEST_DATABASE_URL unset");
+        return;
+    };
+    let db_name = "apexmail_lifecycle_health";
+    let pool = runtime
+        .block_on(migrator::test_support::shared_canonical_db(
+            &base_url, db_name,
+        ))
+        .expect("provision the lifecycle database");
+    let Some(pool) = pool else { return };
+    runtime.block_on(pool.close());
+
+    // Point the spawned server at that database (and the caller's
+    // credentials — never a hardcoded password that can drift).
+    let (server_credentials, _db) = base_url
+        .rsplit_once('/')
+        .expect("TEST_DATABASE_URL carries a database segment");
+    let after_scheme = server_credentials
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(server_credentials);
+    let (userinfo, hostport) = match after_scheme.rsplit_once('@') {
+        Some((userinfo, hostport)) => (userinfo, hostport),
+        None => ("", after_scheme),
+    };
+    let (db_user, db_password) = match userinfo.split_once(':') {
+        Some((user, password)) => (user.to_string(), password.to_string()),
+        None => (userinfo.to_string(), String::new()),
+    };
+    let (db_host, db_port) = match hostport.rsplit_once(':') {
+        Some((host, port)) => (host.to_string(), port.to_string()),
+        None => (hostport.to_string(), "5432".to_string()),
+    };
+
     let port = reserve_addr();
     let metrics_port = reserve_addr();
-    let mut child = spawn_api_server(port.port(), metrics_port.port(), false, &[]);
+    let mut child = spawn_api_server(
+        port.port(),
+        metrics_port.port(),
+        false,
+        &[
+            ("DB_HOST", db_host.as_str()),
+            ("DB_PORT", db_port.as_str()),
+            ("DB_NAME", db_name),
+            ("DB_USER", db_user.as_str()),
+            ("DB_PASSWORD", db_password.as_str()),
+        ],
+    );
 
     let (status, body) = wait_for_health(port);
     assert_eq!(status, 200, "liveness: {body}");

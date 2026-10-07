@@ -101,16 +101,36 @@ END $$;
 DO $$
 DECLARE
     old_table TEXT;
+    real_table TEXT;
+    v_remnant BIGINT;
+    v_real BIGINT;
 BEGIN
     FOREACH old_table IN ARRAY ARRAY[
         'email_queue_old', 'email_delivery_log_old', 'mail_messages_old',
         'audit_logs_old', 'bounce_analytics_daily_old'
     ]
     LOOP
-        IF to_regclass(format('public.%I', old_table)) IS NOT NULL THEN
-            -- count rows for the ops log before dropping
-            RAISE NOTICE '115: dropping stray remnant %', old_table;
-            EXECUTE format('DROP TABLE IF EXISTS %I', old_table);
+        real_table := replace(old_table, '_old', '');
+        -- The header comment is the contract: drop a stray remnant ONLY when
+        -- the real PARTITIONED replacement exists AND holds at least as many
+        -- rows. An earlier revision checked only the remnant's existence and
+        -- would have destroyed the sole copy in the very scenario the header
+        -- describes (gates review 2026-10-07).
+        IF to_regclass(format('public.%I', old_table)) IS NOT NULL
+           AND to_regclass(format('public.%I', real_table)) IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM pg_partitioned_table
+               WHERE partrelid = to_regclass(format('public.%I', real_table))
+           )
+        THEN
+            EXECUTE format('SELECT count(*) FROM %I', old_table) INTO v_remnant;
+            EXECUTE format('SELECT count(*) FROM %I', real_table) INTO v_real;
+            IF v_real >= v_remnant THEN
+                RAISE NOTICE '115: dropping stray remnant % (% rows; replacement has %)', old_table, v_remnant, v_real;
+                EXECUTE format('DROP TABLE IF EXISTS %I', old_table);
+            ELSE
+                RAISE EXCEPTION '115: remnant % has % rows but the partitioned % has only % — aborting with the remnant intact (resolve manually)', old_table, v_remnant, real_table, v_real;
+            END IF;
         END IF;
     END LOOP;
 END $$;

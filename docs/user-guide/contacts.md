@@ -178,7 +178,7 @@ GET /v1/contacts?status=active&list=newsletter
 
 ### Tags
 
-Tags are lightweight labels you can attach to contacts for flexible grouping.
+Tags are lightweight labels you can attach to contacts to group them your way.
 
 - Tags are free-form strings (e.g., `webinar-attendee`, `enterprise`, `churned`).
 - A contact can have unlimited tags.
@@ -293,22 +293,23 @@ Addresses are added to the suppression list when:
 
 ```bash
 # Check if an address is suppressed
-GET /v1/suppressions/check?email=user@example.com
+GET /v1/suppressions/check/user@example.com
 
 # Add to suppression list
 POST /v1/suppressions
-{ "email": "user@example.com", "reason": "manual", "comment": "Requested removal" }
+{ "email": "user@example.com", "reason": "manual" }
 
 # Bulk add
 POST /v1/suppressions/bulk
 { "entries": [{ "email": "a@example.com", "reason": "manual" }, ...] }
 
-# Import suppressions from CSV (up to 100,000 entries)
-POST /v1/suppressions/import
-
-# Export suppression list
-GET /v1/suppressions/export
+# Remove one entry (complaint and unsubscribe entries are protected)
+DELETE /v1/suppressions/:id
 ```
+
+The suppression list has no CSV pipeline; the management routes and the
+protections on removal are documented in
+[the Suppressions API](../api/endpoints/suppressions.md).
 
 > **Warning:** Removing an address from the suppression list re-enables sending to that address. Only do this if you have explicit, documented consent from the recipient.
 
@@ -342,14 +343,19 @@ When a contact updates their preferences, ApexMail automatically respects those 
 
 ## GDPR Compliance
 
-ApexMail provides built-in tools to help you meet your obligations under the General Data Protection Regulation (GDPR) and similar privacy laws (CCPA, etc.).
+ApexMail provides built-in tools to help you meet your obligations under the General Data Protection Regulation (GDPR) and similar privacy laws such as the California Consumer Privacy Act.
 
 ### Right of Access (Article 15)
 
 Contacts have the right to request a copy of all personal data you hold about them.
 
-- **UI:** Go to the contact's profile → **Actions** → **Export Data**. This generates a JSON file containing all stored data.
-- **API:** `GET /v1/contacts/:id/export` returns a complete data export.
+- **UI:** select the contacts in the contacts list and choose **Export
+  selected**, which downloads a CSV from the session form route
+  `GET /web/contacts/export.csv`.
+- **API:** there is no per-contact export endpoint. The shipped API export is
+  the analytics export (`GET /v1/analytics/export`). Automated DSAR handling
+  does not exist yet; see
+  [DSAR rate limiting](../compliance/dsar-rate-limiting.md).
 
 ### Right to Data Portability (Article 20)
 

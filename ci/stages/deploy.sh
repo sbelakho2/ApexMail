@@ -35,10 +35,18 @@ set -eu
 # profiled services part of the project's active set so `--remove-orphans`
 # can never treat their containers as orphans (a long-standing compose v2
 # quirk with inactive-profile services).
+# FIX (audit P2): redis-backup and analytics-backup are default-profile
+# services in docker-compose.prod.yml and are built/scanned/pinned by the
+# images stage, but were absent from this list — `up -d $STACK_SERVICES` only
+# acts on named services, so the Redis snapshot scheduler and the cold
+# analytics archiver were never started or recreated on a pipeline-led host.
+# ci/stages/validate.sh now asserts every *-backup compose service stays in
+# this list AND in ci/stages/verify.sh VERIFY_SERVICES.
 STACK_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
                  observability marketing status-server billing-service sales-autopilot
                  compliance analytics-worker pdf-renderer ai-service
-                 postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                 postgres-backup clickhouse-backup redis-backup analytics-backup
+                 nginx certbot postgres redis clickhouse
                 prometheus grafana loki alertmanager tempo otel-collector
                 node-exporter blackbox-exporter postgres-exporter redis-exporter
                 clickhouse-exporter synthetic-monitor"
@@ -250,14 +258,47 @@ stage_main() {
     # deploy.sh Step 7: drop dangling images left by the rebuild.
     docker image prune -f >/dev/null 2>&1 || true
 
-    # Record what is now live so a failed verify stage can roll back to the
-    # PREVIOUS sha (written only after a fully successful deploy).
-    if [ -n "${CI_SHA:-}" ]; then
-        printf '%s\n' "$CI_SHA" >"$CI_ROOT/.last-deployed-sha"
-    fi
-
+    # Record the state the verify stage needs — NOT by overwriting
+    # .last-deployed-sha with the NEW sha, which made the auto-rollback
+    # trigger dead in every full run (audit P1): verify read the file, saw
+    # its own sha and bailed "nothing to roll back to".
+    #   * pre-deploy-sha — the sha that WAS verified live before this deploy;
+    #     verify.sh rolls back to exactly this when the probes fail.
+    #   * deployed-sha   — the sha this run just brought up; verify.sh
+    #     advances .last-deployed-sha to it ONLY after every probe passes,
+    #     so .last-deployed-sha always names a VERIFIED rollout.
+    record_deploy_state
     ci_info "deploy: stack recreated, nginx reloaded"
     return "$CI_EXIT_OK"
 }
+
+# record_deploy_state — capture the rollback target + this run's rollout sha
+# for the verify stage (see the call site). Split out so
+# ci/tests/rollback-selftest.sh can exercise the real capture logic against a
+# synthetic state without bringing anything up.
+record_deploy_state() {
+    [ -n "${CI_SHA:-}" ] || { ci_warn "CI_SHA unset — rollback state not recorded"; return "$CI_EXIT_OK"; }
+    [ -n "${RUN_DIR:-}" ] || { ci_warn "RUN_DIR unset — rollback state not recorded"; return "$CI_EXIT_OK"; }
+    _rds_prev=''
+    if [ -f "$CI_ROOT/.last-deployed-sha" ]; then
+        _rds_prev=$(tr -d '[:space:]' <"$CI_ROOT/.last-deployed-sha" 2>/dev/null || true)
+    fi
+    if [ -n "$_rds_prev" ] && [ "$_rds_prev" != "$CI_SHA" ]; then
+        printf '%s\n' "$_rds_prev" >"$RUN_DIR/pre-deploy-sha"
+        ci_info "previous verified sha $_rds_prev recorded (verify-stage rollback target)"
+    else
+        ci_warn "no previous VERIFIED sha on $(basename "$CI_ROOT")/.last-deployed-sha — a verify failure has no earlier image set to roll back to"
+    fi
+    printf '%s\n' "$CI_SHA" >"$RUN_DIR/deployed-sha"
+    return "$CI_EXIT_OK"
+}
+
+# Test hook (ci/tests/rollback-selftest.sh): exercise ONLY the rollback-state
+# capture against a synthetic CI_ROOT/RUN_DIR — no docker, no infra. Never
+# part of a real run: gated on an explicit env flag.
+if [ "${CI_DEPLOY_STATE_SELFTEST:-0}" = 1 ]; then
+    record_deploy_state
+    exit "$CI_EXIT_OK"
+fi
 
 stage_main

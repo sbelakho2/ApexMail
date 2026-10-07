@@ -341,16 +341,6 @@ pub fn authenticated_router(state: AppState) -> Router<AppState> {
         )
         .route("/web/inbox-placement/tests", post(form_placement_create))
         .route("/web/assistant/message", post(form_assistant_message))
-        .route("/web/admin/demos", post(form_demo_create))
-        .route("/web/admin/demos/:id/advance", post(form_demo_advance))
-        .route(
-            "/web/admin/ai/drafts/:id/approve",
-            post(form_ai_draft_approve),
-        )
-        .route(
-            "/web/admin/ai/drafts/:id/reject",
-            post(form_ai_draft_reject),
-        )
         .route("/web/dedicated-ips", post(form_dedicated_ip_request))
         .route("/web/confirm", post(form_confirm_destructive))
         .layer(axum::middleware::from_fn_with_state(
@@ -420,6 +410,16 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
             // assuming an operator can reach it.
             "/web/admin/sales/leads/update",
             post(form_sales_leads_update),
+        )
+        .route("/web/admin/demos", post(form_demo_create))
+        .route("/web/admin/demos/:id/advance", post(form_demo_advance))
+        .route(
+            "/web/admin/ai/drafts/:id/approve",
+            post(form_ai_draft_approve),
+        )
+        .route(
+            "/web/admin/ai/drafts/:id/reject",
+            post(form_ai_draft_reject),
         )
         .route("/web/admin/audit/export", get(form_audit_export))
         .route("/web/admin/alerts/ack", post(form_admin_alert_ack))
@@ -548,6 +548,12 @@ fn redirect_success(message: &str, location: &str, config: &Config) -> Response 
 
 fn redirect_error(message: &str, location: &str, config: &Config) -> Response {
     redirect_with_flash(&[FlashMessage::error(message)], location, config)
+}
+
+/// Neutral PRG notice: the request was understood and did nothing wrong, but
+/// there was nothing to do (e.g. advancing an already-complete demo).
+fn redirect_info(message: &str, location: &str, config: &Config) -> Response {
+    redirect_with_flash(&[FlashMessage::info(message)], location, config)
 }
 
 /// Safe fallback redirect target: same-origin paths only. Backslashes
@@ -5670,7 +5676,22 @@ async fn form_demo_create(
     let tenant_id = user.tenant_id.clone();
     let created_by = user.user_id.clone().unwrap_or_else(|| tenant_id.clone());
     let id = apexmail_lib::id::generate_id("dmo", 22);
-    let token = crate::routes::demos::new_token_public();
+    // Fail closed: an RNG failure must create NO session and flash the honest
+    // reason, never mint an all-zero (publicly derivable) viewer link.
+    let token = match crate::routes::demos::new_token_public() {
+        Ok(token) => token,
+        Err(error) => {
+            // Fail closed with the house copy: the internal Display string
+            // never reaches the browser (the ui flash-copy gate flags any
+            // redirect_error fed a raw error Display); the cause is logged.
+            tracing::error!(error = %error, "demo token mint failed");
+            return redirect_error(
+                "The demo could not be created. No session was started.",
+                "/cp/demos",
+                &state.config,
+            );
+        }
+    };
     let inserted = sqlx::query(
         "INSERT INTO demo_sessions (id, token_hash, script_key, state, created_by, expires_at) \
          VALUES ($1, $2, $3, 'created', $4, NOW() + interval '48 hours')",
@@ -5750,6 +5771,16 @@ async fn form_demo_advance(
             if session_state == "expired" || expires_at <= chrono::Utc::now() {
                 return redirect_error(
                     "That demo link has expired. Create a new session.",
+                    "/cp/demos",
+                    &state.config,
+                );
+            }
+            // Every step has already run: say so. The advance below would
+            // find no unexecuted step and still report success (dogfood
+            // 2026-10-06), which read as "a step ran" for a pure no-op.
+            if session_state == "completed" {
+                return redirect_info(
+                    "This demo session is already complete — every step has run.",
                     "/cp/demos",
                     &state.config,
                 );
@@ -8045,6 +8076,14 @@ fn impersonation_sign_payload(payload: &serde_json::Value, secret: &str) -> Opti
 /// expired cookie — callers treat that as "end without attribution", never
 /// as an error.
 fn verify_impersonation_cookie_payload(token: &str, secret: &str) -> Option<serde_json::Value> {
+    verify_hmac_signed_payload(token, secret)
+}
+
+/// Verify `base64url(payload).base64url(HMAC-SHA256(secret))` and return the
+/// payload. Signature compared through the crate's constant-time equality;
+/// `None` for any malformed or forged token. Expiry is the caller's rule
+/// (the impersonation cookie and the JSON session token both carry `exp`).
+fn verify_hmac_signed_payload(token: &str, secret: &str) -> Option<serde_json::Value> {
     use base64::Engine as _;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -8075,6 +8114,51 @@ fn verify_impersonation_cookie_payload(token: &str, secret: &str) -> Option<serd
         return None;
     }
     Some(payload)
+}
+
+/// The active impersonation session carried by THIS request, if any.
+///
+/// Both server-minted cookie flavors are honored:
+///
+/// 1. the control-plane UI start form (`form_admin_tenant_impersonate`),
+///    signed under `impersonation_secret`; and
+/// 2. the JSON exchange (`routes::impersonate`), a `session_secret`-signed
+///    token whose payload type is `"impersonation"`.
+///
+/// A cookie that does not verify, is not an impersonation token, is expired,
+/// or carries no tenant resolves to `None`. This drives the shell banner
+/// (and thereby the only in-UI way to end an impersonation session), so it
+/// must reflect a real server-minted session — never a client-claimed one.
+pub(crate) fn active_impersonation_view(
+    headers: &HeaderMap,
+    config: &crate::config::Config,
+) -> Option<ui_foundation::axum_router::ImpersonationView> {
+    let token = crate::routes::helpers::extract_cookie(headers, "impersonation_session")?;
+    let payload = verify_impersonation_cookie_payload(&token, &config.impersonation_secret)
+        .or_else(|| {
+            verify_hmac_signed_payload(&token, &config.session_secret).filter(|payload| {
+                payload.get("type").and_then(|value| value.as_str()) == Some("impersonation")
+            })
+        })?;
+    let tenant_id = payload.get("tenantId")?.as_str()?.trim().to_string();
+    if tenant_id.is_empty() {
+        return None;
+    }
+    let operator_name = payload
+        .get("operatorName")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Operator")
+        .to_string();
+    let exp = payload.get("exp")?.as_i64()?;
+    let remaining_secs = (exp - Utc::now().timestamp_millis()).max(0) / 1000;
+    Some(ui_foundation::axum_router::ImpersonationView {
+        tenant_id,
+        operator_name,
+        time_remaining: format!("{:02}:{:02}", remaining_secs / 60, remaining_secs % 60),
+        end_session_error: None,
+    })
 }
 
 /// Consume an impersonation jti single-use — the JSON route's
@@ -10262,6 +10346,8 @@ mod tests {
                 )
                 .route("/web/contacts/import", post(form_contacts_import))
                 .route("/web/assistant/message", post(form_assistant_message))
+                .route("/web/admin/demos", post(form_demo_create))
+                .route("/web/admin/demos/:id/advance", post(form_demo_advance))
                 .route(
                     "/web/admin/ai/drafts/:id/approve",
                     post(form_ai_draft_approve),
@@ -10495,6 +10581,158 @@ mod tests {
 
             let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
                 .bind(vec![approve_id, reject_id])
+                .execute(&state.db)
+                .await;
+        }
+
+        /// The review queue must SAY which drafts are first responses and put
+        /// them ahead of the FIFO backlog, and an empty subject must render
+        /// the placeholder instead of a blank heading. DOGFOOD 2026-10-06:
+        /// the loader hardcoded `first_response: false`, so the card badge
+        /// (and the SLA ordering) could never appear no matter what the row
+        /// said.
+        #[tokio::test]
+        async fn ai_drafts_loader_flags_first_responses_and_orders_them_first() {
+            let Some(state) = web_test_state("ai_drafts_first_response_flag").await else {
+                return;
+            };
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let plain_id = format!("inb_{}", &suffix[..22]);
+            let fr_id = format!("inb_{}", &suffix[10..32]);
+            let plain_from = format!("plain-{}@corp.example", &suffix[..8]);
+            let fr_from = format!("firstresponse-{}@corp.example", &suffix[..8]);
+            // The plain draft is OLDER; the first response arrived later. The
+            // flag (not the timestamp) must decide the order.
+            sqlx::query(
+                "INSERT INTO inbound_messages
+                     (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                      is_verp_reply, suggested_action, received_at)
+                 VALUES ($1, 'system', $2, NULL, 'older grounded reply', true, false, NULL,
+                         NOW() - INTERVAL '2 days'),
+                        ($3, 'system', $4, 'Re: pricing', 'urgent grounded reply', true, false,
+                         '{\"first_response\":\"true\"}'::jsonb, NOW())
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&plain_id)
+            .bind(&plain_from)
+            .bind(&fr_id)
+            .bind(&fr_from)
+            .execute(&state.db)
+            .await
+            .expect("seed drafts");
+
+            let data = crate::routes::web::data::load_ai_drafts_page(&state).await;
+            assert!(!data.unavailable, "the loader must read the queue");
+
+            let fr = data
+                .drafts
+                .iter()
+                .position(|d| d.from_email == fr_from)
+                .unwrap_or_else(|| panic!("first-response draft missing: {fr_from}"));
+            let plain = data
+                .drafts
+                .iter()
+                .position(|d| d.from_email == plain_from)
+                .unwrap_or_else(|| panic!("plain draft missing: {plain_from}"));
+            assert!(
+                data.drafts[fr].first_response,
+                "the first-response flag must come from the row"
+            );
+            assert!(
+                !data.drafts[plain].first_response,
+                "a draft without the flag must not claim to be a first response"
+            );
+            assert!(
+                fr < plain,
+                "the SLA-critical first response must sort ahead of the older plain draft"
+            );
+
+            let page = ui_foundation::leptos_views::web_ai_drafts_page(Some(&data));
+            assert!(
+                page.contains("first response"),
+                "the review card must badge first responses"
+            );
+            assert!(
+                page.contains("(no subject)"),
+                "an empty subject must render the placeholder, never a blank heading"
+            );
+
+            let _ = sqlx::query("DELETE FROM inbound_messages WHERE id = ANY($1)")
+                .bind(vec![plain_id, fr_id])
+                .execute(&state.db)
+                .await;
+        }
+
+        /// Advancing a COMPLETED demo session must not report that a step
+        /// ran. DOGFOOD 2026-10-06: the 9th browser advance flashed
+        /// "Step executed." while every step had already run — a success
+        /// message for a pure no-op.
+        #[tokio::test]
+        async fn demo_advance_on_a_completed_session_flashes_a_notice_not_a_success() {
+            let Some(state) = web_test_state("demo_advance_completed").await else {
+                return;
+            };
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let session_id = format!("dmo_{}", &suffix[..22]);
+            let step_id = format!("dms_{}", &suffix[10..32]);
+            sqlx::query(
+                "INSERT INTO demo_sessions (id, token_hash, script_key, state, expires_at)
+                 VALUES ($1, $2, 'platform-tour', 'completed', NOW() + INTERVAL '1 day')",
+            )
+            .bind(&session_id)
+            .bind(format!("hash-{suffix}"))
+            .execute(&state.db)
+            .await
+            .expect("seed completed session");
+            sqlx::query(
+                "INSERT INTO demo_session_steps (id, session_id, idx, kind, input, result, ran_at)
+                 VALUES ($1, $2, 0, 'render_page', '{\"path\":\"/\"}'::jsonb,
+                         '{\"kind\":\"render_page\",\"status\":200}'::jsonb,
+                         NOW() - INTERVAL '1 hour')",
+            )
+            .bind(&step_id)
+            .bind(&session_id)
+            .execute(&state.db)
+            .await
+            .expect("seed finished step");
+
+            let app = web_handlers(state.clone(), session_user("system"));
+            let body = csrf_body(&state, &[]);
+            let response = app
+                .oneshot(post_form(
+                    &format!("/web/admin/demos/{session_id}/advance"),
+                    &body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+            let flashes = flash_messages(&response, &state.config);
+            assert!(
+                flashes.iter().any(|message| {
+                    message.kind == ui_foundation::flash::FlashKind::Info
+                        && message.text.contains("already complete")
+                }),
+                "a completed session must be reported as such, got {flashes:?}",
+            );
+            assert!(
+                !flashes
+                    .iter()
+                    .any(|message| message.kind == ui_foundation::flash::FlashKind::Success),
+                "a no-op must never flash success, got {flashes:?}",
+            );
+            let re_ran: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM demo_session_steps \
+                 WHERE session_id = $1 AND ran_at > NOW() - INTERVAL '5 seconds'",
+            )
+            .bind(&session_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("count");
+            assert_eq!(re_ran, 0, "no step may re-run for a completed session");
+
+            let _ = sqlx::query("DELETE FROM demo_sessions WHERE id = $1")
+                .bind(&session_id)
                 .execute(&state.db)
                 .await;
         }

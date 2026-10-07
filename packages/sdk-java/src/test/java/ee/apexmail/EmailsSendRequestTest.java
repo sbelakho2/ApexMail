@@ -60,7 +60,7 @@ class EmailsSendRequestTest {
             assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));
             assertTrue(httpClient.lastRequestBody().contains("\"from\":\"hello@example.com\""));
             assertTrue(httpClient.lastRequestBody().contains("\"to\":[\"user@example.com\"]"));
-            assertEquals("idem_typed", httpClient.lastRequest().headers().firstValue("X-Idempotency-Key").orElseThrow());
+            assertEquals("idem_typed", httpClient.lastRequest().headers().firstValue("Idempotency-Key").orElseThrow());
         }
     }
 
@@ -91,7 +91,7 @@ class EmailsSendRequestTest {
             assertFalse(httpClient.lastRequestBody().contains("scheduledAt"));
             assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));
             assertTrue(httpClient.lastRequestBody().contains("\"from\":\"hello@example.com\""));
-            assertEquals("idem_map", httpClient.lastRequest().headers().firstValue("X-Idempotency-Key").orElseThrow());
+            assertEquals("idem_map", httpClient.lastRequest().headers().firstValue("Idempotency-Key").orElseThrow());
         }
     }
 

@@ -5,7 +5,8 @@ Validate training data against canonical pricing and prompt catalog.
 Checks:
   1. Every training example uses a valid system_prompt_id from prompts_v2.py
   2. No hallucinated prices (€29, €49, €129, etc.) appear in assistant responses
-  3. All canonical prices (€0, €25, €65, €150, €350, €3000) appear in appropriate contexts
+  3. All canonical prices (Free €0, Developer €29, Pro €89, Growth €229,
+     Business €699, Enterprise Cloud €1,750) appear in appropriate contexts
   4. No ONNX/GPU/vLLM references remain in training data
   5. ChatML format is valid (balanced <|im_start|>/<|im_end|> tags)
   6. No empty assistant responses
@@ -24,18 +25,33 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from validate_pricing import (  # noqa: E402
+    EMAIL_LIMIT_BY_PLAN,
+    PLAN_BY_NAME,
+    PRICE_BY_PLAN,
+)
+
 # ═══════════════════════════════════════════════════════════════════════════
-# Canonical pricing — MUST match docs/pricing.md and prompts_v2.py exactly
+# Canonical pricing — ONE canon, one import (validate_pricing restates
+# services/mail-server/crates/platform-catalog)
 # ═══════════════════════════════════════════════════════════════════════════
 
-CANONICAL_PRICES = {0, 25, 65, 150, 350, 3000}
-CANONICAL_EMAIL_LIMITS = {30_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000}
+CANONICAL_PRICES = {
+    int(price.replace("€", "").replace(",", ""))
+    for price in PRICE_BY_PLAN.values()
+}
+CANONICAL_EMAIL_LIMITS = set(EMAIL_LIMIT_BY_PLAN.values())
 CANONICAL_TEAM_LIMITS = {1, 5, 10, 25, 50}
 
-FORBIDDEN_PRICES = {
-    29, 49, 59, 99, 129, 149, 199, 249, 299, 399, 499,
-    799, 999, 1199, 1299, 1499, 1999, 2499, 3999, 4999,
+_CANDIDATE_FORBIDDEN = {
+    19, 25, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125, 129, 149, 150,
+    199, 249, 299, 349, 350, 399, 449, 499, 599, 649, 650, 749, 799, 899,
+    999, 1199, 1299, 1499, 1999, 2499, 2999, 3999, 4999, 5999, 9999, 12999,
 }
+FORBIDDEN_PRICES = _CANDIDATE_FORBIDDEN - CANONICAL_PRICES
+
+PROMPT_ID_RE = re.compile(r"^apexmail_agent_[0-9a-f]{12}$")
 
 FORBIDDEN_TERMS = [
     "ONNX", "onnx", "vLLM", "vllm", "Qwen3-Next", "Qwen3.Next",
@@ -62,8 +78,8 @@ def validate_example(example: dict, line_num: int, issues: list, prompt_ids: set
     text = example.get("text", "")
     prompt_id = example.get("system_prompt_id", "")
 
-    # Check system_prompt_id is valid
-    if prompt_id and prompt_ids and prompt_id not in prompt_ids:
+    # Check system_prompt_id is a canonical apexmail_agent hash id
+    if prompt_id and not PROMPT_ID_RE.match(prompt_id):
         issues.append(f"Line {line_num}: unknown system_prompt_id '{prompt_id}'")
 
     # Check ChatML format
@@ -93,13 +109,15 @@ def validate_example(example: dict, line_num: int, issues: list, prompt_ids: set
     for m in re.finditer(r'<\|im_start\|>assistant\n(.*?)(?:<\|im_end\|>|<\|im_start\|>)', text, re.DOTALL):
         assistant_texts.append(m.group(1).strip())
 
-    # Check for forbidden prices in assistant responses
+    # Check for wrong plan-adjacent prices in assistant responses. The
+    # shared canonical validator is plan-aware, so legitimate computed totals
+    # (e.g. a PAYG tier cell of €75.00) are not mistaken for plan prices.
+    from validate_pricing import validate_pricing_in_text
     for atext in assistant_texts:
-        amounts = extract_dollar_amounts(atext)
-        for amount in amounts:
-            if amount in FORBIDDEN_PRICES:
-                ctx = atext[max(0, atext.find(f"€{amount}")-30):atext.find(f"€{amount}")+40]
-                issues.append(f"Line {line_num}: FORBIDDEN PRICE €{amount} in assistant response near: '...{ctx}...'")
+        for finding in validate_pricing_in_text(atext, source=f"line {line_num}"):
+            issues.append(
+                f"Line {line_num}: FORBIDDEN PRICE: {finding['message']}"
+            )
 
     # Check for forbidden terms
     for term in FORBIDDEN_TERMS:
@@ -195,7 +213,8 @@ def main() -> None:
     forbidden = [i for i in all_issues if "FORBIDDEN PRICE" in i]
     if forbidden:
         print(f"\n❌ FAIL: {len(forbidden)} forbidden prices found in training data!")
-        print("   Fix: Replace hallucinated prices with canonical values (Free=€0, Starter=€25, Pro=€65, Growth=€150, Scale=€350, Enterprise=€3000)")
+        print("   Fix: Replace hallucinated prices with canonical values (" +
+              ", ".join(f"{row['name']} {row['price']}" for row in PLAN_BY_NAME.values()) + ")")
         sys.exit(1)
 
     # Hard fail on forbidden terms

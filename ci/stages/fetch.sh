@@ -22,6 +22,46 @@ set -eu
 
 . "${CI_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib.sh"
 
+# ensure_full_history <remote> <ref> — repair a shallow checkout (`git fetch
+# --depth 1`, the old bootstrap) so the REQUIRED gitleaks full-history gate
+# scans every commit instead of silently degrading to the current tree (audit
+# P2). The security stage still fails closed if this repair cannot run.
+# Extracted so ci/tests/fetch-selftest.sh can exercise it on a synthetic
+# shallow clone.
+ensure_full_history() {
+    _efh_remote=${1:-origin}
+    _efh_ref=${2:-main}
+    if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || printf 'false')" = true ]; then
+        ci_info "shallow checkout detected — unshallowing (full-history secret scan contract)"
+        if ! ci_run_logged git -C "$REPO_ROOT" fetch --no-tags --unshallow "$_efh_remote" "$_efh_ref"; then
+            ci_warn "git fetch --unshallow failed — the gitleaks full-history gate will fail closed on this checkout"
+        fi
+    fi
+    return "$CI_EXIT_OK"
+}
+
+# prove_head_pushed <head> — true when HEAD is contained in the remote ref.
+# For a raw-sha CI_REF the plain `git fetch origin <sha>` short-circuits when
+# the object exists locally (ci/check-pr.sh / the pre-push hook pass local
+# shas), so FETCH_HEAD IS <head> and the ancestor test proves nothing (audit
+# P3). A sha ref is therefore proved against the tracked branch tip — the
+# "is it pushed" question branch protection asks. Extracted for the selftest.
+prove_head_pushed() {
+    _php_head=$1
+    _php_ref=FETCH_HEAD
+    if printf '%s' "$CI_REF" | grep -Eq '^[0-9a-f]{7,40}$'; then
+        _php_branch=${CI_BRANCH_PROTECTION_BRANCH:-main}
+        ci_info "CI_REF is a raw sha — proving containment in ${CI_REPO_URL:-origin}/$_php_branch"
+        if ci_run_logged git -C "$REPO_ROOT" fetch --no-tags "${CI_REPO_URL:-origin}" "$_php_branch"; then
+            _php_ref=FETCH_HEAD
+        else
+            ci_err "could not fetch ${CI_REPO_URL:-origin}/$_php_branch to prove $_php_head is pushed"
+            return 1
+        fi
+    fi
+    git -C "$REPO_ROOT" merge-base --is-ancestor "$_php_head" "$_php_ref" 2>/dev/null
+}
+
 stage_main() {
     if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         if [ "${CI_ALLOW_NO_GIT:-0}" = 1 ]; then
@@ -59,11 +99,16 @@ stage_main() {
         ci_die "git fetch failed after 4 attempts — check network/deploy key (ci/README.md § deploy key)"
     fi
 
+    # Full history for the REQUIRED gitleaks gate (audit P2) — no-op unless
+    # the checkout is shallow.
+    ensure_full_history "$_fetch_remote" "$CI_REF"
+
     _head=$(git -C "$REPO_ROOT" rev-parse HEAD)
     _remote_sha=$(git -C "$REPO_ROOT" rev-parse FETCH_HEAD 2>/dev/null || printf '')
 
-    # HEAD must be contained in the remote branch (it is pushed).
-    if git -C "$REPO_ROOT" merge-base --is-ancestor "$_head" FETCH_HEAD 2>/dev/null; then
+    # HEAD must be contained in the remote ref (it is pushed) — with the
+    # raw-sha ref handled honestly inside prove_head_pushed (audit P3).
+    if prove_head_pushed "$_head"; then
         ci_info "HEAD $_head is pushed (contained in $_fetch_remote/$CI_REF @ ${_remote_sha:-?})"
     else
         ci_err "HEAD $_head is NOT pushed to $_fetch_remote/$CI_REF"

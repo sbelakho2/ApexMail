@@ -63,7 +63,7 @@ git checkout -b feature/your-feature-name
 
 #### 3. Make Changes
 
-- Follow the [coding standards](../user-guide/getting-started.md)
+- Match the [style system](../development/style-system.md) and the repository-wide conventions in [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - Write tests for new functionality
 - Update documentation as needed
 
@@ -237,7 +237,7 @@ We follow [Semantic Versioning](https://semver.org/):
 
 - **MAJOR**: Breaking changes
 - **MINOR**: New features (backward compatible)
-- **PATCH**: Bug fixes (backward compatible)
+- **PATCH**: bug corrections (backward compatible)
 
 ### Release Workflow
 
@@ -272,7 +272,6 @@ We follow [Semantic Versioning](https://semver.org/):
 
 Contributors are recognized in:
 
-- `CONTRIBUTORS.md` file
 - Release notes
 - Project README
 

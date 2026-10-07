@@ -2,12 +2,12 @@
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
 Canonical pricing (EUR; runtime source: billing-service/src/plans.rs):
-  Free: €0, 30K emails, 300K API
-  Starter: €25, 50K emails, 500K API
-  Pro: €65, 150K emails, 2M API
-  Growth: €150, 500K emails, 5M API
-  Scale: €350, 2M emails, 20M API
-  Enterprise: €3,000, 5M emails, unlimited API
+  Free: €0 30K emails, 300K API
+  Developer: €29 50K emails, 500K API
+  Pro: €89 150K emails, 2M API
+  Growth: €229 500K emails, 5M API
+  Business: €699 2M emails, 20M API
+  Enterprise Cloud: €1,750 5M emails, unlimited API
 """
 
 EXTENDED_PROFILES = {
@@ -25,7 +25,7 @@ EXTENDED_PROFILES = {
         "domain_count": "1",
         "domain_details": "- myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: none)",
         "recent_events": "- 2,850 sent, 2,793 delivered (98.0%), 23 bounced (0.8%), 0 complaints",
-        "open_issues": "- Approaching email limit: 28,500/30,000 (95% used)"
+        "open_issues": "- Approaching email limit: 285/30,000 (95% used)"
     },
     "free_spf_broken_v2": {
         "account_id": "acct_sp2f8z",
@@ -43,7 +43,7 @@ EXTENDED_PROFILES = {
     },
     "starter_healthy_v2": {
         "account_id": "acct_8f3k2j",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "36,240",
         "email_limit": "50,000",
@@ -59,7 +59,7 @@ EXTENDED_PROFILES = {
     },
     "starter_webhook_dead_v2": {
         "account_id": "acct_wh7d3k",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "24,800",
         "email_limit": "50,000",
@@ -73,7 +73,7 @@ EXTENDED_PROFILES = {
     },
     "starter_dmarc_quarantine": {
         "account_id": "acct_dmq2k3",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "18,500",
         "email_limit": "50,000",
@@ -169,7 +169,7 @@ EXTENDED_PROFILES = {
     },
     "scale_deliverability_v2": {
         "account_id": "acct_sc350k",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "1,450,000",
         "email_limit": "2,000,000",
@@ -184,7 +184,7 @@ EXTENDED_PROFILES = {
     },
     "scale_api_rate_limit": {
         "account_id": "acct_arl9k2",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "1,200,000",
         "email_limit": "2,000,000",
@@ -198,7 +198,7 @@ EXTENDED_PROFILES = {
     },
     "scale_greylist_delays": {
         "account_id": "acct_gry6m8",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "980,000",
         "email_limit": "2,000,000",
@@ -212,7 +212,7 @@ EXTENDED_PROFILES = {
     },
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "3,625,000",
         "email_limit": "5,000,000",
@@ -228,7 +228,7 @@ EXTENDED_PROFILES = {
     },
     "enterprise_sso_issue": {
         "account_id": "acct_sso4j7",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "2,150,000",
         "email_limit": "5,000,000",
@@ -242,7 +242,7 @@ EXTENDED_PROFILES = {
     },
     "enterprise_multi_region": {
         "account_id": "acct_mrg2l5",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "4,200,000",
         "email_limit": "5,000,000",

@@ -1,530 +1,496 @@
 # Configuration Reference
 
-Complete reference for all ApexMail configuration options.
+ApexMail reads its configuration from environment variables. This page is the
+reference for the variables that exist in the repository contract: the
+development template [`.env.example`](../../.env.example), the compose files
+([`docker-compose.yml`](../../docker-compose.yml),
+[`docker-compose.prod.yml`](../../docker-compose.prod.yml),
+[`docker-compose.override.yml`](../../docker-compose.override.yml)), and the
+`${VAR:?}` guards the compose files enforce. Values below are the shipped
+defaults or example values; production secrets are supplied through Docker
+secrets (the `PROD_*_FILE` variables) or a secret manager.
 
-## Environment Variables
+## Required variables
 
-### Core Configuration
+These variables are enforced with `${VAR:?}` in the compose files, so a
+deployment fails to start when one is unset. Production secrets follow the
+file-backed pattern: `PROD_<NAME>_FILE` points at a Docker secret whose
+contents are mounted as the matching environment variable.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ENVIRONMENT` | ✓ | `development` | Environment: `development`, `production`, `test` |
-| `PORT` | | `3000` | API server port |
-| `HOST` | | `0.0.0.0` | Server bind address |
-| `LOG_LEVEL` | | `info` | Logging level: `debug`, `info`, `warn`, `error` |
+| Variable | Enforced in | Purpose |
+|---|---|---|
+| `APEXMAIL_API_KEY` | `docker-compose.prod.yml` | Internal API key used by bundled tooling. |
+| `BASE_URL` | `docker-compose.prod.yml` | Required in production. |
+| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | `docker-compose.yml` | Required in production. |
+| `GRAFANA_ADMIN_PASSWORD` | `docker-compose.yml` | Strong password required for non-local Grafana |
+| `JWT_PUBLIC_KEY_PEM` | `docker-compose.yml` | Required in production. |
+| `JWT_SECRET` | `docker-compose.prod.yml` | Legacy symmetric JWT secret (compose wiring); RS256 PEM keys are the current path. |
+| `LOG_STREAM_ENCRYPTION_KEY` | `docker-compose.prod.yml` | AES key encrypting streamed logs at rest. |
+| `MFA_SECRET_ENCRYPTION_KEY` | `docker-compose.override.yml` | At-rest key encrypting stored TOTP/MFA secrets. |
+| `MTA_ATTACHMENT_SCAN_ENABLED` | `docker-compose.prod.yml` | Required in production. |
+| `MTA_ATTACHMENT_SCAN_MODE` | `docker-compose.prod.yml` | Required in production. |
+| `MTA_IDS_ENABLED` | `docker-compose.prod.yml` | Required in production. |
+| `MTA_SPAM_FILTER_ENABLED` | `docker-compose.prod.yml` | Required in production. |
+| `OAUTH_REDIRECT_BASE_URL` | `docker-compose.prod.yml` | Required in production. |
+| `PLACEMENT_ENCRYPTION_SECRET` | `docker-compose.prod.yml` | Generate: openssl rand -base64 32 |
+| `SALES_CAMPAIGN_FROM_EMAIL` | `docker-compose.prod.yml` | Required in production. |
+| `WAF_ENABLED` | `docker-compose.prod.yml` | Production requires the managed WAF policy (true). |
+| `WAF_ENFORCE` | `docker-compose.prod.yml` | Production requires WAF enforcement (true). |
+| `WORKER_DLP_ENABLED` | `docker-compose.prod.yml` | Required in production. |
+| 34 `PROD_*_FILE` variables | `docker-compose.prod.yml` | File-backed production secrets; every mount has a `${VAR:?}` guard. See the list below. |
 
-### Database
+The guarded `PROD_*_FILE` set is: `PROD_API_KEY_HASH_SECRET_FILE`, `PROD_AUDIT_SIGNING_KEY_FILE`, `PROD_AWS_ACCESS_KEY_ID_FILE`, `PROD_AWS_SECRET_ACCESS_KEY_FILE`, `PROD_BACKUP_ENCRYPTION_KEY_FILE`, `PROD_CLICKHOUSE_ADMIN_PASSWORD_FILE`, `PROD_CLICKHOUSE_PASSWORD_FILE`, `PROD_COMPLIANCE_AUTH_TOKEN_FILE`, `PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE`, `PROD_COMPLIANCE_SECRETS_ENCRYPTION_KEY_FILE`, `PROD_COMPLIANCE_SECRETS_KDF_SALT_FILE`, `PROD_CP_SESSION_SECRET_FILE`, `PROD_CSRF_SECRET_FILE`, `PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE`, `PROD_IMPERSONATION_SECRET_FILE`, `PROD_INTERNAL_SERVICE_TOKEN_FILE`, `PROD_ISOLATION_INTERNAL_API_KEY_FILE`, `PROD_JWT_PRIVATE_KEY_FILE`, `PROD_JWT_PUBLIC_KEY_FILE`, `PROD_JWT_SECRET_FILE`, `PROD_KIWI_SECRET_KEY_FILE`, `PROD_PDF_RENDERER_AUTH_TOKEN_FILE`, `PROD_POSTGRES_PASSWORD_FILE`, `PROD_REDIS_PASSWORD_FILE`, `PROD_SALES_UNSUBSCRIBE_SECRET_FILE`, `PROD_SESSION_SECRET_FILE`, `PROD_SMTP_PASSWORD_FILE`, `PROD_SMTP_USERNAME_FILE`, `PROD_STRIPE_SECRET_KEY_FILE`, `PROD_STRIPE_WEBHOOK_SECRET_FILE`, `PROD_TENANT_ENCRYPTION_KEY_FILE`, `PROD_TRACKING_SECRET_KEY_FILE`, `PROD_VERP_HMAC_SECRET_FILE`, `PROD_WEBHOOK_SIGNING_SECRET_FILE`.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DATABASE_URL` | ✓ | - | PostgreSQL connection string |
-| `DATABASE_POOL_MIN` | | `2` | Minimum pool connections |
-| `DATABASE_POOL_MAX` | | `10` | Maximum pool connections |
-| `DATABASE_SSL` | | `false` | Enable SSL for database |
+The compose files also mount these file-backed secrets without a guard: `PROD_AI_ADMIN_TOKEN_FILE`, `PROD_AI_MODEL_API_KEY_FILE`, `PROD_HA_ADMIN_API_KEY_FILE`, `PROD_HA_INTERNAL_API_KEY_FILE`, `PROD_REDIS_PASSWORD_MAP_FILE`.
 
-```env
-# Example
-DATABASE_URL="postgresql://user:password@localhost:5432/apexmail?schema=public"
-DATABASE_POOL_MAX=20
-DATABASE_SSL=true
-```
+## Application variables
+
+### PostgreSQL
+
+PostgreSQL connection and pool settings.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `POSTGRES_USER` | `apexmail` | — |
+| `POSTGRES_PASSWORD` | `***` | Generate: openssl rand -base64 32 |
+| `POSTGRES_DB` | `apexmail` | — |
+| `POSTGRES_PORT` | `5432` | — |
+| `DB_HOST` | `localhost` | — |
+| `DB_PORT` | `5432` | — |
+| `DB_NAME` | `apexmail` | — |
+| `DB_USER` | `apexmail` | — |
+| `DB_PASSWORD` | `***` | Same as POSTGRES_PASSWORD for dev convenience |
+| `DB_MAX_CONNECTIONS` | `20` | — |
+| `API_REPLICA_COUNT` | `1` | — |
+| `DB_CLUSTER_CONNECTION_BUDGET` | `(empty)` | — |
 
 ### Redis
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `REDIS_URL` | ✓ | - | Redis connection string |
-| `REDIS_CLUSTER` | | `false` | Enable cluster mode |
-| `REDIS_TLS` | | `false` | Enable TLS |
-
-```env
-# Single instance
-REDIS_URL="redis://:password@localhost:6379"
-
-# Cluster mode
-REDIS_URL="redis://:password@node1:6379,node2:6379,node3:6379"
-REDIS_CLUSTER=true
-```
-
-### Authentication
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `JWT_PRIVATE_KEY_PEM` | ✓ | - | RSA private key used for JWT signing |
-| `JWT_PUBLIC_KEY_PEM` | ✓ | - | RSA public key used for JWT verification |
-| `JWT_ACCESS_TTL` | | `3600` | Access token TTL (seconds) |
-| `JWT_REFRESH_TTL` | | `2592000` | Refresh token TTL (30 days) |
-| `JWT_ALGORITHM` | | `RS256` | JWT algorithm |
-
-```env
-# Generate an RSA keypair and export both PEM values for the API server.
-JWT_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-JWT_PUBLIC_KEY_PEM="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
-JWT_ACCESS_TTL=3600
-JWT_REFRESH_TTL=2592000
-```
-
-### Login CAPTCHA (KiwiCaptcha)
-
-Login protection is available for both login surfaces:
-- User web login: Rust SSR web surface served by `services/mail-server/crates/api-server` on the `127.0.0.1` host map (`/login`)
-- Control-plane login: Rust SSR control-plane surface served by `services/mail-server/crates/api-server` on the `localhost` host map (`/login`)
-
-KiwiCaptcha is a native Rust, self-contained proof-of-work CAPTCHA — no external services, no iframes, no external JS.
-
-Server-side verification variables:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `KIWI_ENABLED` | | `false` | Enforce CAPTCHA verification in login API routes |
-| `KIWI_SECRET_KEY` | ✓ when enabled | `dev` | HMAC secret key for challenge signing and verification |
-| `KIWI_PBKDF2_ITERATIONS` | | `50000` | PBKDF2 iteration count for proof-of-work |
-| `KIWI_DIFFICULTY_BITS` | | `16` | Required leading zero bits (~1-3s solve time) |
-
-```env
-# Server-side enforcement
-KIWI_ENABLED=true
-KIWI_SECRET_KEY=your-production-secret-key
-```
-
-Behavior when enabled:
-- Missing token: login is rejected (`CAPTCHA_REQUIRED`)
-- Invalid token: login is rejected (`CAPTCHA_INVALID`)
-- Server-side verification failure: login is rejected (`CAPTCHA_UNAVAILABLE`)
-
-### Encryption
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ENCRYPTION_KEY` | ✓ | - | AES-256 encryption key (32 bytes base64) |
-| `ENCRYPTION_ALGORITHM` | | `aes-256-gcm` | Encryption algorithm |
-
-```env
-# Generate with: openssl rand -base64 32
-ENCRYPTION_KEY="base64-encoded-32-byte-key"
-```
-
-### Tracking / SSE Streaming
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TRACKING_SECRET_KEY` | ✓ (prod) | dev default | Shared HMAC-SHA256 secret for SSE stream tokens (min 32 chars in prod) |
-
-Both the API server and tracking service must share the same `TRACKING_SECRET_KEY`.
-See [Streaming API](../api/streaming.md) for details.
-
-### Metrics
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `METRICS_PORT` | | `9090` | Prometheus metrics HTTP port (API server). Set to `0` to disable. |
-
-The tracking service exposes metrics on port 9092 (configured via `METRICS_PORT` in its own config).
-
-### Email Delivery Transport
-
-ApexMail uses one deployment-selected outbound transport. Set
-`EMAIL_TRANSPORT_TYPE=ses` for AWS SES (the production default) or `smtp` for
-the configured SMTP relay. API and worker processes must use the same value;
-there is no automatic per-message, tenant, plan, or dedicated-IP routing.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DEFAULT_FROM_EMAIL` | | - | Default sender address |
-| `DEFAULT_FROM_NAME` | | - | Default sender name |
-
-> **Note:** `EMAIL_TRANSPORT_TYPE` is an active safety setting, not a legacy
-> override. SES domains are not sendable until SES reports identity, BYODKIM,
-> and custom MAIL FROM readiness. SMTP domains are not sendable unless their
-> local per-domain DKIM material is valid.
-
-#### AWS SES Configuration
-
-SES is selected for all delivery when `EMAIL_TRANSPORT_TYPE=ses`.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `AWS_ACCESS_KEY_ID` | ✓ | - | AWS IAM access key for SES |
-| `AWS_SECRET_ACCESS_KEY` | ✓ | - | AWS IAM secret key for SES |
-| `AWS_REGION` | ✓ | `eu-west-1` | AWS region for SES; must match API and worker |
-| `SES_CONFIGURATION_SET` | | - | SES configuration set for event tracking |
-
-```env
-AWS_ACCESS_KEY_ID=AKIAxxxxxxxxxxxx
-AWS_SECRET_ACCESS_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-AWS_REGION=eu-west-1
-SES_CONFIGURATION_SET=apexmail-production
-DEFAULT_FROM_EMAIL=noreply@example.com
-DEFAULT_FROM_NAME="ApexMail"
-```
-
-Domain verification configures SES with the generated per-domain key using
-BYODKIM and configures a custom MAIL FROM domain. It does not use SES Easy
-DKIM or customer-facing CNAME records.
-
-#### Hetzner Cloud Configuration (Dedicated IPs)
-
-Hetzner is used for tenants with dedicated IPs. The `DedicatedIpProvider` manages floating IPs via the Hetzner Cloud API.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `HETZNER_API_TOKEN` | ✓ (for dedicated IPs) | - | Hetzner Cloud API token |
-| `HETZNER_DEFAULT_LOCATION` | | `fsn1` | Default datacenter for new IPs |
-| `HETZNER_MTA_SERVER_ID` | | - | Server ID for IP assignment (single-server mode) |
-
-```env
-HETZNER_API_TOKEN=your-hetzner-cloud-api-token
-HETZNER_DEFAULT_LOCATION=fsn1
-HETZNER_MTA_SERVER_ID=12345678
-```
-
-Dedicated IPs are auto-provisioned when tenants upgrade to plans with dedicated IP access. See [Hetzner Tool Contract](../tool-contracts/hetzner.md) for details.
-
-#### SMTP Relay Configuration
-
-For deployments explicitly configured with `EMAIL_TRANSPORT_TYPE=smtp`:
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `EMAIL_TRANSPORT_TYPE` | | `ses` | Set to `smtp` to force all traffic via SMTP relay |
-| `SMTP_HOST` | | `localhost` | SMTP relay host |
-| `SMTP_PORT` | | `587` | SMTP relay port |
-| `SMTP_SECURE` | | `true` | Use TLS |
-| `SMTP_USERNAME` | | - | SMTP auth username |
-| `SMTP_PASSWORD` | | - | SMTP auth password |
-| `OUTBOUND_IPS` | | - | Comma-separated outbound IPs for source binding |
-| `MTA_HOSTNAME` | ✓ | - | HELO/EHLO hostname |
-
-> **Note:** SMTP is a deployment-wide choice. It locally signs every message
-> with the generated per-domain DKIM key; it is not a fallback or overflow
-> path for SES.
-
-### DKIM Configuration
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | ✓ | — | 64 hexadecimal characters (32 bytes) used to encrypt generated per-domain private keys |
-| `DKIM_ENABLED` | SMTP only | `true` | Enables local SMTP signing; must remain enabled in SMTP mode |
-
-```env
-DKIM_PRIVATE_KEY_ENCRYPTION_KEY=<64-hex-characters>
-DKIM_ENABLED=true
-```
-
-### Rate Limiting
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RATE_LIMIT_ENABLED` | | `true` | Enable rate limiting |
-| `RATE_LIMIT_WINDOW` | | `60` | Window size (seconds) |
-| `RATE_LIMIT_MAX` | | `100` | Max requests per window |
-| `RATE_LIMIT_BURST` | | `50` | Burst allowance |
-
-```env
-RATE_LIMIT_ENABLED=true
-RATE_LIMIT_WINDOW=60
-RATE_LIMIT_MAX=1000
-RATE_LIMIT_BURST=200
-```
-
-### CORS
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CORS_ENABLED` | | `true` | Enable CORS |
-| `CORS_ORIGINS` | | `*` | Allowed origins (comma-separated) |
-| `CORS_METHODS` | | `GET,POST,PUT,DELETE` | Allowed methods |
-| `CORS_CREDENTIALS` | | `true` | Allow credentials |
-
-```env
-CORS_ORIGINS=https://app.example.com,https://admin.example.com
-CORS_METHODS=GET,POST,PUT,PATCH,DELETE,OPTIONS
-CORS_CREDENTIALS=true
-```
-
-### Monitoring
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SENTRY_DSN` | | - | Sentry error tracking DSN |
-| `SENTRY_ENVIRONMENT` | | `NODE_ENV` | Sentry environment |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | | - | OpenTelemetry collector |
-| `PROMETHEUS_ENABLED` | | `true` | Enable Prometheus metrics |
-| `PROMETHEUS_PORT` | | `9090` | Metrics port |
-
-```env
-SENTRY_DSN=https://xxx@sentry.io/123
-OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317
-PROMETHEUS_ENABLED=true
-```
-
-### Feature Flags
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `FEATURE_AI_ENABLED` | | `true` | Enable AI features |
-| `FEATURE_STO_ENABLED` | | `true` | Send time optimization |
-| `FEATURE_AB_TESTING` | | `true` | A/B testing |
-| `FEATURE_WEBHOOKS` | | `true` | Webhook delivery |
-
-```env
-FEATURE_AI_ENABLED=true
-FEATURE_STO_ENABLED=true
-FEATURE_AB_TESTING=true
-```
-
----
-
-## Domain Verification
-
-### DNS Records
-
-To send emails from your domain, configure these DNS records:
-
-#### SPF Record
-
-```dns
-Type: TXT
-Host: bounce
-Value: v=spf1 include:amazonses.com ~all
-```
-
-#### Custom MAIL FROM MX Record
-
-```dns
-Type: MX
-Host: bounce
-Priority: 10
-Value: feedback-smtp.<aws-region>.amazonses.com
-```
-
-#### DKIM Record
-
-```dns
-Type: TXT
-Host: <selector>._domainkey
-Value: v=DKIM1; k=rsa; p=<generated-domain-public-key>
-```
-
-The API generates the selector and key pair. Retrieve the exact direct TXT
-record and the required `bounce` MX record from
-`GET /v1/domains/:id/dns-records`; do not generate or configure a global
-customer DKIM key.
-
-#### DMARC Record
-
-```dns
-Type: TXT
-Host: _dmarc
-Value: v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com; pct=100
-```
-
-### Verification Process
-
-1. **Add Domain** in Settings → Domains
-2. **Configure DNS** records as shown above
-3. **Verify** - System checks DNS propagation
-4. **Activate** - Start sending from domain
-
-Verification status:
-- ⏳ **Pending** - DNS records not yet found
-- ✅ **Verified** - All records valid
-- ⚠️ **Partial** - Some records missing
-- ❌ **Failed** - Invalid records
-
----
-
-## SMTP Configuration (Self-Hosted Opt-In Only)
-
-> **Note:** This section applies only when using `EMAIL_TRANSPORT_TYPE=smtp`. When using the default SES transport, SMTP configuration is not needed for outbound delivery. SMTP configuration below may still apply to inbound mail processing (ports 25/2525/2526).
-
-### Postfix Main Configuration (if using Postfix relay)
-
-`/etc/postfix/main.cf`:
-
-```conf
-# Basic settings
-myhostname = mail.example.com
-mydomain = example.com
-myorigin = $mydomain
-
-# Network settings
-inet_interfaces = all
-inet_protocols = ipv4
-
-# TLS settings
-smtpd_tls_cert_file = /etc/postfix/certs/fullchain.pem
-smtpd_tls_key_file = /etc/postfix/certs/privkey.pem
-smtpd_tls_security_level = may
-smtp_tls_security_level = may
-smtp_tls_loglevel = 1
-
-# DKIM
-milter_protocol = 6
-milter_default_action = accept
-smtpd_milters = inet:localhost:8891
-non_smtpd_milters = inet:localhost:8891
-
-# Queue settings
-maximal_queue_lifetime = 3d
-bounce_queue_lifetime = 3d
-queue_run_delay = 300s
-minimal_backoff_time = 300s
-maximal_backoff_time = 4000s
-
-# Rate limiting
-smtp_destination_rate_delay = 1s
-smtp_destination_concurrency_limit = 20
-default_destination_rate_delay = 0
-default_destination_concurrency_limit = 20
-
-# Size limits
-message_size_limit = 26214400
-mailbox_size_limit = 0
-
-# Header cleanup
-header_checks = regexp:/etc/postfix/header_checks
-```
-
-### IP Warmup Schedule (Dedicated IPs via Hetzner)
-
-> **Note:** Dedicated IPs are now provisioned via Hetzner Cloud floating IPs and managed by the `DedicatedIpProvider`. Warmup is handled automatically by the system.
-
-New dedicated IPs follow a 45-day warmup schedule:
-
-| Day | Daily Volume | Notes |
-|-----|--------------|-------|
-| 0-1 | 50 | Test deliverability |
-| 2-3 | 100 | Monitor bounces |
-| 4-7 | 250-500 | Check reputation |
-| 8-14 | 1,000-2,500 | Increase gradually |
-| 15-28 | 5,000-10,000 | Watch for blocks |
-| 29-44 | 25,000-50,000 | Approach normal volume |
-| 45-54 | 75,000-100,000 | Ramps continue |
-| 55-59 | 250,000 | Final ramp days |
-| 60+ | Unlimited | Full production |
-
-During warmup, sends that exceed the IP's daily cap are deferred to the next UTC day; they do NOT overflow to SES shared sending. No manual configuration needed.
-
----
-
-## Worker Configuration
-
-### Queue Settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `QUEUE_CONCURRENCY` | `10` | Concurrent jobs per worker |
-| `QUEUE_RATE_LIMIT_MAX` | `100` | Max jobs per rate window |
-| `QUEUE_RATE_LIMIT_DURATION` | `1000` | Rate window (ms) |
-| `QUEUE_MAX_RETRIES` | `3` | Max retry attempts |
-| `QUEUE_BACKOFF_TYPE` | `exponential` | Backoff strategy |
-| `QUEUE_BACKOFF_DELAY` | `5000` | Initial backoff (ms) |
-
-```env
-QUEUE_CONCURRENCY=20
-QUEUE_RATE_LIMIT_MAX=200
-QUEUE_RATE_LIMIT_DURATION=1000
-QUEUE_MAX_RETRIES=5
-QUEUE_BACKOFF_TYPE=exponential
-QUEUE_BACKOFF_DELAY=3000
-```
-
-### Job Priorities
-
-| Queue | Priority | Use Case |
-|-------|----------|----------|
-| `critical` | 1 | Transactional (password reset, etc.) |
-| `high` | 2 | Time-sensitive notifications |
-| `default` | 3 | Regular messages |
-| `low` | 4 | Bulk campaigns |
-| `background` | 5 | Analytics, cleanup |
-
----
-
-## AI Configuration
-
-The deployed mail-server does not configure or operate an ONNX runtime, a
-remote LLM provider, a model registry, or a model-training pipeline. Do not
-set `AI_MODEL_PATH`, `AI_EMBEDDING_MODEL`, `AI_INFERENCE_THREADS`,
-`AI_MAX_BATCH_SIZE`, `AI_CACHE_ENABLED`, `AI_CACHE_TTL`, `OPENAI_API_KEY`, or
-`ANTHROPIC_API_KEY` as though they enable product functionality.
-
-The internal `ai-service` helper, where separately run for development, offers
-only deterministic subject templates, fixed-rule subject scoring, and highest
-supplied engagement-score selection. It is not a supported production model
-serving target. See [Deterministic Email Assistance](../architecture/ai-pipeline.md).
-
----
-
-## Compliance Configuration
-
-### GDPR Settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GDPR_ENABLED` | `true` | Enable GDPR features |
-| `GDPR_RETENTION_DAYS` | `365` | Data retention period |
-| `GDPR_EXPORT_FORMAT` | `json` | Export format |
-| `GDPR_DELETION_DELAY` | `30` | Deletion delay (days) |
-
-```env
-GDPR_ENABLED=true
-GDPR_RETENTION_DAYS=365
-GDPR_EXPORT_FORMAT=json
-GDPR_DELETION_DELAY=30
-```
-
-### Audit Logging
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUDIT_ENABLED` | `true` | Enable audit logging |
-| `AUDIT_RETENTION_DAYS` | `2555` | Retention (7 years) |
-| `AUDIT_SIGNING_KEY` | - | HMAC signing key |
-
-```env
-AUDIT_ENABLED=true
-AUDIT_RETENTION_DAYS=2555
-AUDIT_SIGNING_KEY=base64-signing-key
-```
-
----
-
-## SLO Configuration
-
-### Service Level Objectives
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SLO_API_AVAILABILITY` | `99.9` | API availability target (%) |
-| `SLO_API_LATENCY_P99` | `500` | P99 latency target (ms) |
-| `SLO_DELIVERY_RATE` | `98.0` | Email delivery rate (%) |
-| `SLO_DELIVERY_TIME` | `300` | Time to deliver (seconds) |
-
-```env
-SLO_API_AVAILABILITY=99.95
-SLO_API_LATENCY_P99=200
-SLO_DELIVERY_RATE=99.0
-SLO_DELIVERY_TIME=120
-```
-
-### Alerting
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ALERT_SLACK_WEBHOOK` | - | Slack webhook URL |
-| `ALERT_PAGERDUTY_KEY` | - | PagerDuty routing key |
-| `ALERT_EMAIL` | - | Alert email recipient |
-
-```env
-ALERT_SLACK_WEBHOOK=https://hooks.slack.com/services/...
-ALERT_PAGERDUTY_KEY=abc123
-ALERT_EMAIL=oncall@example.com
-```
-
----
-
-## Configuration Files
-
-Runtime configuration now lives in Rust crate configuration structs, environment-variable loaders, and deployment manifests.
+Redis connection and pool settings.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `REDIS_PASSWORD` | `***` | Generate: openssl rand -base64 32 |
+| `REDIS_PORT` | `6379` | — |
+| `REDIS_HOST` | `localhost` | — |
+| `REDIS_DB` | `0` | — |
+| `REDIS_POOL_MAX_SIZE` | `40` | — |
+
+### ClickHouse
+
+ClickHouse analytics store.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CLICKHOUSE_PASSWORD` | `***` | Generate: openssl rand -base64 32 |
+| `CLICKHOUSE_PORT` | `127.0.0.1:9000` | — |
+| `CLICKHOUSE_HTTP_PORT` | `8123` | — |
+
+### API Server
+
+api-server core, UI host routing, secrets and rate limits.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ENVIRONMENT` | `development` | — |
+| `HOST` | `0.0.0.0` | — |
+| `PORT` | `3000` | — |
+| `CORS_ORIGINS` | `*` | — |
+| `TRUSTED_PROXIES` | `(empty)` | — |
+| `MAX_INFLIGHT_REQUESTS` | `30` | — |
+| `METRICS_PORT` | `9090` | — |
+| `APEXMAIL_API_PORT` | `3000` | — |
+| `APEXMAIL_API_BASE_URL` | `http://localhost:3000` | — |
+| `JWT_PRIVATE_KEY_PEM` | `"-----BEGIN PRIVATE KEY-----\n***\n-----END PRIVATE KEY-----"` | — |
+| `JWT_PREVIOUS_PUBLIC_KEYS_PEM` | `(empty)` | — |
+| `JWT_EXPIRY` | `24h` | — |
+| `API_KEY_HASH_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `WEBHOOK_SIGNING_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `SESSION_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `IMPERSONATION_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `CSRF_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `TRACKING_SECRET_KEY` | `***` | Generate: openssl rand -base64 32 |
+| `INTERNAL_SERVICE_TOKEN` | `***` | Generate: openssl rand -base64 32 |
+| `CONTROL_PLANE_API_KEY` | `***` | Generate: openssl rand -base64 32 |
+| `CP_SESSION_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `UI_WEB_HOSTS` | `localhost,127.0.0.1,app.apexmail.ee` | — |
+| `UI_CONTROL_PLANE_HOSTS` | `admin.apexmail.ee,control.apexmail.ee` | — |
+| `UI_MARKETING_HOSTS` | `apexmail.ee,www.apexmail.ee` | — |
+| `UI_MARKETING_SURFACE` | `marketing-zola` | — |
+| `UI_DEFAULT_SURFACE` | `web` | — |
+| `RATE_LIMIT_MAX_REQUESTS` | `1000` | — |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | — |
+| `IDEMPOTENCY_TTL_SECONDS` | `86400` | — |
+
+### Email Grader
+
+Email grader limits.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `GRADER_ENABLED` | `true` | — |
+| `GRADER_RATE_LIMIT` | `10` | — |
+| `GRADER_RATE_WINDOW` | `3600` | — |
+| `GRADER_CACHE_TTL` | `300` | — |
+| `GRADER_MAX_BODY_SIZE` | `1048576` | — |
+
+### Inbox Placement
+
+Inbox placement testing.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `PLACEMENT_ENABLED` | `true` | — |
+| `PLACEMENT_POLLING_INTERVAL` | `60` | — |
+| `PLACEMENT_MAX_POLLING_ATTEMPTS` | `10` | — |
+| `PLACEMENT_MAX_SEEDS_PER_TEST` | `50` | — |
+| `PLACEMENT_MAX_TESTS_PER_HOUR` | `5` | — |
+| `PLACEMENT_IMAP_TIMEOUT` | `30` | — |
+| `PLACEMENT_ENCRYPT_PASSWORDS` | `true` | — |
+
+### Outbound Queue
+
+Outbound queue / SMTP relay target.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SMTP_HOST` | `127.0.0.1` | — |
+| `SMTP_PORT` | `1025` | — |
+
+### Dev MTA (SMTP edge)
+
+Dev MTA host bind address.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SMTP_EDGE_BIND` | `127.0.0.1` | — |
+
+### Dedicated IP / SES
+
+SES, dedicated IP and domain-signing configuration.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AWS_REGION` | `us-east-1` | — |
+| `SES_IP_POOL_PREFIX` | `apexmail` | — |
+| `SES_DEFAULT_WARMUP_DAYS` | `14` | — |
+| `SES_CONFIGURATION_SET` | `(empty)` | — |
+| `SNS_ALLOWED_TOPIC_ARNS` | `(empty)` | — |
+| `SYSTEM_SENDER_BOOTSTRAP_ON_STARTUP` | `false` | — |
+| `HETZNER_API_TOKEN` | `***` | Your Hetzner API token |
+| `HETZNER_DEFAULT_LOCATION` | `fsn1` | — |
+| `HETZNER_MTA_SERVER_ID` | `(empty)` | — |
+
+### OAuth / SSO
+
+OAuth login providers.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `GOOGLE_CLIENT_ID` | `(empty)` | — |
+| `GOOGLE_CLIENT_SECRET` | `***` | Your Google OAuth client secret |
+| `GITHUB_CLIENT_ID` | `(empty)` | — |
+| `GITHUB_CLIENT_SECRET` | `***` | Your GitHub OAuth client secret |
+
+### Enterprise SSO (SAML/OIDC, enterprise service)
+
+Tenant SSO encryption.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SSO_ENCRYPTION_KEY` | `(empty)` | — |
+
+### Billing
+
+Invoice seller details.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `BILLING_COMPANY_BANK` | `Wise` | — |
+| `BILLING_COMPANY_IBAN` | `(empty)` | — |
+| `BILLING_COMPANY_BIC` | `(empty)` | — |
+| `BILLING_COMPANY_PHONE` | `(empty)` | — |
+
+### KiwiCaptcha (native Rust proof-of-work CAPTCHA)
+
+KiwiCaptcha proof-of-work CAPTCHA.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KIWI_ENABLED` | `true` | — |
+| `KIWI_SECRET_KEY` | `dev` | — |
+| `KIWI_ARGON_M_KIB` | `50000` | — |
+| `KIWI_DIFFICULTY_BITS` | `16` | — |
+| `KIWI_CHALLENGE_TTL_SECS` | `120` | — |
+
+### Observability
+
+Telemetry and marketing asset paths.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | — |
+| `ANALYTICS_IMAGE_SRC` | `(empty)` | — |
+| `MARKETING_PUBLIC_DIR` | `apps/marketing-zola/public` | — |
+
+### Composite Connection Strings (derived from individual vars above)
+
+Convenience composite URLs; individual components are also accepted.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://apexmail:***@localhost:5432/apexmail` | — |
+| `REDIS_URL` | `redis://:***@localhost:6379/0` | — |
+
+### Storage
+
+S3-compatible object storage.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `S3_ENDPOINT` | `http://localhost:9000` | — |
+| `S3_REGION` | `us-east-1` | — |
+| `S3_BUCKET` | `apexmail-dev` | — |
+| `S3_ACCESS_KEY_ID` | `***` | Your S3 access key |
+| `S3_SECRET_ACCESS_KEY` | `***` | Your S3 secret key |
+
+### Tracking (Encryption & Signing)
+
+Tracking pixel encryption, signing and rewrite gate.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TRACKING_ENCRYPTION_KEY` | `***` | — |
+| `TRACKING_SIGNATURE_KEY` | `***` | — |
+| `TRACKING_ENABLED` | `true` | — |
+| `TRACKING_ALLOWED_REDIRECT_DOMAINS` | `(empty)` | — |
+
+### VERP bounce routing (worker SMTP transport)
+
+VERP bounce routing.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `VERP_DOMAIN` | `bounces.apexmail.ee` | — |
+
+### Sales Autopilot (internal sales engine, port 3010 internal-only)
+
+Internal sales autopilot.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SALES_CAMPAIGN_FROM_NAME` | `ApexMail` | — |
+| `SALES_UNSUBSCRIBE_SECRET` | `***` | Generate: openssl rand -base64 32 |
+| `SALES_PUBLIC_BASE_URL` | `http://localhost:3010` | — |
+| `SALES_UNSUBSCRIBE_REDIRECT_URL` | `(empty)` | — |
+| `SALES_ALLOWED_TENANTS` | `(empty)` | — |
+| `SALES_ENRICHMENT_API_URL` | `https://enrich.apexmail.ee` | — |
+| `ENRICHMENT_API_KEY` | `(empty)` | — |
+| `SALES_DISPATCH_INTERVAL_SECS` | `30` | — |
+| `SALES_DISPATCH_BATCH_SIZE` | `100` | — |
+| `SALES_DISPATCH_CONCURRENCY` | `4` | — |
+
+### Email Transport Override
+
+Delivery transport selection.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `EMAIL_TRANSPORT_TYPE` | `ses` | — |
+
+### Audit log signing
+
+Audit-log hash-chain signing.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AUDIT_SIGNING_KEY` | `***` | — |
+
+### AI service (ai-service)
+
+ai-service helpers; model features stay off until enabled.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `AI_MODEL_ENABLED` | `false` | — |
+| `AI_MODEL_ENDPOINT` | `(empty)` | — |
+| `AI_MODEL_NAME` | `(empty)` | — |
+| `AI_MODEL_API_KEY` | `(empty)` | — |
+| `AI_MODEL_TIMEOUT_SECS` | `30` | — |
+| `AI_ADMIN_TOKEN` | `***` | — |
+| `AI_TRAINING_RUNNER` | `(empty)` | — |
+| `AI_TRAINING_WORKING_DIR` | `(empty)` | — |
+| `AI_BIND` | `0.0.0.0:3012` | — |
+| `AI_EMAIL_AGENT_ENABLED` | `false` | — |
+| `AI_EMAIL_MAX_TOKENS` | `1024` | — |
+| `AI_EMAIL_POLL_INTERVAL_SECS` | `15` | — |
+| `AI_EMAIL_MAX_BODY_CHARS` | `8000` | — |
+| `AI_EMAIL_REQUIRE_APPROVAL` | `true` | — |
+
+### Worker health probe
+
+Worker health endpoint.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HEALTH_PORT` | `9090` | — |
+
+### Grafana
+
+Grafana and trusted reverse proxies.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DDOS_TRUSTED_PROXIES` | `(empty)` | — |
+
+### Overage (billing-service)
+
+Overage allowance and invoicing.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OVERAGE_ALLOWANCE_PERCENT` | `100` | — |
+| `OVERAGE_INVOICING_ENABLED` | `true` | — |
+
+### HA service (crates/ha, docker target `ha`, port 4300)
+
+HA, isolation and platform key settings.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `HA_PORT` | `4300` | — |
+| `FAILBACK_ENABLED` | `false` | — |
+| `CHAOS_ENABLED` | `false` | — |
+| `HA_INTERNAL_API_KEY` | `(empty)` | — |
+| `HA_ADMIN_API_KEY` | `(empty)` | — |
+| `ISOLATION_PORT` | `4500` | — |
+| `ISOLATION_REDIS_DB` | `3` | — |
+| `ISOLATION_CORS_ORIGINS` | `http://localhost:3000` | — |
+| `ISOLATION_INTERNAL_API_KEY` | `dev-isolation-internal-api-key-change-me` | — |
+| `TENANT_ENCRYPTION_KEY` | `dev-tenant-encryption-key-change-me-32b` | — |
+| `DATA_KEY_ROTATION_DAYS` | `90` | — |
+| `AUDIT_RETENTION_DAYS` | `365` | — |
+
+### Inbound content security (mta inbound, crates/mta content_security.rs)
+
+Inbound content security engines (default off).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `MTA_SPAM_REJECT_ENABLED` | `false` | — |
+| `MTA_IDS_REFUSE` | `false` | — |
+
+### Account Takeover Protection (ato-protection via api-server login flows)
+
+Account-takeover protection thresholds.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATO_PROTECTION_ENABLED` | `(empty)` | — |
+| `ATO_MFA_THRESHOLD` | `(empty)` | — |
+| `ATO_BLOCK_THRESHOLD` | `(empty)` | — |
+
+### Outbound DLP (worker pre-send gate, WORKER_DLP_ENABLED)
+
+Worker pre-send DLP gate.
+
+| Variable | Default | Notes |
+|---|---|---|
+
+### Per-workload internal credentials (P1 #6)
+
+Per-workload internal service tokens.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TEMPLATE_RENDERER_AUTH_TOKEN` | `***` | — |
+| `PDF_RENDERER_AUTH_TOKEN` | `***` | — |
+| `DEVEX_AUTH_TOKEN` | `***` | — |
+| `AI_EMBEDDINGS_AUTH_TOKEN` | `***` | — |
+
+### Compliance service (crates/compliance, docker target `compliance`, :3011)
+
+Compliance service credentials.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `COMPLIANCE_AUTH_TOKEN` | `dev-compliance-token-change-me` | — |
+| `SECRETS_ENCRYPTION_KEY` | `dev-secrets-encryption-key-change-me-32b` | — |
+
+### Test infrastructure (Rust workspace, services/mail-server)
+
+Test-only database URLs.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TEST_DATABASE_URL` | `postgresql://postgres@localhost:5432/apexmail_integration_scratch` | — |
+| `TEST_REDIS_URL` | `redis://localhost:6379` | — |
+| `TEST_HOSTILE_DATABASE_URL` | `(empty)` | — |
+
+### Compose-only runtime variables
+
+These are set by the compose files and read by the services; they do not
+appear in `.env.example`.
+
+| Variable | Default in compose | Purpose |
+|---|---|---|
+| `AI_CHAT_RETENTION_DAYS` | see compose | Chat transcript retention (days). |
+| `AI_REPLY_FROM` | see compose | From address for AI reply drafts. |
+| `ANALYTICS_COLD_RETENTION_DAYS` | see compose | Cold analytics retention (days). |
+| `ANALYTICS_COMPACTION_ENABLED` | see compose | Enable ClickHouse part compaction. |
+| `ANALYTICS_HOT_RETENTION_DAYS` | see compose | Hot analytics retention (days). |
+| `ANALYTICS_STO_HMAC_KEY` | see compose | HMAC key for send-time-optimization analytics. |
+| `APEXMAIL_HA_FENCING` | see compose | HA service fencing mode. |
+| `APP_ENV` | see compose | Service environment for config validation (production enforces dedicated credentials). |
+| `AUTOMATION_TICK_SECS` | see compose | Automation scheduler tick interval. |
+| `CLICKHOUSE_DATABASE` | see compose | ClickHouse database name. |
+| `CLICKHOUSE_INSERT_TIMEOUT_SECONDS` | see compose | ClickHouse insert timeout. |
+| `CLICKHOUSE_MAX_CONNECTIONS` | see compose | ClickHouse connection-pool size. |
+| `CLICKHOUSE_USER` | see compose | ClickHouse user. |
+| `DATABASE_REPLICA_URL` | see compose | Read-replica PostgreSQL URL (roadmap: read replicas). |
+| `DB_REPLICA_HOSTS` | see compose | Read-replica hosts (roadmap: read replicas). |
+| `DKIM_ENABLED` | see compose | Enable local SMTP DKIM signing (SMTP transport only). |
+| `DKIM_KEY_PATH` | see compose | Path to the local DKIM key material. |
+| `DKIM_SELECTOR` | see compose | DKIM selector for locally signed mail. |
+| `GDPR_CLICKHOUSE_ERASURE_ENABLED` | see compose | Enable ClickHouse-side GDPR erasure. |
+| `GDPR_EXPORT_BASE_URL` | see compose | Base URL used in GDPR export links. |
+| `GDPR_VERIFY_BASE_URL` | see compose | Base URL used in GDPR verification links. |
+| `KIWI_ALGORITHM` | see compose | KiwiCaptcha hash: sha256 (default) or argon2id. |
+| `KIWI_ARGON2_DIFFICULTY_BITS` | see compose | Argon2id difficulty bits. |
+| `KIWI_ARGON_P` | see compose | Argon2id parallelism. |
+| `KIWI_ARGON_T` | see compose | Argon2id iterations. |
+| `MAILSTORE_GRPC_ADDR` | see compose | Mailstore gRPC address. |
+| `METRICS_ENABLED` | see compose | Enable the Prometheus metrics endpoint. |
+| `NODE_ENV` | see compose | Service environment name (production refuses ephemeral credentials). |
+| `OUTBOUND_MTA_HELO_DOMAIN` | see compose | Outbound MTA HELO/EHLO domain. |
+| `PLACEMENT_SMTP_HOST` | see compose | SMTP host for placement seed injection. |
+| `PLACEMENT_SMTP_PORT` | see compose | SMTP port for placement seed injection. |
+| `RUST_LOG` | see compose | tracing filter for Rust services. |
+| `SALES_AUTOPILOT_BASE_URL` | see compose | Sales-autopilot base URL. |
+| `SMTP_PASSWORD` | see compose | SMTP relay password (SMTP transport / submission). |
+| `SMTP_TLS` | see compose | Require TLS for the SMTP relay. |
+| `SMTP_USERNAME` | see compose | SMTP relay username. |
+| `SSO_FEDERATION_ALLOWLIST` | see compose | Allowlist of IdP federation metadata hosts. |
+| `STRIPE_SECRET_KEY` | see compose | Stripe API secret (billing service). |
+| `STRIPE_WEBHOOK_SECRET` | see compose | Stripe webhook signing secret. |
+| `TRACKING_BASE_URL` | see compose | Public base URL of the tracking service. |
+| `WORKER_REPLY_CLASSIFIER_AI_ENABLED` | see compose | Enable the AI reply classifier in the worker. |
+| `WORKER_REPLY_CLASSIFIER_AI_URL` | see compose | Reply-classifier endpoint URL. |
+| `WORKER_RUN_AUTOMATIONS` | see compose | Enable automation execution in the worker. |
+
+### Deployment-stack variables
+
+The compose files parameterize the bundled monitoring, backup and edge
+services with the following variables. They configure the third-party images
+rather than the ApexMail services; the compose files carry their defaults.
+
+    `ALERTMANAGER_PORT`, `ALERT_EMAIL_CRITICAL`, `ALERT_EMAIL_WARNING`, `ANALYTICS_BACKUP_KEEP_COUNT`, `API_METRICS_PORT`, `API_PORT`, `BACKUP_KEEP_COUNT`, `BACKUP_KEEP_DAYS`, `BACKUP_KEEP_MONTHS`, `BACKUP_KEEP_WEEKS`, `BACKUP_SSH_KEY_FILE`, `BACKUP_SSH_KNOWN_HOSTS_FILE`, `BACKUP_TARGET`, `BILLING_API_BASE_URL`, `CLICKHOUSE_ADMIN_PASSWORD`, `CLICKHOUSE_BACKUP_KEEP_COUNT`, `CLICKHOUSE_BACKUP_KEEP_DAYS`, `CLICKHOUSE_NATIVE_PORT`, `COMPLIANCE_CONSENT_SIGNING_KEY`, `COMPLIANCE_CORS_ORIGIN`, `COMPLIANCE_SECRETS_ENCRYPTION_KEY`, `COMPLIANCE_SECRETS_KDF_SALT`, `DKIM_DOMAIN`, `ENTERPRISE_BASE_URL`, `ENTERPRISE_CORS_ORIGINS`, `ENTERPRISE_LOG_LEVEL`, `ENTERPRISE_PORT`, `FAILOVER_ENABLED`, `GF_SECURITY_ADMIN_USER`, `GHCR_NS`, `GRAFANA_PORT`, `JWT_PRIVATE_KEY_PEM_FILE`, `JWT_PUBLIC_KEY_PEM_FILE`, `LOCAL_DOMAINS`, `LOKI_PORT`, `MAILPIT_ALLOW_INSECURE`, `MAILPIT_SMTP_PORT`, `MAILPIT_WEB_PORT`, `MAIL_SERVER_HOSTNAME`, `MAIL_TLS_DOMAIN`, `OPSGENIE_API_KEY`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_GRPC_PORT`, `OTEL_HTTP_PORT`, `OTEL_TRACES_SAMPLING_PERCENTAGE`, `OUTBOUND_MTA_BATCH_SIZE`, `OUTBOUND_MTA_MAX_ATTEMPTS`, `OUTBOUND_MTA_POLL_SECS`, `PAGERDUTY_ROUTING_KEY`, `PDF_LOG_LEVEL`, `PROMETHEUS_PORT`, `PROMETHEUS_RETENTION`, `PROMETHEUS_RETENTION_SIZE`, `PROMETHEUS_WEB_PASSWORD`, `PROMETHEUS_WEB_PASSWORD_HASH`, `PROMETHEUS_WEB_USER`, `RATE_LIMIT_ENABLED`, `RATE_LIMIT_MAX_PER_MINUTE`, `REDIS_BACKUP_KEEP_COUNT`, `REDIS_POOL_SIZE`, `RUST_BACKTRACE`, `SLACK_WEBHOOK_PATH`, `SLACK_WEBHOOK_PATH_LOW`, `SUBMISSION_PORT`, `SYNTHETIC_INTERVAL_SECONDS`, `SYNTHETIC_SMTP_TARGETS`, `SYNTHETIC_TARGETS`, `SYNTHETIC_TIMEOUT_SECONDS`, `TEMPO_PORT`, `TLS_CERT_DIR`, `TRACKING_METRICS_PORT`, `TRACKING_PORT`, `WORKER_RUST_LOG`
+
+## Removed variables
+
+The retired configuration generation documented `OPENAI_API_KEY`,
+`SENTRY_DSN`, `ENCRYPTION_KEY`, `DATABASE_POOL_MAX`, `FEATURE_*`, `SLO_*`,
+`QUEUE_*`, `GDPR_*` (except the ClickHouse/export/verify variables above),
+`AUDIT_ENABLED`, `REDIS_CLUSTER`, `CORS_*` and similar names that no service
+reads. They are not part of the contract and are omitted here.
+

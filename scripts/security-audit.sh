@@ -3,8 +3,9 @@
 # ApexMail — Security Audit Script
 # =============================================================================
 # Runs cargo-audit and cargo-deny checks for the mail-server workspace.
-# This script is used both in CI (security-audit.yml) and as a pre-commit hook
-# (see .pre-commit-config.yaml).
+# The CI path is ci/stages/security.sh (the security-audit.yml workflow is
+# gone); this script is wired as a pre-commit hook (see
+# .pre-commit-config.yaml) and can be run manually.
 #
 # Usage:
 #   ./scripts/security-audit.sh            # Run all security audits

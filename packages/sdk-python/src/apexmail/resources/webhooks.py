@@ -41,6 +41,11 @@ KNOWN_WEBHOOK_EVENTS: tuple[str, ...] = (
     "message.clicked",
     "message.cancelled",
     "recipient.unsubscribed",
+    # Campaign lifecycle (produced by the campaign worker; the server
+    # vocabulary carries these three — a stale SDK list warned falsely).
+    "campaign.started",
+    "campaign.ab_winner_selected",
+    "campaign.completed",
     "placement_test.completed",
     "inbound",
     "*",
@@ -173,7 +178,7 @@ class WebhooksResource:
         if offset is not None:
             params["offset"] = offset
         data = self._client._request("GET", "/v1/webhooks", params=params or None)
-        return WebhookListResponse(**data)
+        return WebhookListResponse.model_validate(data)
 
     def update(
         self,
@@ -259,6 +264,28 @@ class WebhooksResource:
         _validate_id(webhook_id, 'webhook')
         return self._client._request("POST", f"/v1/webhooks/{webhook_id}/test")
 
+    def rotate_secret(self, webhook_id: str) -> Webhook:
+        """
+        Rotate the webhook's signing secret.
+
+        ``POST /v1/webhooks/:id/rotate-secret`` (webhooks.rs router). The new
+        secret is returned in this response only; the previous secret stops
+        verifying deliveries immediately, so update the receiver before
+        rotating. Pass the secret verbatim (the full ``whsec_…`` string) to
+        :func:`apexmail.webhooks.verify_signature`.
+
+        Args:
+            webhook_id: The webhook ID whose secret to rotate
+
+        Returns:
+            Webhook details with the new ``secret`` populated
+        """
+        _validate_id(webhook_id, 'webhook')
+        data = self._client._request(
+            "POST", f"/v1/webhooks/{webhook_id}/rotate-secret"
+        )
+        return _parse_webhook(data)
+
 
 class AsyncWebhooksResource:
     """Asynchronous webhooks resource."""
@@ -305,7 +332,7 @@ class AsyncWebhooksResource:
         if offset is not None:
             params["offset"] = offset
         data = await self._client._request("GET", "/v1/webhooks", params=params or None)
-        return WebhookListResponse(**data)
+        return WebhookListResponse.model_validate(data)
 
     async def update(
         self,
@@ -356,3 +383,14 @@ class AsyncWebhooksResource:
         """Send a test event to a webhook asynchronously (no body)."""
         _validate_id(webhook_id, 'webhook')
         return await self._client._request("POST", f"/v1/webhooks/{webhook_id}/test")
+
+    async def rotate_secret(self, webhook_id: str) -> Webhook:
+        """Rotate the webhook's signing secret asynchronously.
+
+        See the sync resource: the new secret is returned once and the old
+        one stops verifying deliveries immediately."""
+        _validate_id(webhook_id, 'webhook')
+        data = await self._client._request(
+            "POST", f"/v1/webhooks/{webhook_id}/rotate-secret"
+        )
+        return _parse_webhook(data)

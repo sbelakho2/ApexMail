@@ -2,9 +2,11 @@
 # ==============================================================================
 # ApexMail Automated Secret Rotation Script (Docker Compose deployment)
 # ==============================================================================
-# Performs rotation of the secrets rendered on the production host by
-# .github/workflows/deploy-hetzner.yml, following the rotation schedule and
-# dual-key overlap pattern documented in:
+# Performs rotation of the secrets rendered as files on the production host
+# (fresh-host bootstrap step 4 of deploy/DEPLOYMENT.md writes them once; the
+# retired GitHub deploy workflow used to render them — nothing in the live
+# pipeline does), following the rotation schedule and dual-key overlap
+# pattern documented in:
 #   docs/operations/secret-rotation.md
 #
 # DEPLOYMENT MODEL (audit M): production ApexMail runs on Docker Compose on a
@@ -123,9 +125,30 @@ usage() {
 
 # ── Backup ────────────────────────────────────────────────────────────────────
 
-# Files rotated by this run — each rotation function appends its PROD_*_FILE
-# var here so backup/rollback know what to snapshot.
+# Files rotated by this run — populated by keys_for_action BEFORE the backup
+# runs, so backup/rollback know exactly what to snapshot. (The rotation
+# functions used to append here themselves, i.e. AFTER backup_current_secrets
+# had already iterated an empty list: every rotation snapshotted zero files,
+# printed a false success and --rollback could never find an index — audit P1.)
 BACKUP_KEYS=()
+
+# keys_for_action — the PROD_*_FILE names the selected action will rewrite.
+# "all" covers every rotation --all performs (the master key is deliberately
+# skipped in --all mode, see the execution block).
+keys_for_action() {
+    case "$1" in
+        jwt)             printf '%s\n' PROD_JWT_PRIVATE_KEY_FILE PROD_JWT_PUBLIC_KEY_FILE ;;
+        api-key-hash)    printf '%s\n' PROD_API_KEY_HASH_SECRET_FILE ;;
+        dkim)            printf '%s\n' PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE ;;
+        db-credentials)  printf '%s\n' PROD_POSTGRES_PASSWORD_FILE ;;
+        master-key)      printf '%s\n' PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE ;;
+        all)             printf '%s\n' PROD_JWT_PRIVATE_KEY_FILE PROD_JWT_PUBLIC_KEY_FILE \
+                                       PROD_API_KEY_HASH_SECRET_FILE \
+                                       PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE \
+                                       PROD_POSTGRES_PASSWORD_FILE ;;
+        *)               : ;;
+    esac
+}
 
 backup_current_secrets() {
     log_step "Backing up current secrets..."
@@ -134,17 +157,30 @@ backup_current_secrets() {
     # Remove this backup (shred -u) once the rotation is verified.
     install -d -m 700 "$BACKUP_DIR/$TIMESTAMP"
     umask 177
+    : > "$BACKUP_DIR/$TIMESTAMP/index.txt"
+    chmod 600 "$BACKUP_DIR/$TIMESTAMP/index.txt" 2>/dev/null || true
 
     local key f n=0
     for key in "${BACKUP_KEYS[@]}"; do
         f="$(env_file_path "$key")"
-        [[ -n "$f" && -f "$f" ]] || continue
+        if [[ -z "$f" || ! -f "$f" ]]; then
+            log_warn "$key has no rendered file ($f) — nothing to back up for it"
+            continue
+        fi
         cp "$f" "$BACKUP_DIR/$TIMESTAMP/$(basename "$f")"
         chmod 600 "$BACKUP_DIR/$TIMESTAMP/$(basename "$f")"
         echo "$key $(basename "$f")" >> "$BACKUP_DIR/$TIMESTAMP/index.txt"
         n=$((n + 1))
     done
-    chmod 600 "$BACKUP_DIR/$TIMESTAMP/index.txt" 2>/dev/null || true
+
+    # Fail closed: rotating a secret with NO recoverable copy is the one
+    # outcome --rollback exists to prevent. (Previously this printed
+    # "(0 files)" and continued — audit P1.)
+    if [[ "$n" -eq 0 ]]; then
+        log_error "secrets backup is EMPTY — refusing to rotate without a recoverable copy"
+        log_error "check that the PROD_*_FILE paths for: ${BACKUP_KEYS[*]} exist and are readable in $ENV_FILE"
+        exit 1
+    fi
 
     log_info "Secrets backed up to: $BACKUP_DIR/$TIMESTAMP ($n files, mode 0600)"
     log_warn "Plaintext backup present — shred it once the rotation is verified:"
@@ -234,7 +270,6 @@ validate_secrets() {
 
 rotate_jwt() {
     log_step "Rotating JWT signing keys..."
-    BACKUP_KEYS+=(PROD_JWT_PRIVATE_KEY_FILE PROD_JWT_PUBLIC_KEY_FILE)
 
     local temp_dir
     temp_dir=$(mktemp -d)
@@ -247,7 +282,8 @@ rotate_jwt() {
 
     # Preserve the old PUBLIC key for dual-key token overlap (the api-server
     # accepts JWT_PREVIOUS_PUBLIC_KEYS_PEM during the overlap window — set it
-    # in .env / APEXMAIL_PROD_ENV for the staged deploy, remove after).
+    # in /opt/apexmail/.env for the staged deploy, remove after; nothing
+    # renders .env automatically anymore).
     local old_public_file
     old_public_file="$BACKUP_DIR/$TIMESTAMP/jwt-public-previous.pem"
     mkdir -p "$BACKUP_DIR/$TIMESTAMP"
@@ -268,7 +304,6 @@ rotate_jwt() {
 
 rotate_api_key_hash() {
     log_step "Rotating API key hash secret..."
-    BACKUP_KEYS+=(PROD_API_KEY_HASH_SECRET_FILE)
 
     local new_secret
     new_secret=$(openssl rand -base64 48)
@@ -283,7 +318,6 @@ rotate_api_key_hash() {
 
 rotate_dkim() {
     log_step "Rotating DKIM signing keys..."
-    BACKUP_KEYS+=(PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE)
 
     # Per-domain DKIM keys are encrypted in the database with this KEK.
     # Rotating it requires re-encrypting the stored keys — see
@@ -302,7 +336,6 @@ rotate_dkim() {
 
 rotate_db_credentials() {
     log_step "Rotating database credentials..."
-    BACKUP_KEYS+=(PROD_POSTGRES_PASSWORD_FILE)
 
     local new_password
     new_password=$(openssl rand -base64 32)
@@ -327,7 +360,6 @@ rotate_db_credentials() {
 
 rotate_master_key() {
     log_step "Rotating master encryption key (DKIM KEK)..."
-    BACKUP_KEYS+=(PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE)
 
     local new_kek old_kek_id
     new_kek=$(openssl rand -hex 32)
@@ -347,10 +379,12 @@ rollback() {
     log_step "Rolling back last secret rotation..."
 
     local latest_backup
-    latest_backup=$(ls -td "$BACKUP_DIR"/*/ 2>/dev/null | head -1)
+    # `|| true`: with pipefail, an empty BACKUP_DIR makes the pipeline fail
+    # before the explicit error below can explain what is missing.
+    latest_backup=$(ls -td "$BACKUP_DIR"/*/ 2>/dev/null | head -1 || true)
 
-    if [[ -z "$latest_backup" || ! -f "$latest_backup/index.txt" ]]; then
-        log_error "No backup found to roll back to"
+    if [[ -z "$latest_backup" || ! -s "$latest_backup/index.txt" ]]; then
+        log_error "No backup found to roll back to (expected an index.txt under $BACKUP_DIR)"
         exit 1
     fi
 
@@ -496,6 +530,15 @@ if [[ "$FORCE" != "true" ]]; then
     fi
 fi
 
+# Compute the action's key list BEFORE the backup — the rotation functions
+# used to populate BACKUP_KEYS after backup_current_secrets had already
+# iterated the (empty) list, so every backup was empty (audit P1).
+while IFS= read -r _bk; do
+    [ -n "$_bk" ] && BACKUP_KEYS+=("$_bk")
+done <<EOF
+$(keys_for_action "$ACTION")
+EOF
+
 # Perform backup before any rotation
 backup_current_secrets
 
@@ -519,6 +562,9 @@ esac
 echo ""
 log_info "Rotation complete."
 log_info "Run validation: $(basename "$0") --validate"
-log_info "Then update APEXMAIL_PROD_ENV (GitHub secret) to match, so the next"
-log_info "deploy does not overwrite the rotated files with the old values."
+log_info "Then update the operator's secret source of truth (password manager /"
+log_info "the .env.production source values) to match, so a future manual secret"
+log_info "render does not overwrite the rotated files with the old values."
+log_info "(The retired GitHub deploy workflow that used to render them is gone;"
+log_info "see deploy/DEPLOYMENT.md step 4.)"
 echo ""

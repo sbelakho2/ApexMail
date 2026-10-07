@@ -14,12 +14,20 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 
 
 class EmailStatus(str, Enum):
-    """Email delivery status."""
+    """Email delivery status.
+
+    Mirrors the documented message status vocabulary
+    (docs/api/endpoints/messages.md "Status Values"): queued, scheduled,
+    processing, sent, partial, bounced, failed, cancelled. The additional
+    legacy members are kept so older responses keep parsing.
+    """
 
     QUEUED = "queued"
     SCHEDULED = "scheduled"
+    PROCESSING = "processing"
     SENDING = "sending"
     SENT = "sent"
+    PARTIAL = "partial"
     DELIVERED = "delivered"
     BOUNCED = "bounced"
     COMPLAINED = "complained"
@@ -181,9 +189,14 @@ class Email(BaseModel):
 class EmailListResponse(BaseModel):
     """Response from listing emails.
 
-    The API returns the envelope {"data": [MessageDetail...], "meta": ...};
-    the client unwraps data, so this model accepts a bare list.
+    The API returns the envelope {"data": [MessageDetail...], "meta":
+    {"hasMore": bool, "nextCursor": str}}. ``cursor`` carries the server's
+    opaque ``meta.nextCursor`` so the next page is requested with
+    ``cursor=<value>``; it is None on the last page. This model accepts a
+    bare list too (legacy shape).
     """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     emails: list[Email]
     cursor: Optional[str] = None
@@ -325,21 +338,28 @@ class TemplateListResponse(BaseModel):
 
 
 class Suppression(BaseModel):
-    """Suppression entry."""
+    """Suppression entry (the live SuppressionResponse shape).
+
+    ``email`` is a plain string on purpose: response parsing must not
+    reject the server's own data — the live stack legitimately carries
+    special-use domains (``rcpt2@example.test``) and syntactically unusual
+    bounce addresses that ``EmailStr`` refuses. ``source`` is nullable and
+    omitted entirely for tracking-service rows.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    email: EmailStr
+    email: str
     reason: str
-    source: str
+    source: Optional[str] = None
     created_at: datetime = Field(alias="createdAt")
 
 
 class SuppressionCheckResponse(BaseModel):
-    """Suppression check response."""
+    """Suppression check response (``email`` is the server's echoed value)."""
 
-    email: EmailStr
+    email: str
     suppressed: bool
     reason: Optional[str] = None
 
@@ -368,14 +388,19 @@ class BulkSuppressionResponse(BaseModel):
 
 
 class Event(BaseModel):
-    """Delivery event details."""
+    """Delivery event details (live EventResponse shape).
+
+    ``recipient`` is a plain string: the server's event log may hold
+    addresses ``EmailStr`` rejects (special-use domains, malformed bounce
+    recipients), and response parsing must never fail on server data.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
     message_id: Optional[str] = Field(default=None, alias="messageId")
     event_type: str = Field(alias="eventType")
-    recipient: Optional[EmailStr] = None
+    recipient: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
     timestamp: datetime
 
@@ -392,7 +417,9 @@ class EventStats(BaseModel):
 
 
 class EventTimeseriesPoint(BaseModel):
-    """Event timeseries point."""
+    """Event timeseries point ({timestamp, count, event_type})."""
+
+    model_config = ConfigDict(populate_by_name=True)
 
     timestamp: datetime
     count: int

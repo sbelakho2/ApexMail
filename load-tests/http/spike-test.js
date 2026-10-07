@@ -20,81 +20,64 @@
 //   7. Baseline 3:  10 VUs for 1m         — final recovery
 //   8. Cooldown:    10 → 0 VUs in 30s
 //
+// Real API contract (see load-test.js): X-API-Key authentication, health at
+// /health/live|/health/ready, send at POST /v1/messages with
+// {from, to[], subject, html?, text?, tags?: string[]} → 202 envelope.
+//
 // Thresholds:
 //   - p(95) < 1000ms  — spike latency tolerance
 //   - p(99) < 3000ms  — extreme tail tolerance during spikes
 //   - Error rate < 3% — slightly relaxed for spike conditions
 //
-// Key metrics to watch:
-//   - http_req_duration trend — does latency spike then recover?
-//   - http_req_failed — do errors concentrate during spike transitions?
-//   - http_reqs — does throughput drop during recovery periods (connection pool drain)?
+// Run (manual/on-demand — the load-gate workflow is archived, ci/README.md §2):
+//   K6_API_KEY=am_live_… K6_API_BASE=http://localhost:8080 \
+//     K6_FROM_EMAIL=sender@verified.example \
+//     k6 run load-tests/http/spike-test.js
 // =============================================================================
 
-import { check, group } from 'k6';
+import { check, group, sleep } from 'k6';
 import http from 'k6/http';
-import { sleep } from 'k6';
-import { testTags } from './test-options.js';
-
-// ── Configuration ───────────────────────────────────────────────────────────
-
-const BASE_URL = __ENV.K6_API_BASE || 'http://localhost:3000';
+import { API_KEY, BASE_URL, FROM_EMAIL, apiKeyHeaders, testTags } from './test-options.js';
 
 // ── Test Options ────────────────────────────────────────────────────────────
 
 export const options = {
   stages: [
-    // ── Stage 1: Baseline ──────────────────────────────────────────────────
     { duration: '2m', target: 10 },
-
-    // ── Stage 2: Spike 1 ───────────────────────────────────────────────────
     { duration: '10s', target: 200 },
-
-    // ── Stage 3: Recovery 1 ────────────────────────────────────────────────
     { duration: '10s', target: 10 },
-
-    // ── Stage 4: Baseline 2 ────────────────────────────────────────────────
     { duration: '1m', target: 10 },
-
-    // ── Stage 5: Spike 2 ───────────────────────────────────────────────────
     { duration: '10s', target: 200 },
-
-    // ── Stage 6: Recovery 2 ────────────────────────────────────────────────
     { duration: '10s', target: 10 },
-
-    // ── Stage 7: Baseline 3 ────────────────────────────────────────────────
     { duration: '1m', target: 10 },
-
-    // ── Stage 8: Cooldown ──────────────────────────────────────────────────
     { duration: '30s', target: 0 },
   ],
 
   thresholds: {
-    http_req_duration: [
-      'p(95)<1000',   // 95% of requests under 1000ms (even during spikes)
-      'p(99)<3000',   // 99% of requests under 3000ms
-      'avg<500',      // Average latency under 500ms
-    ],
-    http_req_failed: [
-      'rate<0.03',    // Less than 3% error rate (relaxed for spike conditions)
-    ],
-    // During spikes, the request rate should increase significantly.
-    // If it plateaus, the system is saturated.
-    http_reqs: [
-      'rate>50',      // Must sustain at least 50 req/s average
-    ],
+    http_req_duration: ['p(95)<1000', 'p(99)<3000', 'avg<500'],
+    http_req_failed: ['rate<0.03'],
+    http_reqs: ['rate>50'],
   },
 
-  discardResponseBodies: true,
-
+  discardResponseBodies: false,
   tags: testTags('spike-test'),
 };
+
+// ── Setup ───────────────────────────────────────────────────────────────────
+
+export function setup() {
+  if (!API_KEY) {
+    throw new Error(
+      'K6_API_KEY is required (X-API-Key: am_… for the target tenant); ' +
+        'refusing to run a spike test whose authenticated scenarios cannot succeed'
+    );
+  }
+  return { start_time: Date.now() };
+}
 
 // ── Helper Functions ────────────────────────────────────────────────────────
 
 function simulateThinkTime() {
-  // Simulate realistic user think time between actions
-  // During spike, reduce think time (users are impatient)
   sleep(0.5 + Math.random() * 1.5);
 }
 
@@ -102,22 +85,14 @@ function simulateThinkTime() {
 
 export default function () {
   const vuId = __VU;
+  const iter = __ITER;
 
   // ── 1. Health Check (lightest operation) ──────────────────────────────────
   group('health check', function () {
-    // During spikes, alternate endpoints to distribute load
     const endpoint = Date.now() % 2 === 0 ? 'live' : 'ready';
-    const resp = http.get(
-      `${BASE_URL}/health/${endpoint}`,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        tags: { endpoint: 'health-check' },
-      }
-    );
-
+    const resp = http.get(`${BASE_URL}/health/${endpoint}`, {
+      tags: { endpoint: 'health-check' },
+    });
     check(resp, {
       'health status is 200': (r) => r.status === 200,
     });
@@ -125,72 +100,37 @@ export default function () {
 
   simulateThinkTime();
 
-  // ── 2. Auth Login ─────────────────────────────────────────────────────────
-  group('auth login', function () {
-    const loginPayload = JSON.stringify({
-      email: `spike-user-${vuId}@apexmail.ee`,
-      password: `spike-pass-${vuId}`,
+  // ── 2. Authenticated probe (X-API-Key) ────────────────────────────────────
+  group('authenticated probe', function () {
+    const resp = http.get(`${BASE_URL}/v1/messages?limit=1`, {
+      headers: apiKeyHeaders(),
+      tags: { endpoint: 'auth-probe' },
     });
-
-    const loginResp = http.post(
-      `${BASE_URL}/v1/auth/login`,
-      loginPayload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        tags: { endpoint: 'auth-login' },
-      }
-    );
-
-    check(loginResp, {
-      'auth status is 200 or 429': (r) => r.status === 200 || r.status === 429,
-      'auth not 5xx': (r) => r.status < 500,
+    check(resp, {
+      'authenticated read status is 200 or 429': (r) => r.status === 200 || r.status === 429,
+      'authenticated read not 5xx': (r) => r.status < 500,
     });
-
-    if (loginResp.status === 200) {
-      try {
-        __ENV.__TOKEN = JSON.parse(loginResp.body).token;
-      } catch {
-        // Ignore parse errors during spikes
-      }
-    }
   });
 
   simulateThinkTime();
 
-  // ── 3. Email Send ─────────────────────────────────────────────────────────
+  // ── 3. Email Send (heaviest operation) ────────────────────────────────────
   group('email send', function () {
-    const token = __ENV.__TOKEN || '';
-
     const emailPayload = JSON.stringify({
-      from: `spike-${vuId}@apexmail.ee`,
-      to: [`spike-recipient-${vuId}-${Date.now()}@example.com`],
-      subject: `[Spike Test] Surge traffic — VU ${vuId} at ${Date.now()}`,
-      text_body: 'Spike test email payload for instantaneous traffic surge measurement.',
-      tags: {
-        spike_test: 'true',
-        vu_id: String(vuId),
-      },
+      from: FROM_EMAIL,
+      to: [`spike-recipient-${vuId}-${iter}@example.com`],
+      subject: `[Spike Test] Surge traffic — VU ${vuId} iteration ${iter}`,
+      text: 'Spike test email payload for instantaneous traffic surge measurement.',
+      tags: ['spike-test'],
     });
 
-    const emailResp = http.post(
-      `${BASE_URL}/v1/messages`,
-      emailPayload,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        tags: { endpoint: 'email-send' },
-      }
-    );
+    const emailResp = http.post(`${BASE_URL}/v1/messages`, emailPayload, {
+      headers: apiKeyHeaders(),
+      tags: { endpoint: 'email-send' },
+    });
 
     check(emailResp, {
-      'email status is 200, 202, or 429': (r) =>
-        r.status === 200 || r.status === 202 || r.status === 429,
+      'email status is 202 or 429': (r) => r.status === 202 || r.status === 429,
       'email not 5xx': (r) => r.status < 500,
     });
   });

@@ -418,7 +418,11 @@ ci_ephem_cleanup() {
 ci_ephem_postgres() {
     _ep_name=$1 _ep_user=$2 _ep_pass=$3 _ep_db=$4 _ep_port=$5
     ci_exec docker rm -f "$_ep_name" >/dev/null 2>&1 || true
-    ci_exec docker run -d --rm --name "$_ep_name" \
+    # --shm-size: Docker's 64 MB /dev/shm default exhausts under the
+    # full-suite parallel load — Postgres workers then fail to resize DSM
+    # segments and segfault into crash-recovery loops (2026-10-07 dogfood;
+    # the compose stack carries the same fix as shm_size).
+    ci_exec docker run -d --rm --name "$_ep_name" --shm-size=1g \
         -e "POSTGRES_USER=$_ep_user" -e "POSTGRES_PASSWORD=$_ep_pass" -e "POSTGRES_DB=$_ep_db" \
         -p "127.0.0.1:$_ep_port:5432" "${CI_EPHEM_PG_IMAGE:-postgres:16-alpine}" >/dev/null || return 1
     ci_ephem_register "$_ep_name"
@@ -522,6 +526,42 @@ ci_have_tool() {
     fi
     ci_warn "tool '$_ht_name' missing — related check skipped (install it for full coverage)"
     return 1
+}
+
+# lane_tool_status <tool> <lane-label> <flag> — print the lane disposition on
+# stdout: `run`, `skip` (advisory lane, tool absent) or `fail` (required
+# lane, tool absent). Backed by ci_have_tool semantics: on the deploy host a
+# missing tool DIES (fail closed, CI_MISSING_TOOLS=auto); on a dev machine
+# the lane flag decides — REQUIRED turns the gap into a stage failure,
+# `advisory` logs and skips. In dry-run (selftest) the lane is assumed
+# runnable: presence is a real-run concern and selftest machines are not
+# required to carry every toolchain (the deploy host installs them all via
+# ci/install.sh).
+#
+# Lives in lib.sh (was test-stage-local) because the ui/validate/test stages
+# all need the same fail-closed disposition for their REQUIRED python3/zola
+# lanes (audit P2: a REQUIRED gate used to warn-and-skip when its runtime was
+# missing, so the stage could go green with the gate never running).
+lane_tool_status() {
+    _lt_tool=$1 _lt_lane=$2 _lt_flag=${3:-required}
+    if ci_dry; then
+        printf 'run\n'
+        return "$CI_EXIT_OK"
+    fi
+    if ci_have_tool "$_lt_tool"; then
+        printf 'run\n'
+        return "$CI_EXIT_OK"
+    fi
+    # ci_have_tool has warned already; decide fail-vs-skip.
+    if [ "$_lt_flag" = required ]; then
+        ci_err "$_lt_lane: '$_lt_tool' missing — lane is REQUIRED \
+(install it via ci/install.sh, or set the lane's CI_*_CHECK=advisory for a triage window)"
+        printf 'fail\n'
+        return "$CI_EXIT_OK"
+    fi
+    ci_warn "ADVISORY: $_lt_lane skipped — '$_lt_tool' missing"
+    printf 'skip\n'
+    return "$CI_EXIT_OK"
 }
 
 # --- retention ---------------------------------------------------------------------------

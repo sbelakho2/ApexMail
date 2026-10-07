@@ -1,5 +1,6 @@
 //! Common types, traits, and utilities shared across all processors.
 
+pub mod audit;
 pub mod backpressure;
 pub mod circuit_breaker;
 pub mod config;

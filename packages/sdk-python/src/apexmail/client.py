@@ -58,6 +58,27 @@ RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 API_KEY_PATTERN = re.compile(r'^am_(live|test)_[a-zA-Z0-9]{16,}$')
 
+# Headers describing the COMPRESSED wire body. httpx's iter_bytes() yields
+# already-decoded bytes, so rebuilding a Response for the buffered body must
+# drop them — otherwise httpx tries to gunzip an already-gunzipped body and
+# raises DecodingError("incorrect header check"). The live api-server gzips
+# every response when httpx's default Accept-Encoding: gzip is present.
+_ENCODING_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
+def _decoded_headers(headers: object) -> list[tuple[str, str]]:
+    """Return the response headers minus the compressed-body encoding
+    headers (works with httpx.Headers and with plain test doubles)."""
+    if headers is None:
+        return []
+    if hasattr(headers, "multi_items"):
+        items = list(headers.multi_items())
+    elif hasattr(headers, "items"):
+        items = list(headers.items())
+    else:
+        items = list(headers)
+    return [(k, v) for k, v in items if str(k).lower() not in _ENCODING_HEADERS]
+
 
 def auto_idempotency_key(method: str, json: Optional[dict]) -> Optional[str]:
     """Duplicate-side-effect protection for mutating POSTs (SDK-B).
@@ -147,7 +168,13 @@ class BaseClient:
             # caller-supplied keys before they reach the transport.
             safe_key = "".join(ch for ch in idempotency_key if ord(ch) >= 0x20 and ord(ch) != 0x7F)
             if safe_key:
-                return {"X-Idempotency-Key": safe_key[:128]}
+                # Contract fix (SDK-IDEM): the server reads `Idempotency-Key`
+                # (docs/api/endpoints/messages.md; middleware/idempotency.rs
+                # IDEMPOTENCY_HEADER). The historical `X-Idempotency-Key`
+                # spelling is ignored by the server — every auto-generated
+                # key was silently dropped and a retried POST could
+                # duplicate.
+                return {"Idempotency-Key": safe_key[:128]}
         return {}
 
     def _parse_retry_after(self, retry_after: Optional[str]) -> Optional[float]:
@@ -198,20 +225,31 @@ class BaseClient:
                 status_code=0,
             )
 
-    def _handle_response(self, response: httpx.Response) -> dict:
-        """Handle API response and raise appropriate exceptions."""
+    def _handle_response(self, response: httpx.Response, *, with_meta: bool = False):
+        """Handle API response and raise appropriate exceptions.
+
+        When ``with_meta`` is true, return ``(data, meta)`` where ``meta`` is
+        the envelope's ``meta`` object (``{"hasMore": bool, "nextCursor":
+        str}`` on paginated endpoints) or None. The default returns the
+        unwrapped ``data`` only.
+        """
         # FIX-500-294: Handle 204 No Content (DELETE responses)
         if response.status_code == 204:
-            return {}
+            return ({}, None) if with_meta else {}
         # SDK-G L7: treat every 2xx status as success (202/206/etc. were
         # previously falling through to the error path).
         if 200 <= response.status_code < 300:
             self._ensure_response_size(response)
             data = response.json()
+            meta: Optional[dict] = None
             # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
             if isinstance(data, dict) and "data" in data:
+                if isinstance(data.get("meta"), dict):
+                    meta = data["meta"]
+                if with_meta:
+                    return data["data"], meta
                 return data["data"]
-            return data
+            return (data, meta) if with_meta else data
 
         try:
             error_data = response.json()
@@ -229,7 +267,10 @@ class BaseClient:
             code = "UNKNOWN"
             errors = []
 
-        if response.status_code == 400:
+        if response.status_code in (400, 422):
+            # SDK-E / live contract: 422 is the server's deserialization and
+            # validation status (docs/api/errors.md VALIDATION_ERROR); it
+            # must surface as ValidationError, not the generic base error.
             raise ValidationError(message=message, code=code, errors=errors)
         elif response.status_code == 401:
             raise AuthenticationError(message=message, code=code)
@@ -303,7 +344,7 @@ class BaseClient:
             chunks.append(chunk)
         return httpx.Response(
             stream.status_code,
-            headers=stream.headers,
+            headers=_decoded_headers(getattr(stream, "headers", None)),
             content=b"".join(chunks),
             request=stream.request,
         )
@@ -387,11 +428,14 @@ class ApexMail(BaseClient):
         json: Optional[dict] = None,
         params: Optional[dict] = None,
         idempotency_key: Optional[str] = None,
-    ) -> dict:
+        with_meta: bool = False,
+    ):
         """Make a synchronous HTTP request with retry logic.
 
         Responses are consumed as a stream and capped at max_response_bytes
-        while reading (SDK-G).
+        while reading (SDK-G). Returns the unwrapped ``data`` payload, or
+        ``(data, meta)`` when ``with_meta`` is true (pagination callers need
+        the envelope's ``nextCursor``/``hasMore``).
         """
         headers = self._get_headers(
             idempotency_key if idempotency_key is not None else auto_idempotency_key(method, json)
@@ -416,7 +460,7 @@ class ApexMail(BaseClient):
                     self._sleep(self._add_jitter(delay))
                     continue
 
-                return self._handle_response(response)
+                return self._handle_response(response, with_meta=with_meta)
 
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
@@ -508,7 +552,7 @@ class AsyncApexMail(BaseClient):
             chunks.append(chunk)
         return httpx.Response(
             stream.status_code,
-            headers=stream.headers,
+            headers=_decoded_headers(getattr(stream, "headers", None)),
             content=b"".join(chunks),
             request=stream.request,
         )
@@ -521,11 +565,14 @@ class AsyncApexMail(BaseClient):
         json: Optional[dict] = None,
         params: Optional[dict] = None,
         idempotency_key: Optional[str] = None,
-    ) -> dict:
+        with_meta: bool = False,
+    ):
         """Make an asynchronous HTTP request with retry logic.
 
         Responses are consumed as a stream and capped at max_response_bytes
-        while reading (SDK-G).
+        while reading (SDK-G). Returns the unwrapped ``data`` payload, or
+        ``(data, meta)`` when ``with_meta`` is true (pagination callers need
+        the envelope's ``nextCursor``/``hasMore``).
         """
         headers = self._get_headers(
             idempotency_key if idempotency_key is not None else auto_idempotency_key(method, json)
@@ -550,7 +597,7 @@ class AsyncApexMail(BaseClient):
                     await asyncio.sleep(self._add_jitter(delay))
                     continue
 
-                return self._handle_response(response)
+                return self._handle_response(response, with_meta=with_meta)
 
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e

@@ -156,7 +156,8 @@ mod api_server_tests {
         assert_eq!(not_found.to_string(), "missing");
 
         let rate_limited = api_server::error::ApiError::RateLimited;
-        assert_eq!(rate_limited.to_string(), "rate limit exceeded");
+        // Matches the shipped enum's Display (api-server/src/error.rs).
+        assert_eq!(rate_limited.to_string(), "too many requests");
     }
 
     #[test]

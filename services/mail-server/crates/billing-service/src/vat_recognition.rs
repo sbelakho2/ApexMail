@@ -435,8 +435,11 @@ pub async fn materialize_invoice_recognition_by_id(
 /// fallback has arrived while they were unpaid. Returns the number of
 /// invoices materialized.
 ///
-/// NOTE: scheduling is not wired into the maintenance loop by this change;
-/// the function is exposed so operations can run it (and tests can call it).
+/// Scheduled (audit F7): `maintenance::start_periodic_jobs` runs this in the
+/// KMD loop, BEFORE the return generation, so the `cash_special_due` output
+/// VAT is in the period being filed — the stripe-webhook comment that "the
+/// sweep" handles the fallback is now true. Also exposed so operations can
+/// run it one-shot.
 pub async fn materialize_due_cash_special(db: &PgPool, now: DateTime<Utc>) -> Result<u64, String> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         r#"

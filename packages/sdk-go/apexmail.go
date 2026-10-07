@@ -2,7 +2,10 @@
 //
 // Usage:
 //
-//	client := apexmail.New("am_live_xxxx")
+//	client, err := apexmail.New("am_live_xxxx")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //	resp, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
 //	    From:    apexmail.EmailAddress{Email: "hello@example.com"},
 //	    To:      []apexmail.EmailAddress{{Email: "user@example.com"}},
@@ -237,12 +240,15 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 	if req.Subject == "" {
 		return fmt.Errorf("apexmail: subject is required")
 	}
+	// GO-6: the server's SendMessageRequest (deny_unknown_fields) carries
+	// template_id/template_data ONLY so validation can reject them with an
+	// explicit 422 ("field 'template_id' is not supported by this endpoint").
+	// A body containing either field is a guaranteed 422, so refuse it
+	// client-side instead of serializing a payload no route accepts.
+	if req.TemplateID != "" || req.TemplateData != nil {
+		return fmt.Errorf("apexmail: template_id/template_data are not supported by the send API (the server rejects them with 422); render the template with Templates.Render and send html/text")
+	}
 	if req.HTML == "" && req.Text == "" {
-		// The API's SendMessageRequest has no templateId field, so a
-		// template-only request cannot be serialized into a valid body.
-		if req.TemplateID != "" {
-			return fmt.Errorf("apexmail: html or text body is required (templateId is not supported by the send API)")
-		}
 		return fmt.Errorf("apexmail: html or text is required")
 	}
 	return nil
@@ -446,7 +452,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			if len(safeKey) > 128 {
 				safeKey = safeKey[:128]
 			}
-			req.Header.Set("X-Idempotency-Key", safeKey)
+			// The server reads exactly `Idempotency-Key`
+			// (middleware/idempotency.rs IDEMPOTENCY_HEADER). The historical
+			// `X-Idempotency-Key` spelling is IGNORED by the server — sending
+			// it silently disabled deduplication for every retried send.
+			req.Header.Set("Idempotency-Key", safeKey)
 		}
 
 		resp, err := httpClient.Do(req)
@@ -489,7 +499,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			apiErr := parseAPIError(respBody, resp.StatusCode)
 			switch e := apiErr.(type) {
 			case *APIError:
-				return classifyAPIError(e)
+				return classifyAPIError(e, parseRetryAfter(resp))
 			default:
 				return apiErr
 			}
@@ -531,35 +541,39 @@ func readLimitedBody(resp *http.Response, maxBytes int64) ([]byte, error) {
 // value was silently truncated to defaultMaxBackoff = 5s). Quadratic backoff
 // on its own remains capped at defaultMaxBackoff.
 func retryDelay(resp *http.Response, attempt int) time.Duration {
-	retryAfter := resp.Header.Get("Retry-After")
-
 	// Compute quadratic backoff: baseDelay * attempt² (capped at 5s)
 	backoff := calculateBackoff(attempt)
-
-	if retryAfter == "" {
-		return backoff
+	if retryAfter := parseRetryAfter(resp); retryAfter > backoff {
+		backoff = retryAfter
 	}
+	return capRetryDelay(backoff)
+}
 
-	// Try integer seconds (most common)
-	if seconds, err := strconv.Atoi(retryAfter); err == nil {
-		if d := time.Duration(seconds) * time.Second; d > backoff {
-			backoff = d
+// parseRetryAfter extracts the Retry-After response header (integer seconds
+// or HTTP-date). Returns 0 when absent or unparseable.
+func parseRetryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	value := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
 		}
-		return capRetryDelay(backoff)
+		return time.Duration(seconds) * time.Second
 	}
-
-	// Try HTTP-date format (RFC 1123)
 	for _, layout := range []string{time.RFC1123, time.RFC1123Z} {
-		if t, err := time.Parse(layout, retryAfter); err == nil {
-			if d := time.Until(t); d > backoff {
-				backoff = d
+		if t, err := time.Parse(layout, value); err == nil {
+			if d := time.Until(t); d > 0 {
+				return d
 			}
-			return capRetryDelay(backoff)
+			return 0
 		}
 	}
-
-	// Unparseable header — fall back to quadratic backoff
-	return backoff
+	return 0
 }
 
 // capRetryDelay bounds the total retry delay at maxRetryAfterDelay.
@@ -694,6 +708,13 @@ func parseAPIError(body []byte, statusCode int) error {
 	}
 }
 
+// envelopeMetaCapturer is implemented by response types that need the raw
+// envelope `meta` object — e.g. the messages list's {hasMore, nextCursor},
+// which cannot ride on the payload because that payload is a bare array.
+type envelopeMetaCapturer interface {
+	setEnvelopeMeta(meta json.RawMessage)
+}
+
 func decodeAPIResponse(body []byte, out interface{}) error {
 	var envelope apiSuccessResponse
 	if err := json.Unmarshal(body, &envelope); err == nil && isAPIEnvelope(envelope) {
@@ -702,6 +723,9 @@ func decodeAPIResponse(body []byte, out interface{}) error {
 		}
 		if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
 			return nil
+		}
+		if capturer, ok := out.(envelopeMetaCapturer); ok {
+			capturer.setEnvelopeMeta(envelope.Meta)
 		}
 		payload := mergeEnvelopeMeta(envelope.Data, envelope.Meta)
 		return json.Unmarshal(payload, out)
@@ -773,7 +797,7 @@ func apiErrorCodeFromStatus(statusCode int) string {
 	}
 }
 
-func classifyAPIError(err *APIError) error {
+func classifyAPIError(err *APIError, retryAfter time.Duration) error {
 	switch {
 	case err.StatusCode == http.StatusUnauthorized || err.Code == "UNAUTHORIZED" || err.Code == "INVALID_API_KEY" || err.Code == "TOKEN_EXPIRED" || err.Code == "TOKEN_BLACKLISTED":
 		return &AuthenticationError{APIError: err}
@@ -786,7 +810,7 @@ func classifyAPIError(err *APIError) error {
 	case err.Code == "VALIDATION_ERROR" || err.Code == "INVALID_INPUT" || err.StatusCode == http.StatusBadRequest:
 		return &ValidationError{APIError: err}
 	case err.StatusCode == http.StatusTooManyRequests || err.Code == "RATE_LIMIT_EXCEEDED" || err.Code == "QUOTA_EXCEEDED":
-		return &RateLimitError{APIError: err}
+		return &RateLimitError{APIError: err, RetryAfter: retryAfter}
 	default:
 		return err
 	}
@@ -810,7 +834,15 @@ type ConflictError struct{ *APIError }
 type ValidationError struct{ *APIError }
 
 // RateLimitError is returned when the rate limit is exceeded (HTTP 429).
-type RateLimitError struct{ *APIError }
+type RateLimitError struct {
+	*APIError
+
+	// RetryAfter is the delay the server asked the client to wait, parsed
+	// from the Retry-After response header (integer seconds or HTTP-date).
+	// Zero when the server sent no parseable value. The SDK's own retry wait
+	// is capped at 120s; this field carries the server's value as sent.
+	RetryAfter time.Duration
+}
 
 // NetworkError is returned when a transport-level (non-HTTP) error occurs.
 type NetworkError struct {
@@ -962,12 +994,17 @@ type EmailsAPI struct{ client *Client }
 
 // SendEmailRequest is the request body for sending a single email.
 //
-// The wire payload (MarshalJSON) serializes every option the struct
+// The wire payload (MarshalJSON) serializes every option the send API
 // accepts (F48): from/to/cc/bcc/reply_to go out as address strings with
 // display names preserved as RFC 5322 "Name <addr>" forms, tags as a
-// string list, and reply_to, template_id/template_data, attachments and
-// priority under their documented snake_case field names. Nothing the SDK
-// accepts is dropped silently.
+// string list, and attachments/priority/headers/metadata/scheduled_at
+// under their documented snake_case field names.
+//
+// TemplateID and TemplateData are retained as inputs for source
+// compatibility only: the send API does not support template sends (the
+// server answers 422), so setting either makes Send/Batch fail client-side
+// with an error naming the contract. Render the template first
+// (Templates.Render) and send html/text.
 type SendEmailRequest struct {
 	From         EmailAddress      `json:"from"`
 	To           []EmailAddress    `json:"to"`
@@ -977,8 +1014,8 @@ type SendEmailRequest struct {
 	Subject      string            `json:"subject"`
 	HTML         string            `json:"html,omitempty"`
 	Text         string            `json:"text,omitempty"`
-	TemplateID   string            `json:"template_id,omitempty"`   // wire: snake_case
-	TemplateData interface{}       `json:"template_data,omitempty"` // wire: snake_case
+	TemplateID   string            `json:"template_id,omitempty"`   // unsupported: rejected client-side (GO-6)
+	TemplateData interface{}       `json:"template_data,omitempty"` // unsupported: rejected client-side (GO-6)
 	Attachments  []Attachment      `json:"attachments,omitempty"`
 	Tags         []string          `json:"tags,omitempty"`
 	Priority     SendPriority      `json:"priority,omitempty"` // wire: int 1-10 or named level (F48 contract)
@@ -990,46 +1027,44 @@ type SendEmailRequest struct {
 // sendMessagePayload is the wire body for the messages send API. Every
 // accepted option is serialized (F48) — display names survive as
 // "Name <addr>" forms and extended options use their documented
-// snake_case field names.
+// snake_case field names. template_id/template_data are deliberately ABSENT:
+// the server's deny_unknown_fields SendMessageRequest always answers 422 for
+// them, and validateSendEmailRequest refuses such requests before marshal.
 type sendMessagePayload struct {
-	From         string            `json:"from"`
-	To           []string          `json:"to"`
-	CC           []string          `json:"cc,omitempty"`
-	BCC          []string          `json:"bcc,omitempty"`
-	ReplyTo      string            `json:"reply_to,omitempty"`
-	Subject      string            `json:"subject"`
-	HTML         string            `json:"html,omitempty"`
-	Text         string            `json:"text,omitempty"`
-	TemplateID   string            `json:"template_id,omitempty"`
-	TemplateData interface{}       `json:"template_data,omitempty"`
-	Attachments  []Attachment      `json:"attachments,omitempty"`
-	Tags         []string          `json:"tags,omitempty"`
-	Priority     *SendPriority     `json:"priority,omitempty"` // int 1-10 or named level, exactly as the API accepts (F48)
-	Headers      map[string]string `json:"headers,omitempty"`
-	Metadata     interface{}       `json:"metadata,omitempty"`
-	ScheduledAt  string            `json:"scheduled_at,omitempty"`
+	From        string            `json:"from"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc,omitempty"`
+	BCC         []string          `json:"bcc,omitempty"`
+	ReplyTo     string            `json:"reply_to,omitempty"`
+	Subject     string            `json:"subject"`
+	HTML        string            `json:"html,omitempty"`
+	Text        string            `json:"text,omitempty"`
+	Attachments []Attachment      `json:"attachments,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
+	Priority    *SendPriority     `json:"priority,omitempty"` // int 1-10 or named level, exactly as the API accepts (F48)
+	Headers     map[string]string `json:"headers,omitempty"`
+	Metadata    interface{}       `json:"metadata,omitempty"`
+	ScheduledAt string            `json:"scheduled_at,omitempty"`
 }
 
 // MarshalJSON serializes the send payload with every accepted option on
-// the wire (F48).
+// the wire (F48). Template fields are never serialized (GO-6).
 func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 	payload := sendMessagePayload{
-		From:         formatEmailAddress(r.From),
-		To:           addressListToStrings(r.To),
-		CC:           addressListToStrings(r.CC),
-		BCC:          addressListToStrings(r.BCC),
-		ReplyTo:      formatEmailAddressPtr(r.ReplyTo),
-		Subject:      r.Subject,
-		HTML:         r.HTML,
-		Text:         r.Text,
-		TemplateID:   r.TemplateID,
-		TemplateData: r.TemplateData,
-		Attachments:  r.Attachments,
-		Tags:         r.Tags,
-		Priority:     sendPriorityPtr(r.Priority),
-		Headers:      r.Headers,
-		Metadata:     r.Metadata,
-		ScheduledAt:  r.ScheduledAt,
+		From:        formatEmailAddress(r.From),
+		To:          addressListToStrings(r.To),
+		CC:          addressListToStrings(r.CC),
+		BCC:         addressListToStrings(r.BCC),
+		ReplyTo:     formatEmailAddressPtr(r.ReplyTo),
+		Subject:     r.Subject,
+		HTML:        r.HTML,
+		Text:        r.Text,
+		Attachments: r.Attachments,
+		Tags:        r.Tags,
+		Priority:    sendPriorityPtr(r.Priority),
+		Headers:     r.Headers,
+		Metadata:    r.Metadata,
+		ScheduledAt: r.ScheduledAt,
 	}
 	if payload.To == nil {
 		payload.To = []string{}
@@ -1267,9 +1302,11 @@ type ListEmailsOptions struct {
 }
 
 // ListEmailsResponse holds a paginated list of emails. The API returns
-// {"data": [MessageDetail...], "meta": {...}} — after envelope unwrap the
-// payload is a bare array, which UnmarshalJSON accepts (as well as the
-// historical {"messages": ...} object shape).
+// {"data": [MessageDetail...], "error": null, "meta": {"hasMore", "nextCursor"}}
+// — after envelope unwrap the payload is a bare array, which UnmarshalJSON
+// accepts (as well as the historical {"messages": ...} object shape). The
+// envelope `meta` is captured into Pagination, because the bare-array payload
+// cannot carry it (GO-7).
 type ListEmailsResponse struct {
 	Messages   []EmailDetail `json:"messages"`
 	Pagination Pagination    `json:"pagination"`
@@ -1284,6 +1321,34 @@ func (r *ListEmailsResponse) UnmarshalJSON(data []byte) error {
 	type alias ListEmailsResponse
 	return json.Unmarshal(trimmed, (*alias)(r))
 }
+
+// setEnvelopeMeta captures the messages-list meta (camelCase hasMore /
+// nextCursor, see routes/messages.rs list_messages).
+func (r *ListEmailsResponse) setEnvelopeMeta(meta json.RawMessage) {
+	if len(meta) == 0 || string(meta) == "null" {
+		return
+	}
+	var payload struct {
+		HasMore    *bool   `json:"hasMore"`
+		NextCursor *string `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(meta, &payload); err != nil {
+		return
+	}
+	if payload.HasMore != nil {
+		r.Pagination.HasMore = *payload.HasMore
+	}
+	if payload.NextCursor != nil {
+		r.Pagination.Cursor = *payload.NextCursor
+	}
+}
+
+// HasMore reports whether the API flagged another page (meta.hasMore).
+func (r *ListEmailsResponse) HasMore() bool { return r.Pagination.HasMore }
+
+// NextCursor returns the opaque cursor for the next page (meta.nextCursor),
+// empty on the last page. Pass it back through ListEmailsOptions.Cursor.
+func (r *ListEmailsResponse) NextCursor() string { return r.Pagination.Cursor }
 
 // List retrieves a paginated list of emails for the tenant.
 func (a *EmailsAPI) List(ctx context.Context, opts ...ListEmailsOptions) (*ListEmailsResponse, error) {
@@ -1334,7 +1399,6 @@ type DNSRecord struct {
 	Name     string `json:"hostname"`
 	Value    string `json:"value"`
 	Priority int    `json:"priority,omitempty"`
-	Verified bool   `json:"verified,omitempty"`
 }
 
 // Envelope represents the SMTP delivery envelope with authentication results.
@@ -1432,6 +1496,51 @@ func (a *DomainsAPI) Verify(ctx context.Context, id string) (*VerifyDomainRespon
 // Delete removes a domain.
 func (a *DomainsAPI) Delete(ctx context.Context, id string) error {
 	return a.client.do(ctx, http.MethodDelete, "/v1/domains/"+url.PathEscape(id), nil, nil)
+}
+
+// DNSRecordsResponse matches the server's DnsRecordsResponse:
+// {domain, records: [{record_type, hostname, value, priority?}]}
+// (GET /v1/domains/:id/dns-records, domains.rs).
+type DNSRecordsResponse struct {
+	Domain  string      `json:"domain"`
+	Records []DNSRecord `json:"records"`
+}
+
+// DNSRecords returns the DNS records required to verify the domain. The
+// route answers 409 until DKIM material exists — call Verify first.
+func (a *DomainsAPI) DNSRecords(ctx context.Context, id string) (*DNSRecordsResponse, error) {
+	var resp DNSRecordsResponse
+	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id)+"/dns-records", nil, &resp)
+	return &resp, err
+}
+
+// AuthCheckResult is one DNS-auth check of DomainAuthStatus: {status,
+// value?, expected?, fix?} (domains.rs AuthCheckResult).
+type AuthCheckResult struct {
+	Status   string `json:"status"`
+	Value    string `json:"value,omitempty"`
+	Expected string `json:"expected,omitempty"`
+	Fix      string `json:"fix,omitempty"`
+}
+
+// DomainAuthStatus matches the server's DomainAuthStatus: {domain, spf,
+// dkim, dmarc, mx, return_path, overall_status}
+// (GET /v1/domains/:id/auth-status, domains.rs).
+type DomainAuthStatus struct {
+	Domain        string          `json:"domain"`
+	SPF           AuthCheckResult `json:"spf"`
+	DKIM          AuthCheckResult `json:"dkim"`
+	DMARC         AuthCheckResult `json:"dmarc"`
+	MX            AuthCheckResult `json:"mx"`
+	ReturnPath    AuthCheckResult `json:"return_path"`
+	OverallStatus string          `json:"overall_status"`
+}
+
+// AuthStatus reports the derived DNS-auth state of the domain.
+func (a *DomainsAPI) AuthStatus(ctx context.Context, id string) (*DomainAuthStatus, error) {
+	var resp DomainAuthStatus
+	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id)+"/auth-status", nil, &resp)
+	return &resp, err
 }
 
 // DomainHealthResponse is the historical health shape.
@@ -1700,11 +1809,15 @@ func (a *TemplatesAPI) Get(ctx context.Context, id string) (*Template, error) {
 	return &resp, err
 }
 
-// ListTemplatesOptions filters for the Templates.List endpoint
-// ({limit, offset, cursor} only on the server).
+// ListTemplatesOptions filters for the Templates.List endpoint. The
+// server's query struct (deny_unknown_fields) accepts exactly {limit,
+// offset} — there is no cursor parameter (SM3).
 type ListTemplatesOptions struct {
 	Limit  *int
 	Offset int
+	// Cursor is retained for source compatibility but is REJECTED
+	// client-side: the server query is deny_unknown_fields and has no
+	// cursor (paginate with Offset).
 	Cursor string
 }
 
@@ -1731,12 +1844,12 @@ func (a *TemplatesAPI) List(ctx context.Context, opts ...ListTemplatesOptions) (
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	if o.Cursor != "" {
+		return nil, fmt.Errorf("apexmail: cursor is not supported by GET /v1/templates (the server query is deny_unknown_fields with {limit, offset}); paginate with Offset")
+	}
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 20)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
-	if o.Cursor != "" {
-		values.Set("cursor", o.Cursor)
-	}
 	query := "?" + values.Encode()
 	var resp ListTemplatesResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates"+query, nil, &resp)
@@ -1904,12 +2017,16 @@ func (a *SuppressionsAPI) Add(ctx context.Context, req *AddSuppressionRequest) (
 	return &resp, err
 }
 
-// ListSuppressionsOptions filters for the Suppressions.List endpoint
-// ({limit, offset, cursor, reason} only on the server).
+// ListSuppressionsOptions filters for the Suppressions.List endpoint. The
+// server's query struct (deny_unknown_fields) accepts exactly {limit,
+// offset, reason} — there is no cursor parameter (SM3).
 type ListSuppressionsOptions struct {
 	Reason string
 	Limit  *int
 	Offset int
+	// Cursor is retained for source compatibility but is REJECTED
+	// client-side: the server query is deny_unknown_fields and has no
+	// cursor (paginate with Offset).
 	Cursor string
 	Tag    string // Deprecated: not accepted by the API; not sent.
 }
@@ -1947,12 +2064,12 @@ func (a *SuppressionsAPI) List(ctx context.Context, opts ...ListSuppressionsOpti
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	if o.Cursor != "" {
+		return nil, fmt.Errorf("apexmail: cursor is not supported by GET /v1/suppressions (the server query is deny_unknown_fields with {limit, offset, reason}); paginate with Offset")
+	}
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
-	if o.Cursor != "" {
-		values.Set("cursor", o.Cursor)
-	}
 	if o.Reason != "" {
 		values.Set("reason", o.Reason)
 	}
@@ -2008,31 +2125,48 @@ func (a *SuppressionsAPI) BulkEntries(ctx context.Context, entries []BulkSuppres
 // EventsAPI provides methods for querying email delivery events.
 type EventsAPI struct{ client *Client }
 
-// Event is the event resource.
+// Event is the event resource returned by the events routes (flat
+// EventResponse, snake_case): {id, message_id, event_type, recipient,
+// metadata, timestamp} (routes/events.rs).
 type Event struct {
-	ID        string `json:"id"`
-	MessageID string `json:"messageId"`
-	EventType string `json:"eventType"`
-	Recipient string `json:"recipientEmail"`
-	Timestamp string `json:"timestamp"`
+	ID        string          `json:"id"`
+	MessageID string          `json:"message_id,omitempty"`
+	EventType string          `json:"event_type"`
+	Recipient string          `json:"recipient,omitempty"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Timestamp string          `json:"timestamp"`
 }
 
-// ListEventsOptions filters for the Events.List endpoint.
+// ListEventsOptions filters for the Events.List endpoint. The server's
+// ListEventsQuery (deny_unknown_fields) accepts exactly {limit, offset,
+// event_type, message_id} — there is no cursor parameter (SM3).
 type ListEventsOptions struct {
-	Type      string
+	EventType string
 	MessageID string
-	DomainID  string
-	Start     string
-	End       string
 	Limit     *int
 	Offset    int
-	Cursor    string
+	// Cursor is retained for source compatibility but is REJECTED
+	// client-side: the server query is deny_unknown_fields and has no
+	// cursor (paginate with Offset).
+	Cursor string
 }
 
-// ListEventsResponse holds a paginated list of events.
+// ListEventsResponse holds a list of events. GET /v1/events returns a BARE
+// array (routes/events.rs list_events → Json(rows…collect())); UnmarshalJSON
+// accepts both the bare array and the historical object shape.
 type ListEventsResponse struct {
 	Events     []Event    `json:"events"`
 	Pagination Pagination `json:"pagination"`
+}
+
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListEventsResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Events)
+	}
+	type alias ListEventsResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
 // List retrieves delivery events for the tenant with optional filters.
@@ -2041,26 +2175,17 @@ func (a *EventsAPI) List(ctx context.Context, opts ...ListEventsOptions) (*ListE
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	if o.Cursor != "" {
+		return nil, fmt.Errorf("apexmail: cursor is not supported by GET /v1/events (the server query is deny_unknown_fields with {limit, offset, event_type, message_id}); paginate with Offset")
+	}
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", optInt(o.Limit, 50)))
 	values.Set("offset", fmt.Sprintf("%d", o.Offset))
-	if o.Cursor != "" {
-		values.Set("cursor", o.Cursor)
-	}
-	if o.Type != "" {
-		values.Set("type", o.Type)
+	if o.EventType != "" {
+		values.Set("event_type", o.EventType)
 	}
 	if o.MessageID != "" {
-		values.Set("messageId", o.MessageID)
-	}
-	if o.DomainID != "" {
-		values.Set("domainId", o.DomainID)
-	}
-	if o.Start != "" {
-		values.Set("start", o.Start)
-	}
-	if o.End != "" {
-		values.Set("end", o.End)
+		values.Set("message_id", o.MessageID)
 	}
 	query := "?" + values.Encode()
 	var resp ListEventsResponse
@@ -2072,38 +2197,36 @@ func (a *EventsAPI) List(ctx context.Context, opts ...ListEventsOptions) (*ListE
 func (a *EventsAPI) GetByMessage(ctx context.Context, messageID string) (*ListEventsResponse, error) {
 	var resp ListEventsResponse
 	values := url.Values{}
-	values.Set("messageId", messageID)
+	values.Set("message_id", messageID)
 	values.Set("limit", "100")
 	err := a.client.do(ctx, http.MethodGet, "/v1/events?"+values.Encode(), nil, &resp)
 	return &resp, err
 }
 
-// GetEventResponse wraps a single event resource.
-type GetEventResponse struct {
-	Event Event `json:"event"`
-}
-
-// Get retrieves a single event by its ID.
-func (a *EventsAPI) Get(ctx context.Context, eventID string) (*GetEventResponse, error) {
-	var resp GetEventResponse
+// Get retrieves a single event by its ID. GET /v1/events/:id returns the
+// FLAT EventResponse — there is no {"event": ...} wrapper.
+func (a *EventsAPI) Get(ctx context.Context, eventID string) (*Event, error) {
+	var resp Event
 	err := a.client.do(ctx, http.MethodGet, "/v1/events/"+url.PathEscape(eventID), nil, &resp)
 	return &resp, err
 }
 
-// EventAggregateOptions filters aggregate event queries.
+// EventAggregateOptions filters the Stats and Timeseries endpoints. The
+// server's StatsQuery (deny_unknown_fields) accepts exactly {from, to}
+// (RFC 3339) on both routes — the previously advertised
+// type/messageId/domainId/start/end/interval parameters drew a plain-text
+// 400 and are gone (GO-9).
 type EventAggregateOptions struct {
-	Type      string
-	MessageID string
-	DomainID  string
-	Start     string
-	End       string
-	Interval  string
+	From string
+	To   string
 }
 
-// EventAggregateResponse is a flexible aggregate event response payload.
+// EventAggregateResponse is a flexible aggregate event response payload
+// (Stats returns the server's EventStats object).
 type EventAggregateResponse map[string]interface{}
 
-// Stats returns aggregate event counts with optional filters.
+// Stats returns aggregate event counts: {total, delivered, bounced,
+// complained, opened, clicked}.
 func (a *EventsAPI) Stats(ctx context.Context, opts ...EventAggregateOptions) (EventAggregateResponse, error) {
 	path := "/v1/events/stats" + eventAggregateQuery(opts...)
 	var resp EventAggregateResponse
@@ -2111,12 +2234,21 @@ func (a *EventsAPI) Stats(ctx context.Context, opts ...EventAggregateOptions) (E
 	return resp, err
 }
 
-// Timeseries returns event counts over time with optional filters.
-func (a *EventsAPI) Timeseries(ctx context.Context, opts ...EventAggregateOptions) (EventAggregateResponse, error) {
+// Timeseries returns event counts over time. GET /v1/events/timeseries
+// returns a BARE array of {timestamp, count, event_type} points.
+func (a *EventsAPI) Timeseries(ctx context.Context, opts ...EventAggregateOptions) ([]TimeseriesPoint, error) {
 	path := "/v1/events/timeseries" + eventAggregateQuery(opts...)
-	var resp EventAggregateResponse
+	var resp []TimeseriesPoint
 	err := a.client.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
+}
+
+// TimeseriesPoint matches the server's TimeseriesPoint: {timestamp, count,
+// event_type}.
+type TimeseriesPoint struct {
+	Timestamp string `json:"timestamp"`
+	Count     int    `json:"count"`
+	EventType string `json:"event_type"`
 }
 
 func eventAggregateQuery(opts ...EventAggregateOptions) string {
@@ -2125,23 +2257,11 @@ func eventAggregateQuery(opts ...EventAggregateOptions) string {
 	}
 	o := opts[0]
 	values := url.Values{}
-	if o.Type != "" {
-		values.Set("type", o.Type)
+	if o.From != "" {
+		values.Set("from", o.From)
 	}
-	if o.MessageID != "" {
-		values.Set("messageId", o.MessageID)
-	}
-	if o.DomainID != "" {
-		values.Set("domainId", o.DomainID)
-	}
-	if o.Start != "" {
-		values.Set("start", o.Start)
-	}
-	if o.End != "" {
-		values.Set("end", o.End)
-	}
-	if o.Interval != "" {
-		values.Set("interval", o.Interval)
+	if o.To != "" {
+		values.Set("to", o.To)
 	}
 	if encoded := values.Encode(); encoded != "" {
 		return "?" + encoded
@@ -2182,19 +2302,38 @@ func (r *CreateAPIKeyRequest) MarshalJSON() ([]byte, error) {
 }
 
 // APIKeyResponse is a flexible API-key response payload. The real create
-// response is {id, key, key_prefix, name, scopes, created_at, expires_at?}.
+// response (HTTP 201, flat) is {id, key, key_prefix, name, scopes,
+// created_at, expires_at?}.
 type APIKeyResponse map[string]interface{}
 
-// ListAPIKeysOptions configures API key list pagination.
+// APIKeyInfo matches the server's ApiKeyInfo (routes/auth.rs):
+// {id, name, key_prefix, scopes, last_used_at?, created_at, expires_at?}.
+// The raw key is only returned by Create — list entries never carry it.
+type APIKeyInfo struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	KeyPrefix  string   `json:"key_prefix"`
+	Scopes     []string `json:"scopes"`
+	LastUsedAt string   `json:"last_used_at,omitempty"`
+	CreatedAt  string   `json:"created_at"`
+	ExpiresAt  string   `json:"expires_at,omitempty"`
+}
+
+// ListAPIKeysOptions configures API key list pagination. The server's
+// ListApiKeysQuery (deny_unknown_fields) accepts exactly {limit, offset}.
 type ListAPIKeysOptions struct {
 	Limit  int
 	Offset int
+	// Cursor is retained for source compatibility but is REJECTED
+	// client-side: the server query is deny_unknown_fields and has no
+	// cursor (paginate with Offset).
 	Cursor string
 }
 
-// ListAPIKeysResponse is a flexible API-key list response payload (the
-// API returns a bare array of ApiKeyInfo objects).
-type ListAPIKeysResponse map[string]interface{}
+// ListAPIKeysResponse is the API's bare array of ApiKeyInfo objects.
+//
+// Deprecated: List returns []APIKeyInfo directly.
+type ListAPIKeysResponse = []APIKeyInfo
 
 // Create creates a new API key ({name, scopes, expires_in_days?}).
 func (a *APIKeysAPI) Create(ctx context.Context, req *CreateAPIKeyRequest) (APIKeyResponse, error) {
@@ -2206,8 +2345,9 @@ func (a *APIKeysAPI) Create(ctx context.Context, req *CreateAPIKeyRequest) (APIK
 	return out, err
 }
 
-// List returns API keys for the authenticated account.
-func (a *APIKeysAPI) List(ctx context.Context, opts ...ListAPIKeysOptions) (ListAPIKeysResponse, error) {
+// List returns API keys for the authenticated account. GET
+// /v1/auth/api-keys returns a BARE array of ApiKeyInfo objects.
+func (a *APIKeysAPI) List(ctx context.Context, opts ...ListAPIKeysOptions) ([]APIKeyInfo, error) {
 	options := ListAPIKeysOptions{Limit: 50, Offset: 0}
 	if len(opts) > 0 {
 		options = opts[0]
@@ -2215,13 +2355,13 @@ func (a *APIKeysAPI) List(ctx context.Context, opts ...ListAPIKeysOptions) (List
 			options.Limit = 50
 		}
 	}
+	if options.Cursor != "" {
+		return nil, fmt.Errorf("apexmail: cursor is not supported by GET /v1/auth/api-keys (the server query is deny_unknown_fields with {limit, offset}); paginate with Offset")
+	}
 	query := url.Values{}
 	query.Set("limit", strconv.Itoa(options.Limit))
 	query.Set("offset", strconv.Itoa(options.Offset))
-	if options.Cursor != "" {
-		query.Set("cursor", options.Cursor)
-	}
-	var out ListAPIKeysResponse
+	var out []APIKeyInfo
 	err := a.client.do(ctx, http.MethodGet, "/v1/auth/api-keys?"+query.Encode(), nil, &out)
 	return out, err
 }
@@ -2300,13 +2440,32 @@ func (a *AnalyticsAPI) Dashboard(ctx context.Context, opts ...AnalyticsOptions) 
 	return a.analyticsGet(ctx, "dashboard", options)
 }
 
-// Volume fetches the volume timeseries: [{date, sent, delivered, bounced}].
-func (a *AnalyticsAPI) Volume(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+// VolumePoint matches the server's VolumePoint: {date, sent, delivered,
+// bounced} (routes/analytics.rs).
+type VolumePoint struct {
+	Date      string `json:"date"`
+	Sent      int    `json:"sent"`
+	Delivered int    `json:"delivered"`
+	Bounced   int    `json:"bounced"`
+}
+
+// Volume fetches the volume timeseries. GET /v1/analytics/volume returns
+// ApiResponse<Vec<VolumePoint>> — an ARRAY inside the envelope, so a map
+// decode could never parse the API's own response (GO-3).
+func (a *AnalyticsAPI) Volume(ctx context.Context, opts ...AnalyticsOptions) ([]VolumePoint, error) {
 	var options AnalyticsOptions
 	if len(opts) > 0 {
 		options = opts[0]
 	}
-	return a.analyticsGet(ctx, "volume", options)
+	query, err := a.analyticsQuery(options)
+	if err != nil {
+		return nil, err
+	}
+	var out []VolumePoint
+	if err := a.client.do(ctx, http.MethodGet, "/v1/analytics/volume"+query, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Engagement fetches engagement rates plus a timeseries: {open_rate,

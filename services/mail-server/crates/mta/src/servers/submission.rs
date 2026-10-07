@@ -1668,12 +1668,19 @@ fn extract_message_id_header(message: &[u8]) -> Option<String> {
 /// * `550 5.3.0` for an invalid server-owned category policy: permanent for
 ///   the client — retrying cannot fix an operator/credential configuration
 ///   error.
+/// * `550 5.7.1` for an F4 consent refusal: a TERMINAL policy verdict (the
+///   recipient has no active marketing consent; retrying cannot create
+///   it), mirroring the suppressions reply.
+/// * `451 4.3.0` when the consent store is unavailable — fail closed but
+///   retryable, like the other infrastructure-failure replies.
 fn admission_refusal_reply(error: &SendAdmissionError) -> &'static str {
     match error {
         SendAdmissionError::QuotaExceeded => "452 4.7.0 sending quota exceeded\r\n",
         SendAdmissionError::MeteringUnavailable(_)
-        | SendAdmissionError::SuppressionUnavailable(_) => "451 4.3.0 Requested action aborted\r\n",
+        | SendAdmissionError::SuppressionUnavailable(_)
+        | SendAdmissionError::ConsentUnavailable(_) => "451 4.3.0 Requested action aborted\r\n",
         SendAdmissionError::Suppressed(_) => "550 5.1.1 recipient address suppressed\r\n",
+        SendAdmissionError::ConsentRefused { .. } => "550 5.7.1 marketing consent required\r\n",
         SendAdmissionError::InvalidCategory { .. } => {
             "550 5.3.0 message category policy invalid\r\n"
         }
@@ -1755,7 +1762,17 @@ const QUEUE_PROTECTED_HEADERS: &[&str] = &[
 /// Fold RFC 5322 continuation lines and collect non-protected headers as a
 /// JSON object keyed by lowercased name. Operates on the decoded header
 /// block text so folded values (long List-Unsubscribe URLs) survive intact.
+///
+/// The RFC 5322 `Reply-To` spelling is normalized onto the canonical queue
+/// key `reply_to` (`apexmail_lib::email_headers::QUEUE_HEADER_REPLY_TO`):
+/// the worker's `split_mime_headers` recognizes that key as the structured
+/// Reply-To, and the hyphenated spelling is in its PROTECTED_HEADERS list —
+/// storing it raw silently DROPPED the header on every SMTP submission
+/// (dogfood finding 2026-10-06 P2). One canonical key, shared constants with
+/// the worker.
 fn extract_custom_headers(headers: &str) -> serde_json::Value {
+    use apexmail_lib::email_headers::{MIME_HEADER_REPLY_TO, QUEUE_HEADER_REPLY_TO};
+
     let mut map = serde_json::Map::new();
     let mut current: Option<(String, String)> = None;
 
@@ -1766,6 +1783,13 @@ fn extract_custom_headers(headers: &str) -> serde_json::Value {
         if let Some((name, value)) = current.take() {
             let key = name.trim().to_ascii_lowercase();
             if !key.is_empty() && !QUEUE_PROTECTED_HEADERS.contains(&key.as_str()) {
+                // Normalize the RFC 5322 spelling onto the queue contract's
+                // canonical key so the worker reads a structured Reply-To.
+                let key = if key == MIME_HEADER_REPLY_TO {
+                    QUEUE_HEADER_REPLY_TO.to_string()
+                } else {
+                    key
+                };
                 map.insert(key, serde_json::Value::String(value.trim().to_string()));
             }
         }
@@ -3248,6 +3272,39 @@ mod tests {
         assert_eq!(decoded, png, "attachment bytes must round-trip exactly");
     }
 
+    /// Regression (dogfood 2026-10-06, P2): the SMTP-submission parser stored
+    /// `Reply-To` under the raw hyphenated key, while the worker's
+    /// `split_mime_headers` only recognized the canonical `reply_to` key —
+    /// and then dropped the raw key as a protected header, so every
+    /// SMTP-submitted Reply-To was silently lost. The parser must normalize
+    /// onto the shared canonical queue key.
+    #[test]
+    fn submission_reply_to_is_normalized_onto_the_canonical_queue_key() {
+        use apexmail_lib::email_headers::{MIME_HEADER_REPLY_TO, QUEUE_HEADER_REPLY_TO};
+
+        let msg = b"From: Alice <alice@example.test>\r\n\
+                    Reply-To: Helpdesk <helpdesk@example.test>\r\n\
+                    X-Campaign: summer-test\r\n\
+                    Subject: hi\r\n\r\nbody";
+        let payload = prepare_queue_payload(msg);
+        let headers = payload.custom_headers.as_object().expect("object");
+
+        assert_eq!(
+            headers.get(QUEUE_HEADER_REPLY_TO).and_then(|v| v.as_str()),
+            Some("Helpdesk <helpdesk@example.test>"),
+            "the submitted Reply-To must ride the canonical queue key"
+        );
+        assert!(
+            !headers.contains_key(MIME_HEADER_REPLY_TO),
+            "the hyphenated spelling must never be stored as a custom header"
+        );
+        assert_eq!(
+            headers.get("x-campaign").and_then(|v| v.as_str()),
+            Some("summer-test"),
+            "ordinary custom headers are unaffected"
+        );
+    }
+
     // ── queue-insert durability (item h) ───────────────────────────────────
 
     #[test]
@@ -3976,6 +4033,36 @@ mod adversarial_db_tests {
         sender: String,
     }
 
+    /// Grant an ACTIVE marketing consent record for `recipient`.
+    ///
+    /// SMTP submissions carry the server-owned `marketing` category (never the
+    /// schema default — see [`submission_credential_category`]), so the shared
+    /// send admission's F4 consent gate requires a live consent record for
+    /// every recipient it queues. The suites below exercise admission's LATER
+    /// arms (durability pin, insert failure, suppression, budget, domain
+    /// readiness), so the fixture grants consent for the addresses they submit
+    /// to; the gate's own refusal arms are covered by its billing/compliance
+    /// suites.
+    async fn grant_marketing_consent(pool: &PgPool, tenant_id: &str, recipient: &str) {
+        sqlx::query(
+            "INSERT INTO consent_records \
+                 (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source) \
+             VALUES ($1, $2, $3, $4, 'marketing', true, NOW(), 'form') \
+             ON CONFLICT (tenant_id, subscriber_id, consent_type) DO UPDATE SET \
+                 granted = true, revoked_at = NULL, granted_at = NOW()",
+        )
+        .bind(format!(
+            "cons-{}",
+            &Uuid::new_v4().simple().to_string()[..24]
+        ))
+        .bind(tenant_id)
+        .bind(recipient)
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("grant marketing consent");
+    }
+
     /// Seed a tenant/user/verified-domain triple the submission path accepts.
     async fn seed_fixture(pool: &PgPool, suffix: &str, domain_ready: bool) -> Fixture {
         let tenant = format!("sub-{}", &Uuid::new_v4().simple().to_string()[..21]);
@@ -4023,6 +4110,18 @@ mod adversarial_db_tests {
         .execute(pool)
         .await
         .expect("insert domain");
+
+        // F4: the server-owned SMTP category is `marketing`, so admission's
+        // consent gate requires an active marketing consent record for every
+        // recipient these reliability suites queue to.
+        for recipient in [
+            "recipient@example.test",
+            "kept@example.test",
+            "budget@example.test",
+        ] {
+            grant_marketing_consent(pool, &tenant, recipient).await;
+        }
+        grant_marketing_consent(pool, &tenant, &format!("rcpt+{tenant}@example.test")).await;
 
         Fixture {
             tenant,

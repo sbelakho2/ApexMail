@@ -149,15 +149,25 @@ for entry in "${METRICS[@]}"; do
     continue
   fi
 
-  # Calculate percent change
+  # Non-numeric values must FAIL LOUDLY, not be swallowed: the old `bc`
+  # fallback (|| echo 0) computed every metric as 0% change on a host without
+  # bc, i.e. "all metrics pass" for any regression (audit P3).
+  if ! [[ "$baseline_val" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || ! [[ "$results_val" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+    echo "ERROR: non-numeric metric ${section}.${field}: baseline='${baseline_val}' results='${results_val}'"
+    exit 2
+  fi
+
+  # Calculate percent change in awk (bc is not a declared prerequisite; awk
+  # is POSIX and always present). Baseline 0 is treated as 0% change — the
+  # only sane reading of a ratio against zero.
+  pct_change=$(awk -v r="$results_val" -v b="$baseline_val" \
+    'BEGIN { if (b == 0) printf "0.0000"; else printf "%.4f", (r - b) / b * 100 }')
   if [[ "$higher_better" == "true" ]]; then
     # Higher is better: change = (results - baseline) / baseline
-    pct_change=$(echo "scale=4; ($results_val - $baseline_val) / $baseline_val * 100" | bc -l 2>/dev/null || echo "0")
-    degraded=$(echo "$pct_change < -$REGRESSION_THRESHOLD" | bc -l 2>/dev/null || echo "0")
+    degraded=$(awk -v p="$pct_change" -v t="$REGRESSION_THRESHOLD" 'BEGIN { print (p < -t) ? 1 : 0 }')
   else
     # Lower is better: change = (results - baseline) / baseline
-    pct_change=$(echo "scale=4; ($results_val - $baseline_val) / $baseline_val * 100" | bc -l 2>/dev/null || echo "0")
-    degraded=$(echo "$pct_change > $REGRESSION_THRESHOLD" | bc -l 2>/dev/null || echo "0")
+    degraded=$(awk -v p="$pct_change" -v t="$REGRESSION_THRESHOLD" 'BEGIN { print (p > t) ? 1 : 0 }')
   fi
 
   PASS=true

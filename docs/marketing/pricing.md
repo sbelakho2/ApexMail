@@ -82,10 +82,10 @@ API calls: first 100K free/month, then €0.10/1K.
 
 | Plan              | Price            |
 |-------------------|------------------|
-| Pro (add-on)      | €30/mo           |
-| Growth            | 1 included       |
-| Scale             | 3 included       |
-| Enterprise        | 10 included      |
+| Pro (add-on)      | €49/mo first, €69/mo each additional |
+| Growth            | 1 included (after qualification) |
+| Business          | 1 included (a second is assigned where traffic justifies it) |
+| Enterprise Cloud  | up to 3 included based on architecture |
 
 ## Annual Billing
 

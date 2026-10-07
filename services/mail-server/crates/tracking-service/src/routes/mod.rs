@@ -572,6 +572,7 @@ pub(crate) mod test_support {
                     .collect(),
                 max_redirect_url_len: 2048,
                 token_max_age_days: None,
+                allowed_redirect_domains: Vec::new(),
             },
             rate_limit: RateLimitConfig {
                 enabled: false,

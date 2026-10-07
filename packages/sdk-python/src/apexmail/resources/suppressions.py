@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import quote
 
 from ..exceptions import ValidationError
 from ..models import BulkSuppressionResponse, Suppression, SuppressionCheckResponse
@@ -23,6 +24,18 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
         raise ValidationError(
             f'Invalid {resource_name} ID format: "{resource_id}". '
             'IDs must be 1-128 alphanumeric characters, hyphens, or underscores.'
+        )
+
+
+def _reject_cursor(cursor: Optional[Any]) -> None:
+    """ListSuppressionsQuery accepts {limit, offset, reason} only
+    (deny_unknown_fields): a `cursor` parameter is rejected by the server
+    with HTTP 400. Fail fast client-side instead of emitting a 400."""
+    if cursor is not None:
+        raise ValidationError(
+            "/v1/suppressions does not support cursor pagination "
+            "(the server rejects `cursor` with HTTP 400); use limit/offset",
+            code="UNSUPPORTED_PAGINATION",
         )
 
 
@@ -76,16 +89,15 @@ class SuppressionsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> list[Suppression]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         if reason:
             params["reason"] = reason
         data = self._client._request("GET", "/v1/suppressions", params=params or None)
@@ -96,7 +108,12 @@ class SuppressionsResource:
         self._client._request("DELETE", f"/v1/suppressions/{suppression_id}")
 
     def check(self, email: str) -> SuppressionCheckResponse:
-        data = self._client._request("GET", f"/v1/suppressions/check/{email}")
+        # Path-segment escaping: the addr-spec rides the URL path, so an
+        # unescaped value containing `/`, `?` or `#` would rewrite the route
+        # (URL injection) instead of checking the address.
+        data = self._client._request(
+            "GET", f"/v1/suppressions/check/{quote(email, safe='')}"
+        )
         return SuppressionCheckResponse(**data)
 
     def bulk(self, entries: list[dict[str, Any]]) -> BulkSuppressionResponse:
@@ -137,16 +154,15 @@ class AsyncSuppressionsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
         reason: Optional[str] = None,
     ) -> list[Suppression]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         if reason:
             params["reason"] = reason
         data = await self._client._request("GET", "/v1/suppressions", params=params or None)
@@ -157,7 +173,9 @@ class AsyncSuppressionsResource:
         await self._client._request("DELETE", f"/v1/suppressions/{suppression_id}")
 
     async def check(self, email: str) -> SuppressionCheckResponse:
-        data = await self._client._request("GET", f"/v1/suppressions/check/{email}")
+        data = await self._client._request(
+            "GET", f"/v1/suppressions/check/{quote(email, safe='')}"
+        )
         return SuppressionCheckResponse(**data)
 
     async def bulk(self, entries: list[dict[str, Any]]) -> BulkSuppressionResponse:

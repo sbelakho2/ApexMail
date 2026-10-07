@@ -107,7 +107,7 @@ while [ "$#" -gt 0 ]; do
       echo "read-only/CI mode; a later writable run consumes the entry."
       exit 0
       ;;
-    -*) echo "docs-lint.sh: unknown option: $1" >&2; exit 0 ;;
+    -*) echo "docs-lint.sh: unknown option: $1" >&2; exit 2 ;;
     *) ROOT="$1" ;;
   esac
   shift
@@ -115,15 +115,15 @@ done
 
 if [ -n "$UPDATE_BASELINE" ] && [ -n "$BASELINE" ]; then
   echo "docs-lint.sh: --baseline and --update-baseline are mutually exclusive" >&2
-  exit 0
+  exit 2
 fi
 if [ -n "$INTEGRITY" ] && [ -n "$BASELINE" ]; then
-  echo "docs-lint.sh: --integrity and --baseline are mutually exclusive" >&2
-  exit 0
+  echo "docs-lint.sh: --integrity and --baseline are mutually exclusive (run the ratchet and the integrity step as two invocations)" >&2
+  exit 2
 fi
 if [ -n "$INTEGRITY" ] && [ -n "$UPDATE_BASELINE" ]; then
   echo "docs-lint.sh: --integrity and --update-baseline are mutually exclusive" >&2
-  exit 0
+  exit 2
 fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

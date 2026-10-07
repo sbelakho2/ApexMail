@@ -54,7 +54,7 @@ repos:
         files: ^services/mail-server/.*\.rs$
 
       - id: forbidden-pattern-gate
-        name: forbidden pattern gate
+        name: forbidden pattern gate (scans the BUILT site; skips when public/ is not built — CI runs it post-build with --require-build)
         entry: bash tools/check-forbidden-patterns.sh
         language: system
         pass_filenames: false

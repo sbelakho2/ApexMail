@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use KiwiCaptcha\Config;
 use PHPUnit\Framework\TestCase;
@@ -1558,5 +1559,171 @@ final class ConfigurationTest extends TestCase
         } catch (InvalidConfigurationException $e) {
             self::assertStringContainsString('bare root', $e->getMessage());
         }
+    }
+
+    /**
+     * The HMAC secret minimum the tree documents is enforced at compile
+     * time, not only at first use: a sub-16-byte secret_key must be
+     * refused when the configuration is processed (the core Config
+     * refuses it at issuance and the Verifier refuses it at verify time,
+     * so a short value is never a working deployment — it is a
+     * misconfiguration caught as early as possible).
+     */
+    public function testShortSecretKeyIsRejectedByTheTree(): void
+    {
+        foreach (['short', str_repeat('a', 15)] as $short) {
+            try {
+                $this->process(['secret_key' => $short]);
+                self::fail(sprintf('a %d-byte secret_key must be refused', \strlen($short)));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+
+        $processed = $this->process(['secret_key' => str_repeat('a', 16)]);
+        self::assertSame(str_repeat('a', 16), $processed['secret_key'], '16 bytes is the documented floor and passes');
+    }
+
+    /**
+     * risk.master_secret derives every risk identity pseudonym: a short
+     * configured master would make the pseudonyms predictable. The
+     * sibling secret knobs (chaining.hmac_secret, execution_key, siteverify
+     * secrets, secrets_by_kid) all validate >= 16 at compile time; the
+     * master must not be the one silent hole. Null keeps the documented
+     * fallback to secret_key.
+     *
+     * The empty string is deliberately NOT a compile-time refusal: an
+     * %env(KIWI_RISK_SECRET)% placeholder is opaque here and Symfony
+     * refuses validated nodes that carry env placeholders (see
+     * testEnvPlaceholderIsAcceptedOnValidatedSecretNodes), so '' passes
+     * the tree and is refused on the RESOLVED value by the runtime
+     * guard — asserted here directly and via the wired factory.
+     */
+    public function testShortRiskMasterSecretIsRejectedByTheTree(): void
+    {
+        foreach (['short', str_repeat('b', 15)] as $short) {
+            try {
+                $this->process(['risk' => ['master_secret' => $short]]);
+                self::fail('a short risk.master_secret must be refused');
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+
+        $processed = $this->process(['risk' => ['master_secret' => str_repeat('b', 16)]]);
+        self::assertSame(str_repeat('b', 16), $processed['risk']['master_secret']);
+
+        $nullMaster = $this->process(['risk' => ['master_secret' => null]]);
+        self::assertNull($nullMaster['risk']['master_secret'], 'null keeps the secret_key fallback');
+    }
+
+    /**
+     * The resolved-value runtime guard for the risk identity keys: an
+     * env-resolved (or literal) master that is short or empty must fail
+     * closed at service construction — the load-time tree cannot see a
+     * placeholder's value, and PHP/Rust `RiskKeys` derive from any byte
+     * string without a length gate. Also pins that the extension wires
+     * this guard as the container factory, so the protection is real in
+     * a booted kernel, not just unit-level.
+     */
+    public function testResolvedRiskMasterSecretBelowTheMinimumFailsClosedAtRuntime(): void
+    {
+        foreach (['', 'short', str_repeat('b', 15)] as $short) {
+            try {
+                KiwiCaptchaExtension::createRiskKeys($short);
+                self::fail('an empty/short resolved risk master must fail closed');
+            } catch (\LogicException $e) {
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+
+        $keys = KiwiCaptchaExtension::createRiskKeys(str_repeat('b', 16));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('b', 16))->source,
+            $keys->source,
+            '16 bytes is the documented floor and derives the same keys as the raw factory'
+        );
+
+        // The container definition must route through the guard.
+        $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
+        $container->setParameter('kernel.project_dir', '/tmp');
+        $container->setParameter('kernel.environment', 'test');
+        (new KiwiCaptchaExtension())->load([[
+            'secret_key' => str_repeat('a', 32),
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis'],
+        ]], $container);
+        self::assertSame(
+            [KiwiCaptchaExtension::class, 'createRiskKeys'],
+            $container->getDefinition('kiwi_captcha.risk.keys')->getFactory(),
+            'the risk identity keys must be constructed through the runtime secret guard'
+        );
+    }
+
+    /**
+     * The documented env-managed secret form must stay accepted on every
+     * validated secret node even inside a full kernel build: Symfony's
+     * ValidateEnvPlaceholdersPass refuses a node that carries BOTH a
+     * final-validation closure and the cannotBeEmpty contract, which is
+     * why the tree uses allowEmptyValue + empty-tolerant closures and
+     * defers the minimum to the runtime guards. The recipe-shaped kernel
+     * test covers secret_key end to end; this pins the other three nodes
+     * at the configuration-processing level with the placeholder form the
+     * info strings recommend.
+     */
+    public function testEnvPlaceholderIsAcceptedOnValidatedSecretNodes(): void
+    {
+        $processed = $this->process([
+            'secret_key' => '%env(KIWI_CAPTCHA_SECRET)%',
+            'execution_key' => '%env(KIWI_EXECUTION_KEY)%',
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'master_secret' => '%env(KIWI_RISK_SECRET)%',
+                'request_binding_authority' => 'app.binding_authority',
+                'chaining' => ['enabled' => true, 'ttl_secs' => 60, 'hmac_secret' => '%env(KIWI_RISK_SECRET)%'],
+            ],
+        ]);
+
+        self::assertSame('%env(KIWI_CAPTCHA_SECRET)%', $processed['secret_key']);
+        self::assertSame('%env(KIWI_EXECUTION_KEY)%', $processed['execution_key']);
+        self::assertSame('%env(KIWI_RISK_SECRET)%', $processed['risk']['master_secret']);
+        self::assertSame('%env(KIWI_RISK_SECRET)%', $processed['risk']['chaining']['hmac_secret']);
+    }
+
+    /**
+     * The build-time literal-secret lane: an explicitly empty (or short)
+     * literal secret_key is refused when the extension loads — the tree's
+     * empty-tolerant closure lets '' through so the %env()% form works,
+     * and this check restores the compile-time refusal for the literal
+     * case. An %env()% placeholder stays accepted (it is opaque here; the
+     * resolved value is refused by the consumers).
+     */
+    public function testLiteralEmptySecretKeyFailsClosedAtContainerBuildButEnvPlaceholdersPass(): void
+    {
+        foreach (['', 'short'] as $bad) {
+            try {
+                $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
+                $container->setParameter('kernel.project_dir', '/tmp');
+                $container->setParameter('kernel.environment', 'test');
+                (new KiwiCaptchaExtension())->load([['secret_key' => $bad]], $container);
+                self::fail(sprintf('a literal %d-byte secret_key must fail at container build', \strlen($bad)));
+            } catch (\Exception $e) {
+                // 'short' is refused by the tree (InvalidConfigurationException),
+                // '' by the extension's literal lane (InvalidArgumentException):
+                // both name the documented minimum.
+                self::assertStringContainsString('at least 16 bytes', $e->getMessage());
+            }
+        }
+
+        $container = new \Symfony\Component\DependencyInjection\ContainerBuilder();
+        $container->setParameter('kernel.project_dir', '/tmp');
+        $container->setParameter('kernel.environment', 'test');
+        (new KiwiCaptchaExtension())->load([['secret_key' => '%env(KIWI_CAPTCHA_SECRET)%']], $container);
+        self::assertSame(
+            '%env(KIWI_CAPTCHA_SECRET)%',
+            $container->getParameter('kiwi_captcha.secret_key'),
+            'the env-managed secret must be accepted at container build'
+        );
     }
 }

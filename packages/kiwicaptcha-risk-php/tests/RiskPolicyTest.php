@@ -23,7 +23,7 @@ final class RiskPolicyTest extends TestCase
                 2 => ['base_risk' => 150, 'minimum' => 'sha16', 'post_solve_check' => true, 'degraded' => 'sha20'],
                 3 => ['base_risk' => 200, 'minimum' => 'argon32', 'post_solve_check' => true, 'degraded' => 'argon16'],
             ],
-            'global_floors' => [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
         ];
     }
 
@@ -257,6 +257,48 @@ final class RiskPolicyTest extends TestCase
                 );
             }
         }
+    }
+
+    public function testGlobalFloorsRequireEveryCanonicalLevelExactlyOnce(): void
+    {
+        // The total global_floors grammar, the exact acceptance set of the
+        // Rust reference parser: the five canonical levels 0..4, each
+        // declared exactly once. A missing set, a partial set, a missing
+        // middle level and a duplicate logical level are all refused —
+        // the parser NEVER substitutes a built-in default for an
+        // operator-omitted level (which would silently swap an intended
+        // floor for another action) and PHP never accepts a policy config
+        // the Rust engine refuses to load.
+        foreach ([
+            null,                                                          // missing entirely
+            [1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],      // no level 0
+            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20'],      // no level 4
+            [0 => 'allow', 1 => 'sha16', 2 => 'sha18'],                    // partial
+            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', '01' => 'sha20'], // dup logical level, non-canonical spelling
+        ] as $floors) {
+            $config = $this->config();
+            if ($floors === null) {
+                unset($config['global_floors']);
+            } else {
+                $config['global_floors'] = $floors;
+            }
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the non-total global_floors %s must be refused', json_encode($floors)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('global_floors'),
+                        self::stringContains('Global floor level'),
+                        self::stringContains('Global floor actions'),
+                    ),
+                );
+            }
+        }
+
+        $policy = RiskPolicy::fromConfig($this->config());
+        self::assertCount(5, $policy->globalFloors, 'the canonical five-level set parses');
     }
 
     public function testGlobalFloorAppliedInDegradedMode(): void

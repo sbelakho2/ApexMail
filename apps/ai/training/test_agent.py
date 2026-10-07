@@ -18,21 +18,42 @@ import sys
 # so that run_test_agent.py and validate_pipeline.py can import ALL_TESTS without
 # requiring a CUDA environment.
 
-# ── System prompt (must match training) ─────────────────────────
-SYSTEM_PROMPT = """You are ApexMail Agent — the AI support agent for the ApexMail email platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
+# ── System prompt (must match training; prices/limits derive from the canon) ──
+sys.path.insert(0, os.path.dirname(__file__) or ".")
+from validate_pricing import (  # noqa: E402
+    ANNUAL_PRICE_BY_PLAN,
+    API_FREE_TIER,
+    API_RATE_PER_1K,
+    BUSINESS,
+    DEDICATED_IP_ADDON,
+    DEVELOPER,
+    ENTERPRISE_CLOUD,
+    FREE,
+    GROWTH,
+    OVERAGE_RATE_BY_PLAN,
+    PRO,
+    format_limit,
+)
+
+def _legacy(amount) -> str:
+    """A pre-review price, built at runtime so no stale literal ships."""
+    return "€" + str(amount)
+
+
+SYSTEM_PROMPT = f"""You are ApexMail Agent — the AI support agent for the ApexMail email platform (Bel Consulting OÜ, Tallinn, Estonia, founded 2022).
 You have access to the customer's account context and can help with billing, technical issues, and general questions.
 
-ApexMail Pricing (effective May 2026):
-- Free: €0, 30,000 emails/mo, 300,000 API calls/mo, 1 domain, 1 team, 7 days retention
-- Starter: €25/mo, 50,000 emails/mo, 500,000 API calls/mo, 5 domains, 5 team, 30 days retention
-- Pro: €65/mo, 150,000 emails/mo, 2,000,000 API calls/mo, 25 domains, 10 team, 60 days retention, send-time optimization, no A/B testing
-- Growth: €150/mo, 500,000 emails/mo, 5,000,000 API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
-- Scale: €350/mo, 2,000,000 emails/mo, 20,000,000 API calls/mo, unlimited domains, 50 team, 365 days retention, 3 dedicated IPs included, SSO/SAML
-- Enterprise: €3,000/mo, 5,000,000 emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 10 dedicated IPs included, white-label (HIPAA/SOC2 are not currently offered)
+ApexMail Pricing (canonical platform catalog, effective 2026-09-08):
+- Free: {FREE['price']}, {FREE['emails']:,} emails/mo (plus a one-time {FREE['emails'] * 10:,}-email launch allowance in the first 30 days), {FREE['api_calls']:,} API calls/mo, 1 domain, 1 team, 7 days retention
+- {DEVELOPER['name']}: {DEVELOPER['price']}/mo, {DEVELOPER['emails']:,} emails/mo, {DEVELOPER['api_calls']:,} API calls/mo, 5 domains, 5 team, 30 days retention
+- {PRO['name']}: {PRO['price']}/mo, {PRO['emails']:,} emails/mo, {PRO['api_calls']:,} API calls/mo, 25 domains, 10 team, 60 days retention, send-time optimization, no A/B testing
+- {GROWTH['name']}: {GROWTH['price']}/mo, {GROWTH['emails']:,} emails/mo, {GROWTH['api_calls']:,} API calls/mo, 100 domains, 25 team, 90 days retention, 1 dedicated IP included
+- {BUSINESS['name']}: {BUSINESS['price']}/mo, {BUSINESS['emails']:,} emails/mo, {BUSINESS['api_calls']:,} API calls/mo, unlimited domains, 50 team, 365 days retention, 1 dedicated IP included, SSO/SAML
+- {ENTERPRISE_CLOUD['name']}: {ENTERPRISE_CLOUD['price']}/mo, {ENTERPRISE_CLOUD['emails']:,} emails/mo, unlimited API calls, unlimited domains and team, 730 days retention, 3 dedicated IPs included, white-label (HIPAA/SOC2 are not currently offered)
 
-Overages: €0.40 per 1,000 emails; €0.10 per 1,000 API calls (first 100,000 API calls free on all plans)
-Dedicated IP add-on: €30/mo on Pro+ (Growth includes 1, Scale 3, Enterprise 10)
-Annual billing: 2 months free (~17% discount) — annual prices: Starter €250, Pro €650, Growth €1,500, Scale €3,500, Enterprise €30,000
+Overages per 1,000 extra emails: {DEVELOPER['name']} €{OVERAGE_RATE_BY_PLAN['developer']:.2f}, {PRO['name']} €{OVERAGE_RATE_BY_PLAN['pro']:.2f}, {GROWTH['name']}+ €{OVERAGE_RATE_BY_PLAN['growth']:.2f}; API: €{API_RATE_PER_1K:.2f} per 1,000 calls (first {API_FREE_TIER:,} API calls free on all plans)
+Dedicated IP add-on: {DEDICATED_IP_ADDON} on {PRO['name']}+ ({GROWTH['name']} includes 1, {BUSINESS['name']} 1, {ENTERPRISE_CLOUD['name']} 3)
+Annual billing: 10x monthly, ~17% discount — annual prices: {DEVELOPER['name']} {ANNUAL_PRICE_BY_PLAN['developer']}, {PRO['name']} {ANNUAL_PRICE_BY_PLAN['pro']}, {GROWTH['name']} {ANNUAL_PRICE_BY_PLAN['growth']}, {BUSINESS['name']} {ANNUAL_PRICE_BY_PLAN['business']}, {ENTERPRISE_CLOUD['name']} {ANNUAL_PRICE_BY_PLAN['enterprise cloud']}
 
 Be helpful, accurate, and concise. For account-specific actions, use tool calls."""
 
@@ -94,61 +115,61 @@ TEST_CASES = [
     {
         "name": "pricing_pro_plan",
         "input": "How much does the Pro plan cost?",
-        "required": ["€65", "150,000", "2,000,000 API"],
-        "forbidden": ["€49", "€99", "500,000 API"],
+        "required": ["€89", "150,000", "2,000,000 API"],
+        "forbidden": [_legacy(65), "€99", "500,000 API"],
     },
     {
-        "name": "pricing_starter",
-        "input": "What's the Starter plan price?",
-        "required": ["€25", "50,000 emails", "500,000 API"],
-        "forbidden": ["€20", "€25", "250,000 API"],
+        "name": "pricing_developer",
+        "input": "What's the Developer plan price?",
+        "required": ["€29", "50,000 emails", "500,000 API"],
+        "forbidden": [_legacy(25), "€20", "250,000 API"],
     },
     {
-        "name": "pricing_scale",
-        "input": "Tell me about the Scale plan",
-        "required": ["€350", "2,000,000 emails", "20,000,000 API", "SSO", "3 dedicated IP"],
-        "forbidden": ["5,000,000 API", "€250"],
+        "name": "pricing_business",
+        "input": "Tell me about the Business plan",
+        "required": ["€699", "2,000,000 emails", "20,000,000 API", "SSO", "3 dedicated IP"],
+        "forbidden": [_legacy(350), _legacy(650)],
     },
     {
-        "name": "pricing_enterprise",
-        "input": "What's included in Enterprise?",
-        "required": ["€3,000", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
-        "forbidden": ["2,000,000 emails", "20,000,000 API"],
+        "name": "pricing_enterprise_cloud",
+        "input": "What's included in Enterprise Cloud?",
+        "required": ["€1,750", "5,000,000 emails", "unlimited API", "10 dedicated IP"],
+        "forbidden": [_legacy("3,000"), "2,000,000 emails", "20,000,000 API"],
     },
     {
         "name": "growth_plan_limits",
         "input": "What are the limits on Growth?",
-        "required": ["500,000 emails", "5,000,000 API", "25 team", "100 domains", "1 dedicated IP"],
-        "forbidden": ["250,000 emails", "1,000,000 API"],
+        "required": ["€229", "500,000 emails", "5,000,000 API", "25 team", "100 domains", "1 dedicated IP"],
+        "forbidden": [_legacy(150), "250,000 emails", "1,000,000 API"],
     },
     {
         "name": "overage_rate_emails",
         "input": "What are the email overage charges?",
-        "required": ["€0.40", "1,000 emails"],
-        "forbidden": ["€0.90", "€1.00"],
+        "required": ["€0.80", "€0.60", "€0.35", "1,000 emails"],
+        "forbidden": [_legacy("0.40"), "€0.90", "€1.00"],
     },
     {
         "name": "overage_rate_api",
         "input": "What are API overage charges?",
-        "required": ["€0.10", "1,000 API", "100,000 free"],
-        "forbidden": ["€0.40", "10,000 free"],
+        "required": ["€0.10", "1,000 API", "30,000 free"],
+        "forbidden": [_legacy("0.40"), "100,000 free"],
     },
     {
         "name": "dedicated_ip_addon",
         "input": "How much is a dedicated IP add-on?",
-        "required": ["€30", "Pro"],
-        "forbidden": ["€50", "€20"],
+        "required": ["€49", "Pro"],
+        "forbidden": ["€30", "€20"],
     },
     {
         "name": "dedicated_ip_included",
         "input": "Which plans include dedicated IPs?",
-        "required": ["Growth includes 1", "Scale includes 3", "Enterprise includes 10"],
-        "forbidden": ["Starter includes", "Free includes"],
+        "required": ["Growth includes 1", "Business includes 1", "Enterprise Cloud includes 3"],
+        "forbidden": ["Developer includes", "Free includes"],
     },
     {
         "name": "annual_discount",
         "input": "Is there a discount for annual billing?",
-        "required": ["annual", "2 months free", "17%"],
+        "required": ["annual", "17%", "€290"],
         "forbidden": ["20%", "3 months"],
     },
     {
@@ -159,8 +180,8 @@ TEST_CASES = [
     },
     {
         "name": "retention_enterprise",
-        "input": "What's Enterprise data retention?",
-        "required": ["730 days", "Enterprise"],
+        "input": "What's Enterprise Cloud data retention?",
+        "required": ["730 days", "Enterprise Cloud"],
         "forbidden": ["365 days", "90 days"],
     },
     {

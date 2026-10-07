@@ -182,7 +182,7 @@ If status information is displayed anywhere on the site:
 
 | Rule | Requirement |
 |------|-------------|
-| Data Source | Must be fetched from the status service (status.apexmail.io) |
+| Data Source | Must be fetched from the status service (status.apexmail.ee) |
 | Timestamp | Last update timestamp must be visible |
 | Failure State | Must be neutral, not misleading |
 | API Failure | Must not default to "All systems operational" |

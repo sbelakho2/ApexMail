@@ -15,17 +15,22 @@ The current implementation lives in the `billing-service` crate and is the sourc
 
 ## Plan Catalog
 
-Default plans are seeded in `src/plans.rs` and persisted to the `plans` table.
+Plan facts (names, prices, included limits) live in the canonical
+`platform-catalog` crate (`PLANS`); `src/plans.rs` seeds the `plans` table from
+it and derives overage rates from it. The 2026-09-08 pricing review set the
+current ladder (Developer €29 / Pro €89 / Growth €229 / Business €699 /
+Enterprise Cloud from €1,750; Free 3,000/month plus a one-time 30,000-email
+launch allowance for the first 30 days).
 
-| Plan | Monthly | Yearly | Emails / month | API calls / month | Rate-limit tier |
-|------|---------|--------|----------------|-------------------|-----------------|
-| Free | `0` | `0` | `30,000` | `300,000` | `Free` |
-| Starter | `2,500` cents | `25,000` cents | `50,000` | `500,000` | `Standard` |
-| Pro | `6,500` cents | `65,000` cents | `150,000` | `2,000,000` | `Standard` |
-| Growth | `15,000` cents | `150,000` cents | `500,000` | `5,000,000` | `High` |
-| Scale | `35,000` cents | `350,000` cents | `2,000,000` | `20,000,000` | `High` |
-| Enterprise | `300,000` cents | `3,000,000` cents | `5,000,000` | unlimited (`-1`) | `Unlimited` |
-| PAYG | `0` | `0` | unlimited (`-1`) | unlimited (`-1`) | `Standard` |
+| Plan | Plan ID | Monthly | Yearly | Emails / month | API calls / month | Rate-limit tier |
+|------|---------|---------|--------|----------------|-------------------|-----------------|
+| Free | `free` | `0` cents | `0` cents | `3,000` + one-time 30,000 launch allowance | `30,000` | `Free` |
+| Developer | `starter` | `2,900` cents | `29,000` cents | `50,000` | `500,000` | `Standard` |
+| Pro | `pro` | `8,900` cents | `89,000` cents | `150,000` | `2,000,000` | `Standard` |
+| Growth | `growth` | `22,900` cents | `229,000` cents | `500,000` | `5,000,000` | `High` |
+| Business | `scale` | `69,900` cents | `699,000` cents | `2,000,000` | `20,000,000` | `High` |
+| Enterprise Cloud | `enterprise` | `175,000` cents | `1,750,000` cents | `5,000,000` | unlimited (`-1`) | `Unlimited` |
+| Pay As You Go | `payg` | `0` | `0` | unlimited (`-1`) | unlimited (`-1`) | `Standard` |
 
 Rate-limit tiers map to API throughput in `src/types.rs`:
 

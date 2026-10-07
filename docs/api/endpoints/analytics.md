@@ -655,14 +655,12 @@ Poll `GET /v1/analytics/export/:export_id` until `status` becomes `completed` an
 
 | Endpoint | Cache TTL | Notes |
 |----------|-----------|-------|
-| `/overview` | 60 s | Coalesced via singleflight |
-| `/timeseries` | 60 s | Cache key includes `interval` + `metric` |
-| `/campaigns` | 60 s | Invalidated on new send completion |
-| `/domains` | 60 s | Invalidated on domain config change |
 | `/engagement` | 60 s | Cache key includes `metric` |
-| `/providers` | 60 s | Coalesced via singleflight |
 | `/deliverability` | 60 s | Coalesced via singleflight |
-| `/bounce-analysis` | 60 s | Coalesced via singleflight |
 | `/export` | 300 s | Download URL cached separately |
+
+The planned endpoints (`/overview`, `/timeseries`, `/campaigns`, `/domains`,
+`/providers`, `/bounce-analysis`) have no cache behavior to document until they
+are served. TTLs in this table apply to the mounted endpoints only.
 
 Responses include a `meta.cached` boolean and `meta.cache_ttl` value. To force a fresh query, pass the `Cache-Control: no-cache` request header (note: this is rate-limited to prevent abuse).

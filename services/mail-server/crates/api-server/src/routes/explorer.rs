@@ -867,7 +867,11 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
     if let Some(plan) = chosen {
         let limit = plan.email_limit.max(0);
         let base = plan.price_monthly;
-        let overage = billing_service::plans::calculate_overage_cost(f.volume, limit);
+        // Quote the plan's CANONICAL catalog overage rate (80/60/35/35) —
+        // the flat legacy 40-millicent wrapper understated Pro by 33% and
+        // disagreed with the invoice sweep's ladder.
+        let overage =
+            billing_service::plans::calculate_plan_overage_cost(&plan.name, f.volume, limit);
         rows.push((
             format!("Plan — {}", title(plan.name)),
             format!("€{:.2}", base as f64 / 100.0),
@@ -1343,6 +1347,41 @@ mod tests {
             rows.iter()
                 .any(|r| r.0 == "Dedicated IPs" && r.1 == "available on Pro+"),
             "{rows:?}"
+        );
+    }
+
+    /// Regression (F2): the public calculator quotes the CANONICAL catalog
+    /// overage ladder, not the legacy flat 40 millicents. At 3M emails the
+    /// fallback plan is Business (scale, 2M included, 35 millicents/email):
+    /// 1M overage = 35,000 cents = €350.00. The old flat wrapper quoted
+    /// €400.00.
+    #[test]
+    fn calculator_quotes_the_canonical_plan_overage_rate() {
+        let f = CalculatorForm {
+            volume: 3_000_000,
+            peak_daily: 100_000,
+            domains: 1,
+            team_users: 5,
+            ..Default::default()
+        };
+        let rows = compute_calculator(&f);
+        let overage = rows
+            .iter()
+            .find(|r| r.0 == "Overage")
+            .expect("overage row for 1M beyond Business' included volume");
+        assert_eq!(overage.1, "€350.00");
+
+        // The plan-aware helper and the catalog agree on the ladder.
+        use billing_service::plans::{calculate_plan_overage_cost, plan_overage_rate_millicents};
+        assert_eq!(plan_overage_rate_millicents("scale"), Some(35));
+        assert_eq!(
+            calculate_plan_overage_cost("scale", 3_000_000, 2_000_000),
+            35_000
+        );
+        assert_eq!(
+            calculate_plan_overage_cost("pro", 200_000, 150_000),
+            3_000,
+            "Pro overage is 60 millicents/email (€30 for 50k over)"
         );
     }
 

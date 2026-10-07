@@ -118,7 +118,7 @@ async fn build_harness() -> Option<Harness> {
     };
     let db = db?;
     let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
-    let (host, port, red_db) = parse_redis_url(&redis_url);
+    let (host, port, red_db, red_password) = parse_redis_url(&redis_url);
 
     let mut config = Config::from_env().expect("HA config must load in development");
     config.internal_api_key = INTERNAL_KEY.into();
@@ -126,7 +126,10 @@ async fn build_harness() -> Option<Harness> {
     config.redis.host = host;
     config.redis.port = port;
     config.redis.db = red_db;
-    config.redis.password = None;
+    // Honor the URL's password: CI's ephemeral Redis is passwordless
+    // (None either way), while the dev compose Redis requires auth — the
+    // previous hardcoded None made every fence-status read fail NOAUTH.
+    config.redis.password = red_password;
     config.multi_region.node_id = format!("node-{}", Uuid::new_v4().simple());
     config.backup.encryption_key = None;
     Some(Harness {
@@ -135,9 +138,16 @@ async fn build_harness() -> Option<Harness> {
     })
 }
 
-fn parse_redis_url(url: &str) -> (String, u16, u8) {
+fn parse_redis_url(url: &str) -> (String, u16, u8, Option<String>) {
     let rest = url.strip_prefix("redis://").unwrap_or(url);
-    let rest = rest.rsplit('@').next().unwrap_or(rest);
+    let (userinfo, rest) = match rest.split_once('@') {
+        Some((userinfo, hostpart)) => (Some(userinfo), hostpart),
+        None => (None, rest),
+    };
+    // `redis://:password@host` — the password is the userinfo after ':'.
+    let password = userinfo
+        .and_then(|info| info.split_once(':').map(|(_, p)| p.to_string()))
+        .filter(|p| !p.is_empty());
     let (authority, db) = match rest.split_once('/') {
         Some((authority, db)) => (authority, db.split('?').next().unwrap_or("0")),
         None => (rest, "0"),
@@ -146,7 +156,7 @@ fn parse_redis_url(url: &str) -> (String, u16, u8) {
         .rsplit_once(':')
         .map(|(h, p)| (h.to_string(), p.parse().unwrap_or(6379)))
         .unwrap_or_else(|| (authority.to_string(), 6379));
-    (host, port, db.parse().unwrap_or(0))
+    (host, port, db.parse().unwrap_or(0), password)
 }
 
 async fn config_with(mutate: impl FnOnce(&mut Config)) -> Arc<Config> {

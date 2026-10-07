@@ -336,8 +336,11 @@ mod boundary_tests {
         db.close().await;
     }
 
-    /// Structural: the gate wraps exactly the sales + autopilot routers and
-    /// nothing else in the production region.
+    /// Structural: the gate wraps exactly the owner-only routers — the
+    /// sales brain, the demos presenter API (it executes real machinery and
+    /// mints viewer links) and the autopilot — and nothing else in the
+    /// production region. Pinned by NAME, not a bare count, so adding a
+    /// fourth gated router must consciously extend this list.
     #[test]
     fn sales_owner_gate_is_mounted_on_exactly_the_sales_routers() {
         let source = include_str!("../app.rs");
@@ -345,10 +348,15 @@ mod boundary_tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production region");
+        let gated: Vec<&str> = production
+            .split(".nest(")
+            .filter(|chunk| chunk.contains("require_sales_owner"))
+            .filter_map(|chunk| chunk.split('"').nth(1))
+            .collect();
         assert_eq!(
-            production.matches("require_sales_owner").count(),
-            2,
-            "the owner gate must wrap exactly the sales + autopilot routers"
+            gated,
+            ["/v1/admin/autopilot", "/v1/admin/demos", "/v1/admin/sales"],
+            "the owner gate must wrap exactly the sales, demos and autopilot routers"
         );
     }
 }

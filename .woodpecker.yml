@@ -31,9 +31,9 @@
 #     | grep -o 'sha256:[0-9a-f]*'
 # ...then paste THAT digest into the &ci_image anchor below. The validate
 # stage mechanically FAILS any run whose apexmail-ci references here lack a
-# @sha256:<digest> pin, so the contract cannot silently regress. The
-# all-zero digest below is the committed PLACEHOLDER — pipelines stay
-# intentionally broken (loudly) until the operator pins the real digest.
+# @sha256:<digest> pin, so the contract cannot silently regress. The anchor
+# below carries the REAL digest (pushed 2026-10-03, see the anchor comment);
+# the all-zero placeholder it replaced was a hard failure, not a silent pass.
 #
 # Scope: validate → test → security. The host-only stages (fetch/migrate/
 # deploy/verify/notify) are deliberately NOT here: they act on the deploy host
@@ -141,10 +141,11 @@ steps:
       - ./ci/woodpecker/stage.sh docs
 
   # --- UI/UX gates over the exported visual fixtures (flash copy, form
-  #     hygiene, a11y, dead links, terminology, strings-catalog drift) ---
-  # All six gates are REQUIRED by default since the 2026-09-27 baseline went
-  # green (see the CI_UI_* block in ci/pipeline.conf); fixtures are exported
-  # into the run dir, never the working tree.
+  #     hygiene, a11y, dead links, terminology, strings-catalog drift,
+  #     marketing token contrast) ---
+  # All seven gates are REQUIRED by default (see the CI_UI_* block in
+  # ci/pipeline.conf — CI_UI_MARKETING_CONTRAST_CHECK joined 2026-10-07);
+  # fixtures are exported into the run dir, never the working tree.
   - name: ui
     image: *ci_image
     environment:

@@ -188,13 +188,18 @@ mod tests {
                 VerifyError::UnsupportedArgon2Params,
                 "invalid-input-response",
             ),
+            (
+                VerifyError::UnsupportedRswParams,
+                "invalid-input-response",
+            ),
             (VerifyError::BotDetected, "invalid-input-response"),
             (VerifyError::MalformedToken, "invalid-input-response"),
             (VerifyError::RecordNotFound, "invalid-input-response"),
+            (VerifyError::ExecutionMismatch, "invalid-input-response"),
         ];
         assert_eq!(
             cases.len(),
-            24,
+            26,
             "the table must cover EVERY VerifyError variant"
         );
         for (reason, expected) in cases {

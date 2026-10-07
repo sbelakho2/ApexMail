@@ -98,7 +98,7 @@ func TestEmailsSendReplaysSameAutoIdempotencyKeyAcrossRetries(t *testing.T) {
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		keys = append(keys, r.Header.Get("X-Idempotency-Key"))
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
 		failures++
 		fail := failures == 1
 		mu.Unlock()
@@ -147,7 +147,7 @@ func TestEmailsSendGeneratesDifferentKeysPerLogicalSend(t *testing.T) {
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		keys = append(keys, r.Header.Get("X-Idempotency-Key"))
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"id":"m","status":"queued","created_at":"now"}}`))
@@ -182,7 +182,7 @@ func TestEmailsSendHonorsCallerIdempotencyKey(t *testing.T) {
 
 	var gotKey string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("X-Idempotency-Key")
+		gotKey = r.Header.Get("Idempotency-Key")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"id":"m","status":"queued","created_at":"now"}}`))
 	}))
@@ -210,7 +210,7 @@ func TestEmailsBatchSendsIdempotencyKey(t *testing.T) {
 
 	var gotKey string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("X-Idempotency-Key")
+		gotKey = r.Header.Get("Idempotency-Key")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"accepted":1,"rejected":0,"results":[{"index":0,"id":"m","status":"queued"}]}}`))
 	}))

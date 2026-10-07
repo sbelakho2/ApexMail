@@ -64,6 +64,18 @@ final class ChainedChallengeTicketService
         private readonly ?RequestBindingAuthorityInterface $bindingAuthority = null,
         private readonly ?\Closure $now = null,
     ) {
+        // The documented 16-byte chain-secret minimum, enforced on the
+        // resolved value at construction: the config tree checks literal
+        // values, but an %env(KIWI_RISK_SECRET)% placeholder is opaque at
+        // compile time and this service is the consumption seam. A short
+        // or empty secret makes every chain ticket forgeable, so the
+        // construction fails closed instead.
+        if (\strlen($hmacSecret) < 16) {
+            throw new \InvalidArgumentException(sprintf(
+                'the chain ticket HMAC secret (risk.chaining.hmac_secret, or its risk.master_secret / secret_key fallback) must be at least 16 bytes (32 random bytes recommended) — got %d byte(s).',
+                \strlen($hmacSecret),
+            ));
+        }
     }
 
     /**

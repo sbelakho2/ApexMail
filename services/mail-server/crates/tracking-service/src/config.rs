@@ -78,6 +78,12 @@ pub struct TrackingConfig {
     /// indefinite semantics, opt-in).
     #[serde(default)]
     pub token_max_age_days: Option<u64>,
+    /// Deployment-wide click-redirect allowlist (`TRACKING_ALLOWED_REDIRECT_DOMAINS`,
+    /// comma-separated host patterns; `*.example.com` wildcards supported).
+    /// Additive to the tenant's owned `domains` and `allowed_redirect_domains`
+    /// setting: a host matching a pattern here is authorized for every tenant.
+    #[serde(default)]
+    pub allowed_redirect_domains: Vec<String>,
 }
 
 fn default_max_redirect_url_len() -> usize {
@@ -134,6 +140,17 @@ fn var_or_bool(name: &str, default: bool) -> bool {
         Ok("false") | Ok("0") | Ok("no") => false,
         _ => default,
     }
+}
+
+/// Parse the comma-separated click-redirect allowlist. Empty entries are
+/// dropped; the values are matched by [`crate::routes::click`]'s
+/// `match_domain_pattern` (exact host or `*.suffix` wildcard).
+fn parse_allowed_redirect_domains(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn parse_trusted_proxies(s: &str) -> Vec<IpNetwork> {
@@ -223,6 +240,11 @@ pub fn load() -> Result<Config> {
     let trusted_proxies =
         parse_trusted_proxies(&var_or("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES));
 
+    // Deployment-wide redirect allowlist (operator config, additive to the
+    // per-tenant owned domains + allowed_redirect_domains).
+    let allowed_redirect_domains =
+        parse_allowed_redirect_domains(&var_or("TRACKING_ALLOWED_REDIRECT_DOMAINS", ""));
+
     let redirect_status = var_or_u16("TRACKING_REDIRECT_STATUS", 302);
     let max_connections = var_or_u32("DB_MAX_CONNECTIONS", 50);
     let pool_size = var_or_usize("REDIS_POOL_SIZE", 16);
@@ -293,6 +315,7 @@ pub fn load() -> Result<Config> {
             trusted_proxies,
             max_redirect_url_len,
             token_max_age_days,
+            allowed_redirect_domains,
         },
         rate_limit: RateLimitConfig {
             enabled: var_or_bool("RATE_LIMIT_ENABLED", true),
@@ -460,6 +483,10 @@ mod tests {
             ),
             ("TRACKING_REDIRECT_STATUS", Some("307")),
             ("TRACKING_MAX_REDIRECT_URL_LEN", Some("1234")),
+            (
+                "TRACKING_ALLOWED_REDIRECT_DOMAINS",
+                Some("Extra.Example.com, *.Wild.Example ,"),
+            ),
             ("RATE_LIMIT_ENABLED", Some("no")),
             ("RATE_LIMIT_MAX_PER_MINUTE", Some("55")),
             ("METRICS_ENABLED", Some("0")),
@@ -476,6 +503,14 @@ mod tests {
         assert_eq!(config.tracking.redirect_status, 307);
         assert_eq!(config.tracking.max_redirect_url_len, 1234);
         assert_eq!(config.tracking.trusted_proxies.len(), 2);
+        assert_eq!(
+            config.tracking.allowed_redirect_domains,
+            vec![
+                "extra.example.com".to_string(),
+                "*.wild.example".to_string()
+            ],
+            "the allowlist is parsed, lowercased and trimmed"
+        );
         assert!(!config.rate_limit.enabled);
         assert_eq!(config.rate_limit.max_per_minute, 55);
         assert!(!config.metrics.enabled);
@@ -667,5 +702,26 @@ mod tests {
         let cfg: TrackingConfig = serde_json::from_str(json).expect("without the optional field");
         assert_eq!(cfg.max_redirect_url_len, default_max_redirect_url_len());
         assert_eq!(cfg.max_redirect_url_len, 2048);
+        assert!(
+            cfg.allowed_redirect_domains.is_empty(),
+            "an absent deployment allowlist is empty, never a fake default"
+        );
+    }
+
+    /// The deployment-wide redirect allowlist parser: comma-separated,
+    /// trimmed, lowercased, empties dropped — the values the click route
+    /// matches with `match_domain_pattern`.
+    #[test]
+    fn allowed_redirect_domains_parse_shape() {
+        use super::parse_allowed_redirect_domains;
+        assert_eq!(
+            parse_allowed_redirect_domains("Extra.Example.com, *.Wild.Example ,"),
+            vec![
+                "extra.example.com".to_string(),
+                "*.wild.example".to_string()
+            ]
+        );
+        assert!(parse_allowed_redirect_domains("").is_empty());
+        assert!(parse_allowed_redirect_domains(" , ,").is_empty());
     }
 }

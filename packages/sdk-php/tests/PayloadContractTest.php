@@ -176,13 +176,16 @@ final class PayloadContractTest extends TestCase
 
     public function testWebhookEventConstantsMatchServerKnownEvents(): void
     {
-        // webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary)
+        // webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary,
+        // the campaign lifecycle events, and the wildcard)
         $expected = [
             'message.accepted', 'message.queued', 'message.attempted',
             'message.deferred', 'message.delivered', 'message.bounced',
             'message.complained', 'message.suppressed', 'message.opened',
             'message.clicked', 'message.cancelled',
-            'recipient.unsubscribed', 'placement_test.completed',
+            'recipient.unsubscribed',
+            'campaign.started', 'campaign.ab_winner_selected', 'campaign.completed',
+            'placement_test.completed',
             'inbound', '*',
         ];
         $this->assertSame($expected, \ApexMail\Resources\Webhooks::EVENTS);

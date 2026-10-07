@@ -551,7 +551,11 @@ impl BounceServer {
         // (original_message_id, original_recipient) dedupe slot, an attacker
         // who knows a sent message id + recipient could pre-insert a row and
         // make the genuine authoritative bounce a no-op. The claimed linkage
-        // is preserved in `observation_detail` instead, for audit.
+        // is preserved in `observation_detail` instead, for audit — including
+        // for a plain non-VERP DSN, whose claimed recipient comes from the
+        // DSN's Final-Recipient / Original-Rcpt-To (dogfood finding
+        // 2026-10-06 P3: the `none` arm dropped it entirely, so "why did this
+        // DSN do nothing?" was unanswerable from the record).
         let (record_message_id, record_recipient, verp_version, observation_detail) =
             match &authoritative {
                 Some(claims) => (
@@ -576,7 +580,7 @@ impl BounceServer {
                         "v2-rejected",
                         Some(format!("v2 rejected: {reason}")),
                     ),
-                    _ => (None, None, "none", None),
+                    _ => (None, None, "none", claimed_dsn_recipient(&message)),
                 },
             };
 
@@ -1331,6 +1335,48 @@ fn extract_original_message_id(message: &str) -> Option<String> {
     None
 }
 
+/// The DSN's claimed recipient, sanitized, for a non-authoritative
+/// `observation_detail` (dogfood finding 2026-10-06 P3).
+///
+/// Reads `Final-Recipient` / `Original-Rcpt-To` and stops at the
+/// attached-original boundary exactly like the status/diagnostic/Message-ID
+/// extractors: a header inside the attached original message is
+/// attacker-writable and must not become the observation's claim. The claim
+/// is NEVER suppression authority — the natural-key columns stay NULL — it
+/// exists so an operator can search "which recipient did this DSN claim?".
+fn claimed_dsn_recipient(message: &str) -> Option<String> {
+    for line in message.lines() {
+        let trimmed = line.trim().to_lowercase();
+        if is_attached_original_boundary(&trimmed) {
+            break;
+        }
+        if trimmed.starts_with("final-recipient:") || trimmed.starts_with("original-rcpt-to:") {
+            let value = line
+                .split(':')
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(":")
+                .trim()
+                .to_string();
+            // Strip the RFC 3464 address-type prefix (`rfc822; user@x`).
+            let address = value
+                .rsplit(';')
+                .next()
+                .unwrap_or(&value)
+                .trim()
+                .trim_matches(|c| c == '<' || c == '>')
+                .trim();
+            if !address.is_empty() {
+                return Some(format!(
+                    "claimed recipient={}",
+                    sanitize_observation_value(address)
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn extract_addr(line: &str) -> String {
     // Shared panic-safe helper: search for '>' only AFTER the '<'. Searching
     // the whole line could find a '>' before the '<' and slice out of bounds
@@ -1438,6 +1484,39 @@ mod tests {
             extract_diagnostic_code(dsn),
             Some("Diagnostic-Code: smtp; 550 user unknown".into())
         );
+    }
+
+    /// Regression (dogfood 2026-10-06, P3): a plain non-VERP DSN's
+    /// observation row dropped the claimed recipient entirely. The
+    /// observation detail must preserve it (sanitized, DSN-part only).
+    #[test]
+    fn observation_detail_preserves_the_claimed_recipient() {
+        assert_eq!(
+            claimed_dsn_recipient(
+                "Final-Recipient: rfc822; flow4-bounce@dogfood.test\r\nStatus: 5.1.1\r\n"
+            ),
+            Some("claimed recipient=flow4-bounce@dogfood.test".into()),
+        );
+        assert_eq!(
+            claimed_dsn_recipient("Status: 5.1.1\r\nOriginal-Rcpt-To: <user@example.com>\r\n"),
+            Some("claimed recipient=user@example.com".into()),
+        );
+        // Control characters are sanitized away (the value lands in a
+        // queryable TEXT column and in logs).
+        assert_eq!(
+            claimed_dsn_recipient("Final-Recipient: rfc822; bad\u{7}@example.com\r\n"),
+            Some("claimed recipient=bad@example.com".into()),
+        );
+        // A claim inside the attached original message is attacker-writable
+        // and must NOT be read.
+        let attached = concat!(
+            "Status: 5.1.1\r\n",
+            "Content-Type: message/rfc822\r\n",
+            "\r\n",
+            "Final-Recipient: rfc822; forged@evil.example\r\n",
+        );
+        assert_eq!(claimed_dsn_recipient(attached), None);
+        assert_eq!(claimed_dsn_recipient("Status: 5.1.1\r\n"), None);
     }
 
     #[test]
@@ -2735,7 +2814,11 @@ mod tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        assert!(read_reply(&mut reader).await.starts_with("220"));
+        // Paused-clock reads: a real-I/O handshake can leave the runtime idle
+        // long enough for auto-advance to fire a plain 5s `read_reply`
+        // timeout before the greeting lands (load-dependent flake), so use
+        // the retrying paused helpers the sibling paused tests use.
+        assert!(paused_read_line(&mut reader).await.starts_with("220"));
         // PIPELINE the whole command sequence so the session never idles in
         // the command phase; the only pending timer after DATA is the
         // per-line DATA timer, which paused virtual time fires.
@@ -2749,10 +2832,10 @@ mod tests {
             .await
             .unwrap();
         for _ in 0..3 {
-            let reply = read_full_reply(&mut reader).await;
+            let reply = paused_read_full(&mut reader).await;
             assert!(reply.starts_with('2'), "{reply:?}");
         }
-        assert!(read_full_reply(&mut reader).await.starts_with("354"));
+        assert!(paused_read_full(&mut reader).await.starts_with("354"));
         let reply = paused_read_line(&mut reader).await;
         assert!(
             reply.starts_with("421 4.4.2 Data timeout exceeded"),

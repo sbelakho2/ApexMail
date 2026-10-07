@@ -6,7 +6,7 @@
 # accessibility or navigation — the exported visual fixtures ARE the surface.
 # This stage provisions them ONCE (ui-foundation's export_visual_fixtures bin
 # with APEX_EXPORT_ALL_UI_ROUTES=1, every manifest route of every surface)
-# and runs six static gates over the result + the Rust sources:
+# and runs seven static gates over the result + the Rust sources:
 #
 #   C  ui flash copy        tools/check_flash_copy.py       (CI_UI_FLASH_COPY_CHECK)
 #   D  ui form hygiene      tools/check_ui_form_hygiene.py  (CI_UI_FORM_HYGIENE_CHECK)
@@ -14,8 +14,9 @@
 #   I  ui dead links        tools/check_ui_links.py         (CI_UI_LINKS_CHECK)
 #   J  ui terminology       tools/check_ui_terminology.py   (CI_UI_TERMINOLOGY_CHECK)
 #   K  ui strings catalog   tools/extract_ui_strings.py     (CI_UI_STRINGS_CATALOG_CHECK)
+#   M  marketing tokens     tools/check_marketing_contrast.py (CI_UI_MARKETING_CONTRAST_CHECK)
 #
-# ALL SIX GATES ARE REQUIRED BY DEFAULT: every CI_UI_*_CHECK flag is set to
+# ALL SEVEN GATES ARE REQUIRED BY DEFAULT: every CI_UI_*_CHECK flag is set to
 # `required` in ci/pipeline.conf (the advisory→required flip happened after
 # the first runs surfaced real P2 drift — missing per-form CSRF inputs,
 # duplicate control-plane h1s, tenant wording in customer-facing flash
@@ -93,10 +94,25 @@ provision_ui_fixtures() {
 }
 
 run_ui_gates() {
-    command -v python3 >/dev/null 2>&1 || {
-        ci_warn "python3 missing — all six ui gates skipped (install python3)"
-        return "$CI_EXIT_OK"
-    }
+    # Audit P2: every UI gate is python3-driven and REQUIRED by default; a
+    # missing python3 used to warn-and-skip all of them while the stage
+    # reported ok (and a blessing could record `ui` as passed). Disposition
+    # follows lane_tool_status: REQUIRED fails closed on any host; the
+    # explicit advisory override (all CI_UI_*_CHECK=advisory) keeps the
+    # bounded triage window. ONE flag is required to fail-decision: if any
+    # gate is required, the lane is required.
+    _ui_flag=advisory
+    for _ui_f in "${CI_UI_FLASH_COPY_CHECK:-required}" "${CI_UI_FORM_HYGIENE_CHECK:-required}" \
+                 "${CI_UI_A11Y_CHECK:-required}" "${CI_UI_LINKS_CHECK:-required}" \
+                 "${CI_UI_TERMINOLOGY_CHECK:-required}" "${CI_UI_STRINGS_CATALOG_CHECK:-required}" \
+                 "${CI_UI_MARKETING_CONTRAST_CHECK:-required}"; do
+        [ "$_ui_f" = required ] && _ui_flag=required
+    done
+    _ui_st=$(lane_tool_status python3 ui-gates "$_ui_flag")
+    case $_ui_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
     ui_gate "${CI_UI_FLASH_COPY_CHECK:-advisory}" \
         "ui flash copy (gate C)" \
         python3 tools/check_flash_copy.py
@@ -106,9 +122,19 @@ run_ui_gates() {
     ui_gate "${CI_UI_A11Y_CHECK:-advisory}" \
         "ui accessibility (gate E)" \
         python3 tools/check_ui_a11y.py "$UI_FIXTURES"
+    ui_gate "${CI_UI_MARKETING_CONTRAST_CHECK:-advisory}" \
+        "ui marketing token contrast (gate M)" \
+        python3 tools/check_marketing_contrast.py
+    # Gate I/marketing: when the zola build was unavailable the marketing
+    # half of the dead-link gate would be vacuous — under --require-marketing
+    # (passed only in that case) an absent site is a hard failure instead of
+    # an assumed-alive pass (2026-10-07 gates review).
+    _ui_marketing_flag=''
+    [ -f "$REPO_ROOT/apps/marketing-zola/public/index.html" ] || _ui_marketing_flag='--require-marketing'
+    # shellcheck disable=SC2086  # flag is empty or one token, by construction
     ui_gate "${CI_UI_LINKS_CHECK:-advisory}" \
         "ui dead links (gate I)" \
-        python3 tools/check_ui_links.py "$UI_FIXTURES"
+        python3 tools/check_ui_links.py "$UI_FIXTURES" $_ui_marketing_flag
     ui_gate "${CI_UI_TERMINOLOGY_CHECK:-advisory}" \
         "ui terminology (gate J)" \
         python3 tools/check_ui_terminology.py "$UI_FIXTURES"

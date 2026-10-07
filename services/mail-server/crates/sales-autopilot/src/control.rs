@@ -838,6 +838,23 @@ pub async fn start_outreach(
     Json(request): Json<enrollments::StartOutreachRequest>,
 ) -> Result<Json<enrollments::StartOutreachResponse>, SalesError> {
     let tenant = tenant_of(&headers)?;
+    // The execution plane must be able to RUN what this command accepts.
+    // The durable action worker refuses to start without the production
+    // dispatcher (`SALES_CAMPAIGN_FROM_EMAIL` + `SALES_UNSUBSCRIBE_SECRET`),
+    // so on an unwired deployment this route used to accept (`accepted:1`),
+    // queue real work and leave it queued forever with no consumer — the
+    // whole decision/kill-switch machinery was unobservable (dogfood
+    // 2026-10-06 P1). Refuse with the NAMED reason; never an accept that can
+    // never run.
+    if state.dispatcher.is_none() {
+        return Err(SalesError::ServiceUnavailable(
+            "the sales execution plane is not configured: the outbound action worker is \
+             disabled without SALES_CAMPAIGN_FROM_EMAIL and SALES_UNSUBSCRIBE_SECRET, so \
+             queued outreach could never execute. Outreach was NOT accepted; configure the \
+             dispatcher and retry."
+                .into(),
+        ));
+    }
     let queue = queue_for(&state, "control-enroll");
     let response = enrollments::start_outreach(&state.db, &queue, &tenant, &request).await?;
     Ok(Json(response))
@@ -2130,5 +2147,92 @@ mod tests {
         assert!(error.to_string().contains("not replayable"), "{error}");
 
         cleanup(&pool, &tenant).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Execution-plane gate (dogfood 2026-10-06 P1)
+    // -----------------------------------------------------------------------
+
+    fn outreach_request() -> Json<enrollments::StartOutreachRequest> {
+        Json(enrollments::StartOutreachRequest {
+            sequence_id: Uuid::new_v4(),
+            contact_ids: vec![Uuid::new_v4()],
+            autonomy_policy_id: None,
+            experiment_id: None,
+        })
+    }
+
+    /// The old contract accepted (`accepted:1`) and queued real work no
+    /// worker could ever run, because the only kill-switch/decision gate
+    /// lived in the (disabled) action worker. With the dispatcher unset the
+    /// command must refuse with the NAMED reason.
+    #[tokio::test]
+    async fn outreach_refuses_with_the_named_reason_when_the_execution_plane_is_unconfigured() {
+        let Some(pool) = crate::test_db::canonical_test_pool("outreach_unconfigured").await else {
+            return;
+        };
+        let state = test_state(&pool);
+        assert!(
+            state.dispatcher.is_none(),
+            "this harness pins the unconfigured plane"
+        );
+
+        let error = start_outreach(State(state), tenant_headers("system"), outreach_request())
+            .await
+            .expect_err("an unconfigured execution plane must refuse outreach");
+        let message = error.to_string();
+        assert!(
+            matches!(error, SalesError::ServiceUnavailable(_)),
+            "the refusal is a service-unavailable verdict: {message}"
+        );
+        assert!(
+            message.contains("SALES_CAMPAIGN_FROM_EMAIL")
+                && message.contains("SALES_UNSUBSCRIBE_SECRET"),
+            "the reason names the missing configuration: {message}"
+        );
+        assert!(
+            message.contains("NOT accepted"),
+            "the reason is explicit that nothing was queued: {message}"
+        );
+    }
+
+    /// With a configured dispatcher the gate opens: the request reaches the
+    /// enrollment path (and here fails on the missing sequence/DB state, NOT
+    /// on the execution-plane refusal).
+    #[tokio::test]
+    async fn outreach_passes_the_execution_plane_gate_when_configured() {
+        let Some(pool) = crate::test_db::canonical_test_pool("outreach_configured").await else {
+            return;
+        };
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy test redis pool");
+        let dispatcher = Arc::new(
+            crate::dispatcher::ProductionCampaignDispatcher::new(
+                crate::config::DispatchConfig {
+                    from_email: "sales@apexmail.ee".into(),
+                    unsubscribe_secret: "s".repeat(32),
+                    ..Default::default()
+                },
+                pool.clone(),
+                Arc::new(
+                    billing_service::send_admission::PostgresAdmissionBackend::new(
+                        pool.clone(),
+                        redis,
+                    ),
+                ),
+            )
+            .expect("a configured dispatcher"),
+        );
+        let mut state = test_state(&pool);
+        Arc::get_mut(&mut state).expect("sole owner").dispatcher = Some(dispatcher);
+
+        let error = start_outreach(State(state), tenant_headers("system"), outreach_request())
+            .await
+            .expect_err("the random sequence cannot exist");
+        assert!(
+            !matches!(&error, SalesError::ServiceUnavailable(message) if message.contains("sales execution plane")),
+            "a configured dispatcher must pass the gate, got: {error}"
+        );
     }
 }

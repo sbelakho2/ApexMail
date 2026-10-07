@@ -8,7 +8,8 @@ The application server (`api-server`) sets the following HSTS header on all HTTP
 
 `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload`
 
-This is configured in [`services/mail-server/crates/api-server/src/app.rs`](../../services/mail-server/crates/api-server/src/app.rs:558).
+This is configured in the `HDR_HSTS` static in
+[`services/mail-server/crates/api-server/src/app.rs`](../../services/mail-server/crates/api-server/src/app.rs).
 
 ## HSTS Preload Requirement
 

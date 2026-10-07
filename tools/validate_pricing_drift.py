@@ -19,6 +19,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 BILLING_PLANS = ROOT / "services/mail-server/crates/billing-service/src/plans.rs"
+# The canonical plan facts (including overage rates) live here since the
+# 2026-10-06 refactor; `plans.rs` delegates to it.
+PLATFORM_CATALOG = ROOT / "services/mail-server/crates/platform-catalog/src/lib.rs"
 AUTH_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/auth.rs"
 API_BILLING_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/billing.rs"
 UI_ROUTER = ROOT / "services/mail-server/crates/ui-foundation/src/axum_router.rs"
@@ -35,6 +38,10 @@ MARKETING_CALCULATOR_ISLAND = (
     ROOT / "apps/marketing-zola/templates/partials/generated/pricing-calculator-island.html"
 )
 MARKETING_FAQ = ROOT / "apps/marketing-zola/templates/partials/generated/pricing-faq-island.html"
+# The runtime dedicated-IP add-on ladder (first / each additional) is quoted by
+# the sandbox estimator; the public calculator and docs/pricing.md must state
+# the same rates.
+EXPLORER_ROUTE = ROOT / "services/mail-server/crates/api-server/src/routes/explorer.rs"
 DOCS_PRICING = ROOT / "docs/pricing.md"
 BILLING_LIFECYCLE = ROOT / "docs/architecture/billing-lifecycle.md"
 STRIPE_CONTRACT = ROOT / "docs/tool-contracts/stripe.md"
@@ -356,12 +363,33 @@ def validate_runtime_catalog(errors: list[str]) -> dict[str, ParsedPlan]:
     return catalog
 
 
+def extract_catalog_overage_rates(source: str) -> dict[str, float]:
+    """EUR per 1,000 emails per plan, from the canonical `platform_catalog::PLANS`."""
+    rates: dict[str, float] = {}
+    for block in re.findall(r"PlanRow \{(.*?)\n    \}", source, re.S):
+        name = re.search(r'name: "([^"]+)"', block)
+        overage = re.search(
+            r"overage_millicents_per_email: Some\((-?[\d_]+)\)", block
+        )
+        if name and overage:
+            rates[name.group(1)] = int(overage.group(1).replace("_", "")) / 100
+    if not rates:
+        raise ValueError("no overage rates parsed from platform-catalog PLANS rows")
+    return rates
+
+
 def extract_overage_rates(source: str) -> dict[str, float]:
-    """EUR per 1,000 emails per plan, from the runtime map arms.
+    """EUR per 1,000 emails per plan.
 
     `plan_overage_rate_millicents` stores MILLICENTS per email
     (cents/1000), so the public per-1,000 rate is millicents/100:
     80 millicents/email = €0.80 per 1,000.
+
+    Two shapes are legal: the historical literal-arm table (kept supported so
+    a reintroduced drifting table still fails the check) and the
+    platform-catalog delegation installed by the 2026-10-06 refactor
+    (`platform_catalog::plan_by_name(...).overage_millicents_per_email`),
+    where the canonical catalog rows are the authority.
     """
     body = re.search(
         r"pub fn plan_overage_rate_millicents\(plan_name: &str\) -> Option<i64> \{(.*?)\n\}",
@@ -370,13 +398,67 @@ def extract_overage_rates(source: str) -> dict[str, float]:
     )
     if body is None:
         raise ValueError("plan_overage_rate_millicents not found in the runtime catalog")
+    text = body.group(1)
     rates: dict[str, float] = {}
-    for arm in re.finditer(r'((?:\s*\|?\s*"[^"]+"\s*)+)=>\s*Some\((\d+)\)', body.group(1)):
+    for arm in re.finditer(r'((?:\s*\|?\s*"[^"]+"\s*)+)=>\s*Some\((\d+)\)', text):
         for name in re.findall(r'"([^"]+)"', arm.group(1)):
             rates[name] = int(arm.group(2)) / 100
-    if not rates:
-        raise ValueError("no overage rate arms parsed from the runtime catalog")
-    return rates
+    if rates:
+        return rates
+    if (
+        "platform_catalog::plan_by_name" in text
+        and "overage_millicents_per_email" in text
+    ):
+        return extract_catalog_overage_rates(read(PLATFORM_CATALOG))
+    raise ValueError(
+        "plan_overage_rate_millicents neither has literal arms nor delegates to the "
+        "canonical platform-catalog (platform_catalog::plan_by_name(...)"
+        ".overage_millicents_per_email)"
+    )
+
+
+def extract_dedicated_ip_addon(errors: list[str]) -> tuple[float, float] | None:
+    """(first, each additional) EUR/month from the runtime estimator.
+
+    `routes/explorer.rs` computes the add-on as
+    `4_900 + (f.dedicated_ips.saturating_sub(1)) * 6_900`; the public
+    calculator and docs/pricing.md quote the same ladder.
+    """
+    source = read(EXPLORER_ROUTE)
+    match = re.search(
+        r"(\d[\d_]*)\s*\+\s*\(f\.dedicated_ips\.saturating_sub\(1\)\)\s*\*\s*(\d[\d_]*)",
+        source,
+    )
+    if match is None:
+        errors.append(
+            "cannot parse the dedicated-IP add-on ladder from "
+            "api-server/src/routes/explorer.rs (first/additional rates)"
+        )
+        return None
+    return (
+        int(match.group(1).replace("_", "")) / 100,
+        int(match.group(2).replace("_", "")) / 100,
+    )
+
+
+def pricing_row_cells(text: str, plan_id: str) -> list[str] | None:
+    """The full catalog table row for `plan_id` in docs/pricing.md."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) == 10 and cells[0] == f"`{plan_id}`":
+            return cells
+    return None
+
+
+def dedicated_ip_cell(plan: ParsedPlan) -> str:
+    if plan.dedicated_ips > 0:
+        return f"{plan.dedicated_ips} included"
+    if plan.feature_flags.get("dedicated_ip"):
+        return "Add-on eligible"
+    return "—"
 
 
 def display_money(cents: int, annual: bool = False) -> str:
@@ -411,9 +493,38 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
             f"docs/pricing.md catalog row drift for {plan_id}: missing {expected_row!r}",
             errors,
         )
+        cells = pricing_row_cells(text, plan_id)
+        if cells is None:
+            errors.append(f"docs/pricing.md has no full catalog row for {plan_id}")
+        else:
+            expected_ips = dedicated_ip_cell(plan)
+            check(
+                cells[9] == expected_ips,
+                f"docs/pricing.md dedicated-IP cell drift for {plan_id}: "
+                f"expected {expected_ips!r}, got {cells[9]!r}",
+                errors,
+            )
     # 2026-09-08: Developer/Business are canonical ladder names now.
     for stale in ("10% on every self-serve",):
         check(stale not in text, f"docs/pricing.md contains stale pricing token {stale!r}", errors)
+    addon = extract_dedicated_ip_addon(errors)
+    if addon is not None:
+        first, additional = addon
+        needle = (
+            f"Dedicated IPs are an add-on from €{first:.0f}/month (first) and "
+            f"€{additional:.0f}/month (each additional)"
+        )
+        check(
+            needle in " ".join(text.split()),
+            f"docs/pricing.md dedicated-IP add-on price drift vs the runtime "
+            f"estimator: missing {needle!r}",
+            errors,
+        )
+        check(
+            "€30/month per additional IP" not in text,
+            "docs/pricing.md contains the stale dedicated-IP price token '€30/month per additional IP'",
+            errors,
+        )
 
 
 def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
@@ -430,7 +541,11 @@ def validate_marketing_data(catalog: dict[str, ParsedPlan], errors: list[str]) -
 
     check(data.get("currency_symbol") == "€", "marketing pricing data must use EUR '€'", errors)
     check(data.get("currency_code") == "EUR", "marketing pricing data must declare EUR", errors)
-    check(data.get("ip_cost") == 30, "marketing dedicated-IP add-on must be €30/month", errors)
+    # `ip_cost` here is a dead legacy field (written by the retired €30/mo
+    # generation; no template reads it). The ONE pinned add-on ladder is the
+    # runtime first/additional pair checked against the calculator and
+    # docs/pricing.md in validate_pricing_reference/validate_marketing_source,
+    # so this table cannot pin a second contradictory price.
     plans = data.get("plans")
     if not isinstance(plans, list):
         errors.append("marketing pricing data has no plans array")
@@ -523,9 +638,21 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
         "Developer (50K/mo)",
         "Business (2M/mo)",
         "Annual subscriptions are billed at 10&times; the monthly price",
-        "Dedicated IPs are an add-on from \u20ac49/month (first) and \u20ac69/month (each additional) on Pro and above",
     ):
         check(needle in calculator, f"calculator source is missing {needle!r}", errors)
+    addon = extract_dedicated_ip_addon(errors)
+    if addon is not None:
+        first, additional = addon
+        needle = (
+            f"Dedicated IPs are an add-on from €{first:.0f}/month (first) and "
+            f"€{additional:.0f}/month (each additional)"
+        )
+        check(
+            needle in calculator,
+            f"calculator dedicated-IP add-on price drift vs the runtime estimator: "
+            f"missing {needle!r}",
+            errors,
+        )
     for stale in ("Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
         check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
 
@@ -639,6 +766,66 @@ def validate_entitlement_boundaries(errors: list[str]) -> None:
         "checkout completed; awaiting subscription state webhook",
     ):
         check(needle in webhooks, f"Stripe webhook reconciliation is missing {needle!r}", errors)
+
+
+def extract_sla_credit_caps(errors: list[str]) -> dict[str, int]:
+    """Plan -> SLA credit cap (%) from the billing seeds (the runtime cap the
+    maintenance SLA sweep enforces)."""
+    source = read(BILLING_PLANS)
+    caps: dict[str, int] = {}
+    for match in re.finditer(r"(?m)^\s*PlanSeed\s*\{", source):
+        block = extract_balanced_block(source, source.find("{", match.start()))
+        name = parse_string_field(block, "name")
+        if name is None:
+            continue
+        cap = re.search(r"sla_credit_percentage:\s*(\d+)", block)
+        if cap:
+            caps[name] = int(cap.group(1))
+    if not caps:
+        errors.append("no sla_credit_percentage values parsed from the billing plan seeds")
+    return caps
+
+
+def validate_sla_credit_docs(errors: list[str]) -> None:
+    """The SLA promise must be the cap the maintenance sweep enforces."""
+    caps = extract_sla_credit_caps(errors)
+    sla_doc = " ".join(read(ROOT / "docs/sla.md").split())
+    legal = " ".join(read(ROOT / "templates/legal/sla.md").split())
+    for plan, cap in caps.items():
+        if cap <= 0:
+            continue
+        if plan == "scale":
+            check(
+                f"capped at {cap}% of the monthly fee" in sla_doc,
+                f"docs/sla.md must state the shipped Business SLA cap {cap}%",
+                errors,
+            )
+            check(
+                f"**{cap}%** of the monthly fee on the Business" in sla_doc,
+                f"docs/sla.md Maximum Credit section must state {cap}% for Business",
+                errors,
+            )
+            check(
+                f"credits never exceed {cap}% of the monthly fee" in legal,
+                f"templates/legal/sla.md must state the shipped Business SLA cap {cap}%",
+                errors,
+            )
+        if plan == "enterprise":
+            check(
+                f"**{cap}%** on the Enterprise Cloud" in sla_doc,
+                f"docs/sla.md Maximum Credit section must state {cap}% for Enterprise Cloud",
+                errors,
+            )
+            check(
+                f"credits never exceed {cap}% of the monthly fee" in legal,
+                f"templates/legal/sla.md must state the shipped Enterprise Cloud SLA cap {cap}%",
+                errors,
+            )
+    for stale, label in (
+        ("capped at 10% of the monthly fee", "docs/sla.md"),
+        ("credits never exceed 10% of the monthly fee", "templates/legal/sla.md"),
+    ):
+        check(stale not in sla_doc and stale not in legal, f"{label} contains the stale 10% SLA cap", errors)
 
 
 def validate_lifecycle_docs(errors: list[str]) -> None:
@@ -781,6 +968,7 @@ def main() -> int:
         validate_extended_artifacts(catalog, errors)
     validate_entitlement_boundaries(errors)
     validate_lifecycle_docs(errors)
+    validate_sla_credit_docs(errors)
     validate_built_output(errors)
 
     if errors:

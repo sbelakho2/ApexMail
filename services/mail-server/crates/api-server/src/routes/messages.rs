@@ -1854,6 +1854,7 @@ async fn send_message(
         &state,
         &auth.tenant_id,
         quota_quantity_for_request(&body),
+        &delivery_recipients(&body),
         idempotency_key.as_deref(),
         None,
         body.category.as_deref(),
@@ -2268,6 +2269,7 @@ async fn send_batch(
             &state,
             &auth.tenant_id,
             quota_quantity_for_request(msg),
+            &delivery_recipients(msg),
             batch_key.as_deref(),
             Some(i),
             msg.category.as_deref(),
@@ -2871,6 +2873,19 @@ fn map_send_admission_error(error: SendAdmissionError) -> ApiError {
             tracing::error!(error = %error, "suppression lookup failed");
             ApiError::Internal("suppression lookup error".into())
         }
+        // F4: a marketing-class send to a recipient without an active
+        // consent record is a validation refusal with the enforcer's named
+        // reason (e.g. "no marketing consent on file — recipient must opt
+        // in"), never a silent admit.
+        SendAdmissionError::ConsentRefused { email, reason } => {
+            ApiError::Validation(vec![format!(
+                "marketing consent required for {email}: {reason}"
+            )])
+        }
+        SendAdmissionError::ConsentUnavailable(error) => {
+            tracing::error!(error = %error, "consent lookup failed");
+            ApiError::Internal("consent lookup error".into())
+        }
     }
 }
 
@@ -2891,17 +2906,33 @@ async fn reserve_email_quota(
     state: &AppState,
     tenant_id: &str,
     quantity: i64,
+    recipients: &[String],
     idempotency_key: Option<&str>,
     idempotency_item: Option<usize>,
     category: Option<&str>,
 ) -> Result<QuotaReservation, ApiError> {
-    send_admission_service(state)
+    let service = send_admission_service(state);
+
+    // F4: the REST admission carries a QUANTITY (to + cc + bcc), so the
+    // recipient list cannot ride the admission request — run the SAME
+    // consent gate explicitly, before any quota is reserved. Transactional/
+    // service categories are preference-exempt; a marketing-class send to a
+    // recipient without an active consent record is refused with the
+    // enforcer's named reason.
+    let normalized_category =
+        send_admission::normalize_category(category).map_err(map_send_admission_error)?;
+    service
+        .enforce_consent(tenant_id, recipients, &normalized_category)
+        .await
+        .map_err(map_send_admission_error)?;
+
+    service
         .admit(SendAdmissionRequest {
             tenant_id,
             meter: AdmissionMeter::Quantity(quantity),
             idempotency_key,
             idempotency_item,
-            category,
+            category: Some(&normalized_category),
         })
         .await
         .map_err(map_send_admission_error)
@@ -5527,6 +5558,34 @@ Bcc: victim@example.com"@example.com"#
         }
     }
 
+    /// Grant an ACTIVE marketing consent record for `recipient`.
+    ///
+    /// Sends default to the customer `marketing` category, and the shared
+    /// send admission's consent gate refuses any recipient without a live
+    /// consent record. The suites below exercise admission's LATER arms
+    /// (persistence, idempotency, quota, suppression, ledger failures), so
+    /// the fixtures grant consent for the addresses they submit to; the
+    /// gate's own refusal arms are covered by the billing/compliance suites.
+    async fn grant_marketing_consent(pool: &sqlx::PgPool, tenant_id: &str, recipient: &str) {
+        sqlx::query(
+            "INSERT INTO consent_records \
+                 (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source) \
+             VALUES ($1, $2, $3, $4, 'marketing', true, NOW(), 'form') \
+             ON CONFLICT (tenant_id, subscriber_id, consent_type) DO UPDATE SET \
+                 granted = true, revoked_at = NULL, granted_at = NOW()",
+        )
+        .bind(format!(
+            "cons-{}",
+            &Uuid::new_v4().simple().to_string()[..24]
+        ))
+        .bind(tenant_id)
+        .bind(recipient)
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("grant marketing consent");
+    }
+
     async fn msg_fixture(test_name: &str) -> Option<MsgFixture> {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| {
@@ -5544,6 +5603,19 @@ Bcc: victim@example.com"@example.com"#
         let other_tenant = insert_test_tenant(&pool, "adv-other").await;
         let domain = unique_sender_domain();
         let _domain_id = insert_verified_domain(&pool, &tenant, &domain).await;
+        for recipient in [
+            "to@example.com",
+            "cc@example.com",
+            "bcc@example.com",
+            "first@example.com",
+            "second@example.com",
+            "blocked@example.com",
+            "good@example.com",
+            "bad@example.com",
+            "x@example.com",
+        ] {
+            grant_marketing_consent(&pool, &tenant, recipient).await;
+        }
         let redis_url = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -6586,6 +6658,9 @@ Bcc: victim@example.com"@example.com"#
         let tenant = insert_test_tenant(&pool, suffix).await;
         let domain = unique_sender_domain();
         insert_verified_domain(&pool, &tenant, &domain).await;
+        // cov_send_body submits to@example.com; the consent gate would
+        // otherwise refuse it before any of these later arms run.
+        grant_marketing_consent(&pool, &tenant, "to@example.com").await;
         let key = crate::app::test_support::seed_api_key_for(
             &pool,
             &tenant,

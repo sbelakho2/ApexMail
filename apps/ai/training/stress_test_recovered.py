@@ -8,9 +8,30 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=€0/30K/300K, Starter=€25/50K/500K, Pro=€65/150K/2M,
-  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/∞
+  Free=€0/3K/30K (+30K launch allowance), Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from validate_pricing import legacy_price_tokens  # noqa: E402
+
+
+def _assert_no_legacy_prices() -> None:
+    """Fail at import if any required/expected token is a pre-review price."""
+    violations = []
+    for category, tests in RECOVERED_STRESS_TESTS.items():
+        for test in tests:
+            checks = test.get("checks", {})
+            for key in ("must_contain", "must_contain_any"):
+                for token in checks.get(key, []) or []:
+                    hits = legacy_price_tokens(str(token))
+                    if hits:
+                        violations.append(f"{category}: {key} requires {hits} ({token!r})")
+    if violations:
+        raise AssertionError("legacy plan prices in stress assertions: " + "; ".join(violations[:5]))
+
 
 RECOVERED_STRESS_TESTS = {
 
@@ -72,7 +93,7 @@ RECOVERED_STRESS_TESTS = {
 
     "webhook_troubleshooting": [
         {"q": "I configured a webhook but I'm on the Free plan. Why am I not receiving events?",
-         "checks": {"must_contain_any": ["Free", "not available", "Starter", "paid", "no webhook"]}},
+         "checks": {"must_contain_any": ["Free", "not available", "Developer", "paid", "no webhook"]}},
         {"q": "How do I verify that a webhook is really from ApexMail and not spoofed?",
          "checks": {"must_contain_any": ["HMAC", "SHA256", "signature", "signing secret", "verify"]}},
         {"q": "My webhook endpoint is slow. What happens if it takes over 30 seconds?",
@@ -114,11 +135,11 @@ RECOVERED_STRESS_TESTS = {
         {"q": "What's the difference between IP reputation and domain reputation?",
          "checks": {"must_contain": ["IP", "domain"], "must_contain_any": ["separate", "both", "different", "independent"]}},
         {"q": "I want separate IPs for transactional and marketing email. What plans support this?",
-         "checks": {"must_contain_any": ["Scale", "€350", "Enterprise", "IP pool"]}},
+         "checks": {"must_contain_any": ["Business", "€699", "Enterprise Cloud", "IP pool"]}},
         {"q": "How do I check if I'm on a blocklist like Spamhaus?",
          "checks": {"must_contain_any": ["Spamhaus", "check.spamhaus.org", "blocklist", "DNSBL"]}},
         {"q": "I'm on the Free plan. Can I get a dedicated IP address?",
-         "checks": {"must_contain_any": ["no", "Pro", "€65", "not available"]}},
+         "checks": {"must_contain_any": ["no", "Pro", "€89", "not available"]}},
     ],
 
     "template_rendering": [
@@ -135,7 +156,7 @@ RECOVERED_STRESS_TESTS = {
     ],
 
     "api_rate_limits": [
-        {"q": "What are the API rate limits on the Starter plan?",
+        {"q": "What are the API rate limits on the Developer plan?",
          "checks": {"must_contain_any": ["500,000", "500K", "per month"]}},
         {"q": "Can I burst 10,000 API calls in one minute?",
          "checks": {"must_contain_any": ["no", "rate", "throttle", "spread"]}},
@@ -151,7 +172,7 @@ RECOVERED_STRESS_TESTS = {
         {"q": "How many failed login attempts before lockout?",
          "checks": {"must_contain_any": ["5", "five", "lockout", "15 minute"]}},
         {"q": "Can I require MFA for all team members?",
-         "checks": {"must_contain_any": ["yes", "Scale", "Enterprise", "enforce"]}},
+         "checks": {"must_contain_any": ["yes", "Business", "Enterprise Cloud", "enforce"]}},
         {"q": "How long do team invites stay valid?",
          "checks": {"must_contain_any": ["72", "hour", "3 day", "expire"]}},
         {"q": "How do I rotate my API keys without downtime?",
@@ -180,11 +201,11 @@ RECOVERED_STRESS_TESTS = {
         {"q": "Is ApexMail GDPR compliant?",
          "checks": {"must_contain_any": ["yes", "GDPR", "DPA", "EU"]}},
         {"q": "Does ApexMail offer a Data Processing Agreement (DPA)?",
-         "checks": {"must_contain_any": ["yes", "DPA", "contact", "Enterprise"]}},
+         "checks": {"must_contain_any": ["yes", "DPA", "contact", "Enterprise Cloud"]}},
         {"q": "What happens to my data if I cancel my account?",
          "checks": {"must_contain_any": ["delete", "retention", "days", "export"]}},
         {"q": "Is ApexMail HIPAA compliant?",
-         "checks": {"must_contain_any": ["Enterprise", "BAA", "contact", "HIPAA"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "BAA", "contact", "HIPAA"]}},
         {"q": "Where is my data stored geographically?",
          "checks": {"must_contain_any": ["EU", "Europe", "Hetzner", "Germany"]}},
     ],
@@ -232,10 +253,10 @@ RECOVERED_STRESS_TESTS = {
     ],
 
     "ip_infrastructure": [
-        {"q": "How many dedicated IPs are included with Scale?",
+        {"q": "How many dedicated IPs are included with Business?",
          "checks": {"must_contain_any": ["3", "three"]}},
         {"q": "Can I bring my own IP address (BYOIP)?",
-         "checks": {"must_contain_any": ["Enterprise", "contact", "BYOIP"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "contact", "BYOIP"]}},
         {"q": "How much does an additional dedicated IP cost?",
          "checks": {"must_contain_any": ["€30", "30", "month"]}},
     ],
@@ -278,7 +299,7 @@ RECOVERED_STRESS_TESTS = {
 
     "billing_sla": [
         {"q": "What's the email overage rate per 1,000 emails?",
-         "checks": {"must_contain_any": ["€0.40", "0.40", "40 cent"]}},
+         "checks": {"must_contain_any": ["€0.80", "€0.60", "€0.35"]}},
         {"q": "What's the ApexMail uptime SLA?",
          "checks": {"must_contain_any": ["99.9", "SLA"]}},
         {"q": "How do I get credits for downtime?",
@@ -289,11 +310,11 @@ RECOVERED_STRESS_TESTS = {
 
     "security_advanced": [
         {"q": "Does ApexMail support SOC2 compliance?",
-         "checks": {"must_contain_any": ["Enterprise", "SOC2", "SOC 2", "contact"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "SOC2", "SOC 2", "contact"]}},
         {"q": "Can I get audit logs for my team's actions?",
-         "checks": {"must_contain_any": ["Scale", "Enterprise", "audit"]}},
+         "checks": {"must_contain_any": ["Business", "Enterprise Cloud", "audit"]}},
         {"q": "Is there SSO support with SAML?",
-         "checks": {"must_contain_any": ["Scale", "Enterprise", "SSO", "SAML"]}},
+         "checks": {"must_contain_any": ["Business", "Enterprise Cloud", "SSO", "SAML"]}},
         {"q": "Can I restrict API keys to specific IPs?",
          "checks": {"must_contain_any": ["yes", "allowlist", "IP restriction"]}},
     ],
@@ -335,7 +356,7 @@ RECOVERED_STRESS_TESTS = {
     ],
 
     "mixed_intent_advanced": [
-        {"q": "Hello, I want to upgrade from Starter to Growth and also need to fix my DKIM. Oh and what's my current usage?",
+        {"q": "Hello, I want to upgrade from Developer to Growth and also need to fix my DKIM. Oh and what's my current usage?",
          "checks": {"must_contain_any": ["upgrade", "DKIM", "usage", "Growth"]}},
         {"q": "My emails aren't delivering. Also I want to add a new domain. And what's the API limit on my plan?",
          "checks": {"must_contain_any": ["deliver", "domain", "API"]}},
@@ -343,7 +364,7 @@ RECOVERED_STRESS_TESTS = {
 
     "tricky_numbers": [
         {"q": "I send 2,000,001 emails. What plan handles that?",
-         "checks": {"must_contain_any": ["Enterprise", "Scale + overage"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "Business + overage"]}},
         {"q": "With Growth's 5M API calls, how many emails can I send with one API call each?",
          "checks": {"must_contain_any": ["500,000", "email limit", "separate"]}},
     ],
@@ -351,11 +372,13 @@ RECOVERED_STRESS_TESTS = {
     "rapid_multi_fact": [
         {"q": "Free plan: emails, API calls, team size, domains - all the limits please.",
          "checks": {"must_contain": ["3,000"], "must_contain_any": ["50,000", "1", "team", "domain"]}},
-        {"q": "Scale plan: everything - price, emails, API, team, domains, IPs, features.",
-         "checks": {"must_contain": ["€350"], "must_contain_any": ["2,000,000", "20,000,000", "SSO", "IP"]}},
+        {"q": "Business plan: everything - price, emails, API, team, domains, IPs, features.",
+         "checks": {"must_contain": ["€699"], "must_contain_any": ["2,000,000", "20,000,000", "SSO", "IP"]}},
     ],
 
 }
+
+_assert_no_legacy_prices()
 
 
 def get_recovered_tests():

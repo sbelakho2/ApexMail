@@ -2142,6 +2142,20 @@ final class Verifier
         if ($signingSecret === null) {
             return VerifyError::UnknownKid;
         }
+        // 2. The documented 16-byte HMAC secret minimum, enforced fail
+        //    closed at the verification seam. The constructor enforces it
+        //    for secretsByKid entries; the legacy single-secret path is a
+        //    per-call parameter, and signPayloadV2() (like the Rust
+        //    production verifier's cached-key path) deliberately does not
+        //    re-check it, so without this gate a caller passing a
+        //    sub-16-byte secret would verify records that no conforming
+        //    issuer (Config enforces the same minimum) could have signed.
+        //    A short secret is a configuration fault, never an authentic
+        //    record: BadSignature, the exact mapping the Rust verifier
+        //    produces for its KeyTooShort gate.
+        if (\strlen($signingSecret) < 16) {
+            return VerifyError::BadSignature;
+        }
 
         // 2. Signature re-check: reconstruct the payload from the record and
         //    compare against the signature embedded in the challenge string.

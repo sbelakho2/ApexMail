@@ -33,7 +33,12 @@ export default defineConfig({
   testDir: './specs',
   testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable)\.spec\.mjs/,
   timeout: 120_000,
-  retries: 1,
+  // BR-3: 0 retries, matching playwright.config.mjs and both real-browser
+  // lanes. This lane includes the adversarial/security suites
+  // (adversarial-portable, extensions-adversary, targeted-bot) — a retry can
+  // mask a genuine race/flake in exactly the class of test where that race
+  // is the defect. The previous `retries: 1` contradicted the stated posture.
+  retries: 0,
   use: { baseURL: 'http://127.0.0.1:8087' },
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },

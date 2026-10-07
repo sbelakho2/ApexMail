@@ -18,13 +18,16 @@ UI fixtures must resolve against ONE of
       alive when <path>/, <path>/index.html or <path>.html exists there —
       this is what keeps locale (/de, /fr, /es) and compare pages alive
       without enumerating them. When the built site is absent (fresh
-      checkout) existence is assumed and a note is printed.
+      checkout) existence is assumed and a note is printed; with
+      --require-marketing (CI: passed when the marketing build is unavailable)
+      an absent site is a failure instead — a green run must not be able to
+      mean "the site was never built".
   (f) tools/ui_links_allowlist.txt — reviewed false positives only
       (`path # justification`), one per line.
 
 Dead links print surface:route:target; any dead link exits 1.
 
-Usage: python3 tools/check_ui_links.py [fixtures-dir]
+Usage: python3 tools/check_ui_links.py [--require-marketing] [fixtures-dir]
 """
 from __future__ import annotations
 
@@ -132,7 +135,9 @@ class LinkResolver:
 
 
 def main(argv: list[str]) -> int:
-    fixtures = Path(argv[1]) if len(argv) > 1 else DEFAULT_FIXTURES
+    require_marketing = "--require-marketing" in argv
+    positional = [a for a in argv[1:] if not a.startswith("--")]
+    fixtures = Path(positional[0]) if positional else DEFAULT_FIXTURES
     if not fixtures.is_dir():
         print(f"FAIL fixtures directory missing: {fixtures}")
         print("provision with: APEX_EXPORT_ALL_UI_ROUTES=1 cargo run -p ui-foundation "
@@ -147,6 +152,11 @@ def main(argv: list[str]) -> int:
           f"tracking paths {sorted(resolver.tracking)}")
     print(f"marketing public: {resolver.marketing_public or 'ABSENT (existence assumed)'}")
     print(f"link allowlist entries: {len(allowlist)}")
+    if resolver.marketing_public is None and require_marketing:
+        print("FAIL marketing public/ is absent and --require-marketing is set — "
+              "the marketing half of the dead-link gate cannot be verified "
+              "(build apps/marketing-zola: the zola_gates build produces public/)")
+        return 1
 
     links_seen = 0
     for entry, doc in iter_documents(fixtures):

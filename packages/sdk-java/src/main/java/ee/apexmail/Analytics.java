@@ -28,10 +28,16 @@ public final class Analytics {
             null, jsonMap());
     }
 
-    /** Volume timeseries: [{date, sent, delivered, bounced}, ...]. */
-    public Map<String, Object> volume(String from, String to, String interval) {
+    /**
+     * Volume timeseries: the live payload is a BARE ARRAY
+     * ({@code [{"date":…,"sent":…,"delivered":…,"bounced":…}, …]}) inside the
+     * envelope's {@code data} — parsing it into a Map (the previous
+     * signature) made every successful {@code GET /v1/analytics/volume}
+     * fail with PARSE_ERROR.
+     */
+    public List<Map<String, Object>> volume(String from, String to, String interval) {
         return client.request("GET", "/v1/analytics/volume" + analyticsQuery(from, to, interval),
-            null, jsonMap());
+            null, new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
     }
 
     /** Engagement rates + timeseries: {open_rate, click_rate,

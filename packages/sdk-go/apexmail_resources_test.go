@@ -49,7 +49,11 @@ func TestAPIKeysCreateUsesAuthEndpoint(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"apiKey":{"id":"key_123"}}`))
+		w.WriteHeader(http.StatusCreated)
+		// Real POST /v1/auth/api-keys response (HTTP 201, flat — no
+		// {"apiKey": ...} wrapper, no envelope; routes/auth.rs
+		// create_api_key → CreateApiKeyResponse).
+		_, _ = w.Write([]byte(`{"id":"key_123","key":"am_live_0123456789abcdef","key_prefix":"am_live_…cdef","name":"Deploy key","scopes":["messages:send"],"created_at":"2026-10-06T00:00:00Z","expires_at":"2027-01-04T00:00:00Z"}`))
 	}))
 	defer server.Close()
 
@@ -61,8 +65,11 @@ func TestAPIKeysCreateUsesAuthEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
-	if response["apiKey"] == nil {
-		t.Fatalf("unexpected response: %#v", response)
+	if response["id"] != "key_123" || response["key"] != "am_live_0123456789abcdef" || response["key_prefix"] != "am_live_…cdef" {
+		t.Fatalf("flat ApiKeyInfo shape not parsed: %#v", response)
+	}
+	if _, present := response["apiKey"]; present {
+		t.Fatalf("the real route returns a flat object; no apiKey wrapper may be expected: %#v", response)
 	}
 }
 

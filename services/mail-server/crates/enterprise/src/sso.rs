@@ -1605,8 +1605,15 @@ impl SSOService {
 
         // An inactive canonical user never receives a session (the identity
         // link survives, so re-activation restores SSO logins).
-        let (role, status): (String, String) = sqlx::query_as(
-            "SELECT COALESCE(role, 'member'), status FROM users WHERE id = $1::uuid",
+        // The MFA state is part of the identity contract: an SSO login must
+        // never bypass the second factor (dogfood 2026-10-06, live-proven: an
+        // MFA-enrolled owner completed OIDC here and received a session with
+        // no MFA step, while the api-server's SSO path refuses the same
+        // class). Enrolled accounts AND role-mandated roles (owner/admin)
+        // fail closed with the same reason the api-server uses.
+        let (role, status, mfa_enabled): (String, String, bool) = sqlx::query_as(
+            "SELECT COALESCE(role, 'member'), status, COALESCE(mfa_enabled, false) \
+             FROM users WHERE id = $1::uuid",
         )
         .bind(&user_id)
         .fetch_one(&self.db)
@@ -1614,6 +1621,14 @@ impl SSOService {
         .map_err(|e| format!("Load SSO user: {e}"))?;
         if status != "active" {
             return Err(format!("SSO user account is {status}"));
+        }
+        let role_requires_mfa = matches!(role.as_str(), "admin" | "owner");
+        if mfa_enabled || role_requires_mfa {
+            return Err(
+                "mfa_required: single sign-on cannot bypass the second factor; \
+                 sign in and complete MFA at the console"
+                    .to_string(),
+            );
         }
 
         Ok(ResolvedSsoUser {

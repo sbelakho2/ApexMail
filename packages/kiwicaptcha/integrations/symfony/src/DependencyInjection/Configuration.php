@@ -45,9 +45,25 @@ final class Configuration implements ConfigurationInterface
                     ->end()
                 ->end()
                 ->scalarNode('secret_key')
-                    ->info('HMAC secret key for signing/verifying challenges (min 16 bytes).')
+                    ->info('HMAC secret key for signing/verifying challenges (min 16 bytes). %env(KIWI_CAPTCHA_SECRET)% is the recommended form; env placeholders are opaque at compile time and the minimum is enforced on the resolved value when the core Config service is constructed.')
                     ->isRequired()
-                    ->cannotBeEmpty()
+                    // No cannotBeEmpty(): a node carrying BOTH a
+                    // final-validation closure and the cannotBeEmpty
+                    // contract is refused by Symfony's
+                    // ValidateEnvPlaceholdersPass the moment its value is
+                    // an %env()% placeholder ("cannot contain an
+                    // environment variable when empty values are not
+                    // allowed by definition and are validated"), which
+                    // broke the documented env-managed secret form.
+                    // Placeholders are validated against empty dummy
+                    // values, so the closure rejects only literal
+                    // non-empty shorts; the resolved value is refused by
+                    // the core Config constructor (>= 16 bytes) at
+                    // runtime, and isRequired() still demands the key.
+                    ->validate()
+                        ->ifTrue(static fn ($v): bool => \is_string($v) && '' !== $v && \strlen($v) < 16)
+                        ->thenInvalid('kiwi_captcha.secret_key must be a string of at least 16 bytes (32 random bytes recommended) — the core Config enforces the same minimum at issuance and the verifier refuses a shorter secret at verify time')
+                    ->end()
                 ->end()
                 ->scalarNode('issuer')
                     ->info('Deployment issuer stamped into every issued challenge (e.g. "auth-prod"). When set, the verifier REJECTS any record whose issuer does not match exactly — a dev/staging/prod mixup cannot validate cross-environment. The core long supported issuer; this makes it first-class bundle configuration.')
@@ -422,8 +438,19 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue('%kernel.project_dir%')
                         ->end()
                         ->scalarNode('master_secret')
-                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives the keys from the captcha secret_key (documented fallback). Configure a dedicated, stable master secret: the derived identities anchor the adaptive risk memory, and a routine signing-key rotation must not silently reset that memory. A fresh master derives fresh pseudonyms, so every source/subnet/session counter restarts at zero and a source flagged earlier loses its memory. A compromise of one secret never leaks the other. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the risk identities untouched.')
+                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret of at least 16 bytes (%env(KIWI_RISK_SECRET)% recommended; placeholders are opaque at compile time and the minimum is enforced on the resolved value at service construction). When null, the bundle derives the keys from the captcha secret_key (documented fallback). Configure a dedicated, stable master secret: the derived identities anchor the adaptive risk memory, and a routine signing-key rotation must not silently reset that memory. A fresh master derives fresh pseudonyms, so every source/subnet/session counter restarts at zero and a source flagged earlier loses its memory. A compromise of one secret never leaks the other. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the risk identities untouched.')
                             ->defaultNull()
+                            // Empty-tolerant closure, no cannotBeEmpty():
+                            // an %env(KIWI_RISK_SECRET)% placeholder must
+                            // stay accepted (Symfony refuses validated
+                            // nodes that deny empty values); the resolved
+                            // value is refused under 16 bytes by
+                            // KiwiCaptchaExtension::createRiskKeys() at
+                            // service construction.
+                            ->validate()
+                                ->ifTrue(static fn ($v): bool => \is_string($v) && '' !== $v && \strlen($v) < 16)
+                                ->thenInvalid('risk.master_secret must be a string of at least 16 bytes (32 random bytes recommended) when configured — a short master makes every derived risk pseudonym predictable, exactly the weakness the dedicated-secret guidance exists to avoid')
+                            ->end()
                         ->end()
                         ->integerNode('source_epoch_secs')
                             ->info('Epoch length in seconds for the SOURCE pseudonym (default 900). The source identity rotates every epoch, so old snapshots cannot correlate one source across time periods.')
@@ -707,10 +734,17 @@ final class Configuration implements ConfigurationInterface
                                     ->max(60)
                                 ->end()
                                 ->scalarNode('hmac_secret')
-                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret of at least 16 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter configured secret is refused at compile time. When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
+                                    ->info('HMAC secret signing the chain tickets. MUST be a high-entropy secret of at least 16 bytes (%env(KIWI_RISK_SECRET)% recommended; placeholders are opaque at compile time and the minimum is enforced on the resolved value when the ticket service is constructed). When null, the bundle derives it from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated chain secret is strongly recommended so a compromise of one never leaks the other.')
                                     ->defaultNull()
+                                    // Empty-tolerant closure, no
+                                    // cannotBeEmpty(): env placeholders
+                                    // validate against empty dummy values
+                                    // (see secret_key); the resolved
+                                    // value is refused under 16 bytes by
+                                    // the ChainedChallengeTicketService
+                                    // constructor.
                                     ->validate()
-                                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
+                                        ->ifTrue(static fn ($v): bool => \is_string($v) && '' !== $v && \strlen($v) < 16)
                                         ->thenInvalid('risk.chaining.hmac_secret must be a string of at least 16 bytes when configured')
                                     ->end()
                                 ->end()
@@ -979,10 +1013,14 @@ final class Configuration implements ConfigurationInterface
                     ->min(1)
                 ->end()
                 ->scalarNode('execution_key')
-                    ->info('EXECUTIONCHALLENGEV1 KEYED-PRF KEY (string of at least 16 bytes, default null): the secret that generates the deterministic browser-execution programs (the Cap-style dimension, see ExecutionChallengeGenerator). Null (default) = execution challenges are never issued — arming without the key is refused. The key NEVER leaves the server: it only feeds the program generator; the browser digest uses the program blob itself as its content-derived key, so the deployment can rotate it without invalidating outstanding challenges. Requires the risk.execution_challenge gate to be on to have any effect; the gate on without a key is refused at compile time.')
+                    ->info('EXECUTIONCHALLENGEV1 KEYED-PRF KEY (string of at least 16 bytes, default null): the secret that generates the deterministic browser-execution programs (the Cap-style dimension, see ExecutionChallengeGenerator). Null (default) = execution challenges are never issued — arming without the key is refused. The key NEVER leaves the server: it only feeds the program generator; the browser digest uses the program blob itself as its content-derived key, so the deployment can rotate it without invalidating outstanding challenges. Requires the risk.execution_challenge gate to be on to have any effect; the gate on without a key is refused at compile time. Env placeholders are opaque at compile time; the resolved value is refused under 16 bytes by ExecutionChallengeGenerator.')
                     ->defaultNull()
+                    // Empty-tolerant closure, no cannotBeEmpty(): an
+                    // %env()% placeholder must stay accepted (see
+                    // secret_key); the resolved value is refused by
+                    // ExecutionChallengeGenerator.
                     ->validate()
-                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
+                        ->ifTrue(static fn ($v): bool => \is_string($v) && '' !== $v && \strlen($v) < 16)
                         ->thenInvalid('execution_key must be a string of at least 16 bytes when configured')
                     ->end()
                 ->end()

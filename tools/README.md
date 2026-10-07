@@ -13,7 +13,9 @@ These scripts are part of the current repeatable developer workflow and are refe
 - `validate-prod-env.sh`: preflight that validates an environment file against the `${VAR:?}` contract in docker-compose*.yml (missing/placeholder values fail fast). Used by `make verify-env` and by the pipeline's validate stage; supersedes the old validate-compose-secrets.sh local-file check.
 - `dev-start.sh`: local development startup helper.
 - `bootstrap.sh`: repository/bootstrap helper.
-- `check-forbidden-patterns.sh`: quality gate that blocks known regression patterns in production Rust, Docker Compose, and GitHub workflow changes.
+- `check-forbidden-patterns.sh`: quality gate that blocks known regression patterns in production Rust, Docker Compose, and GitHub workflow changes. It scans the BUILT marketing site: CI calls it with `--require-build` after the zola build; without the flag (pre-commit) an absent `public/` is an announced skip, never a silent pass.
+- `check-risk-lua-parity.sh`: WAF risk-Lua parity + trust-neutrality gate (byte-identical packaged Lua copies; `event == 3` stays trust-neutral). Wired into the validate stage 2026-10-07 after the gates review found it orphaned.
+- `check_hsts_preload.py`: manual HSTS-preload readiness probe (`python3 tools/check_hsts_preload.py <domain>`), run by hand when preparing a preload submission — see `docs/security/hsts-preload.md`; it needs a public HTTPS endpoint, so it is not a CI stage gate.
 - `update-checksums.sh`: refreshes `tools/checksums.sha256` from real local release artifacts instead of hand-editing hashes.
 
 ## Quality Gates

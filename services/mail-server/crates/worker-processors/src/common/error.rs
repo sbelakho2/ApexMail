@@ -110,6 +110,18 @@ pub enum ProcessorError {
     #[error("source binding unverified: {0}")]
     SourceBindingUnverified(String),
 
+    /// The recipient-facing relay durably HOLDS this send and owns its
+    /// retry/DSN ladder (an inline transient failure was scheduled for retry,
+    /// the row is already queued, or another attempt holds its lease).
+    ///
+    /// The processor must DEFER the queue row — no attempt consumed, never
+    /// dead-lettered — and observe the relay's terminal state on a later
+    /// claim. Treating this as a worker failure used to split the two
+    /// ledgers: the queue row died `failed` while the relay still held the
+    /// message and could deliver it (dogfood finding 2026-10-06 P1).
+    #[error("relay delivery pending: {0}")]
+    RelayDeliveryPending(String),
+
     /// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),

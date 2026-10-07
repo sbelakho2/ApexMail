@@ -15,7 +15,12 @@ SET uid = r.uid
 FROM ranked r
 WHERE m.id = r.id;
 
+-- UIDNEXT must be NON-DECREASING (RFC 3501): a mailbox whose highest-UID
+-- message was expunged has uidnext > max(uid)+1, and the original statement
+-- recomputed it downward, telling cached clients deliveries were lost and
+-- permitting UID reuse after expunge. GREATEST guard added 2026-10-07
+-- (gates review).
 UPDATE mail_mailboxes mb
-SET uidnext = COALESCE((
+SET uidnext = GREATEST(mb.uidnext, COALESCE((
     SELECT MAX(uid) + 1 FROM mail_messages mm WHERE mm.mailbox_id = mb.id
-), 1);
+), 1));

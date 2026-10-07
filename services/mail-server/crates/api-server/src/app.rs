@@ -880,22 +880,25 @@ async fn security_headers(
 /// - immutable build artifacts (`/css`, `/js`, `/fonts`, `/images`):
 ///   `public, max-age=31536000, immutable`;
 /// - site-level files that change per build but must still be cacheable
-///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons, the SSR
-///   pages' `/assets/globals.css`, autoconfig): `public, max-age=3600`
-///   (revalidated hourly).
+///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons, autoconfig):
+///   `public, max-age=3600` (revalidated hourly);
+/// - the SSR console's `/assets/globals.css`: `no-cache, must-revalidate`,
+///   because its URL carries no content hash — an hour-long blind cache
+///   kept serving the PREVIOUS stylesheet in open tabs after every deploy
+///   (dogfood 2026-10-06: a redesigned page rendered with the old CSS). The
+///   handler also emits an ETag and answers `If-None-Match` with a 304, so
+///   revalidation costs one conditional request, not a re-download.
 fn static_asset_cache_control(path: &str) -> HeaderValue {
     let immutable = path.starts_with("/css/")
         || path.starts_with("/js/")
         || path.starts_with("/fonts/")
         || path.starts_with("/images/");
+    if path == "/assets/globals.css" {
+        return HeaderValue::from_static("no-cache, must-revalidate");
+    }
     let cacheable_file = matches!(
         path,
-        "/manifest.json"
-            | "/sitemap.xml"
-            | "/robots.txt"
-            | "/icon.svg"
-            | "/favicon.ico"
-            | "/assets/globals.css"
+        "/manifest.json" | "/sitemap.xml" | "/robots.txt" | "/icon.svg" | "/favicon.ico"
     ) || path.starts_with("/.well-known/")
         || path == "/mail/config-v1.1.xml";
     if immutable {
@@ -983,7 +986,16 @@ fn inject_kiwi_widget(mut html: String, scope: &str, nonce: &str) -> String {
 /// carries the widget, `None` otherwise. The MFA step-two variant of
 /// `/login` (query `mfa=1`) is deliberately excluded — the password proof
 /// (and therefore the CAPTCHA) was already consumed at step one.
-fn kiwi_widget_for_render(surface: &str, uri: &Uri) -> Option<&'static str> {
+///
+/// The widget renders ONLY when the captcha is actually enforced
+/// (`kiwi_enabled`): with enforcement off the widget's challenge fetch gets
+/// the endpoint's honest 503 and the page shows a "Challenge failed /
+/// Verification failed" error on a perfectly healthy login form (dogfood
+/// 2026-10-06). A widget that verifies nothing must not render.
+fn kiwi_widget_for_render(surface: &str, uri: &Uri, kiwi_enabled: bool) -> Option<&'static str> {
+    if !kiwi_enabled {
+        return None;
+    }
     let scope = kiwi_auth_scope_for(surface, uri.path())?;
     if uri
         .query()
@@ -1073,14 +1085,48 @@ fn apply_recorded_consent_state(html: String, headers: &HeaderMap) -> String {
     .replace("data-consent-state=pending", "data-consent-state=recorded")
 }
 
-async fn browser_globals_css() -> impl IntoResponse {
+async fn browser_globals_css(headers: HeaderMap) -> Response {
+    // The stylesheet has no content-hashed URL, so a long-lived cache would
+    // serve a stale sheet after every deploy (dogfood 2026-10-06: a rebuilt
+    // console kept rendering the previous CSS in an open tab). `no-cache`
+    // means REVALIDATE, not skip: the ETag makes the revalidation a cheap
+    // 304 while the body can never go stale.
+    let etag = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ui_foundation::GLOBALS_CSS.hash(&mut hasher);
+        format!("\"{:x}\"", hasher.finish())
+    };
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == etag)
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response
+            .headers_mut()
+            .insert(header::ETAG, HeaderValue::from_str(&etag).expect("etag"));
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, must-revalidate"),
+        );
+        return response;
+    }
     (
-        [(
-            CONTENT_TYPE,
-            HeaderValue::from_static("text/css; charset=utf-8"),
-        )],
+        [
+            (
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/css; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, must-revalidate"),
+            ),
+            (header::ETAG, HeaderValue::from_str(&etag).expect("etag")),
+        ],
         ui_foundation::GLOBALS_CSS,
     )
+        .into_response()
 }
 
 // ─── Legacy /legal/* permanent redirects ───────────────────────
@@ -1414,7 +1460,7 @@ fn render_ui_response(
         Some(form_csrf.token.as_str()),
     )?;
     let html = apply_recorded_consent_state(html, headers);
-    let mut response = match kiwi_widget_for_render(surface, uri) {
+    let mut response = match kiwi_widget_for_render(surface, uri, config.kiwi_enabled) {
         Some(scope) => {
             let nonce = uuid::Uuid::new_v4().simple().to_string();
             auth_html_response(inject_kiwi_widget(html, scope, &nonce), &nonce)
@@ -1517,31 +1563,60 @@ async fn render_ui_response_with_state(
             // bypass; they cannot arrive as a browser navigation.
             Ok(cp_auth::CpAuthOutcome::MachineCredential) => {}
             Err(error) => {
-                tracing::warn!(
-                    path = %uri.path(),
-                    error = %error,
-                    "control-plane render denied by the CP session gate"
-                );
                 // F1b: an MFA denial is named as such instead of a bare
                 // login bounce (which loops — signing in again re-mints
                 // the same MFA-less session): GETs are sent onward to
-                // /cp/security to enable it. The security pages themselves
-                // would redirect to themselves, so they get the 403
-                // interstitial directly. Every other denial keeps the
+                // /cp/security to enable it. Every other denial keeps the
                 // login redirect.
+                //
+                // DOGFOOD FINDING (2026-10-06): the enrollment page itself
+                // used to receive the 403 interstitial whose only link points
+                // BACK at /cp/security — an operator without MFA could never
+                // enroll, because the enrollment page is the one page that
+                // requires the MFA it exists to enable. The security pages
+                // now fall through and RENDER for a verified, MFA-less CP
+                // session; every other CP route stays denied by this gate.
                 if cp_auth::is_mfa_required_error(&error) {
-                    if matches!(uri.path(), "/cp/security" | "/settings/security") {
-                        return Some(cp_auth::mfa_required_browser_response());
+                    if !matches!(uri.path(), "/cp/security" | "/settings/security") {
+                        tracing::warn!(
+                            path = %uri.path(),
+                            error = %error,
+                            "control-plane render denied by the CP session gate"
+                        );
+                        return Some(
+                            (
+                                StatusCode::SEE_OTHER,
+                                [(header::LOCATION, "/cp/security".to_string())],
+                            )
+                                .into_response(),
+                        );
                     }
-                    return Some(
-                        (
-                            StatusCode::SEE_OTHER,
-                            [(header::LOCATION, "/cp/security".to_string())],
-                        )
-                            .into_response(),
+                    // Fall through: render the security page (enrollment).
+                    // The verification verdict above already recorded the
+                    // MFA-less session; this second event records what the
+                    // browser actually RECEIVES (200 + the enrollment page),
+                    // so cp_access_log cannot read as a 403 that never
+                    // happened (dogfood 2026-10-06).
+                    tracing::info!(
+                        path = %uri.path(),
+                        "control-plane security page rendered for an MFA-less session (enrollment gate)"
                     );
+                    cp_auth::log_cp_access(
+                        state,
+                        auth_user.user_id.as_deref(),
+                        uri.path(),
+                        StatusCode::OK.as_u16(),
+                        "cp_mfa_setup_rendered",
+                    )
+                    .await;
+                } else {
+                    tracing::warn!(
+                        path = %uri.path(),
+                        error = %error,
+                        "control-plane render denied by the CP session gate"
+                    );
+                    return Some(login_redirect_response(uri));
                 }
-                return Some(login_redirect_response(uri));
             }
         }
 
@@ -1553,15 +1628,29 @@ async fn render_ui_response_with_state(
         }
     }
 
-    let route_data = match surface {
-        "web" | "control-plane" => {
-            let auth_user = browser_auth_user(state, headers, uri, method).await;
+    // Resolved once: the data loader AND the shell identity below both read
+    // the browser session (an anonymous request resolves to `None`).
+    let browser_user = match surface {
+        "web" | "control-plane" | "marketing" | "marketing-zola" => {
+            browser_auth_user(state, headers, uri, method).await
+        }
+        _ => None,
+    };
+    let mut route_data = match surface {
+        // The MARKETING surface is data-backed for exactly one page: `/demo`
+        // resolves the shared viewer link by its `?token=` (the token IS the
+        // credential). Its loader branch existed in `load_page_data` but was
+        // unreachable from here, so the viewer always rendered
+        // `demo_viewer: None` → "demo link is not valid" for every token,
+        // valid or not (dogfood 2026-10-06). Other marketing pages ignore the
+        // data and render their static documents unchanged.
+        "web" | "control-plane" | "marketing" | "marketing-zola" => {
             let mut data = routes::web::load_page_data(
                 state,
                 surface,
                 uri.path(),
                 uri.query(),
-                auth_user.as_ref(),
+                browser_user.as_ref(),
             )
             .await;
             // Pending MFA setup rides along on the CP security page via its
@@ -1569,7 +1658,7 @@ async fn render_ui_response_with_state(
             if surface == "control-plane"
                 && matches!(uri.path(), "/cp/security" | "/settings/security")
             {
-                if let Some(user_id) = auth_user.as_ref().and_then(|user| user.user_id.clone()) {
+                if let Some(user_id) = browser_user.as_ref().and_then(|user| user.user_id.clone()) {
                     data.mfa_setup =
                         routes::web::decode_mfa_setup_cookie(headers, &state.config, &user_id);
                 }
@@ -1578,6 +1667,23 @@ async fn render_ui_response_with_state(
         }
         _ => None,
     };
+    // Dogfood 2026-10-06: the console shells never received the session's
+    // real identity (every page showed the fabricated "Free Plan — 30K / mo")
+    // and never rendered the impersonation banner (the only in-UI way to end
+    // an impersonation session). Both ride along on the route data.
+    //
+    // Only the authenticated console surfaces consume them; the marketing
+    // shell has no identity block and must never render an operator banner,
+    // so neither value is populated there.
+    if let Some(data) = route_data.as_mut() {
+        if matches!(surface, "web" | "control-plane") {
+            if let Some(user) = browser_user.as_ref() {
+                data.session_identity = load_shell_session_identity(state, user).await;
+            }
+            data.impersonation = routes::web::active_impersonation_view(headers, &state.config);
+        }
+    }
+    let route_data = route_data;
 
     let (html, _embedded_token) = ui_router::render_route_with_form_fields_and_csrf(
         surface,
@@ -1597,7 +1703,7 @@ async fn render_ui_response_with_state(
         None => html,
     };
     let html = apply_recorded_consent_state(html, headers);
-    let mut response = match kiwi_widget_for_render(surface, uri) {
+    let mut response = match kiwi_widget_for_render(surface, uri, state.config.kiwi_enabled) {
         Some(scope) => {
             let nonce = uuid::Uuid::new_v4().simple().to_string();
             auth_html_response(inject_kiwi_widget(html, scope, &nonce), &nonce)
@@ -1703,6 +1809,98 @@ async fn browser_auth_user(
     auth::AuthUser::from_request_parts(&mut parts, state)
         .await
         .ok()
+}
+
+/// The console header's session identity: the operator's display name and
+/// email plus the tenant's REAL plan, resolved from the billing catalog.
+///
+/// Never fabricated (dogfood 2026-10-06: every authenticated page showed a
+/// hardcoded "Free Plan — 30K / mo"): a lookup failure, a missing user row,
+/// or a plan with no active catalog row yields `None` pieces — the shell
+/// then renders no plan label. Storage errors are logged and degrade to no
+/// label; they never invent one and never fail the render.
+async fn load_shell_session_identity(
+    state: &AppState,
+    user: &auth::AuthUser,
+) -> Option<ui_foundation::axum_router::SessionIdentity> {
+    let user_id = user.user_id.as_deref()?;
+    let row: Option<(Option<String>, String, Option<String>)> = match sqlx::query_as(
+        "SELECT u.name, u.email, t.plan
+         FROM users u JOIN tenants t ON t.id = u.tenant_id
+         WHERE u.id = $1::uuid AND u.tenant_id = $2 AND u.status = 'active'",
+    )
+    .bind(user_id)
+    .bind(&user.tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(error = %error, "shell identity lookup failed; rendering no plan label");
+            return None;
+        }
+    };
+    let (name, email, plan) = row?;
+    let display_name = name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| email.clone());
+    let plan_label = match plan
+        .as_deref()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+    {
+        Some(plan) => {
+            match sqlx::query_as::<_, (String, i64)>(
+                "SELECT display_name, email_limit FROM plans WHERE name = $1 AND is_active = true",
+            )
+            .bind(plan)
+            .fetch_optional(&state.db)
+            .await
+            {
+                Ok(Some((display_name, email_limit))) => {
+                    Some(format_plan_label(&display_name, email_limit))
+                }
+                // An unknown/inactive plan has no catalog display name — no
+                // label is better than a fabricated one.
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(error = %error, "plan catalog lookup failed; rendering no plan label");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    Some(ui_foundation::axum_router::SessionIdentity {
+        display_name,
+        email,
+        plan_label,
+    })
+}
+
+/// "Pro Plan — 150K / mo" (unlimited plans carry no numeric limit).
+fn format_plan_label(display_name: &str, email_limit: i64) -> String {
+    if email_limit > 0 {
+        format!(
+            "{} Plan — {} / mo",
+            display_name,
+            format_email_limit(email_limit)
+        )
+    } else {
+        format!("{display_name} Plan")
+    }
+}
+
+/// Compact monthly limit for the header ("3K", "150K", "2M", raw otherwise).
+fn format_email_limit(limit: i64) -> String {
+    if limit % 1_000_000 == 0 {
+        format!("{}M", limit / 1_000_000)
+    } else if limit % 1_000 == 0 {
+        format!("{}K", limit / 1_000)
+    } else {
+        limit.to_string()
+    }
 }
 
 fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
@@ -2570,6 +2768,34 @@ mod tests {
         test_app_with_ddos(ddos_protector).await
     }
 
+    /// Same fixture as [`test_app`] with a caller-supplied config — for
+    /// behavior branches that depend on a config flag (e.g. captcha
+    /// enforcement, which decides whether auth pages carry the widget).
+    async fn test_app_with_config(config: Config) -> Router {
+        let ddos_protector = Arc::new(
+            DdosProtector::new(ProtectorConfig::default())
+                .await
+                .expect("failed to create default ddos protector"),
+        );
+        let state = test_state().await;
+        build_app(AppStateInner::with_ddos_protector(
+            state.db.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: state.db.clone(),
+                ro: state.db.clone(),
+            },
+            state.redis.clone(),
+            config,
+            reqwest::Client::new(),
+            (*state.ses_provider).clone(),
+            None,
+            ddos_protector,
+            None, // grader_state
+            None, // placement_state
+            ResilientClient::new_from_config(&test_config()),
+        ))
+    }
+
     async fn test_app_with_ddos(ddos_protector: Arc<DdosProtector>) -> Router {
         let state = test_state().await;
         build_app(AppStateInner::with_ddos_protector(
@@ -2944,8 +3170,9 @@ mod tests {
 
     #[tokio::test]
     async fn serves_globals_css_asset() {
-        let response = test_app()
-            .await
+        let app = test_app().await;
+        let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/assets/globals.css")
@@ -2961,10 +3188,56 @@ mod tests {
             "text/css; charset=utf-8"
         );
 
+        // Headers first: the body consumes the response.
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let has_etag = response.headers().contains_key(header::ETAG);
         let body = response_body_string(response).await;
         let compact_body = body.replace(' ', "");
         assert!(compact_body.contains(":root{"));
         assert!(compact_body.contains("font-family:var(--font-sans)"));
+        // The sheet must REVALIDATE: no content-hashed URL means a long-lived
+        // cache serves a stale console after every deploy.
+        assert_eq!(cache_control.as_deref(), Some("no-cache, must-revalidate"));
+        assert!(
+            has_etag,
+            "the stylesheet carries an ETag so revalidation is a cheap 304"
+        );
+
+        // …and a conditional request with that ETag is answered 304.
+        let etag = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/globals.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .expect("etag value")
+            .to_string();
+        let conditional = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/globals.css")
+                    .header(header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            conditional.status(),
+            StatusCode::NOT_MODIFIED,
+            "revalidation must be a cheap 304, not a re-download"
+        );
     }
 
     #[tokio::test]
@@ -2984,10 +3257,55 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // Auth pages are the sanctioned nonce exception: they carry the
-        // KiwiCaptcha widget (script-src 'nonce-…', style-src 'self'
-        // 'nonce-…'), and the ONLY script bytes on the page are the
-        // widget's — the render output itself stays script-free.
+        // Auth pages are the sanctioned nonce exception — but ONLY when the
+        // captcha is enforced. The default test config has kiwi_enabled =
+        // false, so the login page must render the plain, script-free
+        // document: no widget, no challenge fetch, no 503 rendered as a
+        // "Verification failed" error on a healthy form (dogfood
+        // 2026-10-06). The enforced-config variant below pins the widget
+        // branch.
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let csp = page
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            csp.contains("script-src 'none'"),
+            "un-enforced auth page CSP was: {csp}"
+        );
+        let body = response_body_string(page).await;
+        assert!(
+            !body.contains("data-kiwi-widget"),
+            "a captcha-disabled deployment must not render the captcha widget"
+        );
+        assert_eq!(
+            body.matches("<script").count(),
+            0,
+            "the script-free auth page must carry zero script bytes"
+        );
+    }
+
+    /// Captcha ENFORCED: the auth page carries the KiwiCaptcha widget under
+    /// the nonce CSP, and the only script bytes are the widget's own two
+    /// nonce'd tags — the render output itself stays script-free.
+    #[tokio::test]
+    async fn enforced_captcha_auth_pages_carry_the_widget_under_nonce_csp() {
+        let mut config = test_config();
+        config.kiwi_enabled = true;
+        let app = test_app_with_config(config).await;
+
         let page = app
             .clone()
             .oneshot(
@@ -3113,6 +3431,79 @@ mod tests {
             body.contains("data-marketing-shell=\"footer\""),
             "the marketing shell footer must render"
         );
+    }
+
+    /// Dogfood 2026-10-06 (P1): the public demo viewer on the MARKETING host
+    /// always said "demo link is not valid" — for every token, valid or not —
+    /// because this render path loaded route data only for `web` and
+    /// `control-plane`, leaving the `marketing` branch of `load_page_data`
+    /// (the only caller of `load_demo_viewer`) unreachable. A valid token must
+    /// render the recorded steps; an unknown one renders the honest invalid
+    /// state, on the same host, without a session.
+    #[tokio::test]
+    async fn marketing_demo_viewer_renders_a_valid_token_and_refuses_an_unknown_one() {
+        let Some(db) = crate::test_db::canonical_pool("marketing_demo_viewer").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(db.clone()).await;
+        let auth = crate::middleware::auth::AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("demo-presenter".into()),
+            api_key_id: None,
+            session_id: Some("sess-demo-viewer-test".into()),
+            scopes: vec!["*".into()],
+        };
+        let Json(created) = crate::routes::demos::create_session(
+            axum::extract::State(state.clone()),
+            auth,
+            Json(crate::routes::demos::CreateDemoBody {
+                script: "platform-tour".into(),
+                tenant_id: None,
+            }),
+        )
+        .await
+        .expect("create demo session");
+        let token = created.viewer_token.clone().expect("viewer token");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("apexmail.ee"));
+        let uri: Uri = format!("/demo?token={token}").parse().unwrap();
+        let response = render_ui_response_with_state(&state, &headers, &uri, &Method::GET, None)
+            .await
+            .expect("the marketing viewer must render");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("ApexMail walkthrough"),
+            "the viewer page must render on the marketing host"
+        );
+        assert!(
+            body.contains(crate::routes::demos::script::PLATFORM_TOUR.steps[0].title),
+            "a valid token must render the script's steps"
+        );
+        assert!(
+            !body.contains("This demo link is not valid"),
+            "a valid token must never be reported invalid"
+        );
+
+        // The same host with an unknown token renders the honest state.
+        let uri: Uri =
+            "/demo?token=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                .parse()
+                .unwrap();
+        let response = render_ui_response_with_state(&state, &headers, &uri, &Method::GET, None)
+            .await
+            .expect("the invalid viewer state must still render");
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("This demo link is not valid"),
+            "an unknown token renders the honest invalid state"
+        );
+
+        let _ = sqlx::query("DELETE FROM demo_sessions WHERE id = $1")
+            .bind(&created.id)
+            .execute(&db)
+            .await;
     }
 
     /// F65: once a verification token has been exchanged on
@@ -3700,6 +4091,13 @@ mod tests {
                 "{immutable} must be immutably cacheable"
             );
         }
+        // The SSR sheet revalidates: its URL is unhashed, so an hour-long
+        // public cache serves the previous build's CSS (dogfood 2026-10-06).
+        assert_eq!(
+            static_asset_cache_control("/assets/globals.css"),
+            "no-cache, must-revalidate",
+            "the unhashed SSR stylesheet must revalidate, never blind-cache"
+        );
         for cacheable in [
             "/manifest.json",
             "/sitemap.xml",
@@ -4219,9 +4617,14 @@ mod tests {
         assert_eq!(kiwi_auth_scope_for("marketing", "/login"), None);
 
         let mfa = Uri::from_static("/login?mfa=1&email=a%40b.c");
-        assert_eq!(kiwi_widget_for_render("web", &mfa), None);
+        assert_eq!(kiwi_widget_for_render("web", &mfa, true), None);
         let plain = Uri::from_static("/login");
-        assert_eq!(kiwi_widget_for_render("web", &plain), Some("login"));
+        assert_eq!(kiwi_widget_for_render("web", &plain, true), Some("login"));
+        // Enforcement off ⇒ no widget anywhere: it would verify nothing and
+        // its challenge fetch would surface a 503 as "Verification failed"
+        // on a healthy login form (dogfood 2026-10-06).
+        assert_eq!(kiwi_widget_for_render("web", &plain, false), None);
+        assert_eq!(kiwi_widget_for_render("control-plane", &plain, false), None);
     }
 
     #[tokio::test]
@@ -4356,6 +4759,20 @@ mod tests {
         let gated = Router::new()
             .route("/web/admin/tenants", post(|| async { "created" }))
             .route("/v1/admin/tenants", post(|| async { "created" }))
+            // Dogfood 2026-10-06 (P0): these four routes were declared in the
+            // UNGATED authenticated router, so any customer session could
+            // queue platform email (draft approve) and execute real demo
+            // steps. They now ride this gate — pinned here.
+            .route("/web/admin/demos", post(|| async { "created" }))
+            .route("/web/admin/demos/:id/advance", post(|| async { "ran" }))
+            .route(
+                "/web/admin/ai/drafts/:id/approve",
+                post(|| async { "approved" }),
+            )
+            .route(
+                "/web/admin/ai/drafts/:id/reject",
+                post(|| async { "rejected" }),
+            )
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 crate::middleware::auth::require_system_tenant_middleware,
@@ -4382,6 +4799,29 @@ mod tests {
             StatusCode::SEE_OTHER,
             "a customer session must be PRG-bounced from /web/admin/*"
         );
+        for path in [
+            "/web/admin/demos",
+            "/web/admin/demos/dmo_x/advance",
+            "/web/admin/ai/drafts/inb_x/approve",
+            "/web/admin/ai/drafts/inb_x/reject",
+        ] {
+            let mut request = Request::post(path).body(Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(crate::middleware::auth::AuthUser {
+                    tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
+                    user_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                });
+            let response = gated.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "a customer session must be bounced from {path}"
+            );
+        }
         assert_eq!(
             response.headers().get(header::LOCATION).unwrap(),
             "/login",
@@ -5029,17 +5469,42 @@ mod tests {
     async fn cp_gate_app(
         test_name: &str,
     ) -> Option<(Router, sqlx::PgPool, Config, deadpool_redis::Pool)> {
+        let (state, pool, config, redis) = cp_gate_state(test_name).await?;
+        Some((build_app(state), pool, config, redis))
+    }
+
+    /// [`cp_gate_app`]'s fixture, with the raw [`AppState`] so render-path
+    /// tests can call `render_ui_response_with_state` directly (the built
+    /// `Router` embeds its own state clone and cannot hand it back).
+    async fn cp_gate_state(
+        test_name: &str,
+    ) -> Option<(AppState, sqlx::PgPool, Config, deadpool_redis::Pool)> {
         let pool = crate::test_db::canonical_pool(test_name).await?;
         crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
         let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
         let redis = deadpool_redis::Config::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .ok()?;
-        let mut conn = redis.get().await.ok()?;
+        // TEST_REDIS_URL is configured at this point, so an unusable Redis is
+        // an infrastructure failure — the same contract the canonical pool
+        // states for TEST_DATABASE_URL. A silent `None` here made every test
+        // on this fixture "pass" vacuously when the URL carried a password
+        // the local server does not use (observed 2026-10-07 while proving
+        // the item-16 regression test).
+        let mut conn = match redis.get().await {
+            Ok(conn) => conn,
+            Err(error) => panic!(
+                "failed to acquire a Redis connection ({error}); TEST_REDIS_URL is \
+                 configured, so this is an infrastructure failure — fix the server, do \
+                 not skip the test"
+            ),
+        };
         let ping: Result<String, _> = redis::cmd("PING").query_async(&mut *conn).await;
-        if ping.is_err() {
-            eprintln!("skipping {test_name}: TEST_REDIS_URL unreachable");
-            return None;
+        if let Err(error) = ping {
+            panic!(
+                "Redis PING failed ({error}); TEST_REDIS_URL is configured, so this is an \
+                 infrastructure failure — fix the server, do not skip the test"
+            );
         }
 
         sqlx::raw_sql(
@@ -5106,10 +5571,164 @@ mod tests {
             None,
             ResilientClient::new_from_config(&config),
         );
-        Some((build_app(state), pool, config, redis))
+        Some((state, pool, config, redis))
     }
 
-    /// Seed a system-tenant operator and return (user_id, email, password).
+    /// The JSON impersonation exchange's cookie flavor: a
+    /// `session_secret`-signed token with `type = "impersonation"`, exactly
+    /// what `routes::impersonate::start_impersonation` sets (the CP UI form
+    /// mints the `impersonation_secret` flavor; both must drive the banner).
+    fn mint_impersonation_cookie(
+        config: &Config,
+        tenant_id: &str,
+        operator_name: &str,
+        exp_ms: i64,
+    ) -> String {
+        use base64::Engine as _;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let payload = serde_json::json!({
+            "type": "impersonation",
+            "tenantId": tenant_id,
+            "operatorId": uuid::Uuid::new_v4().to_string(),
+            "operatorName": operator_name,
+            "tokenId": uuid::Uuid::new_v4().simple().to_string(),
+            "exp": exp_ms,
+        });
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(config.session_secret.as_bytes()).expect("hmac key");
+        mac.update(payload_b64.as_bytes());
+        let signature =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        format!("{payload_b64}.{signature}")
+    }
+
+    /// Dogfood 2026-10-06 (P1/P2, UI): the authenticated console used to
+    /// render a fabricated "Free Plan — 30K / mo" on every page (the
+    /// `_with_user_context` layout path was never called) and never rendered
+    /// the impersonation banner (the component had no request-path caller),
+    /// so an operator had no in-UI way to end an impersonation session.
+    ///
+    /// This drives the REAL request path (`render_ui_response_with_state`)
+    /// with a session cookie + a verified impersonation cookie and asserts
+    /// the real identity/plan and the banner (with its Terminate form)
+    /// render — and that removing the impersonation cookie removes the
+    /// banner.
+    #[tokio::test]
+    async fn console_renders_the_real_plan_and_the_impersonation_banner() {
+        let Some((state, pool, config, _redis)) = cp_gate_state("shell_identity_banner").await
+        else {
+            return;
+        };
+
+        let tenant_id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'Shell Fixture', 'scale', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        // The catalog row the tenant's plan resolves through. Production
+        // databases carry it (billing-service seeds the catalog at runtime);
+        // a fresh canonical test database does not, so the fixture provides
+        // exactly the row the session lookup reads.
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, price_monthly, price_yearly,
+                                email_limit, api_call_limit, is_active, sort_order)
+             VALUES ($1, 'scale', 'Business', 69900, 69900, 699000, 2000000, 20000000, true, 5)
+             ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name,
+                 email_limit = EXCLUDED.email_limit, is_active = true",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .execute(&pool)
+        .await
+        .expect("seed plan catalog row");
+        let user_id = uuid::Uuid::new_v4();
+        let user_email = format!("shell-{}@apexmail.ee", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Ada Operator', 'not-a-real-hash', 'owner', 'active',
+                     true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(&tenant_id)
+        .bind(&user_email)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+
+        let am_session = mint_am_session(&config, &user_id.to_string(), &tenant_id);
+        let exp_ms = chrono::Utc::now().timestamp_millis() + 30 * 60 * 1000;
+        let impersonation = mint_impersonation_cookie(&config, &tenant_id, "Operator Jane", exp_ms);
+
+        let uri: Uri = "/dashboard".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("app.apexmail.ee"));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "am_session={am_session}; impersonation_session={impersonation}"
+            ))
+            .expect("cookie header"),
+        );
+        let response = render_ui_response_with_state(&state, &headers, &uri, &Method::GET, None)
+            .await
+            .expect("authenticated dashboard must render");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("Ada Operator") && body.contains(&user_email),
+            "the session's real display name and email must render in the header"
+        );
+        assert!(
+            body.contains("Business Plan — 2M / mo"),
+            "the tenant's real catalog plan (scale → Business, 2M emails/mo) must render"
+        );
+        assert!(
+            !body.contains("Free Plan"),
+            "the fabricated plan label must be gone"
+        );
+        assert!(
+            body.contains("Impersonation Active"),
+            "a verified impersonation cookie must render the banner"
+        );
+        assert!(
+            body.contains("action=\"/web/auth/impersonate/end\""),
+            "the banner must carry the Terminate form"
+        );
+        assert!(body.contains(&tenant_id), "the banner names the tenant");
+
+        // Same session, no impersonation cookie: the banner is gone, the
+        // real identity stays.
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("am_session={am_session}")).expect("cookie header"),
+        );
+        let response = render_ui_response_with_state(&state, &headers, &uri, &Method::GET, None)
+            .await
+            .expect("dashboard must render without impersonation");
+        let body = response_body_string(response).await;
+        assert!(!body.contains("Impersonation Active"));
+        assert!(body.contains("Business Plan — 2M / mo"));
+        assert!(body.contains("Ada Operator"));
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
     ///
     /// The tenant id is the SEEDED system tenant (`system_internal_tenant01`,
     /// migration 072) — not the literal `system` sentinel — so every gate on
@@ -5561,9 +6180,10 @@ mod tests {
 
     /// F1b: an MFA denial on a CP PAGE render is named guidance, not a
     /// bare login bounce (which loops — signing in again re-mints the same
-    /// MFA-less session): other CP pages 303 onward to /cp/security, and
-    /// /cp/security itself (which must not redirect to itself) gets the
-    /// 403 HTML interstitial with the same copy.
+    /// MFA-less session): other CP pages 303 onward to /cp/security, while
+    /// /cp/security itself (which must not redirect to itself) RENDERS the
+    /// enrollment page — it is the one page whose job is to enable the MFA
+    /// it requires (dogfood finding 2026-10-06).
     #[tokio::test]
     async fn cp_render_mfa_denial_redirects_to_security_page() {
         let Some((app, db, config, _redis)) = cp_gate_app("cp_render_mfa_guidance").await else {
@@ -5598,8 +6218,10 @@ mod tests {
             "the render path must send the operator to where MFA is enabled"
         );
 
-        // The security page itself: the loop-safe 403 interstitial that
-        // names the fix instead of a self-redirect.
+        // The security page itself RENDERS for the same MFA-less session:
+        // it is the one page whose job is to enable MFA, so gating it behind
+        // the interstitial (whose link points back at itself) locked every
+        // new operator out of the control plane (dogfood finding 2026-10-06).
         let response = app
             .oneshot(
                 Request::get("/cp/security")
@@ -5610,7 +6232,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the enrollment page must render for a verified MFA-less CP session"
+        );
         assert_eq!(
             response
                 .headers()
@@ -5619,11 +6245,53 @@ mod tests {
             Some("text/html; charset=utf-8")
         );
         let body = response_body_string(response).await;
-        assert!(body.contains("Two-factor authentication"), "got: {body}");
-        assert!(body.contains("href=\"/cp/security\""), "got: {body}");
+        // The shipped enrollment page names the control as "MFA
+        // Configuration"/"Multi-factor authentication" (leptos_views); the
+        // assertion only insists the control is NAMED, not its exact wording.
+        let names_the_control = [
+            "Two-factor",
+            "two-factor",
+            "Multi-factor",
+            "multi-factor",
+            "MFA",
+        ]
+        .iter()
+        .any(|needle| body.contains(needle));
+        assert!(
+            names_the_control,
+            "the enrollment page names the control it enables: {body}"
+        );
         assert!(
             !body.contains("\"error\""),
             "no raw JSON error body may reach the browser, got: {body}"
+        );
+
+        // The access log carries BOTH facts for this request: the session
+        // gate's MFA verdict (403) and the effective response the browser
+        // actually received (200 + the enrollment page). Recording only the
+        // 403 would claim a denial that never happened (dogfood 2026-10-06).
+        let outcomes: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT status_code, outcome FROM cp_access_log \
+             WHERE path = '/cp/security' \
+             ORDER BY created_at",
+        )
+        .fetch_all(&db)
+        .await
+        .expect("cp_access_log rows for /cp/security");
+        assert!(
+            outcomes
+                .iter()
+                .any(|(status, outcome)| *status == 403 && outcome == "cp_mfa_required"),
+            "the gate's MFA verdict must stay on the record, got {outcomes:?}",
+        );
+        // `log_cp_access` records the 2xx vocabulary ("allowed") for every
+        // success regardless of the caller's detail string (cp_auth.rs), so
+        // the effective render is pinned by its STATUS; the detail outcome
+        // stays accepted should the writer ever preserve it.
+        assert!(
+            outcomes.iter().any(|(status, outcome)| *status == 200
+                && (outcome == "allowed" || outcome == "cp_mfa_setup_rendered")),
+            "the effective 200 render must be on the record, got {outcomes:?}",
         );
     }
 

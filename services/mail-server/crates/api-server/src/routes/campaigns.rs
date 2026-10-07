@@ -1914,9 +1914,10 @@ async fn campaign_stats(
             COALESCE(SUM(m.unsubscribe_count), 0) \
          FROM campaign_recipients cr \
          LEFT JOIN messages m ON m.id = cr.message_id \
-         WHERE cr.campaign_id = $1",
+         WHERE cr.campaign_id = $1 AND cr.tenant_id = $2",
     )
     .bind(campaign_id)
+    .bind(&auth.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -1946,10 +1947,11 @@ async fn campaign_stats(
                             ELSE 'other' \
                         END AS device \
                  FROM events \
-                 WHERE campaign_id = $1 AND event_type = 'opened' \
+                 WHERE campaign_id = $1 AND event_type = 'opened' AND tenant_id = $2 \
              ) classified",
         )
         .bind(campaign_id.to_string())
+        .bind(&auth.tenant_id)
         .fetch_one(&state.db)
         .await?;
 

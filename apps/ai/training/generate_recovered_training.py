@@ -10,8 +10,8 @@ Creates high-quality ChatML training examples based on the patterns found in:
   - industry-knowledge-base.ts (domain knowledge)
 
 All pricing uses canonical schema:
-  Free=€0/30K/300K, Starter=€25/50K/500K, Pro=€65/150K/2M,
-  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/∞
+  Free=€0/30K/300K, Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
 
 import json
@@ -43,9 +43,9 @@ RECOVERED_TRAINING_EXAMPLES = [
     {
         "context": "starter_healthy",
         "q": "How many emails do I have left this month?",
-        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Starter plan (€25/mo). That leaves you **17,500 emails** remaining.
+        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Developer plan (€29/mo). That leaves you **17,500 emails** remaining.
 
-You're at **65% usage** — you're on pace, but if you have a large campaign planned, keep an eye on it. If you exceed 50,000, overages are billed at **€0.40 per 1,000 extra emails**.
+You're at **65% usage** — you're on pace, but if you have a large campaign planned, keep an eye on it. If you exceed 50,000, overages are billed at **€0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1,000 extra emails**.
 
 Would you like me to check your sending rate trend to estimate if you'll hit the limit?"""
     },
@@ -53,9 +53,9 @@ Would you like me to check your sending rate trend to estimate if you'll hit the
     {
         "context": "starter_healthy",
         "q": "Can I add another team member?",
-        "a": """Yes! Your Starter plan allows up to **5 team members** and you currently have **3**. You can add 2 more in **Dashboard → Settings → Team**.
+        "a": """Yes! Your Developer plan allows up to **5 team members** and you currently have **3**. You can add 2 more in **Dashboard → Settings → Team**.
 
-If you need more than 5, the Pro plan (€65/mo) supports 10 team members, and Growth (€150/mo) supports 25.
+If you need more than 5, the Pro plan (€89/mo) supports 10 team members, and Growth (€229/mo) supports 25.
 
 Team invites expire after **72 hours**, so make sure they accept promptly."""
     },
@@ -113,10 +113,10 @@ The more urgent issue is the **0.13% complaint rate** — that's above the 0.1% 
 Your options:
 
 1. **Wait for the monthly reset** — your quota resets on the 1st of each month.
-2. **Upgrade to Starter (€25/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
+2. **Upgrade to Developer (€29/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
 3. **Switch to Pay-As-You-Go** — €0 base with per-email pricing starting at €0.001/email, so an extra 1,000 emails would cost only €1.00.
 
-Given your volume (~2,850 emails/month), Starter would give you plenty of room to grow. Would you like me to walk through the upgrade process?"""
+Given your volume (~2,850 emails/month), Developer would give you plenty of room to grow. Would you like me to walk through the upgrade process?"""
     },
     
     {
@@ -139,7 +139,7 @@ Start with `p=none` (monitoring only), then move to `p=quarantine` → `p=reject
 Would you like me to check the domain health after you add the record?"""
     },
     
-    # ── Scale customer with deliverability crisis ──
+    # ── Business customer with deliverability crisis ──
     {
         "context": "scale_deliverability",
         "q": "Our Gmail deliverability dropped from 96% to 78%. What happened?",
@@ -153,7 +153,7 @@ Would you like me to check the domain health after you add the record?"""
 
 **Immediate action plan:**
 
-1. **Pause all campaigns on the affected IP** — I can help you do this. Your Scale plan has 3 dedicated IPs, so we can shift traffic to the other two.
+1. **Pause all campaigns on the affected IP** — I can help you do this. Your Business plan has 3 dedicated IPs, so we can shift traffic to the other two.
 2. **Submit Spamhaus delisting request** — Go to https://check.spamhaus.org and follow the removal steps for 198.51.100.12.
 3. **Clean your lists** — Remove all hard-bounced addresses and contacts who haven't engaged in 90+ days.
 4. **Reduce sending volume** — Cut back to your engaged segment only until the IP is delisted and rates normalize.
@@ -163,11 +163,11 @@ Your DMARC is set to `quarantine` on all domains — I'd recommend keeping it th
 Want me to pull up the bounce details to identify which recipient domains are contributing the most bounces?"""
     },
     
-    # ── Enterprise compliance ──
+    # ── Enterprise Cloud compliance ──
     {
         "context": "enterprise_compliance",
         "q": "We need a DPA for GDPR compliance. How do we get one?",
-        "a": """As an Enterprise customer, you have access to full compliance support. For a **Data Processing Agreement (DPA)**, this needs to be handled by our legal team.
+        "a": """As an Enterprise Cloud customer, you have access to full compliance support. For a **Data Processing Agreement (DPA)**, this needs to be handled by our legal team.
 
 Please email **support@apexmail.ee** with:
 - Subject: "DPA Request — globalbank.com (acct_1a3b5c)"
@@ -175,7 +175,7 @@ Please email **support@apexmail.ee** with:
 - Any specific clauses or requirements
 - Your preferred timeline
 
-Your Enterprise plan includes HIPAA and SOC2 compliance features, and our legal team typically processes DPA requests within **3-5 business days**.
+Your Enterprise Cloud plan includes HIPAA and SOC2 compliance features, and our legal team typically processes DPA requests within **3-5 business days**.
 
 **Sub-processor disclosure:** ApexMail uses Hetzner Online GmbH (EU data centers) as a sub-processor. We support Standard Contractual Clauses (SCCs) for cross-border data transfers."""
     },
@@ -232,7 +232,7 @@ Gradually increase to your normal sending volume, always prioritizing engaged re
 - If you see issues, slow down immediately
 - Maintain consistent daily sending (no spikes)
 
-Your Growth plan includes **1 dedicated IP** (€150/mo). Your current shared IP sending will continue during warmup.
+Your Growth plan includes **1 dedicated IP** (€229/mo). Your current shared IP sending will continue during warmup.
 
 Would you like me to help set up segments for the warmup phases?"""
     },
@@ -448,7 +448,7 @@ For recurring campaigns (weekly newsletters, etc.), consider using our **automat
 - Historical events are anonymized after 90 days
 - Email content is purged per retention policy
 
-For Enterprise customers, we can provide a **Data Processing Addendum (DPA)** that documents all retention policies. Contact **support@apexmail.ee** for the formal documentation.
+For Enterprise Cloud customers, we can provide a **Data Processing Addendum (DPA)** that documents all retention policies. Contact **support@apexmail.ee** for the formal documentation.
 
 Would you like me to help locate the specific contact to delete?"""
     },
@@ -482,7 +482,7 @@ For bulk CCPA requests, use the **API endpoint:**
 DELETE /v1/contacts/{email}
 ```
 
-Your Scale plan includes **audit logs** that can document compliance actions. Would you like me to show you the audit log for recent deletions?"""
+Your Business plan includes **audit logs** that can document compliance actions. Would you like me to show you the audit log for recent deletions?"""
     },
     
     # ══════════════════════════════════════════════════════════════════════════
@@ -512,7 +512,7 @@ Your Scale plan includes **audit logs** that can document compliance actions. Wo
 - Newsletters: **27.9%**
 - Promotional: **21.3%**
 
-Your current open rate of **28.1%** on the Starter plan is solid. To improve:
+Your current open rate of **28.1%** on the Developer plan is solid. To improve:
 1. Optimize subject lines (personalization adds ~6%)
 2. Test send times for your audience
 3. Segment by engagement level
@@ -549,7 +549,7 @@ Would you like specific subject line tips?"""
 
 **Your current CTR:** Looking at your account, your newsletters average 2.3% CTR. Industry benchmark for your sector is ~2.9%.
 
-**Quick win:** Try a smaller segment test on your next campaign. ApexMail Pro (€65/mo) includes send-time optimization and custom tracking domains, while Growth adds formal A/B testing when you need experiment tooling.
+**Quick win:** Try a smaller segment test on your next campaign. ApexMail Pro (€89/mo) includes send-time optimization and custom tracking domains, while Growth adds formal A/B testing when you need experiment tooling.
 
 Want me to suggest some CTA variations for your next campaign?"""
     },
@@ -593,27 +593,27 @@ Would you like me to show the exact DNS record you need?"""
     {
         "context": "starter_healthy",
         "q": "I'm sending 60,000 emails per month now. What plan should I be on?",
-        "a": """With 60,000 emails/month, you're currently over your Starter plan limit (50,000). Let me break down your options:
+        "a": """With 60,000 emails/month, you're currently over your Developer plan limit (50,000). Let me break down your options:
 
-**Current situation (Starter €25/mo):**
+**Current situation (Developer €29/mo):**
 - Limit: 50,000 emails
 - Your usage: 60,000 emails
 - Overage: 10,000 × €0.50/1K = **€4.00 extra**
 - **Total cost: €29/mo**
 
-**If you upgrade to Pro (€65/mo):**
+**If you upgrade to Pro (€89/mo):**
 - Limit: 150,000 emails
 - Your usage: 60,000 emails
 - Overage: None ✓
-- **Total cost: €65/mo**
+- **Total cost: €89/mo**
 
-**Recommendation:** At 60,000 emails, Starter + overage (€29) is cheaper than Pro (€65). However:
+**Recommendation:** At 60,000 emails, Developer + overage (€29) is cheaper than Pro (€89). However:
 
 - If you expect growth beyond 150,000/mo, Pro becomes better value
 - Pro includes **send-time optimization** and custom tracking domains
-- Pro includes **10 team members** vs Starter's 5
+- Pro includes **10 team members** vs Developer's 5
 
-**Break-even point:** At 100,000 emails/mo, Starter + overage = €45 vs Pro = €65. Pro becomes better value once you exceed 150,000 emails/mo, and it unlocks send-time optimization.
+**Break-even point:** At 100,000 emails/mo, Developer + overage = €45 vs Pro = €89. Pro becomes better value once you exceed 150,000 emails/mo, and it unlocks send-time optimization.
 
 What's your growth trajectory looking like?"""
     },
@@ -628,14 +628,14 @@ What's your growth trajectory looking like?"""
 |--------|------|--------|------|
 | First 10,000 | €0.001 | 10,000 | €10.00 |
 | 10,001 – 100,000 | €0.0008 | 90,000 | €72.00 |
-| 100,001 – 150,000 | €0.0005 | 50,000 | €25.00 |
+| 100,001 – 150,000 | €0.0005 | 50,000 | €29.00 |
 | **Total** | | **150,000** | **€107.00** |
 
 **Comparison to plans:**
-- **Growth (€150/mo):** 500,000 emails included — better if you send more than ~188K/mo
-- **Pro (€65/mo):** 150,000 emails included — break-even with PAYG at exactly your volume!
+- **Growth (€229/mo):** 500,000 emails included — better if you send more than ~188K/mo
+- **Pro (€89/mo):** 150,000 emails included — break-even with PAYG at exactly your volume!
 
-**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **€65/mo** saves you **€42/mo** compared to PAYG.
+**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **€89/mo** saves you **€42/mo** compared to PAYG.
 
 Pro also includes:
 - Send-time optimization
@@ -726,7 +726,7 @@ Looking at your recent sends:
 - Resume sending at 25% volume
 - Monitor bounce rate (target: under 2%)
 
-**Plan impact:** On Starter (€25/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
+**Plan impact:** On Developer (€29/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
 
 Your threshold is 2% — you're at 15%. This takes 2-4 weeks of clean sending to recover.
 

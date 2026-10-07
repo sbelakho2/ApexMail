@@ -19,7 +19,8 @@ pub mod view_data;
 
 // ─── UI/UX CI gates (test-only) ────────────────────────────────────────
 // Gate A: golden skeletons. Gate B: chrome consistency. Gate D: form
-// hygiene. Gate I: link integrity. Shared helpers in gate_support.
+// hygiene. Gate I: link integrity. Gate J: theme contrast. Gate K: class
+// integrity. Shared helpers in gate_support.
 #[cfg(test)]
 mod chrome_tests;
 #[cfg(test)]
@@ -31,8 +32,39 @@ mod golden_tests;
 #[cfg(test)]
 mod link_integrity_tests;
 
+// Gate J: theme-safe tinted surfaces (pale static tints need an explicit
+// text colour — the colour scheme flips the inherited one).
+#[cfg(test)]
+mod theme_contrast_tests;
+
+// Gate K: every class a rendered page uses is defined in globals.css
+// (the stylesheet is a prebuilt artifact; unknown classes render as nothing).
+#[cfg(test)]
+mod class_integrity_tests;
+
 #[cfg(test)]
 mod migration_tests;
+
+/// The stylesheet URL every SSR document links, with a content-hash query.
+///
+/// The routes `/assets/globals.css` is served from carry no hash, so a plain
+/// `/assets/globals.css` URL can be served from a browser or proxy cache for
+/// as long as the cache entry's freshness allows — a CSS change then leaves
+/// open tabs (and warm caches) rendering the PREVIOUS build (dogfood
+/// 2026-10-06: a redesigned page kept rendering the old sheet). The query is
+/// derived from the sheet itself, so a changed sheet is a changed URL and
+/// every cache misses exactly once. The handler still answers conditional
+/// requests with a 304 for the warmth of that one request.
+pub fn globals_css_url() -> &'static str {
+    static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URL.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        GLOBALS_CSS.hash(&mut hasher);
+        format!("/assets/globals.css?v={:x}", hasher.finish())
+    })
+    .as_str()
+}
 
 pub const FOUNDATION_MANIFEST_JSON: &str =
     include_str!("../../../../../docs/development/ui-rust-foundation-manifest.json");
@@ -75,6 +107,40 @@ mod tests {
     /// functional from `prefers-color-scheme` alone — the zero-JS console
     /// has no bootstrap script to toggle a `.dark` class at runtime.
     #[test]
+    fn globals_css_url_is_content_hashed() {
+        // The URL must carry a content-derived query so a changed sheet is a
+        // changed URL (dogfood 2026-10-06: an unhashed sheet kept open tabs
+        // on the previous build's CSS).
+        let url = super::globals_css_url();
+        assert!(url.starts_with("/assets/globals.css?v="), "{url}");
+        let version = url.trim_start_matches("/assets/globals.css?v=");
+        assert!(
+            version.len() >= 8 && version.chars().all(|c| c.is_ascii_hexdigit()),
+            "version must be a hex hash of the sheet: {version}"
+        );
+        // Stable within a build.
+        assert_eq!(url, super::globals_css_url());
+    }
+
+    #[test]
+    fn every_document_links_the_hashed_stylesheet() {
+        for html in [
+            crate::leptos_views::web_root_layout("x", "t"),
+            crate::leptos_views::control_plane_root_layout_with_title("x", "t"),
+            crate::leptos_views::web_campaign_preview_page("<p>x</p>"),
+        ] {
+            assert!(
+                html.contains(super::globals_css_url()),
+                "document must link the content-hashed stylesheet"
+            );
+            assert!(
+                !html.contains("href=\"/assets/globals.css\""),
+                "no document may link the bare, unhashed stylesheet"
+            );
+        }
+    }
+
+    #[test]
     fn globals_css_dark_mode_needs_no_scripts() {
         assert!(GLOBALS_CSS.contains("@media (prefers-color-scheme: dark)"));
         // `:root:not(.light)` matches when no class is ever set, which is
@@ -93,14 +159,172 @@ mod tests {
     // These tests pin the RESTORED red/black brand token values at their
     // source (the token block feeds every utility via var()).
 
+    /// Surface-separation policy (owner review 2026-10-06: "lots of grey on
+    /// grey or grey on black"). WCAG ratios are the wrong yardstick for
+    /// large fills — they compress at both ends of the scale — so the ladder
+    /// is pinned in CIE L*: every consecutive surface step and every hairline
+    /// must differ by a just-noticeable amount (ΔL* ≥ 3 for fills, ≥ 2.5 for
+    /// borders), in BOTH themes. Live audit after this policy: low-separation
+    /// fills 1208 → 45 (all card-vs-page pairs whose edge is carried by a
+    /// crisp border), faint borders 216 → 0.
+    #[test]
+    fn surface_ladder_steps_are_perceptible_in_both_themes() {
+        fn lstar(rgb: &str) -> f64 {
+            let parts: Vec<f64> = rgb
+                .split_whitespace()
+                .map(|v| v.parse::<f64>().expect("token channel"))
+                .collect();
+            assert_eq!(parts.len(), 3, "token {rgb:?} must be three channels");
+            let lin = |v: f64| {
+                let v = v / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            let y = 0.2126 * lin(parts[0]) + 0.7152 * lin(parts[1]) + 0.0722 * lin(parts[2]);
+            if y > 0.008856 {
+                116.0 * y.cbrt() - 16.0
+            } else {
+                903.3 * y
+            }
+        }
+        // Pull a "R G B" token's value out of a stylesheet.
+        fn token(sheet: &str, name: &str) -> String {
+            // The two stylesheets write tokens differently (`--x: 1 2 3` in the
+            // console, `--x:1 2 3` in the marketing sheet), so accept both.
+            let idx = sheet
+                .find(name)
+                .unwrap_or_else(|| panic!("missing token {name}"));
+            let rest = &sheet[idx + name.len()..];
+            let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            rest.split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        }
+        let ladders: [(&str, &str, &str, &str, &str, &str); 2] = [
+            // sheet, page, card, inset, border
+            (
+                "console",
+                GLOBALS_CSS,
+                "--background",
+                "--card",
+                "--surface-100",
+                "--border",
+            ),
+            // The marketing sheet has no `--border` token: its hairlines are
+            // the surface-200 step.
+            (
+                "marketing",
+                MARKETING_INPUT_CSS,
+                "--background",
+                "--card",
+                "--surface-100",
+                "--surface-200",
+            ),
+        ];
+        for (name, sheet, page_t, card_t, inset_t, border_t) in ladders {
+            let page = token(sheet, page_t);
+            let card = token(sheet, card_t);
+            let inset = token(sheet, inset_t);
+            let border = token(sheet, border_t);
+            let dl = |a: &str, b: &str| (lstar(a) - lstar(b)).abs();
+            assert!(
+                dl(&page, &card) >= 3.0,
+                "{name}: the card fill must sit a perceptible step off the page (ΔL*={:.1}, page={page:?}, card={card:?})",
+                dl(&page, &card),
+            );
+            assert!(
+                dl(&card, &inset) >= 3.0,
+                "{name}: inset surfaces must sit a perceptible step off the card (ΔL*={:.1})",
+                dl(&card, &inset),
+            );
+            assert!(
+                dl(&border, &card) >= 2.5,
+                "{name}: the hairline must be visible on the card (ΔL*={:.1}, border={border:?})",
+                dl(&border, &card),
+            );
+        }
+    }
+
+    /// The palette policy (owner review 2026-10-06), pinned at the source of
+    /// BOTH stylesheets so it cannot drift back:
+    ///
+    /// 1. **No green.** The ApexMail palette is red + near-black/neutral;
+    ///    emerald "success" chips and the terminal's green strings read as a
+    ///    foreign design element on every page.
+    /// 2. **No black-infused two-tone red.** The brand fill is the classic
+    ///    flat red (#dc2626); the maroon gradient/blends (#a81818 → #7f1d1d,
+    ///    brand-950 #450a0a washes) are gone.
+    /// 3. **Surfaces separate.** The dark card fill is 24 24 27 — one clear
+    ///    step above the 9 9 11 page, so cards are not grey-on-grey.
+    #[test]
+    fn palette_policy_no_green_no_maroon_and_separating_surfaces() {
+        for (name, sheet) in [
+            ("console globals.css", GLOBALS_CSS),
+            ("console globals.input.css", GLOBALS_INPUT_CSS),
+            ("marketing input.css", MARKETING_INPUT_CSS),
+        ] {
+            for green in [
+                "34 197 94",
+                "22 163 74",
+                "20 83 45",
+                "240 253 244",
+                "220 252 231",
+                "187 247 208",
+                "134 239 172",
+                "74 222 128",
+                "#22c55e",
+                "#34d399",
+                "#4ade80",
+                "#86efac",
+                "#10b981",
+                "#059669",
+            ] {
+                assert!(
+                    !sheet.contains(green),
+                    "{name} still carries the green palette value {green:?} — success states are neutral ink, never green",
+                );
+            }
+            for maroon in ["#a81818", "#7f1d1d"] {
+                assert!(
+                    !sheet.contains(maroon),
+                    "{name} still carries the black-infused two-tone red {maroon:?} — the brand fill is the flat classic red",
+                );
+            }
+        }
+        // Surfaces separate in dark mode.
+        assert!(
+            GLOBALS_CSS.contains("--card: 24 24 27;"),
+            "the console's dark card fill must sit a clear step above the 9 9 11 page",
+        );
+        assert!(
+            MARKETING_INPUT_CSS.contains("--card: 24 24 27;"),
+            "the marketing dark card fill must sit a clear step above the 9 9 11 page",
+        );
+        // The classic red is what the brand fill uses.
+        assert!(
+            MARKETING_INPUT_CSS
+                .contains("--brand-gradient: linear-gradient(135deg, #dc2626, #dc2626);"),
+            "the marketing brand fill must be the flat classic red",
+        );
+    }
+
     /// Console/CP brand tokens: deep red #dc2626 on near-black zinc #09090b.
     #[test]
     fn brand_palette_is_red_and_black() {
         for source in [GLOBALS_CSS, GLOBALS_INPUT_CSS] {
             // Deep red brand accent (#dc2626 = 220 38 38).
+            // Light-mode primary is the brand-700 step (#b91c1c): the
+            // #dc2626 fill measured 4.40:1 as TEXT on the 244 244 246 canvas
+            // (dogfood 2026-10-06). White on #b91c1c is 6.35:1 — AA for both
+            // text and fill roles.
             assert!(
-                source.contains("--primary: 220 38 38;"),
-                "primary must be #dc2626"
+                source.contains("--primary: 185 28 28;"),
+                "primary must be the brand-700 red #b91c1c"
             );
             assert!(
                 source.contains("--destructive: 220 38 38;"),
@@ -135,9 +359,12 @@ mod tests {
                 source.contains("--surface-950: 9 9 11;"),
                 "surface-950 must be zinc-950 #09090b"
             );
+            // surface-200 deepened to zinc-300: a zinc-200 hairline on the
+            // 244 244 246 canvas measured ΔL* < 2.5 (invisible) — the
+            // surface-ladder gate pins the perceptible step (2026-10-06).
             assert!(
-                source.contains("--surface-200: 228 228 231;"),
-                "surface-200 must be zinc-200 #e4e4e7"
+                source.contains("--surface-200: 212 212 216;"),
+                "surface-200 must be zinc-300 #d4d4d8 so hairlines read"
             );
             // The coral regression values must stay gone.
             assert!(
@@ -195,21 +422,36 @@ mod tests {
             "marketing brand-500 must be #ef4444"
         );
         assert!(
-            MARKETING_INPUT_CSS.contains("--brand-600: 220 38 38;"),
-            "marketing brand-600 must be #dc2626"
+            // brand-600 is the TEXT step for prose links and receipts; on the
+            // 244 244 246 canvas #dc2626 measured 4.40:1, so it deepens to the
+            // brand-700 red (5.9:1) — the same AA-driven step as the console.
+            MARKETING_INPUT_CSS.contains("--brand-600:185 28 28"),
+            "marketing brand-600 must be the brand-700 red #b91c1c"
         );
         assert!(
             MARKETING_INPUT_CSS.contains("--brand-950: 69 10 10;"),
             "marketing brand-950 must be #450a0a"
         );
+        // The marketing sheet writes tokens without a space after the colon.
         assert!(
-            MARKETING_INPUT_CSS.contains("--primary: 239 68 68;"),
-            "marketing primary must be #ef4444"
+            MARKETING_INPUT_CSS.contains("--primary:185 28 28"),
+            "marketing primary must be the brand-700 red #b91c1c (AA as text on the light canvas)"
         );
+        // The brand fill is the CLASSIC flat red: white on #dc2626 measures
+        // 4.76:1 (AA for normal text), so the old maroon two-tone gradient's
+        // rationale ("white needs 4.5+ on every stop") is met by the flat
+        // fill — and the black-infused maroon is gone (owner review
+        // 2026-10-06).
         assert!(
-            MARKETING_INPUT_CSS.contains("linear-gradient(135deg, #a81818, #7f1d1d)"),
-            "brand gradient must be red (AA-deepened 2026-09-10: white text needs 4.5+ on every stop)"
+            MARKETING_INPUT_CSS.contains("linear-gradient(135deg, #dc2626, #dc2626)"),
+            "brand fill must be the flat classic red (#dc2626), white text at 4.76:1"
         );
+        for maroon in ["#a81818", "#7f1d1d"] {
+            assert!(
+                !MARKETING_INPUT_CSS.contains(maroon),
+                "the black-infused maroon {maroon} must not return to the brand fill"
+            );
+        }
         // The indigo regression values must stay gone.
         assert!(
             !MARKETING_INPUT_CSS.contains("99 102 241"),

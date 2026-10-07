@@ -339,8 +339,17 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $record = $storage->find($nonce);
         self::assertNotNull($record, 'the stored record must exist for the solve to verify');
         $verifier = new Verifier($storage, now: static fn (): int => time());
+        // A deterministic receipt clock past the server-measured minimum
+        // duration: the floor at 8 difficulty bits is 5 ms from the
+        // record's issuance timestamp, and relying on the wall-clock gap
+        // between issuance and this call made the assertion a timing
+        // flake under load (observed once in a full-suite run). Fixing the
+        // receipt 10 ms after issuance pins the intended semantics — the
+        // proof verdict, not the timing heuristic.
+        $receiptNs = (int) (microtime(true) * 1_000_000) + 10_000_000;
+        self::assertGreaterThan($record->issuedAtNs, $receiptNs);
 
-        return $verifier->verify($token, self::SECRET, 'login', '127.0.0.1')->isOk();
+        return $verifier->verify($token, self::SECRET, 'login', '127.0.0.1', $receiptNs)->isOk();
     }
 
     public function testVersion2GrammarIsIssuedOnlyWhenClientConfigAndFloorAllConfirm(): void

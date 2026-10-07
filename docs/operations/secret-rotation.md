@@ -147,7 +147,7 @@ curl -s https://api.apexmail.ee/v1/auth/session | jq '.token'
 
 ```bash
 #!/bin/bash
-# scripts/rotate-api-key-hash-secret.sh
+# Inline emergency script (not a shipped file; run it by pasting it on the host)
 set -euo pipefail
 
 NEW_SECRET=$(openssl rand -base64 48)
@@ -520,7 +520,7 @@ groups:
 
 ```bash
 #!/bin/bash
-# scripts/validate-secret-rotation.sh
+# Inline emergency script (not a shipped file; run it by pasting it on the host)
 # Run after each secret rotation to verify correctness
 
 set -euo pipefail

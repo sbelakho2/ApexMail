@@ -437,6 +437,26 @@ pub mod test_support {
     /// digest of every (version, checksum) pair, so a template cloned from an
     /// older/newer build's chain is never silently reused — the fresh build
     /// provisions and verifies its own template.
+    /// Attempt count for the template-clone retry ladder. The wide default
+    /// absorbs a full workspace's clone queue; tests that MEASURE the window
+    /// (template held for its whole duration) pin a small value so they do not
+    /// pay the production-scale wait.
+    fn clone_retry_attempts() -> u32 {
+        std::env::var("TEST_DB_CLONE_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(180)
+    }
+
+    /// Base delay of the ladder's fast phase (the slow phase is 4x it).
+    fn clone_retry_base_delay_ms() -> u64 {
+        std::env::var("TEST_DB_CLONE_BASE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(250)
+    }
+
     fn canonical_template_db() -> &'static str {
         static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         NAME.get_or_init(compute_canonical_template_db)
@@ -809,7 +829,8 @@ pub mod test_support {
         // Backoff ladder: 250ms for the first 24 attempts, then 1s — under
         // a full workspace parallel run the template can be held by another
         // process's top-up or clone for well over a flat 12-second window.
-        for attempt in 0..60u32 {
+        let attempts = clone_retry_attempts();
+        for attempt in 0..attempts {
             match sqlx::query(&format!(
                 r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
             ))
@@ -831,11 +852,12 @@ pub mod test_support {
                     if stale_catalog_row {
                         drop_database(&admin, db_name).await?;
                     }
-                    if (!busy && !stale_catalog_row) || attempt == 59 {
+                    if (!busy && !stale_catalog_row) || attempt + 1 == attempts {
                         last_error = Some(error);
                         break;
                     }
-                    let delay = if attempt < 24 { 250 } else { 1_000 };
+                    let base = clone_retry_base_delay_ms();
+                    let delay = if attempt < 24 { base } else { base * 4 };
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
@@ -1489,7 +1511,8 @@ pub mod test_support {
         // transient classes the fresh path retries.
         let mut clone_error = None;
         // Same backoff ladder as the fresh path (see there for why).
-        for attempt in 0..60u32 {
+        let attempts = clone_retry_attempts();
+        for attempt in 0..attempts {
             match sqlx::query(&format!(
                 r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
             ))
@@ -1508,11 +1531,12 @@ pub mod test_support {
                     if stale_catalog_row {
                         drop_database(&admin, db_name).await?;
                     }
-                    if (!busy && !stale_catalog_row) || attempt == 59 {
+                    if (!busy && !stale_catalog_row) || attempt + 1 == attempts {
                         clone_error = Some(error);
                         break;
                     }
-                    let delay = if attempt < 24 { 250 } else { 1_000 };
+                    let base = clone_retry_base_delay_ms();
+                    let delay = if attempt < 24 { base } else { base * 4 };
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
@@ -2442,6 +2466,12 @@ pub mod test_support {
         /// window (the template stays busy) fails closed at the clone stage.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn clone_failure_after_the_full_retry_window_is_reported() {
+            // Pin a small window: the template is held for the WHOLE ladder
+            // duration, so the production-scale default would make this test
+            // run for minutes (nextest isolates each test in its own process,
+            // so these process-global pins cannot race siblings).
+            std::env::set_var("TEST_DB_CLONE_ATTEMPTS", "4");
+            std::env::set_var("TEST_DB_CLONE_BASE_DELAY_MS", "25");
             let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -2770,6 +2800,10 @@ pub mod test_support {
         /// shared-clone stage.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn shared_clone_failure_is_reported() {
+            // Small window, like its fresh-path twin: the template is held
+            // for the WHOLE ladder duration.
+            std::env::set_var("TEST_DB_CLONE_ATTEMPTS", "4");
+            std::env::set_var("TEST_DB_CLONE_BASE_DELAY_MS", "25");
             let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");

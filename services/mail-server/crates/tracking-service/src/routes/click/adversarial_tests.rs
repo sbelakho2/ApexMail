@@ -2,13 +2,16 @@
 //!
 //! Proven here, against the canonical schema and the live test Redis:
 //! - The redirect domain authorization walks its full cache hierarchy:
-//!   moka → Redis (authoritative cached verdict) → Postgres (owned domain
-//!   row, then JSONB wildcard patterns) — a Redis MISS falls through to the
-//!   database, a DB error denies for one request WITHOUT caching, and an
-//!   authoritative absence is cached as "0".
+//!   moka → deployment allowlist → Redis (authoritative cached verdict) →
+//!   Postgres (owned domain row OR any subdomain of one, then JSONB wildcard
+//!   patterns) — a Redis MISS falls through to the database, a DB error
+//!   refuses for one request (503) WITHOUT caching, and an authoritative
+//!   absence is cached as "0".
 //! - Hostile tokens (wrong length, garbage, tampered) redirect to the
 //!   fallback, record NOTHING, and never panic.
-//! - Oversized and non-http redirect targets are refused.
+//! - A refused destination host is answered 400 (`click_refused` recorded)
+//!   with the named reason — never a silent bounce to the vendor homepage;
+//!   oversized / non-http redirect targets are refused the same way.
 //! - Bot clicks render the redirect but never record.
 //! - Per-link URL cache failures never break the redirect or the recording.
 
@@ -109,6 +112,7 @@ fn config(redis_url: &str) -> crate::config::Config {
             trusted_proxies: Vec::new(),
             max_redirect_url_len: 2048,
             token_max_age_days: None,
+            allowed_redirect_domains: Vec::new(),
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -124,7 +128,14 @@ fn config(redis_url: &str) -> crate::config::Config {
 }
 
 fn state(db: sqlx::PgPool, redis: deadpool_redis::Pool, redis_url: &str) -> AppState {
-    let cfg = config(redis_url);
+    state_with_cfg(db, redis, config(redis_url))
+}
+
+fn state_with_cfg(
+    db: sqlx::PgPool,
+    redis: deadpool_redis::Pool,
+    cfg: crate::config::Config,
+) -> AppState {
     let processor = std::sync::Arc::new(EventProcessor::new(
         db.clone(),
         redis.clone(),
@@ -213,6 +224,31 @@ async fn location_of(resp: axum::response::Response) -> String {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string()
+}
+
+/// A refused destination is NOT a redirect: the status is 400 (503 when the
+/// store could not answer) and the body names the reason.
+async fn refusal_body(resp: axum::response::Response, expected: axum::http::StatusCode) -> String {
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let csp = resp
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("refusal body");
+    assert_eq!(status, expected, "refusal status");
+    assert!(content_type.starts_with("text/html"), "got {content_type}");
+    assert!(csp.contains("default-src 'none'"), "locked-down CSP");
+    String::from_utf8(body.to_vec()).expect("utf8 refusal body")
 }
 
 async fn wal_entries_for(redis: &deadpool_redis::Pool, needle: &str) -> Vec<String> {
@@ -389,7 +425,8 @@ async fn oversized_and_non_http_targets_are_refused() {
     let tenant = unique("tn_len");
 
     // The fallback host is allowed without any DB round-trip, so the token's
-    // original_url is the ONLY thing that can exceed the cap here.
+    // original_url is the ONLY thing that can exceed the cap here. The
+    // refusal is answered with the named reason, never a redirect.
     let too_long = format!("https://fallback.test.example/{}", "p".repeat(2_100));
     let token = click_token(&tenant, &unique("msg"), Some(&too_long));
     let resp = handle_click(
@@ -400,10 +437,10 @@ async fn oversized_and_non_http_targets_are_refused() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(
-        location_of(resp).await,
-        "https://fallback.test.example/",
-        "oversized target refused → fallback"
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(
+        body.contains("maximum redirect URL length"),
+        "the refusal names the reason: {body}"
     );
 
     // A non-http(s) scheme baked into the token is refused.
@@ -416,7 +453,8 @@ async fn oversized_and_non_http_targets_are_refused() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("http and https"), "{body}");
 
     // A tampered ?r= cannot rescue a blocked scheme…
     let token = click_token(&tenant, &unique("msg"), Some("javascript:alert(1)"));
@@ -430,7 +468,7 @@ async fn oversized_and_non_http_targets_are_refused() {
         }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
 
     // …and an unparseable ?r= is refused too (token has no original_url).
     let token = click_token(&tenant, &unique("msg"), None);
@@ -444,7 +482,8 @@ async fn oversized_and_non_http_targets_are_refused() {
         }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("parseable URL"), "{body}");
 }
 
 #[tokio::test]
@@ -574,7 +613,10 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
     };
     let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
 
-    // Cached "0" → deny, with a DEAD database proving the DB is not consulted.
+    // Cached "0" → refused, with a DEAD database proving the DB is not
+    // consulted. The refusal is explicit (400 + reason) AND recorded as a
+    // `click_refused` event — the recipient is never bounced to the vendor
+    // homepage and the operator sees the block.
     let tenant = unique("tn_c0");
     let message = unique("msg");
     seed_redis_domain(&redis, &tenant, "cached-deny.example", false).await;
@@ -588,9 +630,18 @@ async fn redis_cached_verdicts_are_authoritative_without_db() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(wal_entries_for(&redis, &message).await.is_empty());
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("not authorized"), "{body}");
+    assert!(
+        wait_wal_entry(&redis, &message).await,
+        "the refused click is recorded"
+    );
+    let refused = wal_entries_for(&redis, &message).await;
+    assert!(
+        refused.iter().all(|entry| entry.contains("click_refused")),
+        "no real 'clicked' event may be recorded for a refusal: {refused:?}"
+    );
+    drop_wal_entries(&redis, &tenant).await;
 
     // Cached "1" → allow, again without any DB.
     let tenant = unique("tn_c1");
@@ -638,15 +689,15 @@ async fn database_error_denies_for_one_request_and_caches_nothing() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(
-        location_of(resp).await,
-        "https://fallback.test.example/",
-        "a DB that cannot answer must deny for this request"
+    let body = refusal_body(resp, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+    assert!(
+        body.contains("could not be verified"),
+        "a DB outage is named as such, not as a forbidden host: {body}"
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         wal_entries_for(&redis, &message).await.is_empty(),
-        "no click event may be recorded for an unproven redirect"
+        "nothing is recorded while the authorization store cannot answer"
     );
     assert_eq!(
         redis_domain_verdict(&redis, &tenant, domain).await,
@@ -694,8 +745,9 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
     );
     drop_wal_entries(&redis, &tenant).await;
 
-    // (2) A domain owned by nobody is an authoritative absence → fallback,
-    //     no event, and the verdict is cached as "0".
+    // (2) A domain owned by nobody is an authoritative absence → 400 with the
+    //     reason, a `click_refused` event (never a `clicked` one), and the
+    //     verdict is cached as "0".
     let stranger = unique("tn_stranger");
     let message = unique("msg");
     let token = click_token(
@@ -711,9 +763,17 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(wal_entries_for(&redis, &message).await.is_empty());
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("stranger-owned.example"), "{body}");
+    assert!(wait_wal_entry(&redis, &message).await);
+    let recorded = wal_entries_for(&redis, &message).await;
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one refused event, got: {recorded:?}"
+    );
+    assert!(recorded[0].contains("click_refused"), "{recorded:?}");
+    drop_wal_entries(&redis, &stranger).await;
     assert_eq!(
         redis_domain_verdict(&redis, &stranger, "stranger-owned.example").await,
         Some("0".into()),
@@ -721,7 +781,7 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
     );
 
     // (3) The moka tier now answers for the stranger's domain: the second
-    //     click hits the in-process cache (still denied, still no event).
+    //     click hits the in-process cache (still refused, still no `clicked`).
     let message = unique("msg");
     let token = click_token(
         &stranger,
@@ -736,9 +796,14 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(wal_entries_for(&redis, &message).await.is_empty());
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(wait_wal_entry(&redis, &message).await);
+    let recorded = wal_entries_for(&redis, &message).await;
+    assert!(
+        recorded.iter().all(|entry| entry.contains("click_refused")),
+        "the moka tier still refuses: {recorded:?}"
+    );
+    drop_wal_entries(&redis, &stranger).await;
 
     // (4) The wildcard tier: tenant_settings.allowed_redirect_domains
     //     (JSONB) with `*.wild.example` authorizes subdomains only.
@@ -767,7 +832,7 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
     assert!(wait_wal_entry(&redis, &message).await, "click recorded");
     drop_wal_entries(&redis, &wildcard_tenant).await;
 
-    // (5) The bare apex is NOT covered by the wildcard.
+    // (5) The bare apex is NOT covered by the wildcard → refused.
     let message = unique("msg");
     let token = click_token(
         &wildcard_tenant,
@@ -782,9 +847,125 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(wal_entries_for(&redis, &message).await.is_empty());
+    refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(wait_wal_entry(&redis, &message).await);
+    assert!(wal_entries_for(&redis, &message)
+        .await
+        .iter()
+        .all(|entry| entry.contains("click_refused")));
+    drop_wal_entries(&redis, &wildcard_tenant).await;
+}
+
+/// The pinned sub-domain decision (dogfood 2026-10-06 P1): any hostname under
+/// a tenant-owned domain IS the tenant's, so `www.owned.example` and
+/// `a.b.owned.example` redirect and record normally — while a foreign host
+/// that merely ends in the same text (`evil-owned.example`) is refused.
+#[tokio::test]
+async fn subdomains_of_an_owned_domain_are_authorized() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let Some(db) = live_pg("click_subdomain_auth").await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let state = state(db.clone(), redis.clone(), &redis_url);
+    let tenant = unique("tn_sub");
+    seed_tenant(&db, &tenant).await;
+    seed_domain(&db, &tenant, "owned.example").await;
+
+    // A real subdomain (the common `www.` case) redirects and records.
+    let message = unique("msg");
+    let token = click_token(&tenant, &message, Some("https://www.owned.example/landing"));
+    let resp = handle_click(
+        State(state.clone()),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(token),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    assert_eq!(location_of(resp).await, "https://www.owned.example/landing");
+    assert!(wait_wal_entry(&redis, &message).await, "click recorded");
+    assert!(
+        wal_entries_for(&redis, &message)
+            .await
+            .iter()
+            .any(|entry| entry.contains("\"type\":\"clicked\"")),
+        "a subdomain click records a real click"
+    );
+    drop_wal_entries(&redis, &tenant).await;
+
+    // Deeper nesting is still the same registrable owner.
+    let message = unique("msg");
+    let token = click_token(&tenant, &message, Some("https://a.b.owned.example/x"));
+    let resp = handle_click(
+        State(state.clone()),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(token),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    assert_eq!(location_of(resp).await, "https://a.b.owned.example/x");
+    drop_wal_entries(&redis, &tenant).await;
+
+    // …but a domain that merely ENDS with the same text (no dot boundary) is
+    // a different registrable domain: refused, with the reason.
+    let message = unique("msg");
+    let token = click_token(&tenant, &message, Some("https://evil-owned.example/x"));
+    let resp = handle_click(
+        State(state.clone()),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(token),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    let body = refusal_body(resp, axum::http::StatusCode::BAD_REQUEST).await;
+    assert!(body.contains("evil-owned.example"), "{body}");
+    drop_wal_entries(&redis, &tenant).await;
+}
+
+/// The deployment allowlist (`TRACKING_ALLOWED_REDIRECT_DOMAINS`) is the
+/// operator configuration surface for hosts outside the tenant's own
+/// domains: a pattern here authorizes the host for every tenant.
+#[tokio::test]
+async fn deployment_allowlist_authorizes_a_foreign_host() {
+    let _wal_serial = crate::routes::test_support::redis_wal_serial().await;
+    let Some(redis) = live_redis() else {
+        eprintln!("skipping: set TEST_REDIS_URL");
+        return;
+    };
+    let redis_url = crate::routes::test_support::live_test_redis_url().expect("TEST_REDIS_URL");
+    let mut cfg = config(&redis_url);
+    cfg.tracking.allowed_redirect_domains = vec!["*.partner.example".into()];
+    let state = state_with_cfg(lazy_dead_db(), redis.clone(), cfg);
+    let tenant = unique("tn_allow");
+    let message = unique("msg");
+    let token = click_token(
+        &tenant,
+        &message,
+        Some("https://promo.partner.example/offer"),
+    );
+    let resp = handle_click(
+        State(state),
+        addr(),
+        headers_with_ua(NORMAL_UA),
+        Path(token),
+        Query(ClickQuery { r: None }),
+    )
+    .await;
+    assert_eq!(
+        location_of(resp).await,
+        "https://promo.partner.example/offer",
+        "the deployment allowlist authorizes the host without any DB"
+    );
+    assert!(wait_wal_entry(&redis, &message).await, "click recorded");
+    drop_wal_entries(&redis, &tenant).await;
 }
 
 #[tokio::test]

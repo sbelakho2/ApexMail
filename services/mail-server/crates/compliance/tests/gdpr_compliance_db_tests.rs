@@ -18,6 +18,7 @@
 //! - the audit hash chain survives concurrent appends and archival
 //! - the access export carries a per-store manifest and is downloadable
 
+use chrono::SubsecRound;
 use compliance::config::{AuditConfig, GdprConfig};
 use compliance::gdpr_automation::{ErasureStore, GdprAutomation, StoreErasureStatus};
 use compliance::types::{AuditAction, AuditOutcome, AuditResource, LogContext};
@@ -2785,7 +2786,10 @@ async fn erasure_discloses_statutory_retention_and_archives_the_invoice() {
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
 
-    let issued_at = chrono::Utc::now() - chrono::Duration::days(3);
+    // TIMESTAMPTZ stores microsecond precision: seed the exact value the
+    // database will round-trip, or the expected expiry computed from the
+    // in-memory nanoseconds would differ from the persisted one.
+    let issued_at = (chrono::Utc::now() - chrono::Duration::days(3)).trunc_subsecs(6);
     let (invoice_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO invoices (tenant_id, amount, billing_address, issued_at)
          VALUES ($1, 100, $2, $3) RETURNING id",
@@ -3394,4 +3398,220 @@ async fn dsr_never_crosses_tenant_boundaries_for_the_same_address() {
         b_messages.contains(&subject),
         "tenant B's message is untouched"
     );
+}
+
+// ── F5: DSR completion writes the audit trail and advances the CP mirror ───
+
+/// The dogfood finding: a completed DSR left ZERO `audit_logs` rows and the
+/// control-plane `gdpr_requests` mirror stayed `pending` forever. This drives
+/// the real submit → verify → process flow and asserts both rows.
+#[tokio::test]
+async fn dsr_completion_writes_the_audit_entry_and_advances_the_mirror() {
+    use compliance::types::DataSubjectRequestType;
+
+    let Some(pool) = test_pool("f5_dsr_audit_mirror").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+
+    let audit = std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "f5-audit-key-0123456789abcdef".into(),
+        },
+    ));
+    let gdpr = GdprAutomation::new(pool.clone(), dummy_redis(), test_gdpr_config())
+        .with_audit_logger(audit);
+
+    let subject = format!("f5-{}@x.com", Uuid::new_v4().simple());
+    let (request, _token) = gdpr
+        .submit_request(&tenant, DataSubjectRequestType::Access, &subject)
+        .await
+        .expect("DSR submit");
+
+    // The mirror exists, linked by token hash, still pending.
+    let (mirror_status, mirror_fulfilled): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, fulfilled_at FROM gdpr_requests WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("mirror row written at submit");
+    assert_eq!(mirror_status, "pending");
+    assert!(mirror_fulfilled.is_none());
+
+    // Identity verification is exercised in its own tests; drive the verified
+    // state directly so this test does not depend on Redis (the enqueue half
+    // of `verify_request`).
+    sqlx::query(
+        "UPDATE data_subject_requests SET status = 'verified', verified = true,
+                verified_at = NOW(), identity_verified_at = NOW() WHERE id = $1",
+    )
+    .bind(&request.id)
+    .execute(&pool)
+    .await
+    .expect("mark verified");
+    let result = gdpr
+        .process_request(&request.id)
+        .await
+        .expect("access request completes");
+    assert!(result.export_url.is_some(), "access export produced");
+
+    // 1. The chained audit trail carries the lifecycle transition.
+    let (action, resource, lifecycle, audit_outcome): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT action, resource, details->>'action', outcome
+             FROM audit_logs
+             WHERE tenant_id = $1 AND resource_id = $2
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .bind(&tenant)
+        .bind(&request.id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit entry written on completion");
+    assert_eq!(action, "update");
+    assert_eq!(resource, "subscriber");
+    assert_eq!(lifecycle, "dsr.lifecycle.completed");
+    assert_eq!(audit_outcome, "success");
+    let details: serde_json::Value =
+        sqlx::query_scalar("SELECT details FROM audit_logs WHERE tenant_id = $1 AND resource_id = $2 ORDER BY timestamp DESC LIMIT 1")
+            .bind(&tenant)
+            .bind(&request.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(details["requestType"], "access");
+
+    // The DSR's terminal status is mirrored exactly. (In this canonical test
+    // database the optional ClickHouse store is unconfigured, so the access
+    // export legitimately completes as `partial`; production with every
+    // store configured reports `completed`.)
+    let dsr_status: String =
+        sqlx::query_scalar("SELECT status FROM data_subject_requests WHERE id = $1")
+            .bind(&request.id)
+            .fetch_one(&pool)
+            .await
+            .expect("DSR status");
+    assert!(
+        matches!(dsr_status.as_str(), "completed" | "partial"),
+        "access DSR terminal status: {dsr_status}"
+    );
+    assert_eq!(details["status"], dsr_status);
+
+    // 2. The CP mirror advanced with the completion.
+    let (mirror_status, mirror_fulfilled): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, fulfilled_at FROM gdpr_requests WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("mirror still present");
+    assert_eq!(
+        mirror_status, dsr_status,
+        "the mirror must carry the DSR's terminal status, never stay pending"
+    );
+    assert!(
+        mirror_fulfilled.is_some(),
+        "fulfilled_at is stamped on a completed/partial DSR"
+    );
+}
+
+/// A tenant under legal hold parks the erasure in `pending_manual_review`;
+/// the CP mirror must reflect that state too (still unpublished work, but no
+/// longer `pending`), and the audit trail names the deferral.
+#[tokio::test]
+async fn held_erasure_defers_the_mirror_too() {
+    use compliance::types::DataSubjectRequestType;
+
+    let Some(pool) = test_pool("f5_dsr_legal_hold").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let audit = std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "f5-audit-key-0123456789abcdef".into(),
+        },
+    ));
+    let gdpr = GdprAutomation::new(pool.clone(), dummy_redis(), test_gdpr_config())
+        .with_audit_logger(audit);
+
+    // The canonical hold flag (migration 121): an active hold on the tenant.
+    sqlx::query("UPDATE tenants SET legal_hold = true WHERE id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed legal hold");
+
+    let subject = format!("f5-held-{}@x.com", Uuid::new_v4().simple());
+    let (request, _token) = gdpr
+        .submit_request(&tenant, DataSubjectRequestType::Erasure, &subject)
+        .await
+        .expect("DSR submit");
+    // The mirror is linked by the verification token hash — the completion
+    // path keys its advance on it.
+    let (dsr_hash, mirror_hash): (String, String) = sqlx::query_as(
+        "SELECT (SELECT verification_token_hash FROM data_subject_requests WHERE id = $1),
+                (SELECT token_hash FROM gdpr_requests WHERE tenant_id = $2)",
+    )
+    .bind(&request.id)
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("mirror linkage");
+    assert_eq!(dsr_hash, mirror_hash, "mirror linked by token hash");
+    assert_eq!(request.verification_token_hash, dsr_hash);
+    sqlx::query(
+        "UPDATE data_subject_requests SET status = 'verified', verified = true,
+                verified_at = NOW(), identity_verified_at = NOW() WHERE id = $1",
+    )
+    .bind(&request.id)
+    .execute(&pool)
+    .await
+    .expect("mark verified");
+    gdpr.process_request(&request.id)
+        .await
+        .expect("held erasure defers");
+
+    let dsr_status: String =
+        sqlx::query_scalar("SELECT status FROM data_subject_requests WHERE id = $1")
+            .bind(&request.id)
+            .fetch_one(&pool)
+            .await
+            .expect("DSR status");
+    assert_eq!(
+        dsr_status, "pending_manual_review",
+        "a held erasure parks for manual review"
+    );
+
+    let (mirror_status, mirror_fulfilled): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, fulfilled_at FROM gdpr_requests WHERE tenant_id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    // The mirror's VARCHAR(20) status vocabulary maps the deferral to
+    // `processing` (the request is no longer pending; it awaits an operator).
+    assert_eq!(mirror_status, "processing");
+    assert!(
+        mirror_fulfilled.is_none(),
+        "a deferred request is not fulfilled"
+    );
+
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT details->>'action' FROM audit_logs
+         WHERE tenant_id = $1 AND resource_id = $2 ORDER BY timestamp DESC LIMIT 1",
+    )
+    .bind(&tenant)
+    .bind(&request.id)
+    .fetch_one(&pool)
+    .await
+    .expect("deferral audit entry");
+    assert_eq!(lifecycle, "dsr.lifecycle.completed");
 }

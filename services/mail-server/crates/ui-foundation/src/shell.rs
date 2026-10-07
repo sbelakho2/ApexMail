@@ -103,9 +103,11 @@ pub fn shell_source_catalog() -> [(&'static str, &'static str); 7] {
     ]
 }
 
-/// Session identity rendered in the shell header. `None` falls back to a
-/// neutral plan label and omits the identity block; callers with an
-/// authenticated session pass the real operator identity.
+/// Session identity rendered in the shell header. `None` renders NO plan
+/// label and omits the identity block — a caller without session data must
+/// never fabricate one (the old hardcoded "Free Plan — 30K / mo" label was
+/// shown to paying customers on every console page; dogfood 2026-10-06). An
+/// empty `plan_label` inside `Some` likewise renders no label.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserContext<'a> {
     pub display_name: &'a str,
@@ -145,7 +147,19 @@ impl<'a> ShellHeader<'a> {
         let user = self.user_context.as_ref();
         let display_name = html_escape(user.map_or("ApexMail User", |u| u.display_name));
         let email = html_escape(user.map_or("", |u| u.email));
-        let plan_label = html_escape(user.map_or("Free Plan — 30K / mo", |u| u.plan_label));
+        // No session (or an unresolved plan) renders NO plan label: the real
+        // plan comes from the session, and a fabricated "Free Plan — 30K / mo"
+        // on every authenticated page was the defect (dogfood 2026-10-06).
+        let plan_label = user.map(|u| html_escape(u.plan_label)).unwrap_or_default();
+        let plan_label_block = if plan_label.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
+                    <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
+                </div>"
+            )
+        };
         let identity_block = if user.is_some() {
             format!(
                 "<div class=\"text-right hidden sm:block\">\
@@ -171,9 +185,7 @@ impl<'a> ShellHeader<'a> {
                     </form>\
                 </div>\
                 <div class=\"flex items-center gap-4\">\
-                    <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
-                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
-                    </div>\
+                    {plan_label_block}\
                     <div class=\"flex items-center gap-3 pl-2\">\
                         {identity_block}\
                         <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
@@ -183,7 +195,7 @@ impl<'a> ShellHeader<'a> {
                 </div>\
             </header>",
             mobile_toggle = shell_icon("menu", "h-5 w-5"),
-            plan_label = plan_label,
+            plan_label_block = plan_label_block,
             identity_block = identity_block,
             avatar = safe_avatar,
         )
@@ -278,13 +290,13 @@ impl<'a> WebDashboardShell<'a> {
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"mobile-sidebar\">\
             <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
-            <div id=\"mobile-sidebar-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            <div id=\"mobile-sidebar-panel\" class=\"h-screen w-full bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );
 
         format!(
-            "<div class=\"apex-console-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-storage-key=\"{theme_key}\">\
+            "<div class=\"apex-console-shell min-h-screen bg-background flex\" data-theme-storage-key=\"{theme_key}\">\
             {banner}\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen {sidebar_width} z-30 transition-all duration-300\" data-sidebar-storage-key=\"{sidebar_key}\" aria-label=\"Primary sidebar navigation\">\
                 {sidebar_content}\
@@ -364,13 +376,13 @@ impl<'a> ControlPlaneShell<'a> {
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"control-plane-mobile-sidebar\">\
             <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
-            <div id=\"control-plane-mobile-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
+            <div id=\"control-plane-mobile-panel\" class=\"h-screen w-full bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
         );
 
         format!(
-            "<div class=\"apex-cp-shell min-h-screen bg-[#fcfcfc] flex\" data-theme-storage-key=\"{theme_key}\">\
+            "<div class=\"apex-cp-shell min-h-screen bg-background flex\" data-theme-storage-key=\"{theme_key}\">\
             <aside class=\"hidden md:flex flex-col fixed left-0 top-0 h-screen w-64 z-30\" data-user-role=\"{role}\">\
                 {sidebar_content}\
             </aside>\
@@ -594,6 +606,71 @@ pub fn apply_control_plane_role(html: &str, role: &str) -> String {
     )
 }
 
+/// Inject the impersonation banner into an already-rendered control-plane
+/// document.
+///
+/// [`ControlPlaneShell`] has no banner slot of its own; the banner (which is
+/// `position: fixed`) is inserted as the first child of the shell root and
+/// the scroll column is pushed down by its rendered height (~2.1rem) so the
+/// sticky header is not clipped — the same offset the web shell applies
+/// natively. Used by the SSR request path whenever the request carries a
+/// verified impersonation cookie (dogfood 2026-10-06: the banner component
+/// existed but no request path ever rendered it, so an operator had no UI
+/// way to end an impersonation session).
+///
+/// Structural no-op when the document is not a CP shell.
+pub fn apply_control_plane_impersonation_banner(
+    html: &str,
+    banner: &ImpersonationBanner<'_>,
+) -> String {
+    const SHELL_ANCHOR: &str = "<div class=\"apex-cp-shell min-h-screen bg-background flex\"";
+    let Some(shell_start) = html.find(SHELL_ANCHOR) else {
+        return html.to_string();
+    };
+    let Some(tag_len) = html[shell_start..].find('>') else {
+        return html.to_string();
+    };
+    let insert_at = shell_start + tag_len + 1;
+    let mut out = String::with_capacity(html.len() + 1024);
+    out.push_str(&html[..insert_at]);
+    out.push_str(&banner.render_html());
+    out.push_str(&offset_cp_scroll_column(&html[insert_at..]));
+    out
+}
+
+/// Push the CP scroll column below the fixed impersonation banner,
+/// preserving any operational-banner offset the shell already applied.
+fn offset_cp_scroll_column(html: &str) -> String {
+    const CLASS_ATTR: &str = "class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\"";
+    const STYLE_PREFIX: &str = " style=\"padding-top: ";
+    const REM: &str = "rem\"";
+    let Some(class_pos) = html.find(CLASS_ATTR) else {
+        return html.to_string();
+    };
+    let after_class = class_pos + CLASS_ATTR.len();
+    if let Some(style_rest) = html[after_class..].strip_prefix(STYLE_PREFIX) {
+        if let Some(rel_end) = style_rest.find(REM) {
+            let value_start = after_class + STYLE_PREFIX.len();
+            let value_end = value_start + rel_end;
+            let current: f64 = html[value_start..value_end].trim().parse().unwrap_or(0.0);
+            let mut out = String::with_capacity(html.len() + 16);
+            out.push_str(&html[..value_start]);
+            // One decimal: avoids the 2.0+2.1 = 4.1000000000000005 f64
+            // representation leaking into the style attribute.
+            out.push_str(&format!("{:.1}", current + 2.1));
+            out.push_str(&html[value_end..]);
+            return out;
+        }
+    }
+    let mut out = String::with_capacity(html.len() + 32);
+    out.push_str(&html[..after_class]);
+    out.push_str(STYLE_PREFIX);
+    out.push_str("2.1");
+    out.push_str(REM);
+    out.push_str(&html[after_class..]);
+    out
+}
+
 fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     // Task-oriented regroup (design report structural #20): Operate /
     // Customers / Governance. Alerts — the most operational page — joins
@@ -704,8 +781,10 @@ mod tests {
         assert!(!header.contains("Engineering"));
         assert!(!header.contains("admin@apexmail.ee"));
 
-        // Without a session the neutral plan label renders and no identity
-        // block is emitted.
+        // Without a session NO plan label renders (the old hardcoded
+        // "Free Plan — 30K / mo" showed a fabricated plan to every
+        // authenticated page — dogfood 2026-10-06) and no identity block is
+        // emitted.
         let anon = ShellHeader {
             user_context: None,
             ..ShellHeader {
@@ -717,8 +796,92 @@ mod tests {
             }
         }
         .render_html();
-        assert!(anon.contains("Free Plan"));
+        assert!(
+            !anon.contains("Free Plan"),
+            "no session must render no plan label (never a fabricated one)"
+        );
+        assert!(!anon.contains("data-plan-label"));
         assert!(!anon.contains("data-user-email"));
+
+        // A session whose plan could not be resolved renders the identity
+        // but still NO plan label.
+        let unresolved = ShellHeader {
+            user_context: Some(UserContext {
+                display_name: "Ops Team",
+                email: "ops@tenant.example",
+                plan_label: "",
+            }),
+            ..ShellHeader {
+                search_query: "",
+                unread_count: 0,
+                avatar_fallback: "OT",
+                mobile_menu_open: false,
+                user_context: None,
+            }
+        }
+        .render_html();
+        assert!(unresolved.contains("Ops Team"));
+        assert!(unresolved.contains("ops@tenant.example"));
+        assert!(!unresolved.contains("data-plan-label"));
+    }
+
+    /// The CP shell has no native banner slot; the injector must place the
+    /// banner inside the shell root and push the scroll column below it —
+    /// including on pages that already carry operational-banner padding.
+    #[test]
+    fn control_plane_impersonation_banner_is_injected_with_the_column_offset() {
+        let banner = ImpersonationBanner {
+            tenant_id: "tenant_42",
+            operator_name: "Operator Jane",
+            time_remaining: "29:59",
+            end_session_error: None,
+            ending_session: false,
+        };
+        let page = crate::leptos_views::control_plane_app_layout_with_role(
+            "<section>Ops</section>",
+            "Operations",
+            "Monitor the fleet.",
+            "/dashboard",
+            "csrf",
+            "owner",
+        );
+        assert!(
+            !page.contains("Impersonation Active"),
+            "the plain layout must not fabricate a banner"
+        );
+
+        let with_banner = crate::shell::apply_control_plane_impersonation_banner(&page, &banner);
+        assert!(with_banner.contains("Impersonation Active"));
+        assert!(with_banner.contains("tenant_42"));
+        assert!(with_banner.contains("action=\"/web/auth/impersonate/end\""));
+        assert!(
+            with_banner.contains("style=\"padding-top: 2.1rem\""),
+            "the scroll column must be pushed below the fixed banner"
+        );
+        // The banner sits INSIDE the shell root, before the sidebar.
+        let shell_start = with_banner.find("apex-cp-shell").expect("CP shell root");
+        let banner_pos = with_banner
+            .find("Impersonation Active")
+            .expect("banner markup");
+        assert!(banner_pos > shell_start);
+
+        // A non-CP document is a structural no-op.
+        assert_eq!(
+            crate::shell::apply_control_plane_impersonation_banner("<div>other</div>", &banner),
+            "<div>other</div>"
+        );
+
+        // An operational-banner offset is preserved and extended, not
+        // replaced.
+        let with_ops = page.replace(
+            "class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\"",
+            "class=\"flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64\" style=\"padding-top: 2rem\"",
+        );
+        let both = crate::shell::apply_control_plane_impersonation_banner(&with_ops, &banner);
+        assert!(
+            both.contains("style=\"padding-top: 4.1rem\""),
+            "the impersonation offset stacks on the operational-banner offset"
+        );
     }
 
     /// The Terminate button must POST to the real impersonation end

@@ -26,6 +26,18 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
         )
 
 
+def _reject_cursor(cursor: Optional[Any]) -> None:
+    """ListTemplatesQuery accepts {limit, offset} only (deny_unknown_fields):
+    a `cursor` parameter is rejected by the server with HTTP 400. Fail fast
+    client-side instead of emitting a 400."""
+    if cursor is not None:
+        raise ValidationError(
+            "/v1/templates does not support cursor pagination "
+            "(the server rejects `cursor` with HTTP 400); use limit/offset",
+            code="UNSUPPORTED_PAGINATION",
+        )
+
+
 def _extract_list(data: Any, key: str) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return data
@@ -71,15 +83,14 @@ class TemplatesResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> list[Template]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         data = self._client._request("GET", "/v1/templates", params=params or None)
         return [Template(**item) for item in _extract_list(data, "templates")]
 
@@ -170,15 +181,14 @@ class AsyncTemplatesResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> list[Template]:
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
         data = await self._client._request("GET", "/v1/templates", params=params or None)
         return [Template(**item) for item in _extract_list(data, "templates")]
 

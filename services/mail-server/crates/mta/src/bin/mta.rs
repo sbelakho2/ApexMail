@@ -1115,8 +1115,14 @@ mod run_tests {
         );
     }
 
+    /// The metrics recorder is a PROCESS-GLOBAL resource: a fresh `run_` with
+    /// metrics enabled installs it and serves; a SECOND `run_` in the same
+    /// process cannot install it and must abort startup rather than run
+    /// without its observability. Both behaviours live in ONE test because
+    /// the global recorder exists once per process — as two parallel tests
+    /// they raced (whichever installed first made the other fail).
     #[tokio::test]
-    async fn run_installs_the_prometheus_recorder_when_metrics_are_enabled() {
+    async fn run_installs_the_prometheus_recorder_then_fails_fast_on_a_conflicting_install() {
         let Some(db_url) = skip_if_no_db() else {
             return;
         };
@@ -1124,29 +1130,16 @@ mod run_tests {
         let mut config = base_config(&db_url, &ports);
         config.metrics.enabled = true;
         config.metrics.port = free_port();
-        run_(config, std::future::ready(()))
+        run_(config.clone(), std::future::ready(()))
             .await
             .expect("metrics listener on a free port must install cleanly");
-    }
 
-    #[tokio::test]
-    async fn run_fails_fast_when_the_metrics_recorder_cannot_be_installed() {
-        let Some(db_url) = skip_if_no_db() else {
-            return;
-        };
-        let ports = ports();
-        // Install the process recorder first: whatever run_ then tries to
-        // install fails ("recorder already installed") and startup must
-        // abort rather than run without its observability.
-        let _ = metrics_exporter_prometheus::PrometheusBuilder::new()
-            .with_http_listener(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .install_recorder();
-        let mut config = base_config(&db_url, &ports);
-        config.metrics.enabled = true;
-        config.metrics.port = free_port();
+        // The recorder is installed now: a second startup must fail fast.
+        let mut second = config;
+        second.metrics.port = free_port();
         let error = tokio::time::timeout(
             Duration::from_secs(30),
-            run_(config, std::future::pending()),
+            run_(second, std::future::pending()),
         )
         .await
         .expect("the double install fails immediately")

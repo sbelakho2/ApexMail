@@ -28,6 +28,11 @@ services:
     image: postgres:16.8-alpine
     container_name: apexmail-postgres
     restart: unless-stopped
+    # Shared memory for parallel-query DSM segments. Docker's 64 MB default
+    # fills under a many-connection test load ("could not resize shared
+    # memory segment ... No space left on device") and Postgres workers then
+    # segfault into crash-recovery loops (2026-10-07 whole-repo dogfood).
+    shm_size: 1gb
     environment:
       # SECURITY: Read the Postgres password from a Docker secret, not compose env.
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
@@ -417,6 +422,17 @@ services:
       # issuance fail (kiwicaptcha SignError::WeakSecret).
       KIWI_ENABLED: "false"
       KIWI_SECRET_KEY: ${KIWI_SECRET_KEY:-dev-kiwi-secret-not-for-production}
+      # ── UI surface routing (Host header → SSR surface) ────────────────────
+      # The .env "UI Surface Routing" block was inert: nothing passed these
+      # vars through, so editing .env changed no routing at all (dogfood
+      # 2026-10-06 — found while trying to reach the control-plane surface
+      # from a browser, which cannot set a Host header). Defaults mirror
+      # config.rs exactly, so a bare `docker compose up` behaves as before.
+      UI_WEB_HOSTS: ${UI_WEB_HOSTS:-app.apexmail.ee,127.0.0.1}
+      UI_CONTROL_PLANE_HOSTS: ${UI_CONTROL_PLANE_HOSTS:-admin.apexmail.ee,control.apexmail.ee}
+      UI_MARKETING_HOSTS: ${UI_MARKETING_HOSTS:-apexmail.ee,www.apexmail.ee}
+      UI_MARKETING_SURFACE: ${UI_MARKETING_SURFACE:-marketing-zola}
+      UI_DEFAULT_SURFACE: ${UI_DEFAULT_SURFACE:-}
     volumes:
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
@@ -457,7 +473,12 @@ services:
       context: .
       dockerfile: services/mail-server/Dockerfile
       target: enterprise
-    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "JWT_PUBLIC_KEY_PEM", "JWT_PUBLIC_KEY_PEM_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/enterprise-server"]
+    # F6 (dogfood): the SSO flow mints the canonical `am_session` console
+    # cookie with the SHARED signing key. Without JWT_PRIVATE_KEY_PEM every
+    # federated login returned an enterprise bearer with no console session
+    # (silent for the user, logged only server-side). Same key pair the
+    # api-server signs sessions with; the _FILE variant supports secrets.
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "DB_PASSWORD", "DB_PASSWORD_FILE", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "JWT_PUBLIC_KEY_PEM", "JWT_PUBLIC_KEY_PEM_FILE", "JWT_PRIVATE_KEY_PEM", "JWT_PRIVATE_KEY_PEM_FILE", "--", "/usr/bin/tini", "--", "/usr/local/bin/enterprise-server"]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -489,6 +510,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-enterprise-jwt-secret-change-me}
       JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:-dev}
       JWT_PUBLIC_KEY_PEM_FILE: ${JWT_PUBLIC_KEY_PEM_FILE:-}
+      # F6: the shared RS256 private key that mints the canonical console
+      # session on SSO callback. Same pair the api-server uses; unset (the
+      # old shape) means SSO logins never produce an am_session cookie.
+      JWT_PRIVATE_KEY_PEM: ${JWT_PRIVATE_KEY_PEM:-dev}
+      JWT_PRIVATE_KEY_PEM_FILE: ${JWT_PRIVATE_KEY_PEM_FILE:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       OTEL_SERVICE_NAME: enterprise-server
     volumes:
@@ -1105,8 +1131,12 @@ services:
       SALES_PORT: "3010"
       # ── Campaign dispatch (production dispatcher) ──────────────────────────
       # Without FROM_EMAIL + UNSUBSCRIBE_SECRET (>= 32 chars) the dispatcher
-      # stays unwired and campaign start fails loudly with 503.
-      SALES_CAMPAIGN_FROM_EMAIL: ${SALES_CAMPAIGN_FROM_EMAIL:-}
+      # stays unwired, the outbound action worker refuses to start, and the
+      # outreach command is refused with the named reason (it must never
+      # accept work no worker can execute). The default below is a real dev
+      # sender so `docker compose up` runs the worker (dogfood 2026-10-06:
+      # the empty default parked every environment's sales work forever).
+      SALES_CAMPAIGN_FROM_EMAIL: ${SALES_CAMPAIGN_FROM_EMAIL:-sales@apexmail.ee}
       SALES_CAMPAIGN_FROM_NAME: ${SALES_CAMPAIGN_FROM_NAME:-ApexMail}
       SALES_UNSUBSCRIBE_SECRET: ${SALES_UNSUBSCRIBE_SECRET:-dev-sales-unsubscribe-secret-change-me-0123456789}
       SALES_PUBLIC_BASE_URL: ${SALES_PUBLIC_BASE_URL:-http://localhost:3010}

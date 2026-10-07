@@ -38,14 +38,30 @@ All SDKs should parse the standard ApexMail API error envelope:
 
 ## Cursor Pagination
 
-All SDKs support cursor-based pagination for list endpoints (messages, templates, events, suppressions).
-Every list method accepts a `cursor` parameter that is forwarded as the `cursor` query parameter.
-See each SDK's CHANGELOG for details:
+Only `GET /v1/messages` supports cursor-based pagination. Its response
+envelope carries `meta.hasMore` / `meta.nextCursor`, and the SDKs capture
+that metadata on the list response.
 
-- **Go SDK:** `Cursor` field on `ListEmailsOptions`, `ListTemplatesOptions`, `ListSuppressionsOptions`, `ListEventsOptions`; `Pagination` exposes `Cursor` and `HasMore`
-- **Java SDK:** `cursor` key in the options `Map` of every list method
-- **PHP SDK:** `$options['cursor']` in all list methods; envelope metadata (`has_more`, `next_cursor`) is captured on the client
-- **Python SDK:** `cursor=` keyword argument in all list methods; list models expose `cursor`/`has_more`
-- **Ruby SDK:** `cursor:` keyword argument in all list methods
+The other list endpoints (templates, suppressions, events, API keys) do NOT
+accept a `cursor` query parameter — their server query structs are
+`deny_unknown_fields` without one, and sending it produces a plain-text
+HTTP 400 (`Failed to deserialize query string …`). Every SDK therefore
+implements the following contract:
+
+- **Go SDK:** `Cursor` on `ListEmailsOptions` is forwarded; the
+  `ListTemplatesOptions`/`ListSuppressionsOptions`/`ListEventsOptions`/
+  `ListAPIKeysOptions` `Cursor` fields are rejected client-side with an
+  error naming the endpoint. `ListEmailsResponse.Pagination` exposes the
+  captured `Cursor`/`HasMore` (plus `NextCursor()`/`HasMore()` accessors).
+- **Java SDK:** the messages list options `Map` forwards `cursor`; the other
+  list methods throw when a `cursor` key is passed.
+- **PHP SDK:** `$options['cursor']` is forwarded on messages only; the other
+  list methods throw an `InvalidArgumentException` for `cursor`, and the
+  messages envelope metadata (`has_more`, `next_cursor`) is captured on the
+  client.
+- **Python SDK:** `cursor=` is forwarded on messages only; the other list
+  methods raise for `cursor`, and list models expose `cursor`/`has_more`.
+- **Ruby SDK:** `cursor:` is forwarded on messages only; the other list
+  methods raise `ArgumentError` for `cursor`.
 
 SDK clients should return typed error objects with `Code` and `Message` fields.

@@ -533,6 +533,18 @@ class EmailsResource:
             data = data["email"]
         return Email(**data)
 
+    def send_batch(
+        self,
+        emails: list[dict[str, Any]],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> list[SendEmailResponse]:
+        """Alias of :meth:`batch` under the name documented in
+        docs/api/sdk-reference.md ("emails.send_batch()") — same endpoint
+        (POST /v1/messages/batch), same serialization, same auto idempotency
+        key."""
+        return self.batch(emails, idempotency_key=idempotency_key)
+
     def list(
         self,
         *,
@@ -547,6 +559,11 @@ class EmailsResource:
 
         The server's ListMessagesQuery accepts {limit, offset, cursor,
         status, sort_by} only — other filter parameters are rejected.
+
+        Pagination: the response envelope's ``meta.nextCursor`` becomes
+        ``EmailListResponse.cursor`` and ``meta.hasMore`` becomes
+        ``has_more``; pass ``cursor=response.cursor`` to fetch the next page
+        (the cursor is only valid with the default created_at sort).
         """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if cursor is not None:
@@ -556,8 +573,14 @@ class EmailsResource:
         if sort_by:
             params["sort_by"] = sort_by
 
-        data = self._client._request("GET", "/v1/messages", params=params)
-        return EmailListResponse(**data)
+        data, meta = self._client._request(
+            "GET", "/v1/messages", params=params, with_meta=True
+        )
+        meta = meta or {}
+        emails = data if isinstance(data, list) else (data or {}).get("emails", [])
+        next_cursor = meta.get("nextCursor") or meta.get("next_cursor")
+        has_more = bool(meta.get("hasMore", meta.get("has_more", False)))
+        return EmailListResponse(emails=emails, cursor=next_cursor, has_more=has_more)
 
     def cancel(self, email_id: str) -> dict[str, Any]:
         """
@@ -696,6 +719,16 @@ class AsyncEmailsResource:
             data = data["email"]
         return Email(**data)
 
+    async def send_batch(
+        self,
+        emails: list[dict[str, Any]],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> list[SendEmailResponse]:
+        """Alias of :meth:`batch` under the documented
+        ``emails.send_batch()`` name (docs/api/sdk-reference.md)."""
+        return await self.batch(emails, idempotency_key=idempotency_key)
+
     async def list(
         self,
         *,
@@ -705,7 +738,11 @@ class AsyncEmailsResource:
         status: Optional[Union[str, EmailStatus]] = None,
         sort_by: Optional[str] = None,
     ) -> EmailListResponse:
-        """List emails with optional filters asynchronously."""
+        """List emails with optional filters asynchronously.
+
+        Pagination metadata from the response envelope (meta.nextCursor /
+        meta.hasMore) is surfaced on the returned EmailListResponse.
+        """
         params: dict[str, Any] = {"limit": limit, "offset": offset}
         if cursor is not None:
             params["cursor"] = cursor
@@ -714,8 +751,14 @@ class AsyncEmailsResource:
         if sort_by:
             params["sort_by"] = sort_by
 
-        data = await self._client._request("GET", "/v1/messages", params=params)
-        return EmailListResponse(**data)
+        data, meta = await self._client._request(
+            "GET", "/v1/messages", params=params, with_meta=True
+        )
+        meta = meta or {}
+        emails = data if isinstance(data, list) else (data or {}).get("emails", [])
+        next_cursor = meta.get("nextCursor") or meta.get("next_cursor")
+        has_more = bool(meta.get("hasMore", meta.get("has_more", False)))
+        return EmailListResponse(emails=emails, cursor=next_cursor, has_more=has_more)
 
     async def cancel(self, email_id: str) -> dict[str, Any]:
         """Cancel a scheduled email asynchronously ({id, status, created_at})."""

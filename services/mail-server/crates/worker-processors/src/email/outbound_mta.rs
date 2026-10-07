@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mail_send::mail_auth::common::headers::HeaderWriter;
-use outbound_mta::ledger::{PgLedger, RelayLedger};
+use outbound_mta::ledger::{PgLedger, QueuedSubmission, RelayLedger};
 use outbound_mta::mx::DnsMxResolver;
 use outbound_mta::relay::RelayError;
 use outbound_mta::{AcceptanceRecord, Relay, RelayConfig, SubmitRequest};
@@ -65,6 +65,18 @@ pub trait RelaySubmitter: Send + Sync {
     /// a second copy.
     async fn submit(&self, request: SubmitRequest) -> Result<AcceptanceRecord, RelayError>;
 
+    /// Read the durable ledger row for `send_unit` WITHOUT submitting.
+    ///
+    /// The transport observes this before every submission so a worker retry
+    /// never rebuilds and resubmits MIME that the relay already holds. The
+    /// worker re-renders with a fresh `Date`, MIME boundary and tracking-token
+    /// IVs on each attempt, so the relay's byte-contract fingerprint of a
+    /// rebuilt submission differs from the stored one — resubmitting it is
+    /// what used to terminalize the queue row as a false "idempotency
+    /// conflict" while the relay ledger stayed `pending` (dogfood finding
+    /// 2026-10-06 P1 split-brain).
+    async fn get(&self, send_unit: &str) -> Result<Option<QueuedSubmission>, RelayError>;
+
     /// Readiness probe: the durable acceptance ledger must be reachable, or
     /// no submission can be recorded exactly once.
     async fn ready(&self) -> Result<(), String>;
@@ -74,6 +86,10 @@ pub trait RelaySubmitter: Send + Sync {
 impl RelaySubmitter for Relay {
     async fn submit(&self, request: SubmitRequest) -> Result<AcceptanceRecord, RelayError> {
         Relay::submit(self, request).await
+    }
+
+    async fn get(&self, send_unit: &str) -> Result<Option<QueuedSubmission>, RelayError> {
+        Relay::get(self, send_unit).await
     }
 
     async fn ready(&self) -> Result<(), String> {
@@ -207,10 +223,15 @@ impl OutboundMtaTransport {
 ///   remote diagnostics the relay folded into `reason` still decide
 ///   suppression through the existing address-proving rule: a 5.1.x /
 ///   "user unknown" diagnostic suppresses, a policy refusal does not;
-/// * everything else (in-flight, already queued, retry scheduled, ledger
-///   unavailable) stays an UNCLASSIFIED transport error: the processor
-///   retries with backoff, and the MTA ledger's idempotency makes the retry
-///   safe (a stored acceptance is returned, never a second delivery).
+/// * the relay's durable-queue outcomes (`RetryScheduled`, `AlreadyQueued`,
+///   `InFlight`) mean the relay HAS the message and owns the retry/DSN
+///   ladder. They map to [`ProcessorError::RelayDeliveryPending`] so the
+///   processor DEFERS the queue row (no attempt consumed, no dead-letter)
+///   instead of racing the relay's ladder with its own and failing a message
+///   the relay may still deliver;
+/// * everything else (ledger unavailable, delivery errors) stays an
+///   UNCLASSIFIED transport error: the processor retries with backoff, and
+///   the MTA ledger's idempotency makes the retry safe.
 fn map_relay_error(error: RelayError) -> ProcessorError {
     match error {
         RelayError::Permanent { reason, .. } => ProcessorError::Smtp {
@@ -218,7 +239,63 @@ fn map_relay_error(error: RelayError) -> ProcessorError {
             enhanced: None,
             message: format!("outbound MTA permanent delivery failure: {reason}"),
         },
+        pending @ (RelayError::RetryScheduled { .. }
+        | RelayError::AlreadyQueued { .. }
+        | RelayError::InFlight { .. }) => ProcessorError::RelayDeliveryPending(pending.to_string()),
         other => ProcessorError::Transport(format!("outbound MTA submission failed: {other}")),
+    }
+}
+
+/// The processor receipt for one verified acceptance record.
+fn receipt_from_record(record: &AcceptanceRecord) -> DeliveryReceipt {
+    DeliveryReceipt {
+        transport: TransportType::Smtp,
+        transport_message_id: None,
+        // The verified bound IP from the acceptance record — the ONLY
+        // evidence that lets the processor consume warmup capacity.
+        actual_source_ip: record.actual_source_ip,
+        // The relay resolved the recipient MX but the mailbox provider
+        // mapping is a separate concern; unknown stays None and is never
+        // inferred from the visible domain.
+        recipient_provider: None,
+        provider_source: None,
+    }
+}
+
+/// The outcome of a ledger row the relay already holds, WITHOUT submitting
+/// anything: accepted rows verify and return their stored acceptance; a
+/// terminal failure keeps its 5xx shape; every non-terminal state defers.
+fn outcome_for_stored_row(
+    route: &DeliveryRoute,
+    send_unit: &str,
+    row: QueuedSubmission,
+) -> ProcessorResult<DeliveryReceipt> {
+    match row.state.as_str() {
+        "accepted" => {
+            let record = row.acceptance.ok_or_else(|| {
+                ProcessorError::SourceBindingUnverified(format!(
+                    "outbound MTA ledger row for '{send_unit}' is accepted but carries no \
+                     acceptance record — refusing to treat it as delivered"
+                ))
+            })?;
+            verify_acceptance_record(route, send_unit, &record)?;
+            Ok(receipt_from_record(&record))
+        }
+        "failed" => Err(ProcessorError::Smtp {
+            code: 554,
+            enhanced: None,
+            message: format!(
+                "outbound MTA permanent delivery failure: {}",
+                row.last_error
+                    .unwrap_or_else(|| "terminal relay failure".to_string())
+            ),
+        }),
+        state => Err(ProcessorError::RelayDeliveryPending(format!(
+            "outbound MTA already holds send unit '{send_unit}' in state '{state}' \
+             (attempt {}, next attempt {}) — the relay owns the delivery ladder; refusing to \
+             resubmit rebuilt bytes under the same idempotency key",
+            row.attempt, row.next_attempt_at
+        ))),
     }
 }
 
@@ -290,6 +367,36 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
     ) -> ProcessorResult<DeliveryReceipt> {
         // Defense in depth: the dispatch layer already routes by route, but
         // the MTA path must never carry shared-pool mail.
+        if !matches!(route, DeliveryRoute::Dedicated { .. }) {
+            return Err(ProcessorError::Transport(format!(
+                "the outbound MTA transport only carries the dedicated delivery route; \
+                 route {route} belongs to the shared SES pool — refusing before submission"
+            )));
+        }
+        let send_unit = email.send_unit.trim();
+        if send_unit.is_empty() {
+            return Err(ProcessorError::Config(
+                "the outbound MTA transport requires the stable send unit \
+                 (PreparedEmail::send_unit) for idempotent acceptance"
+                    .into(),
+            ));
+        }
+
+        // ── Observe the relay's durable row BEFORE rebuilding anything ─────
+        // A worker retry rebuilds the MIME with a fresh `Date`, MIME boundary
+        // and tracking-token IVs. Resubmitting those bytes under the same
+        // send_unit made the relay's byte-contract fingerprint mismatch: the
+        // queue row terminalized `failed` ("idempotency conflict") while the
+        // relay ledger stayed `pending` and could still deliver (dogfood
+        // finding 2026-10-06 P1 split-brain). Whenever the relay already
+        // holds the unit, report its stored outcome — accepted rows verify
+        // and return their stored acceptance; non-terminal rows DEFER.
+        match self.relay.get(send_unit).await {
+            Ok(Some(row)) => return outcome_for_stored_row(route, send_unit, row),
+            Ok(None) => {}
+            Err(error) => return Err(map_relay_error(error)),
+        }
+
         let request = self.build_request(email, route)?;
         let expected_send_unit = request.send_unit.clone();
         let record = self.relay.submit(request).await.map_err(map_relay_error)?;
@@ -301,18 +408,7 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
             remote_mx = ?record.remote_mx,
             "outbound MTA accepted the dedicated send with a verified source binding"
         );
-        Ok(DeliveryReceipt {
-            transport: TransportType::Smtp,
-            transport_message_id: None,
-            // The verified bound IP from the acceptance record — the ONLY
-            // evidence that lets the processor consume warmup capacity.
-            actual_source_ip: record.actual_source_ip,
-            // The relay resolved the recipient MX but the mailbox provider
-            // mapping is a separate concern; unknown stays None and is never
-            // inferred from the visible domain.
-            recipient_provider: None,
-            provider_source: None,
-        })
+        Ok(receipt_from_record(&record))
     }
 
     async fn close(&self) -> ProcessorResult<()> {
@@ -389,6 +485,9 @@ mod tests {
         calls: AtomicUsize,
         last_request: Mutex<Option<SubmitRequest>>,
         record: AcceptanceRecord,
+        /// Optional stored ledger row the transport observes before submitting
+        /// (the real relay holds one after the first submission).
+        stored: Mutex<Option<QueuedSubmission>>,
     }
 
     impl ScriptedRelay {
@@ -397,6 +496,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 last_request: Mutex::new(None),
                 record,
+                stored: Mutex::new(None),
             }
         }
 
@@ -409,6 +509,13 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
+        }
+
+        fn set_stored(&self, row: QueuedSubmission) {
+            *self
+                .stored
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(row);
         }
     }
 
@@ -423,8 +530,44 @@ mod tests {
             Ok(self.record.clone())
         }
 
+        async fn get(&self, _send_unit: &str) -> Result<Option<QueuedSubmission>, RelayError> {
+            Ok(self
+                .stored
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone())
+        }
+
         async fn ready(&self) -> Result<(), String> {
             Ok(())
+        }
+    }
+
+    /// A stored ledger row in the given state (the shape `Relay::get`
+    /// returns).
+    fn stored_row(state: &str, acceptance: Option<AcceptanceRecord>) -> QueuedSubmission {
+        QueuedSubmission {
+            send_unit: "email_queue:job-1:user@example.com".into(),
+            tenant_id: Some("tenant-1".into()),
+            queue_id: None,
+            request_fingerprint: Some("stored-fingerprint".into()),
+            state: state.into(),
+            envelope_from: Some("bounces+token@bounces.apexmail.ee".into()),
+            recipients: vec!["user@example.com".into()],
+            message: b"From: sender@apexmail.ee\r\n\r\nbody".to_vec(),
+            requested_source_ip: Some("127.0.0.1".parse().expect("test IP")),
+            actual_source_ip: acceptance
+                .as_ref()
+                .and_then(|record| record.actual_source_ip),
+            remote_mx: Some("mx.example.com".into()),
+            tls_used: false,
+            attempt: 1,
+            max_attempts: 12,
+            next_attempt_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            lease_until: None,
+            acceptance,
+            last_error: None,
+            created_at: chrono::Utc::now(),
         }
     }
 
@@ -780,6 +923,9 @@ mod tests {
             ) -> Result<AcceptanceRecord, RelayError> {
                 Err(RelayError::Delivery("relay down".into()))
             }
+            async fn get(&self, _send_unit: &str) -> Result<Option<QueuedSubmission>, RelayError> {
+                Err(RelayError::Delivery("relay down".into()))
+            }
             async fn ready(&self) -> Result<(), String> {
                 Err("ledger unreachable".into())
             }
@@ -803,6 +949,185 @@ mod tests {
             "error: {error}"
         );
         transport.close().await.expect("close is a no-op");
+    }
+
+    /// A stored terminal relay failure keeps its 5xx refusal shape (and its
+    /// address-proving classification) — observed from the ledger without
+    /// resubmitting the message.
+    #[tokio::test]
+    async fn stored_terminal_failure_maps_to_a_5xx_refusal_without_resubmitting() {
+        let scripted = Arc::new(ScriptedRelay::new(record(
+            "accepted",
+            Some("127.0.0.1"),
+            Some("127.0.0.1"),
+        )));
+        let mut row = stored_row("failed", None);
+        row.last_error = Some("5.1.1 user unknown".into());
+        scripted.set_stored(row);
+        let transport = OutboundMtaTransport::new(scripted.clone());
+
+        let error = transport
+            .send(&email(), &dedicated_route())
+            .await
+            .expect_err("a stored terminal failure is surfaced");
+        assert!(
+            matches!(error, ProcessorError::Smtp { code: 554, .. }),
+            "got {error:?}"
+        );
+        assert!(
+            crate::email::processor::is_recipient_invalid(&error),
+            "a 5.1.1 diagnostic stays address-proving"
+        );
+        assert_eq!(
+            scripted.calls(),
+            0,
+            "observing a stored failure must never resubmit"
+        );
+    }
+
+    /// Regression (dogfood 2026-10-06, P1 split-brain): a worker retry after a
+    /// transient relay failure must NOT resubmit rebuilt bytes. The relay's
+    /// ledger already holds the message (its own retry ladder will deliver or
+    /// DSN it); the transport observes the stored row, reports
+    /// `RelayDeliveryPending` (the processor defers instead of failing the
+    /// queue row), and once the relay accepts, the stored acceptance is
+    /// returned — exactly one delivery, both sides agreeing on the outcome.
+    #[tokio::test]
+    async fn retry_after_a_transient_failure_defers_and_never_resubmits_rebuilt_bytes() {
+        use std::sync::atomic::AtomicBool;
+
+        /// A relay double whose ledger behaves like the real one: the first
+        /// submission is durably queued but delivers transiently; every later
+        /// submission of a DIFFERENT contract is a typed ledger conflict —
+        /// exactly what a rebuilt retry hit before the fix.
+        struct FlakyRelay {
+            submits: AtomicUsize,
+            stored: Mutex<Option<QueuedSubmission>>,
+            delivered: AtomicBool,
+        }
+        impl FlakyRelay {
+            fn new() -> Self {
+                Self {
+                    submits: AtomicUsize::new(0),
+                    stored: Mutex::new(None),
+                    delivered: AtomicBool::new(false),
+                }
+            }
+        }
+        #[async_trait]
+        impl RelaySubmitter for FlakyRelay {
+            async fn submit(&self, request: SubmitRequest) -> Result<AcceptanceRecord, RelayError> {
+                let n = self.submits.fetch_add(1, Ordering::SeqCst);
+                if self.delivered.load(Ordering::SeqCst) {
+                    return Ok(record("accepted", Some("127.0.0.1"), Some("127.0.0.1")));
+                }
+                *self
+                    .stored
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some(stored_row("pending", None));
+                if n == 0 {
+                    // The inline attempt's transient failure: the relay
+                    // records the retry on its own durable ladder.
+                    Err(RelayError::RetryScheduled {
+                        send_unit: request.send_unit,
+                        attempt: 1,
+                        next_attempt_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                        reason: "connection to mx.example.com timed out".into(),
+                    })
+                } else {
+                    // A rebuilt resubmission under the same send_unit: the
+                    // stored contract no longer matches the incoming bytes.
+                    Err(RelayError::Ledger(
+                        outbound_mta::ledger::LedgerError::Corrupt {
+                            send_unit: request.send_unit,
+                            message: "idempotency conflict: send_unit reused with a different \
+                                  delivery contract — reconcile against the existing row"
+                                .into(),
+                        },
+                    ))
+                }
+            }
+
+            async fn get(&self, _send_unit: &str) -> Result<Option<QueuedSubmission>, RelayError> {
+                Ok(self
+                    .stored
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone())
+            }
+
+            async fn ready(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let relay = Arc::new(FlakyRelay::new());
+        let transport = OutboundMtaTransport::new(relay.clone());
+        let route = dedicated_route();
+
+        // Attempt 1: the relay durably queues the message, then its inline
+        // delivery fails transiently.
+        let error = transport
+            .send(&email(), &route)
+            .await
+            .expect_err("a transient relay failure is not acceptance");
+        assert!(
+            matches!(error, ProcessorError::RelayDeliveryPending(_)),
+            "the relay's recorded retry must map to a DEFERRAL, got {error:?}"
+        );
+
+        // Attempt 2: the worker rebuilds the message (fresh Date/boundary/IVs)
+        // and retries. The transport must observe the stored row instead of
+        // resubmitting the rebuilt bytes.
+        let error = transport
+            .send(&email(), &route)
+            .await
+            .expect_err("the relay still holds the send — the worker defers");
+        assert!(
+            matches!(error, ProcessorError::RelayDeliveryPending(_)),
+            "a retry while the relay holds the row must defer, got {error:?}"
+        );
+        assert_eq!(
+            relay.submits.load(Ordering::SeqCst),
+            1,
+            "the rebuilt message must NEVER be resubmitted under the same send_unit"
+        );
+
+        // The relay's own ladder delivers; the next worker attempt observes
+        // the stored acceptance (one delivery, no resubmission).
+        relay.delivered.store(true, Ordering::SeqCst);
+        {
+            let mut stored = relay
+                .stored
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *stored = Some(stored_row(
+                "accepted",
+                Some(record("accepted", Some("127.0.0.1"), Some("127.0.0.1"))),
+            ));
+        }
+        let receipt = transport
+            .send(&email(), &route)
+            .await
+            .expect("the stored acceptance is returned after the relay delivers");
+        assert_eq!(
+            receipt.actual_source_ip,
+            Some("127.0.0.1".parse().expect("test IP")),
+            "the verified bound IP comes from the STORED acceptance"
+        );
+        assert_eq!(
+            relay.submits.load(Ordering::SeqCst),
+            1,
+            "observing the stored acceptance must not submit again"
+        );
+        assert_eq!(
+            crate::email::processor::classify_send_failure(&ProcessorError::RelayDeliveryPending(
+                "pending".into()
+            )),
+            crate::email::processor::SendFailureClass::Unknown,
+            "a deferral is not a bounce class"
+        );
     }
 
     /// Regression guard for the pre-DATA refusal: a dedicated route whose

@@ -1,6 +1,6 @@
 # Glossary
 
-A comprehensive reference of email industry terms, security standards, and ApexMail-specific concepts.
+A reference of email industry terms, security standards, and ApexMail-specific concepts.
 
 ---
 
@@ -176,7 +176,7 @@ A feature that analyzes each contact's historical engagement patterns (opens, cl
 
 ### RFM (Recency, Frequency, Monetary)
 
-A customer segmentation model based on three dimensions: how **recently** a contact engaged (Recency), how **often** they engage (Frequency), and how much **value** they represent (Monetary). In ApexMail, RFM analysis feeds into contact scoring and segmentation.
+A customer segmentation model based on three dimensions: how **recently** a contact engaged (Recency), how **often** they engage (Frequency), and how much value they represent (Monetary). In ApexMail, RFM analysis feeds into contact scoring and segmentation.
 
 ---
 

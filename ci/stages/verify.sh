@@ -29,7 +29,8 @@ set -eu
 VERIFY_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
                  observability marketing status-server billing-service sales-autopilot
                  compliance analytics-worker pdf-renderer ai-service
-                 postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                 postgres-backup clickhouse-backup redis-backup analytics-backup
+                 nginx certbot postgres redis clickhouse
                  prometheus grafana loki alertmanager tempo otel-collector
                  node-exporter blackbox-exporter postgres-exporter redis-exporter
                  clickhouse-exporter synthetic-monitor"
@@ -283,34 +284,63 @@ verify_remote_only() {
 # rollback; canonical stack services must ALL exist or the rollback aborts).
 EXTRA_ROLLBACK_IMAGES="${EXTRA_ROLLBACK_IMAGES:-}"
 
+# image_repo_for_key <compose-service-key> — the image repository behind a
+# compose key; mirror of image_compose_key() in ci/stages/images.sh (the one
+# divergence: image `tracking-service` ↔ compose key `tracking`). The old
+# rollback loop inspected `$_rb_ns/tracking:<sha>` — an image that never
+# exists (the pipeline tags tracking-service) — so the tracking service was
+# silently left on the NEW image while the rollback claimed success (audit P1).
+image_repo_for_key() {
+    case "$1" in
+        tracking) printf 'tracking-service' ;;
+        *)        printf '%s' "$1" ;;
+    esac
+}
+
 # Rollback to the previously deployed :<sha> pins when the rollout probes
 # fail (CI_ROLLBACK_ON_VERIFY_FAIL, default 1). Migrations are NOT reverted —
 # they are additive/compatible by the migration gate's design; this restores
 # the previous APPLICATION images only.
+#
+# Trigger source (audit P1): the deploy stage records the PREVIOUSLY VERIFIED
+# sha in $RUN_DIR/pre-deploy-sha BEFORE it brings the new images up.
+# `.last-deployed-sha` is only advanced by this stage on a green verify, so it
+# is the fallback for partial `--stages verify` runs (e.g. re-verifying after
+# an interrupted deploy) and equally names a verified rollout.
 rollback_to_previous_sha() {
     [ "${CI_ROLLBACK_ON_VERIFY_FAIL:-1}" = 1 ] || { ci_warn "auto-rollback disabled (CI_ROLLBACK_ON_VERIFY_FAIL=0)"; return 0; }
     _rb_sha=""
-    [ -f "$CI_ROOT/.last-deployed-sha" ] && _rb_sha=$(cat "$CI_ROOT/.last-deployed-sha" 2>/dev/null)
+    if [ -n "${RUN_DIR:-}" ] && [ -s "$RUN_DIR/pre-deploy-sha" ]; then
+        _rb_sha=$(tr -d '[:space:]' <"$RUN_DIR/pre-deploy-sha" 2>/dev/null || true)
+    fi
+    if [ -z "$_rb_sha" ] && [ -f "$CI_ROOT/.last-deployed-sha" ]; then
+        _rb_sha=$(tr -d '[:space:]' <"$CI_ROOT/.last-deployed-sha" 2>/dev/null || true)
+    fi
     if [ -z "$_rb_sha" ] || [ "$_rb_sha" = "${CI_SHA:-}" ]; then
-        ci_warn "no previous deployed sha to roll back to — leaving the current rollout in place"
+        ci_warn "no previous VERIFIED sha to roll back to — leaving the current rollout in place"
         return 0
     fi
     ci_err "verify FAILED — rolling back to previously deployed images :$_rb_sha"
     _rb_ns=${GHCR_NS:-ghcr.io/sbelakho2/apexmail}
     _rb_missing=0
     for _svc in $STACK_SERVICES; do
-        if docker image inspect "$_rb_ns/$_svc:$_rb_sha" >/dev/null 2>&1; then
-            docker tag "$_rb_ns/$_svc:$_rb_sha" "$_rb_ns/$_svc:latest" >/dev/null 2>&1 \
-                || { ci_warn "retag failed for $_svc"; _rb_missing=1; }
+        _rb_img=$(image_repo_for_key "$_svc")
+        if docker image inspect "$_rb_ns/$_rb_img:$_rb_sha" >/dev/null 2>&1; then
+            docker tag "$_rb_ns/$_rb_img:$_rb_sha" "$_rb_ns/$_rb_img:latest" >/dev/null 2>&1 \
+                || { ci_err "retag failed for $_rb_img"; _rb_missing=1; }
         else
-            # Extra images (migrator etc.) may legitimately not exist per sha.
+            # Policy (comment above, audit P1 — the branch was inverted): only
+            # names in EXTRA_ROLLBACK_IMAGES may be absent; a missing CANONICAL
+            # image aborts the rollback (a silently retagged subset = the
+            # mixed-version stack the abort exists to prevent).
             case " $EXTRA_ROLLBACK_IMAGES " in
-                *" $_svc "*) ci_warn "image $_svc:$_rb_sha missing — not rolled back"; _rb_missing=1 ;;
+                *" $_svc "*) ci_warn "optional image $_rb_img:$_rb_sha missing — continuing" ;;
+                *) ci_err "canonical image $_rb_img:$_rb_sha missing — rollback cannot restore $_svc" ; _rb_missing=1 ;;
             esac
         fi
     done
     if [ "$_rb_missing" = 1 ]; then
-        ci_warn "rollback incomplete for at least one service — keeping current stack (mixed versions are worse than a known-bad one with containers up)"
+        ci_err "ROLLBACK ABORTED: at least one canonical image of :$_rb_sha is missing — keeping the current stack (a partial retag would be a mixed-version stack)"
         return 0
     fi
     if compose up -d --remove-orphans $STACK_SERVICES >>"$CI_STAGE_LOG" 2>&1; then
@@ -352,8 +382,32 @@ stage_main() {
         return "$CI_EXIT_FAIL"
     fi
 
+    # Advance .last-deployed-sha only NOW: the rollout has passed every probe,
+    # so the file always names a VERIFIED sha (audit P1 — the deploy stage used
+    # to write the unverified NEW sha before this stage ran, which killed the
+    # rollback trigger and made the filename a lie). Only the sha THIS run
+    # brought up is promoted (deployed-sha is written by the deploy stage), so
+    # a partial `--stages verify` run can never bless an undeployed sha.
+    if [ -n "${RUN_DIR:-}" ] && [ -s "$RUN_DIR/deployed-sha" ]; then
+        _vd_sha=$(tr -d '[:space:]' <"$RUN_DIR/deployed-sha" 2>/dev/null || true)
+        if [ -n "$_vd_sha" ]; then
+            printf '%s\n' "$_vd_sha" >"$CI_ROOT/.last-deployed-sha"
+            ci_info "recorded $_vd_sha as the last VERIFIED deployed sha ($CI_ROOT/.last-deployed-sha)"
+        fi
+    else
+        ci_info "no deployed-sha in this run (verify-only run) — .last-deployed-sha left unchanged"
+    fi
+
     ci_info "verify: rollout verified — services healthy, endpoints and SMTP answering"
     return "$CI_EXIT_OK"
 }
+
+# Test hook (ci/tests/rollback-selftest.sh): exercise rollback_to_previous_sha
+# against a synthetic image set + stub docker — no infrastructure, no
+# production access. Never part of a real run: gated on an explicit env flag.
+if [ "${CI_VERIFY_ROLLBACK_SELFTEST:-0}" = 1 ]; then
+    rollback_to_previous_sha
+    exit "$CI_EXIT_OK"
+fi
 
 stage_main

@@ -6,27 +6,32 @@ read-optimized records reconciled from verified Stripe webhooks.
 
 ## Catalog boundary
 
-The active ApexMail catalog is defined by
-[the billing plan seeds](../../services/mail-server/crates/billing-service/src/plans.rs)
-and persisted in the `plans` table. Each active plan may have a monthly and/or
-annual Stripe price ID.
+The active ApexMail catalog is defined by the canonical
+[platform catalog](../../services/mail-server/crates/platform-catalog/src/lib.rs)
+(`PLANS`), seeded into the `plans` table by
+[the billing service seeds](../../services/mail-server/crates/billing-service/src/plans.rs).
+Each active plan may have a monthly and/or annual Stripe price ID.
 
-All prices are EUR:
+All prices are EUR (the 2026-09-08 pricing review):
 
-| Plan | Monthly | Annual | Public generic Checkout |
-|---|---:|---:|---|
-| Free | €0 | €0 | No — initial entitlement |
-| Starter | €25 | €250/year | Yes |
-| Pro | €65 | €650/year | Yes |
-| Growth | €150 | €1,500/year | Yes |
-| Scale | €350 | €3,500/year | Yes |
-| Enterprise | €3,000 | €30,000/year | No — sales and contract flow |
-| PAYG | Usage priced | Usage priced | No — approved billing setup |
+| Plan | Plan ID | Monthly | Annual | Generic public Checkout |
+|---|---|---:|---:|---|
+| Free | `free` | €0 | €0 | No — initial entitlement |
+| Developer | `starter` | €29 | €290/year | Yes |
+| Pro | `pro` | €89 | €890/year | Yes |
+| Growth | `growth` | €229 | €2,290/year | Yes |
+| Business | `scale` | €699 | €6,990/year | Yes |
+| Enterprise Cloud | `enterprise` | €1,750 | €17,500/year | No — sales and contract flow |
+| Pay As You Go | `payg` | Usage priced | Usage priced | No — approved billing setup |
+
+Annual subscriptions are billed at 10× the monthly price (two months free).
+Free includes 3,000 emails/month forever plus a one-time 30,000-email launch
+allowance for the first 30 days.
 
 The public Checkout endpoint accepts a submitted Stripe price only when it
-maps to an **active** Starter, Pro, Growth, or Scale catalog row. It rejects
-unknown prices and cannot be used to purchase an arbitrary product in the
-Stripe account.
+maps to an **active** self-service catalog row: `starter` (Developer), `pro`
+(Pro), `growth` (Growth), or `scale` (Business). It rejects unknown prices and
+cannot be used to purchase an arbitrary product in the Stripe account.
 
 ## Checkout and portal flow
 

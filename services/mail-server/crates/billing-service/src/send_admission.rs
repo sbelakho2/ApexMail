@@ -18,6 +18,12 @@
 //!    query ([`suppressed_recipients_in_db`]) shared with the REST validation
 //!    path; the SMTP caller lets admission drop suppressed recipients before
 //!    queueing, the REST caller validates them up front.
+//! 2b. **consent** (F4) — every non-transactional (marketing/other) recipient
+//!    is checked against the canonical consent records through
+//!    `compliance::consent_enforcement::ConsentEnforcer`. A marketing send
+//!    without an active consent record is refused with the enforcer's named
+//!    reason; transactional/service sends keep their existing contract
+//!    (suppression + quota). The consent store failing fails CLOSED.
 //! 3. **entitlement + quota** — the plan gate and the `EmailsSent`
 //!    reservation through the canonical
 //!    [`crate::usage::record_with_quota_check`], keyed by the deterministic
@@ -62,6 +68,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use apexmail_lib::email_headers::message_category;
+use compliance::consent_enforcement::{ConsentEnforcer, SendDecision};
 
 use crate::types::MeterEventType;
 use crate::usage::{self, QuotaRecordResult, UsageError};
@@ -186,6 +193,18 @@ pub enum SendAdmissionError {
     /// or unscreened.
     #[error("suppression lookup unavailable: {0}")]
     SuppressionUnavailable(String),
+
+    /// F4: the send-time consent gate refused a non-transactional
+    /// (marketing) recipient — no active consent record, revoked, expired,
+    /// or an unconfirmed double opt-in. Carries the recipient and the
+    /// enforcer's named reason.
+    #[error("marketing consent required for {email}: {reason}")]
+    ConsentRefused { email: String, reason: String },
+
+    /// F4: the consent store was unavailable — fail closed, never send
+    /// marketing mail without a completed consent check.
+    #[error("consent lookup unavailable: {0}")]
+    ConsentUnavailable(String),
 }
 
 /// The metering layer this service orchestrates.
@@ -223,6 +242,23 @@ pub trait SendAdmissionBackend: Send + Sync + 'static {
         tenant_id: &str,
         canonical_recipients: &[String],
     ) -> Result<Vec<String>, String>;
+
+    /// F4: the send-time consent decision for one canonical recipient.
+    ///
+    /// The production backend consults the canonical consent records via
+    /// `compliance::consent_enforcement::ConsentEnforcer`. The default
+    /// implementation allows, so test/in-memory backends that do not model
+    /// consent keep their previous contract; a backend that DOES enforce
+    /// must never return `Allowed` when the consent store is unreadable
+    /// (return `Err` — the service fails closed).
+    async fn consent_decision(
+        &self,
+        _tenant_id: &str,
+        _email: &str,
+        _is_transactional: bool,
+    ) -> Result<SendDecision, String> {
+        Ok(SendDecision::Allowed)
+    }
 }
 
 /// Production backend over the canonical billing storage.
@@ -285,6 +321,22 @@ impl SendAdmissionBackend for PostgresAdmissionBackend {
         suppressed_recipients_in_db(&self.db, tenant_id, canonical_recipients)
             .await
             .map_err(|error| error.to_string())
+    }
+
+    async fn consent_decision(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        is_transactional: bool,
+    ) -> Result<SendDecision, String> {
+        // The canonical send-time enforcer (F4): it consults
+        // `consent_records` + `double_opt_in_tokens` and returns the named
+        // block/confirmation reason. Transactional sends bypass consent on
+        // the enforcer's legitimate-interest path; marketing sends require
+        // an active marketing consent record.
+        ConsentEnforcer::new(self.db.clone())
+            .check_send_allowed_with_transactional(tenant_id, email, &[], is_transactional, &[], "")
+            .await
     }
 }
 
@@ -457,6 +509,48 @@ impl SendAdmissionService {
             .map_err(SendAdmissionError::SuppressionUnavailable)
     }
 
+    /// F4: enforce the send-time consent gate for an explicit recipient
+    /// list.
+    ///
+    /// `category` must already be normalized (see [`normalize_category`]).
+    /// Transactional/service categories are preference-exempt and keep
+    /// their existing contract; every other category is a marketing-class
+    /// send whose recipients each need an ACTIVE consent record, or the
+    /// send is refused with the enforcer's named reason. The consent store
+    /// failing fails CLOSED.
+    ///
+    /// Called from [`SendAdmissionService::admit`] for recipient-carrying
+    /// admissions (SMTP submission, campaigns, automations, sales dispatch)
+    /// and directly by the REST send path, whose admission carries only a
+    /// quantity.
+    pub async fn enforce_consent(
+        &self,
+        tenant_id: &str,
+        recipients: &[String],
+        category: &str,
+    ) -> Result<(), SendAdmissionError> {
+        if message_category::is_preference_exempt(category) {
+            return Ok(());
+        }
+
+        for recipient in recipients {
+            let email = canonical_recipient(recipient);
+            match self
+                .backend
+                .consent_decision(tenant_id, &email, false)
+                .await
+            {
+                Ok(SendDecision::Allowed) => {}
+                Ok(SendDecision::Blocked(reason))
+                | Ok(SendDecision::RequiresConfirmation(reason)) => {
+                    return Err(SendAdmissionError::ConsentRefused { email, reason });
+                }
+                Err(error) => return Err(SendAdmissionError::ConsentUnavailable(error)),
+            }
+        }
+        Ok(())
+    }
+
     /// The one admission gate: validate the server-owned category, apply the
     /// suppression policy, and reserve `EmailsSent` quota for the tenant's
     /// plan under the caller's idempotency identity.
@@ -498,6 +592,13 @@ impl SendAdmissionService {
                     // that cannot be delivered.
                     return Err(SendAdmissionError::Suppressed(suppressed));
                 }
+
+                // F4: consent gate AFTER suppression (only recipients that
+                // would actually be queued are checked) and BEFORE any
+                // quota reservation (a refused marketing send consumes
+                // nothing).
+                self.enforce_consent(request.tenant_id, &allowed, &category)
+                    .await?;
 
                 (allowed.len() as i64, allowed, suppressed)
             }
@@ -558,6 +659,12 @@ mod tests {
         used: i64,
         events: HashMap<Uuid, i64>,
         suppressed: std::collections::HashSet<String>,
+        /// F4: consent enforcement is opt-in for the in-memory backend so
+        /// the pre-existing tests keep their (pre-consent) contract; the
+        /// consent tests below enable it explicitly. The production
+        /// backend always consults the canonical consent records.
+        consent_enforced: bool,
+        consented: std::collections::HashSet<String>,
     }
 
     impl FakeBackend {
@@ -579,6 +686,18 @@ mod tests {
                 .lock()
                 .unwrap()
                 .suppressed
+                .insert(email.to_ascii_lowercase());
+        }
+
+        fn enforce_consent(&self) {
+            self.state.lock().unwrap().consent_enforced = true;
+        }
+
+        fn grant_marketing_consent(&self, email: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .consented
                 .insert(email.to_ascii_lowercase());
         }
     }
@@ -647,6 +766,22 @@ mod tests {
             suppressed.sort();
             suppressed.dedup();
             Ok(suppressed)
+        }
+
+        async fn consent_decision(
+            &self,
+            _tenant_id: &str,
+            email: &str,
+            is_transactional: bool,
+        ) -> Result<SendDecision, String> {
+            let state = self.state.lock().unwrap();
+            if is_transactional || !state.consent_enforced || state.consented.contains(email) {
+                Ok(SendDecision::Allowed)
+            } else {
+                Ok(SendDecision::Blocked(
+                    "no marketing consent on file — recipient must opt in".into(),
+                ))
+            }
         }
     }
 
@@ -989,5 +1124,201 @@ mod tests {
             error,
             SendAdmissionError::SuppressionUnavailable(_)
         ));
+    }
+
+    // ── F4: send-time consent enforcement ───────────────────────────
+
+    #[tokio::test]
+    async fn marketing_send_without_consent_is_refused_with_a_named_reason() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+
+        let error = admit_smtp(
+            &service,
+            &recipients(&["NoConsent@Example.com"]),
+            "smtp:<no-consent@example.com>",
+        )
+        .await
+        .unwrap_err();
+
+        match error {
+            SendAdmissionError::ConsentRefused { email, reason } => {
+                assert_eq!(email, "noconsent@example.com", "canonical recipient");
+                assert!(
+                    reason.contains("marketing consent"),
+                    "the refusal carries the enforcer's named reason: {reason}"
+                );
+            }
+            other => panic!("expected ConsentRefused, got {other:?}"),
+        }
+        assert_eq!(
+            backend.used(),
+            0,
+            "a consent-refused marketing send reserves no quota"
+        );
+    }
+
+    #[tokio::test]
+    async fn marketing_send_with_active_consent_is_admitted() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+        backend.grant_marketing_consent("opted-in@example.com");
+
+        let admission = admit_smtp(
+            &service,
+            &recipients(&["Opted-In@Example.com"]),
+            "smtp:<consented@example.com>",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admission.category(), "marketing");
+        assert_eq!(backend.used(), 1, "the consented marketing send is metered");
+    }
+
+    #[tokio::test]
+    async fn one_unconsented_recipient_refuses_the_whole_marketing_send() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+        backend.grant_marketing_consent("ok@example.com");
+
+        let error = admit_smtp(
+            &service,
+            &recipients(&["ok@example.com", "missing@example.com"]),
+            "smtp:<mixed@example.com>",
+        )
+        .await
+        .unwrap_err();
+
+        match error {
+            SendAdmissionError::ConsentRefused { email, .. } => {
+                assert_eq!(email, "missing@example.com")
+            }
+            other => panic!("expected ConsentRefused, got {other:?}"),
+        }
+        assert_eq!(backend.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn transactional_send_keeps_its_existing_contract_without_consent() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+
+        let admission = service
+            .admit(SendAdmissionRequest {
+                tenant_id: TENANT,
+                meter: AdmissionMeter::FilteredRecipients(&recipients(&[
+                    "password-reset@example.com",
+                ])),
+                idempotency_key: Some("smtp:<transactional@example.com>"),
+                idempotency_item: None,
+                category: Some("transactional"),
+            })
+            .await
+            .expect("transactional sends are consent-exempt");
+
+        assert_eq!(admission.category(), "transactional");
+        assert_eq!(
+            backend.used(),
+            1,
+            "transactional sends consume quota exactly as before"
+        );
+
+        // `service` is the second exempt category (platform notices).
+        let notice = service
+            .admit(SendAdmissionRequest {
+                tenant_id: TENANT,
+                meter: AdmissionMeter::FilteredRecipients(&recipients(&["notice@example.com"])),
+                idempotency_key: Some("smtp:<service@example.com>"),
+                idempotency_item: None,
+                category: Some("service"),
+            })
+            .await
+            .expect("service sends are consent-exempt");
+        assert_eq!(notice.category(), "service");
+    }
+
+    /// The REST path's admission carries only a quantity, so the route calls
+    /// [`SendAdmissionService::enforce_consent`] directly with the delivery
+    /// recipient list — the same gate the recipient-carrying admissions use.
+    #[tokio::test]
+    async fn enforce_consent_is_the_shared_gate_for_quantity_admissions() {
+        let (service, backend) = service(10);
+        backend.enforce_consent();
+
+        let recipients = recipients(&["no-consent@example.com"]);
+        let error = service
+            .enforce_consent(TENANT, &recipients, "marketing")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SendAdmissionError::ConsentRefused { .. }));
+
+        // Transactional categories never consult consent.
+        service
+            .enforce_consent(TENANT, &recipients, "transactional")
+            .await
+            .expect("transactional bypass");
+        // Unknown categories are marketing-class: consent required.
+        assert!(service
+            .enforce_consent(TENANT, &recipients, "newsletter")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn consent_store_failure_fails_closed() {
+        struct FailingConsentBackend;
+
+        #[async_trait]
+        impl SendAdmissionBackend for FailingConsentBackend {
+            async fn record_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+            ) -> Result<QuotaRecordResult, UsageError> {
+                panic!("must not reserve when the consent check failed");
+            }
+
+            async fn rollback_send_usage(
+                &self,
+                _tenant_id: &str,
+                _quantity: i64,
+                _event_id: Uuid,
+                _recorded_at: DateTime<Utc>,
+            ) -> Result<(), UsageError> {
+                Ok(())
+            }
+
+            async fn suppressed_recipients(
+                &self,
+                _tenant_id: &str,
+                _canonical_recipients: &[String],
+            ) -> Result<Vec<String>, String> {
+                Ok(Vec::new())
+            }
+
+            async fn consent_decision(
+                &self,
+                _tenant_id: &str,
+                _email: &str,
+                _is_transactional: bool,
+            ) -> Result<SendDecision, String> {
+                Err("consent_records unavailable".to_string())
+            }
+        }
+
+        let service = SendAdmissionService::new(Arc::new(FailingConsentBackend));
+        let error = service
+            .admit(SendAdmissionRequest {
+                tenant_id: TENANT,
+                meter: AdmissionMeter::FilteredRecipients(&recipients(&["a@example.com"])),
+                idempotency_key: Some("smtp:<consent-down>"),
+                idempotency_item: None,
+                category: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SendAdmissionError::ConsentUnavailable(_)));
     }
 }

@@ -30,7 +30,7 @@ RETIRED_NAME_ALLOWLIST = (
     "docs/adr/",
     "docs/audit/",
     "tools/check_outbound_delivery_contract.py",
-    "migrations/",
+    "services/mail-server/migrations/",
 )
 # A path-shaped reference is what actually implies a package that exists
 # ("crates/outbound-queue/src/..."), which is how broken doc links looked.
@@ -45,7 +45,7 @@ def _scan_for_retired_references() -> list[str]:
     files that no longer exist. This gate keeps them from creeping back.
     """
     violations: list[str] = []
-    suffixes = {".md", ".rs", ".toml", ".yml", ".yaml", ".sh", ".py", ".json"}
+    suffixes = {".md", ".rs", ".toml", ".yml", ".yaml", ".sh", ".py", ".json", ".sql"}
     for path in sorted(ROOT.rglob("*")):
         if not path.is_file() or path.suffix not in suffixes:
             continue

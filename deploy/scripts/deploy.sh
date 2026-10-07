@@ -151,6 +151,39 @@ else
     log "Full deploy: all services"
 fi
 
+# fallback_pin_tag <image-ref> — tag a locally-built image with a unique
+# per-run tag and print it (the Step 3.5 pin fallback when the daemon records
+# no repo digest AND no git sha is available — e.g. an rsync'd, non-git deploy
+# dir). Prints nothing and returns non-zero when even tagging fails.
+fallback_pin_tag() {
+    local _fpt_img="$1" _fpt_repo="${1%:latest}" _fpt_tag
+    _fpt_tag="manual-$(date -u '+%Y%m%dT%H%M%S')-$$"
+    docker tag "$_fpt_img" "$_fpt_repo:$_fpt_tag" 2>/dev/null || return 1
+    printf '%s' "$_fpt_tag"
+}
+
+# remove_retired_bare_metal_units — delete ONLY the retired pre-compose
+# systemd units (exact names, no glob). The old
+# `rm -f /etc/systemd/system/apexmail-*.service` also matched the self-hosted
+# pipeline's own units (apexmail-pipeline.service, ...-webhook.service, the
+# TLS-renew restart units): a manual hotfix silently deleted the 5-minute
+# deploy timer and the webhook receiver from disk (audit P1). Runs
+# daemon-reload so systemd drops the removed units immediately.
+# SYSTEMD_UNIT_DIR is a test seam (deploy/tests/deploy-unit-cleanup-selftest.sh).
+remove_retired_bare_metal_units() {
+    local unit_dir="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+    local unit
+    for unit in apexmail-imap apexmail-mta apexmail-status; do
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl disable --now "$unit" 2>/dev/null || true
+        fi
+        rm -f "${unit_dir}/${unit}.service" 2>/dev/null || true
+    done
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload 2>/dev/null || true
+    fi
+}
+
 # ── Step 1: Clean old artifacts ──────────────────────────────────────────────
 step "Step 1: Clean old artifacts"
 
@@ -175,9 +208,9 @@ for name in apexmail-imap apexmail-mta apexmail-mailstore; do
     fi
 done
 
-# Disable stale systemd units
-systemctl disable --now apexmail-imap apexmail-mta apexmail-status 2>/dev/null || true
-rm -f /etc/systemd/system/apexmail-*.service 2>/dev/null || true
+# Disable/remove ONLY the retired bare-metal systemd units (exact names —
+# the glob used to delete the pipeline's own units, audit P1).
+remove_retired_bare_metal_units
 
 log "Cleanup complete."
 
@@ -361,8 +394,22 @@ if ! $NO_BUILD && command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 
             pin="$repo:$GIT_SHA"
             digest="$img_id"
         else
-            warn "no repo digest for $repo and no git SHA — cannot pin; leaving :latest (audit item 5)"
-            continue
+            # Audit P3: on an rsync'd (non-git) deploy dir GIT_SHA is empty
+            # and locally-built images carry no RepoDigests, so neither pin
+            # branch applied and the whole emergency deploy hard-failed at
+            # "release manifest would be empty". Fall back to a unique
+            # locally-generated tag for the freshly built image — never
+            # :latest (mutable) and never :pre-deploy (that is the OLD image
+            # generation, the one a rollback returns to).
+            _fallback_tag="$(fallback_pin_tag "$img")" || _fallback_tag=""
+            if [[ -n "$_fallback_tag" ]]; then
+                pin="$repo:$_fallback_tag"
+                digest="$img_id"
+                warn "no repo digest and no git SHA for $repo — pinned to the locally-generated tag :$_fallback_tag (audit P3 fallback)"
+            else
+                warn "no repo digest, no git SHA and tagging failed for $repo — leaving :latest (audit item 5)"
+                continue
+            fi
         fi
         jq -n --arg service "$svc" --arg repo "$repo" --arg sha "${GIT_SHA:-unknown}" \
               --arg digest "$digest" \
@@ -502,6 +549,15 @@ verify_stack() {
 # recreate the stack (tag-before-upgrade / retag-on-failure, Step 1.5).
 # Migrations are NOT reverted: the migrate gate only ships additive,
 # compatible migrations by design.
+#
+# Override precedence (audit P1): Step 3.5 APPENDS the digest override to
+# COMPOSE_FILES, and that override pins every first-party service to the
+# images THIS deploy just built. Reusing $COMPOSE_FILES here made the
+# rollback a no-op: the retag changed :latest, but compose still resolved
+# the override's @sha256/:<new-sha> pins and brought the failed images
+# straight back. The rollback therefore composes from base + prod only, plus
+# an override of its OWN that pins the :pre-deploy baseline tags explicitly
+# for exactly the images that have one.
 rollback_images() {
     if [[ "$ROLLBACK_BASELINE" -ne 1 ]]; then
         warn "no rollback baseline (first deploy?) — leaving the current stack in place"
@@ -521,7 +577,29 @@ rollback_images() {
         warn "rollback incomplete for at least one image — keeping the current stack (mixed versions are worse)"
         return 0
     fi
-    if docker compose $COMPOSE_FILES --env-file "$ENV_FILE" \
+    # Never reuse the Step 3.5 digest override: it pins the new (failed)
+    # images. An explicit rollback override pins the baseline tags so even a
+    # `:latest` drift cannot resurrect the failed rollout.
+    local rb_dir rb_override
+    rb_dir="$(dirname "${_override:-${MANUAL_RUN_DIR:-/tmp}/docker-compose.digest-override.yml}")"
+    rb_override="${rb_dir}/docker-compose.rollback-override.yml"
+    {
+        echo "# GENERATED by deploy/scripts/deploy.sh rollback_images() — do not edit, do not commit."
+        echo "# Pins the :pre-deploy baseline for this rollback; the Step 3.5 digest override"
+        echo "# (which pins the FAILED images) is deliberately NOT used."
+        echo "services:"
+        for img in $ALL_IMAGES; do
+            pre="${img%:latest}:pre-deploy"
+            repo="${img%:latest}"
+            svc="${repo##*/}"
+            svc_key="$svc"; [[ "$svc" == "tracking-service" ]] && svc_key="tracking"
+            docker image inspect "$pre" >/dev/null 2>&1 || continue
+            printf '  %s:\n    image: %s\n' "$svc_key" "$pre"
+        done
+    } >"$rb_override" 2>/dev/null || warn "could not render the rollback override — retagged :latest will be used"
+    local rb_compose="-f docker-compose.yml -f docker-compose.prod.yml"
+    [[ -s "$rb_override" ]] && rb_compose="$rb_compose -f $rb_override"
+    if docker compose $rb_compose --env-file "$ENV_FILE" \
         --profile monitoring up -d --remove-orphans 2>&1; then
         sleep 3
         [[ -n "$NGINX_NAME" ]] && docker exec "$NGINX_NAME" nginx -s reload 2>&1 || true
@@ -569,10 +647,10 @@ for img in $ALL_IMAGES; do
 done
 if [[ -n "$SERVICES_TO_BUILD" ]]; then
     # F6 — NEVER rmi the :<sha> rollback pins the CI verify stage depends on.
-    # ci/stages/verify.sh rolls a failed rollout back to the tags recorded in
-    # ci/.last-deployed-sha (written by ci/stages/deploy.sh after a green
-    # deploy). Read the SAME file/format here and exclude that tag (plus
-    # `latest`) from the prune list.
+    # ci/stages/verify.sh rolls a failed rollout back to $RUN_DIR/pre-deploy-sha
+    # (the last VERIFIED sha, also recorded in ci/.last-deployed-sha — written
+    # by ci/stages/verify.sh after all probes pass). Read the SAME file/format
+    # here and exclude that tag (plus `latest`) from the prune list.
     LAST_DEPLOYED_SHA=""
     if [[ -f "${DEPLOY_DIR}/ci/.last-deployed-sha" ]]; then
         LAST_DEPLOYED_SHA="$(tr -d '[:space:]' < "${DEPLOY_DIR}/ci/.last-deployed-sha")"

@@ -160,29 +160,36 @@ Contact support@apexmail.ee for enterprise rate limiting.
 
 ### Via API
 
+The billing surface reports the current cycle's usage. It requires the
+`billing:read` scope.
+
 ```http
-GET /v1/account/usage
+GET /v1/billing/usage
 X-API-Key: {{api_key}}
 ```
 
-Response:
+Response (abridged):
 ```json
 {
-  "period": {
-    "start": "2024-01-01T00:00:00Z",
-    "end": "2024-01-31T23:59:59Z"
-  },
-  "usage": {
-    "apiRequests": 45230,
-    "emailsSent": 12500,
-    "rateLimitHits": 12
-  },
-  "limits": {
-    "apiRequestsPerDay": 100000,
-    "emailsPerMonth": 50000
+  "data": {
+    "tenantId": "tenant_...",
+    "period": {
+      "start": "2026-10-01T00:00:00Z",
+      "end": "2026-11-01T00:00:00Z"
+    },
+    "billingCycleUsage": {
+      "emailsSent": 12500,
+      "emailsLimit": 50000,
+      "apiCalls": 45230,
+      "apiCallsLimit": 500000,
+      "percentUsed": 25
+    }
   }
 }
 ```
+
+`GET /v1/billing/usage/realtime/:metric` (`emails_sent` or `api_calls`)
+returns the live counter for the current month.
 
 ### Via Dashboard
 

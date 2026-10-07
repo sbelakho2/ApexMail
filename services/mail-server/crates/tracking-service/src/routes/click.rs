@@ -5,14 +5,25 @@
 //! Security properties:
 //! - Prefers `originalUrl` from inside the encrypted token over `?r=` query
 //!   param (-041) — query params can be tampered with, token content cannot.
-//! - Only allows redirects to http/https URLs whose hostname is explicitly
-//!   authorised for the tenant (blocks open-redirect attacks).
+//! - Only allows redirects to http/https URLs whose hostname is authorised
+//!   for the tenant (blocks open-redirect attacks). A host is authorised
+//!   when it is the tenant's own `domains` row **or a subdomain of one**
+//!   (suffix match — `www.example.com` for owned `example.com`), matches a
+//!   pattern in the tenant's `allowed_redirect_domains`, matches the
+//!   deployment allowlist (`TRACKING_ALLOWED_REDIRECT_DOMAINS`), or is the
+//!   configured fallback host.
+//! - A refused destination is answered HONESTLY: HTTP 400 (503 when the
+//!   authorization store cannot answer) with the named reason and a
+//!   locked-down HTML page, and — for valid, non-bot tokens — recorded as an
+//!   explicit `click_refused` event. It is never silently redirected to the
+//!   vendor homepage (dogfood 2026-10-06 P1).
 //! - Adds a locked-down `Content-Security-Policy` to prevent click-jacking and
 //!   script/style execution around redirect responses (-500-455).
 
 use std::net::SocketAddr;
 
 use axum::{
+    body::Body,
     extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Response,
@@ -20,7 +31,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
-use crate::processor::ClickData;
+use crate::processor::{ClickData, RefusedClickData};
 use crate::routes::extract_client_ip;
 use crate::state::AppState;
 use crate::token_shape::token_log_prefix;
@@ -80,25 +91,50 @@ pub async fn handle_click(
 
     let redirect_url = determine_redirect_url(&data, q.r.as_deref(), &fallback);
 
-    // Validate protocol and domain. `validated` keeps the outcome so the
-    // click is only RECORDED when the redirect was actually authorised —
-    // recording a blocked link as a "click on the fallback URL" would
-    // poison click analytics and the per-link URL cache.
+    // Validate protocol and domain. A refusal is answered honestly (400 with
+    // the reason, or 503 when the authorization store cannot answer) — never
+    // a silent bounce to the vendor fallback.
     let validated = validate_redirect_url(&redirect_url, data.as_ref(), &state).await;
-    let redirect_url = match &validated {
-        Ok(url) => url.clone(),
-        Err(_) => {
-            // The block reason is warn!'d inside validate_redirect_url;
-            // the counter feeds blocked-link dashboards separately.
+    let redirect_url = match validated {
+        Ok(url) => url,
+        Err(refusal) => {
             metrics::counter!("apexmail_tracking_click_redirects_blocked_total").increment(1);
-            fallback.clone()
+            // The refused destination is recorded as an EXPLICIT
+            // `click_refused` event (only for valid, non-bot tokens and only
+            // when the destination host was the reason), so operators can
+            // see what was blocked and why.
+            if let (Some(d), RedirectRefusal::NotAuthorized { domain }) = (&data, &refusal) {
+                if !is_bot {
+                    let processor = state.processor.clone();
+                    let refused = RefusedClickData {
+                        tenant_id: d.tenant_id.clone(),
+                        message_id: d.message_id.clone(),
+                        recipient: d.recipient.clone(),
+                        link_id: d.link_id.clone().unwrap_or_else(|| "unknown".into()),
+                        link_url: redirect_url.clone(),
+                        reason: format!(
+                            "destination host '{domain}' is not an owned domain (or subdomain) \
+                             of this tenant and is not in the redirect allowlist"
+                        ),
+                        user_agent: user_agent.clone(),
+                        ip_address: Some(ip.clone()),
+                    };
+                    tokio::spawn(async move {
+                        if let Err(error) = processor.record_refused_click(refused).await {
+                            error!(error = %error, "Failed to record refused click event");
+                        }
+                    });
+                }
+            }
+            return refusal_response(&refusal);
         }
     };
 
     // Record click asynchronously (fire-and-forget) — only for valid tokens,
-    // non-bot clients, and redirects that passed domain validation.
+    // non-bot clients, and redirects that passed domain validation (any
+    // refusal returned above).
     if let Some(d) = &data {
-        if validated.is_ok() && !is_bot {
+        if !is_bot {
             let processor = state.processor.clone();
             let click_data = ClickData {
                 tenant_id: d.tenant_id.clone(),
@@ -171,11 +207,68 @@ fn determine_redirect_url(
     fallback.to_owned()
 }
 
+/// Why a click destination was refused. Every variant carries the reason the
+/// recipient page and the logs name; `NotAuthorized` is also the one recorded
+/// as an explicit `click_refused` event.
+#[derive(Debug)]
+enum RedirectRefusal {
+    /// The destination host is not authorized for this tenant.
+    NotAuthorized { domain: String },
+    /// The destination URL itself is invalid (non-http scheme, unparseable
+    /// URL, over the length cap) — nothing to authorize.
+    InvalidTarget { reason: &'static str },
+    /// The authorization store could not answer. Refusing (rather than
+    /// guessing) is outage honesty; it is a 503, not a client error.
+    Unavailable { domain: String },
+}
+
+impl RedirectRefusal {
+    fn status(&self) -> StatusCode {
+        match self {
+            RedirectRefusal::NotAuthorized { .. } | RedirectRefusal::InvalidTarget { .. } => {
+                StatusCode::BAD_REQUEST
+            }
+            RedirectRefusal::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            RedirectRefusal::NotAuthorized { domain } => format!(
+                "The destination host '{domain}' is not authorized for this sender. Ask the \
+                 sender to send from an owned domain or add the host to their allowed \
+                 redirect domains."
+            ),
+            RedirectRefusal::InvalidTarget { reason } => {
+                format!("The link destination is not a valid http(s) URL: {reason}.")
+            }
+            RedirectRefusal::Unavailable { domain } => format!(
+                "The destination host '{domain}' could not be verified right now. The click \
+                 was refused rather than guessed; try again in a moment."
+            ),
+        }
+    }
+}
+
+/// The honest refused-destination response: the named reason in a
+/// locked-down HTML page, with the refusal's status code.
+fn refusal_response(refusal: &RedirectRefusal) -> Response {
+    let body = crate::templates::render_click_refused_page(&refusal.reason());
+    axum::http::Response::builder()
+        .status(refusal.status())
+        .header("content-type", "text/html; charset=utf-8")
+        .header("content-security-policy", TRACKING_CSP)
+        .header("x-robots-tag", "noindex, nofollow")
+        .header("cache-control", "no-store")
+        .body(Body::from(body))
+        .unwrap_or_default()
+}
+
 async fn validate_redirect_url(
     url: &str,
     data: Option<&crate::codec::TrackingData>,
     state: &AppState,
-) -> Result<String, ()> {
+) -> Result<String, RedirectRefusal> {
     // O-6.2: Enforce max redirect URL length
     let max_len = state.config.tracking.max_redirect_url_len;
     if url.len() > max_len {
@@ -184,35 +277,46 @@ async fn validate_redirect_url(
             max_len = max_len,
             "Click: redirect URL exceeds max length"
         );
-        return Err(());
+        return Err(RedirectRefusal::InvalidTarget {
+            reason: "it exceeds the maximum redirect URL length",
+        });
     }
 
     let parsed = parse_allowed_redirect_url(url)?;
 
     if let Some(d) = data {
         let domain = parsed.host_str().unwrap_or("").to_owned();
-        let allowed = verify_redirect_domain(state, &d.tenant_id, &domain).await;
-        if !allowed {
-            warn!(
-                domain = %domain,
-                tenant_id = %d.tenant_id,
-                "Click: blocked unauthorized redirect domain"
-            );
-            return Err(());
+        match verify_redirect_domain(state, &d.tenant_id, &domain).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    domain = %domain,
+                    tenant_id = %d.tenant_id,
+                    "Click: blocked unauthorized redirect domain"
+                );
+                return Err(RedirectRefusal::NotAuthorized { domain });
+            }
+            Err(refusal) => return Err(refusal),
         }
     }
 
     Ok(url.to_owned())
 }
 
-fn parse_allowed_redirect_url(url: &str) -> Result<url::Url, ()> {
-    let parsed = url.parse::<url::Url>().map_err(|_| ())?;
+fn parse_allowed_redirect_url(url: &str) -> Result<url::Url, RedirectRefusal> {
+    let parsed = url
+        .parse::<url::Url>()
+        .map_err(|_| RedirectRefusal::InvalidTarget {
+            reason: "it is not a parseable URL",
+        })?;
 
     match parsed.scheme() {
         "http" | "https" => Ok(parsed),
         scheme => {
             warn!(scheme, "Click: blocked non-http redirect");
-            Err(())
+            Err(RedirectRefusal::InvalidTarget {
+                reason: "only http and https destinations are allowed",
+            })
         }
     }
 }
@@ -221,20 +325,40 @@ fn parse_allowed_redirect_url(url: &str) -> Result<url::Url, ()> {
 /// Cache hierarchy:/// 1. moka in-memory cache (60 s TTL, 10 000 entries)
 /// 2. Redis (300 s TTL)
 /// 3. Postgres (domains + tenant_settings tables)
-async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str) -> bool {
+///
+/// `Err(RedirectRefusal::Unavailable)` means the database could not answer —
+/// the caller refuses this request (503) WITHOUT caching the outcome.
+async fn verify_redirect_domain(
+    state: &AppState,
+    tenant_id: &str,
+    domain: &str,
+) -> Result<bool, RedirectRefusal> {
     let cache_key = format!("{tenant_id}:{domain}");
 
     // 1. moka
     if let Some(r) = state.domain_cache.get(&cache_key).await {
-        return r;
+        return Ok(r);
     }
 
     // Allow fallback domain without DB round-trip
     if let Ok(fallback) = state.config.tracking.fallback_url.parse::<url::Url>() {
         if fallback.host_str() == Some(domain) {
             state.domain_cache.insert(cache_key.clone(), true).await;
-            return true;
+            return Ok(true);
         }
+    }
+
+    // The deployment-wide allowlist (TRACKING_ALLOWED_REDIRECT_DOMAINS) is
+    // static operator configuration, additive to the tenant's own domains.
+    if state
+        .config
+        .tracking
+        .allowed_redirect_domains
+        .iter()
+        .any(|pattern| match_domain_pattern(domain, pattern))
+    {
+        state.domain_cache.insert(cache_key.clone(), true).await;
+        return Ok(true);
     }
 
     // 2. Redis — an AUTHORITATIVE cached verdict only. A key MISS
@@ -251,20 +375,19 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
         {
             let result = cached == "1";
             state.domain_cache.insert(cache_key.clone(), result).await;
-            return result;
+            return Ok(result);
         }
     }
 
-    // 3. Postgres:owned domains, then tenant allowed_redirect_domains
-    //    wildcard patterns.
+    // 3. Postgres:owned domains (including subdomains), then tenant
+    //    allowed_redirect_domains wildcard patterns.
     //
     // A database ERROR must NOT be treated as an authoritative "not allowed":
     // the previous `.ok().flatten()` swallowed failures and cached them as a
     // 300 s deny, silently breaking every owned-domain redirect during a
-    // database blip. On error we log at ERROR level and return the safe
-    // fallback WITHOUT touching the caches, so the next request re-queries.
-    // Only an authoritative absence (no owned-domain row AND no pattern
-    // match) is cached as "0".
+    // database blip. On error the caller answers 503 WITHOUT touching the
+    // caches, so the next request re-queries. Only an authoritative absence
+    // (no owned-domain row AND no pattern match) is cached as "0".
     let result = match query_domain_authorization(state, tenant_id, domain).await {
         Ok(authorized) => authorized,
         Err(error) => {
@@ -272,9 +395,11 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
                 tenant_id = %tenant_id,
                 domain = %domain,
                 error = %error,
-                "Click: domain authorization lookup failed — denying for this request only"
+                "Click: domain authorization lookup failed — refusing for this request only"
             );
-            return false;
+            return Err(RedirectRefusal::Unavailable {
+                domain: domain.to_owned(),
+            });
         }
     };
 
@@ -289,13 +414,13 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
             .await;
     }
     state.domain_cache.insert(cache_key, result).await;
-    result
+    Ok(result)
 }
 
 /// Authoritative Postgres check for redirect-domain authorization: an
-/// owned `domains` row, or a wildcard match in `tenant_settings`.
-/// `Err` means the database could not answer — callers must deny for the
-/// current request WITHOUT caching the outcome.
+/// owned `domains` row (or any subdomain of one), or a wildcard match in
+/// `tenant_settings`. `Err` means the database could not answer — callers
+/// must refuse for the current request WITHOUT caching the outcome.
 async fn query_domain_authorization(
     state: &AppState,
     tenant_id: &str,
@@ -307,8 +432,16 @@ async fn query_domain_authorization(
     // into i64, and an i64 tuple made this probe (and therefore EVERY
     // database-backed domain authorization) fail with a type error,
     // denying all owned-domain redirects on cache miss.
+    //
+    // Sub-domains of an owned domain ARE the tenant's (the `right(...)`
+    // suffix test, exact boundary: `evil-owned.example` never matches
+    // `owned.example`). The decision is pinned by
+    // `subdomains_of_an_owned_domain_are_authorized`.
     let owned = sqlx::query_as::<_, (i32,)>(
-        "SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 LIMIT 1",
+        "SELECT 1 FROM domains \
+         WHERE tenant_id = $1 \
+           AND (lower(name) = $2 OR right($2, length(name) + 1) = '.' || lower(name)) \
+         LIMIT 1",
     )
     .bind(tenant_id)
     .bind(domain)
@@ -644,11 +777,12 @@ mod tests {
             cleanup(&redis, &tenant, &message_id).await;
         }
 
-        /// A blocked redirect domain must NOT produce a click row/event on
-        /// the fallback URL — the user is redirected, the analytics are not
-        /// poisoned.
+        /// A blocked redirect domain is REFUSED HONESTLY: 400 with the reason,
+        /// an explicit `click_refused` event, and NOT a redirect to the vendor
+        /// fallback (dogfood 2026-10-06 P1: the old 302 silently sent the
+        /// recipient to the marketing homepage and recorded nothing).
         #[tokio::test]
-        async fn click_on_blocked_domain_records_nothing_and_falls_back() {
+        async fn click_on_blocked_domain_is_refused_with_the_reason_and_recorded() {
             let _wal_serial = test_support::redis_wal_serial().await;
             let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
                 return;
@@ -668,19 +802,34 @@ mod tests {
                 )
                 .await;
 
-            assert_eq!(response.status_code().as_u16(), 302);
-            let location = response
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default();
-            assert_eq!(location, "https://fallback.test.example/");
+            assert_eq!(response.status_code().as_u16(), 400);
+            let body = response.text();
+            assert!(
+                body.contains("evil.example.test") && body.contains("not authorized"),
+                "the refusal names the host and the reason: {body}"
+            );
 
             settle().await;
             let recorded = wal_entries_for(&redis, &message_id).await;
+            assert_eq!(
+                recorded.len(),
+                1,
+                "the refused click is recorded explicitly, got: {recorded:?}"
+            );
+            assert!(recorded[0].contains("click_refused"), "{recorded:?}");
             assert!(
-                recorded.is_empty(),
-                "blocked-domain click must not be recorded, got: {recorded:?}"
+                !recorded[0].contains("\"type\":\"clicked\""),
+                "a refusal is not a click"
+            );
+            assert!(
+                recorded[0].contains(&format!("\"linkId\":\"lnk_{message_id}\"")),
+                "the refusal is attributed to the clicked link: {}",
+                recorded[0]
+            );
+            assert!(
+                recorded[0].contains("not an owned domain"),
+                "the reason names why: {}",
+                recorded[0]
             );
 
             // The per-link URL cache must not record the blocked link either.
@@ -688,12 +837,53 @@ mod tests {
             let cached_link: Option<String> = redis::cmd("HGET")
                 .arg(format!("links:{tenant}:{message_id}"))
                 .arg(format!("lnk_{message_id}"))
-                .query_async(&mut *conn)
+                .query_async::<Option<String>>(&mut *conn)
                 .await
                 .expect("hget links cache");
             assert_eq!(
                 cached_link, None,
                 "blocked-domain link must not land in the links cache"
+            );
+
+            cleanup(&redis, &tenant, &message_id).await;
+        }
+
+        /// Dogfood 2026-10-06 P2: the token's `link_id` must reach the event
+        /// row (the worker used to encode an empty linkId, so every click was
+        /// stored as `unknown` and per-link analytics were impossible).
+        #[tokio::test]
+        async fn click_event_carries_the_token_link_id() {
+            let _wal_serial = test_support::redis_wal_serial().await;
+            let Some((state, redis)) = test_support::live_redis_or_skip(&[]).await else {
+                return;
+            };
+            let tenant = test_support::unique_tenant("linkid");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "allowed.example.test", true).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://allowed.example.test/landing")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    NORMAL_UA.parse().expect("ua"),
+                )
+                .await;
+            assert_eq!(response.status_code().as_u16(), 302);
+
+            settle().await;
+            let recorded = wal_entries_for(&redis, &message_id).await;
+            assert_eq!(recorded.len(), 1, "got: {recorded:?}");
+            assert!(
+                recorded[0].contains(&format!("\"linkId\":\"lnk_{message_id}\"")),
+                "the event row must carry the token's link id, got: {}",
+                recorded[0]
+            );
+            assert!(
+                !recorded[0].contains("\"linkId\":\"unknown\""),
+                "never the unattributed fallback"
             );
 
             cleanup(&redis, &tenant, &message_id).await;

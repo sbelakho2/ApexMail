@@ -474,19 +474,33 @@ impl RelayLedger for PgLedger {
         })?;
 
         // Migration 230's contract: the same send_unit with a DIFFERENT
-        // delivery contract is a typed conflict. A NULL stored fingerprint
-        // (a row claimed pre-230) is PINNED to the incoming value on first
-        // replay; after that the contract is enforced.
+        // delivery contract is a typed conflict — but only once the stored
+        // row is TERMINAL. While the stored row is still non-terminal
+        // (`pending`/`delivering`) the differing fingerprint is the
+        // documented worker-retry shape: the worker re-renders the MIME on
+        // every attempt (fresh `Date`, MIME boundary and tracking-token
+        // IVs), so the byte digest changes while the logical send does not.
+        // The stored bytes are the authoritative copy the relay will
+        // deliver, so ADOPT the stored row (classify_existing below) and
+        // never surface a false "corrupt ledger row" — the old behavior
+        // terminalized the worker's queue row `failed` while this ledger
+        // stayed `pending` and could still deliver (dogfood finding
+        // 2026-10-06 P1 split-brain). A NULL stored fingerprint (a row
+        // claimed pre-230) is PINNED to the incoming value on first replay;
+        // after that the contract is enforced.
         match (&state.request_fingerprint, &new.request_fingerprint) {
             (Some(stored), Some(incoming)) if stored != incoming => {
-                return Err(LedgerError::Corrupt {
-                    send_unit: new.send_unit.clone(),
-                    message: format!(
-                        "idempotency conflict: send_unit reused with a different delivery \
-                         contract (stored fingerprint {stored:?}, incoming {incoming:?}) — \
-                         reconcile against the existing row; never re-route under the same key"
-                    ),
-                });
+                if matches!(state.state.as_str(), "accepted" | "failed") {
+                    return Err(LedgerError::Corrupt {
+                        send_unit: new.send_unit.clone(),
+                        message: format!(
+                            "idempotency conflict: terminal send_unit reused with a different \
+                             delivery contract (stored fingerprint {stored:?}, incoming \
+                             {incoming:?}) — reconcile against the existing row; never re-route \
+                             under the same key"
+                        ),
+                    });
+                }
             }
             (None, Some(incoming)) => {
                 sqlx::query(
@@ -1278,6 +1292,120 @@ mod tests {
             .await;
     }
 
+    /// Regression (dogfood 2026-10-06, P1 split-brain): a worker retry
+    /// rebuilds the MIME (fresh `Date`, MIME boundary, tracking-token IVs), so
+    /// the byte-contract fingerprint of an otherwise identical logical send
+    /// differs. While the stored row is still NON-TERMINAL that must ADOPT the
+    /// stored row (the first submission's bytes are what the relay will
+    /// deliver) instead of a false "corrupt ledger row" conflict; a TERMINAL
+    /// row keeps the strict conflict so a genuine key reuse cannot silently
+    /// inherit an outcome.
+    #[tokio::test]
+    async fn rebuilt_message_adopts_a_non_terminal_row_but_terminal_rows_stay_strict() {
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("rebuilt").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool.clone());
+        let unit = format!("outbound-mta-test:rebuilt:{}", Uuid::new_v4());
+        let envelope_from = "bounces+tok@bounces.apexmail.ee";
+        let recipients = vec!["user@example.com".to_string()];
+        let source_ip: std::net::IpAddr = "203.0.113.8".parse().expect("ip");
+        let submission = |message: &[u8]| {
+            let request = SubmitRequest {
+                send_unit: unit.clone(),
+                tenant_id: Some("tenant-rebuilt".to_string()),
+                queue_id: None,
+                envelope_from: Some(envelope_from.to_string()),
+                recipients: recipients.clone(),
+                message: message.to_vec(),
+                requested_source_ip: Some(source_ip),
+            };
+            NewSubmission {
+                send_unit: unit.clone(),
+                tenant_id: Some("tenant-rebuilt".to_string()),
+                queue_id: None,
+                request_fingerprint: Some(Relay::request_fingerprint(&request)),
+                envelope_from: Some(envelope_from.to_string()),
+                recipients: recipients.clone(),
+                message: message.to_vec(),
+                requested_source_ip: Some(source_ip),
+                max_attempts: 12,
+            }
+        };
+        let original = b"From: sender@example.com\r\nSubject: t\r\n\r\nbody v1".to_vec();
+        let rebuilt = b"From: sender@example.com\r\nSubject: t\r\nDate: Tue, 06 Oct 2026 22:00:00 +0000\r\n\r\nbody v1".to_vec();
+        assert_ne!(
+            submission(&original).request_fingerprint,
+            submission(&rebuilt).request_fingerprint,
+            "the rebuilt MIME must present a different byte-contract fingerprint"
+        );
+
+        let now = Utc::now();
+        match ledger
+            .claim_submission(submission(&original), now, Duration::from_secs(60))
+            .await
+            .expect("first claim")
+        {
+            ClaimOutcome::Claimed(row) => assert_eq!(row.message, original),
+            other => panic!("expected Claimed, got {other:?}"),
+        }
+        // The inline attempt failed transiently: the relay's own ladder owns
+        // the retry (the exact live flow from the finding).
+        let next_attempt_at = now + chrono::Duration::seconds(300);
+        ledger
+            .record_retry(&unit, 1, next_attempt_at, "connect timed out")
+            .await
+            .expect("schedule relay retry");
+
+        // A rebuilt replay must adopt the stored row, not raise a conflict.
+        match ledger
+            .claim_submission(submission(&rebuilt), Utc::now(), Duration::from_secs(60))
+            .await
+            .expect("a non-terminal rebuilt replay must not be a corrupt-row error")
+        {
+            ClaimOutcome::AlreadyQueued { attempt, .. } => assert_eq!(attempt, 1),
+            other => panic!("expected AlreadyQueued, got {other:?}"),
+        }
+        let stored = ledger.get(&unit).await.expect("get").expect("stored row");
+        assert_eq!(
+            stored.message, original,
+            "the FIRST submission's bytes stay authoritative — the rebuilt copy is discarded"
+        );
+
+        // Once the row is terminal, the strict conflict is back.
+        let due = ledger
+            .claim_due(
+                next_attempt_at + chrono::Duration::seconds(1),
+                Duration::from_secs(60),
+                10,
+            )
+            .await
+            .expect("the relay's ladder claims the row");
+        let claimed = due
+            .iter()
+            .find(|row| row.send_unit == unit)
+            .expect("the row is due");
+        assert_eq!(claimed.attempt, 2);
+        ledger
+            .record_permanent(&unit, claimed.attempt, "domain publishes no MX records")
+            .await
+            .expect("terminal failure");
+        let error = ledger
+            .claim_submission(submission(&rebuilt), Utc::now(), Duration::from_secs(60))
+            .await
+            .expect_err("a terminal row reused with a different contract is a conflict");
+        assert!(
+            error.to_string().contains("idempotency conflict"),
+            "got: {error}"
+        );
+
+        let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit LIKE $1")
+            .bind(format!("{unit}%"))
+            .execute(&pool)
+            .await;
+    }
+
     #[tokio::test]
     async fn pg_ledger_classifies_existing_rows_and_rejects_corruption() {
         let _guard = PG_LEDGER_LOCK.lock().await;
@@ -1353,8 +1481,13 @@ mod tests {
         // a duplicate submit must not deliver it.
         let crashed = format!("outbound-mta-test:classify:crashed:{}", Uuid::new_v4());
         seed_row(&pool, &crashed, "delivering").await;
-        sqlx::query("UPDATE outbound_relay_ledger SET lease_until = NOW() - INTERVAL '1 second' WHERE send_unit = $1")
+        // Bind the CLIENT clock: `classify_existing` compares the lease
+        // against the `Utc::now()` the caller passes, and a database host
+        // with a skewed clock (measured ~3s ahead on the dogfood host) would
+        // leave a server-`NOW() - 1s` lease still in the client's future.
+        sqlx::query("UPDATE outbound_relay_ledger SET lease_until = $2 WHERE send_unit = $1")
             .bind(&crashed)
+            .bind(Utc::now() - chrono::Duration::seconds(60))
             .execute(&pool)
             .await
             .expect("expire lease");

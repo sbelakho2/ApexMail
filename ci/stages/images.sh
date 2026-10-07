@@ -64,8 +64,9 @@ image_compose_key() {
 #     registry push) and falls back to the image ID (`.Id`), which is the
 #     exact content the deploy-stage tamper guard re-verifies. sbom_digest is
 #     the sha256 of the Trivy SPDX SBOM this stage generated for the image
-#     (null when the image was outside the blocking gate — e.g. the backup
-#     sidecars). Nothing in this pipeline produces provenance attestations,
+#     (null only when SBOM generation failed; the excluded sidecars get
+#     theirs from the ADVISORY scan pass). Nothing in this pipeline produces
+#     provenance attestations,
 #     so provenance_digest is always null (recorded for the audit shape).
 #
 #   docker-compose.digest-override.yml
@@ -206,14 +207,22 @@ stage_main() {
         # no reachable path in an offline job; they are scanned ADVISORILY
         # below instead of blocking the deploy. Revisit on base bumps.
         _sidecars='postgres-backup|clickhouse-backup|redis-backup|clickhouse-exporter|redis-exporter|node-exporter|postgres-exporter|synthetic-monitor|otel-collector|tempo|loki|prometheus|alertmanager|grafana|certbot|clickhouse|postgres|redis|nginx-traefik'
-        _scan_refs=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-                --profile monitoring --profile migrate config --format json 2>>"$CI_STAGE_LOG" \
-            | jq -r --arg ns "$_ns" --arg sidecars "^($_sidecars)$" '.services | to_entries[]
+        # Render the merged config ONCE: the blocking scan set and the
+        # advisory sidecar set are two filters over the same JSON.
+        _cfg_json=$(mktemp "${TMPDIR:-/tmp}/apexmail-compose-images.XXXXXX")
+        if ! docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+                --profile monitoring --profile migrate config --format json >"$_cfg_json" 2>>"$CI_STAGE_LOG"; then
+            rm -f "$_cfg_json"
+            ci_err "could not render the compose config for the trivy gate (see log above)"
+            return "$CI_EXIT_FAIL"
+        fi
+        _scan_refs=$(jq -r --arg ns "$_ns" --arg sidecars "^($_sidecars)$" '.services | to_entries[]
                 | select(.value.image != null)
                 | select(.key | test($sidecars) | not)
                 | select(.value.image | startswith($ns + "/") or startswith("apexmail/"))
-                | .value.image' | sort -u || true)
+                | .value.image' "$_cfg_json" | sort -u || true)
         if [ -z "$_scan_refs" ]; then
+            rm -f "$_cfg_json"
             ci_err "derived an EMPTY trivy scan list from the compose config — refusing to silently skip the gate (check the compose config output above)"
             return "$CI_EXIT_FAIL"
         fi
@@ -244,6 +253,37 @@ stage_main() {
                 && ci_info "SBOM: $RUN_DIR/sbom-$_sbom_name.spdx.json" \
                 || ci_warn "SBOM generation failed for $_scan_img (advisory)"
         done
+        # ADVISORY pass over the excluded FIRST-PARTY sidecars (audit P3: the
+        # comment above promised one and none existed, so the backup sidecars
+        # this pipeline builds were never scanned anywhere). Findings are
+        # recorded but do not block the deploy; SBOMs are still produced.
+        _adv_refs=$(jq -r --arg ns "$_ns" --arg sidecars "^($_sidecars)$" '.services | to_entries[]
+                | select(.value.image != null)
+                | select(.key | test($sidecars))
+                | select(.value.image | startswith($ns + "/"))
+                | .value.image' "$_cfg_json" | sort -u || true)
+        for _aref in $_adv_refs; do
+            _adv_img="$_aref"
+            case "$_aref" in
+                "$_ns"/*:latest)
+                    if docker image inspect "${_aref%:latest}:$CI_SHA" >/dev/null 2>&1; then
+                        _adv_img="${_aref%:latest}:$CI_SHA"
+                    fi
+                    ;;
+            esac
+            if ! docker image inspect "$_adv_img" >/dev/null 2>&1; then
+                ci_warn "advisory trivy: $_adv_img not built by this pipeline — skipped"
+                continue
+            fi
+            ci_check_advisory "trivy advisory $_adv_img" \
+                trivy image --ignorefile "$REPO_ROOT/.trivyignore" --severity "$CI_TRIVY_SEVERITY" --quiet "$_adv_img"
+            _adv_sbom=$(printf '%s' "$_adv_img" | tr '/:' '__')
+            trivy image --format spdx-json --output "$RUN_DIR/sbom-$_adv_sbom.spdx.json" \
+                "$_adv_img" >>"$CI_STAGE_LOG" 2>&1 \
+                && ci_info "SBOM (advisory scan): $RUN_DIR/sbom-$_adv_sbom.spdx.json" \
+                || ci_warn "SBOM generation failed for $_adv_img (advisory)"
+        done
+        rm -f "$_cfg_json"
     else
         ci_warn "trivy missing — post-build vulnerability gate skipped (install with ci/install.sh)"
     fi

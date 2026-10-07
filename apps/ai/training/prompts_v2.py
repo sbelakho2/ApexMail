@@ -32,33 +32,52 @@ Set SENSITIVE_PROMPTS_ENABLED=false in environment to redact Level 2 blocks.
 from __future__ import annotations
 import os as _os
 
+# ── One canon, one import ────────────────────────────────────────────────
+# Every price and limit in this module derives from validate_pricing's
+# CANONICAL_PRICING (a restatement of services/mail-server/crates/
+# platform-catalog, pinned by tools/check_knowledge_consistency.py). Never
+# re-hardcode a plan price or quota here.
+from validate_pricing import (  # noqa: E402
+    API_FREE_TIER,
+    API_LIMIT_BY_PLAN,
+    API_RATE_PER_1K,
+    BUSINESS,
+    DEDICATED_IP_ADDON,
+    DEVELOPER,
+    EMAIL_LIMIT_BY_PLAN,
+    ENTERPRISE_CLOUD,
+    FREE,
+    FREE_LAUNCH_ALLOWANCE_EMAILS,
+    GROWTH,
+    OVERAGE_RATE_BY_PLAN,
+    PAYG_TIERS,
+    PLAN_BY_NAME,
+    PRICE_BY_PLAN,
+    PRO,
+    format_limit,
+    render_payg_info,
+    render_pricing_table,
+)
+
+# Row aliases (canonical plan rows keyed by their lowercase catalog name).
+PLANS = PLAN_BY_NAME
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CANONICAL PRICING TABLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-PRICING_TABLE = """\
-| Plan       | Price    | Emails/mo   | API calls/mo | Team      | Domains    |
-|------------|----------|-------------|--------------|-----------|------------|
-| Free       | €0       | 30,000      | 300,000       | 1         | 1          |
-| Starter    | €25      | 50,000      | 500,000      | 5         | 5          |
-| Pro        | €65      | 150,000     | 2,000,000    | 10        | 25         |
-| Growth     | €150     | 500,000     | 5,000,000    | 25        | 100        |
-| Scale      | €350     | 2,000,000   | 20,000,000   | 50        | Unlimited  |
-| Enterprise | €3,000     | 5,000,000   | Unlimited    | Unlimited | Unlimited  |"""
+PRICING_TABLE = render_pricing_table()
 
-PAYG_INFO = """\
-Pay-as-you-go (PAYG): €0 base. Email tiers: €0.001 (0-10k), €0.0008 (10k-100k), \
-€0.0005 (100k-1M), €0.0003 (1M+). Overages on plans: €0.40 per 1,000 extra emails. \
-API: first 100k free, then €0.10/1,000."""
+PAYG_INFO = render_payg_info()
 
-FEATURES_BY_PLAN = """\
+FEATURES_BY_PLAN = f"""\
 ## Key features by plan
-- **Free**: Basic sending, 1 domain, NO webhooks, 7-day retention.
-- **Starter (€25)**: Webhooks (5), 5 domains, 5 team members, email support, 30-day retention. NO A/B testing, NO dedicated IP. 10,000 contacts.
-- **Pro (€65)**: Send-time optimization (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on (€30/mo). NO A/B testing. 50,000 contacts.
-- **Growth (€150)**: 1 dedicated IP included, 100 domains, 25 team members, audit logs, priority support, 90-day retention. 200,000 contacts.
-- **Scale (€350)**: 3 dedicated IPs, SSO/SAML, unlimited domains, 50 team members, priority async support, shared Slack hub, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention. 500,000 contacts.
-- **Enterprise (€3,000)**: 10 dedicated IPs, BYOIP, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts. HIPAA/SOC2 are NOT currently offered on any plan."""
+- **Free ({FREE['price']})**: Basic sending, {FREE['emails']:,} emails/mo (plus a one-time {FREE_LAUNCH_ALLOWANCE_EMAILS:,}-email launch allowance in the first 30 days), 1 domain, NO webhooks, 7-day retention.
+- **{DEVELOPER['name']} ({DEVELOPER['price']})**: Webhooks (5), 5 domains, 5 team members, email support, 30-day retention. NO A/B testing, NO dedicated IP. 10,000 contacts.
+- **{PRO['name']} ({PRO['price']})**: Send-time optimization (AI), custom tracking domain, 25 domains, 10 team members, email support, 60-day retention. Dedicated IP available as add-on ({DEDICATED_IP_ADDON}). NO A/B testing. 50,000 contacts.
+- **{GROWTH['name']} ({GROWTH['price']})**: 1 dedicated IP included, 100 domains, 25 team members, audit logs, priority support, 90-day retention. 200,000 contacts.
+- **{BUSINESS['name']} ({BUSINESS['price']})**: 1 dedicated IP, SSO/SAML, unlimited domains, 50 team members, priority async support, shared Slack hub, subaccounts (10), inbound receiving, SLA 99.9% (30% credit), 365-day retention. 500,000 contacts.
+- **{ENTERPRISE_CLOUD['name']} ({ENTERPRISE_CLOUD['price']})**: 3 dedicated IPs, BYOIP, white-label, unlimited team, dedicated CSM, SLA 99.9% (25% credit), 730-day retention. Unlimited contacts. HIPAA/SOC2 are NOT currently offered on any plan."""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TOOL DEFINITIONS (matches training data exactly)
@@ -278,11 +297,11 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "notes": ["No specific customer context available. Answer general questions about ApexMail."],
     },
 
-    # ── STARTER TIER ─────────────────────────────────────────────────────
+    # ── DEVELOPER TIER ─────────────────────────────────────────────────────
 
     "starter_healthy": {
         "id": "acct_s1h23a",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "43,240/50,000", "api": "120,000/500,000",
         "team": "2/5", "created": "2025-01-15", "billing_day": 15,
         "contacts": "4,200",
@@ -310,7 +329,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_webhook_dead": {
         "id": "acct_swd01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "22,000/50,000", "api": "80,000/500,000",
         "team": "3/5", "created": "2025-04-20", "billing_day": 20,
         "contacts": "5,100",
@@ -323,18 +342,18 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_over_limit": {
         "id": "acct_sol01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "52,800/50,000", "api": "200,000/500,000",
         "team": "2/5", "created": "2025-03-10", "billing_day": 10,
         "contacts": "8,500",
         "domains": ["shopfront.co: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)"],
         "delivery": "Rate: 97.0%, Bounce rate: 1.8%, Complaint rate: 0.06%",
-        "notes": ["⚠ Email quota exceeded: 2,800 overage emails at €0.40/1,000 = €1.12 overage charge"],
+        "notes": [f"⚠ Email quota exceeded: 2,800 overage emails at €{OVERAGE_RATE_BY_PLAN['developer']:.2f}/1,000 = €2.24 overage charge"],
     },
 
     "starter_nonprofit": {
         "id": "acct_snp01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "38,000/50,000", "api": "90,000/500,000",
         "team": "4/5", "created": "2024-09-01", "billing_day": 1,
         "contacts": "12,000",
@@ -348,7 +367,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_bounce_spike": {
         "id": "acct_sbs01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "20,000/50,000", "api": "60,000/500,000",
         "team": "2/5", "created": "2025-06-15", "billing_day": 15,
         "contacts": "15,000",
@@ -365,7 +384,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_dunning_soft": {
         "id": "acct_sds01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "15,000/50,000", "api": "40,000/500,000",
         "team": "1/5", "created": "2025-08-16", "billing_day": 16,
         "contacts": "3,000",
@@ -378,7 +397,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_restaurant": {
         "id": "acct_srs01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "12,500/50,000", "api": "35,000/500,000",
         "team": "2/5", "created": "2025-02-01", "billing_day": 1,
         "contacts": "6,800",
@@ -388,7 +407,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "starter_gdpr_deletion": {
         "id": "acct_sgd01",
-        "plan": "Starter", "price": "€25/mo",
+        "plan": PLANS['developer']["name"], "price": f"{PRICE_BY_PLAN['developer']}/mo",
         "emails": "30,000/50,000", "api": "100,000/500,000",
         "team": "3/5", "created": "2025-05-01", "billing_day": 1,
         "contacts": "7,200",
@@ -401,19 +420,19 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "free_hitting_limits": {
         "id": "acct_fhl01",
-        "plan": "Free", "price": "€0/mo",
-        "emails": "29,800/30,000", "api": "293,400/300,000",
+        "plan": PLANS['free']["name"], "price": f"{PRICE_BY_PLAN['free']}/mo",
+        "emails": f"2,980/{PLANS['free']['emails']:,}", "api": f"29,340/{PLANS['free']['api_calls']:,}",
         "team": "1/1", "created": "2025-10-01", "billing_day": 1,
         "contacts": "312",
         "domains": ["myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: MISSING)"],
         "delivery": "Rate: 97.5%, Bounce rate: 1.5%, Complaint rate: 0.03%",
-        "notes": ["⚠ Email limit nearly reached: 29,800/30,000 (99.3%). 200 remaining."],
+        "notes": [f"⚠ Email limit nearly reached: 2,980/{PLANS['free']['emails']:,} (99.3%). 20 remaining."],
     },
 
     "free_brand_new": {
         "id": "acct_fbn01",
-        "plan": "Free", "price": "€0/mo",
-        "emails": "0/30,000", "api": "0/300,000",
+        "plan": PLANS['free']["name"], "price": f"{PRICE_BY_PLAN['free']}/mo",
+        "emails": f"0/{PLANS['free']['emails']:,}", "api": f"0/{PLANS['free']['api_calls']:,}",
         "team": "1/1", "created": "2026-02-22", "billing_day": 22,
         "contacts": "0",
         "domains": [],
@@ -422,8 +441,8 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "free_spf_broken": {
         "id": "acct_fsb01",
-        "plan": "Free", "price": "€0/mo",
-        "emails": "12,000/30,000", "api": "150,000/300,000",
+        "plan": PLANS['free']["name"], "price": f"{PRICE_BY_PLAN['free']}/mo",
+        "emails": f"1,200/{PLANS['free']['emails']:,}", "api": f"15,000/{PLANS['free']['api_calls']:,}",
         "team": "1/1", "created": "2025-11-15", "billing_day": 15,
         "contacts": "450",
         "domains": [
@@ -435,8 +454,8 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "free_hobby_blogger": {
         "id": "acct_fhb01",
-        "plan": "Free", "price": "€0/mo",
-        "emails": "4,500/30,000", "api": "50,000/300,000",
+        "plan": PLANS['free']["name"], "price": f"{PRICE_BY_PLAN['free']}/mo",
+        "emails": f"450/{PLANS['free']['emails']:,}", "api": f"5,000/{PLANS['free']['api_calls']:,}",
         "team": "1/1", "created": "2025-08-01", "billing_day": 1,
         "contacts": "280",
         "domains": ["craftyblog.net: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
@@ -447,7 +466,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_new_user": {
         "id": "acct_pnu01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "1,200/150,000", "api": "5,000/2,000,000",
         "team": "3/10", "created": "2026-02-10", "billing_day": 10,
         "contacts": "500",
@@ -473,7 +492,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_agency_multi_domain": {
         "id": "acct_pam01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "95,000/150,000", "api": "800,000/2,000,000",
         "team": "6/10", "created": "2025-03-01", "billing_day": 1,
         "contacts": "35,000",
@@ -489,7 +508,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_dmarc_none": {
         "id": "acct_pdn01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "60,000/150,000", "api": "400,000/2,000,000",
         "team": "4/10", "created": "2025-01-15", "billing_day": 15,
         "contacts": "18,000",
@@ -502,7 +521,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_template_issue": {
         "id": "acct_pti01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "72,000/150,000", "api": "500,000/2,000,000",
         "team": "5/10", "created": "2025-04-01", "billing_day": 1,
         "contacts": "22,000",
@@ -519,7 +538,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_outlook_rendering": {
         "id": "acct_por01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "45,000/150,000", "api": "300,000/2,000,000",
         "team": "3/10", "created": "2025-06-01", "billing_day": 1,
         "contacts": "15,000",
@@ -533,7 +552,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_edtech": {
         "id": "acct_ped01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "28,900/150,000", "api": "180,000/2,000,000",
         "team": "5/10", "created": "2025-07-01", "billing_day": 1,
         "contacts": "12,000",
@@ -546,7 +565,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "pro_realtor": {
         "id": "acct_prl01",
-        "plan": "Pro", "price": "€65/mo",
+        "plan": PLANS['pro']["name"], "price": f"{PRICE_BY_PLAN['pro']}/mo",
         "emails": "18,000/150,000", "api": "95,000/2,000,000",
         "team": "2/10", "created": "2025-09-01", "billing_day": 1,
         "contacts": "8,500",
@@ -561,7 +580,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_dkim_fail": {
         "id": "acct_gdf01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "467,500/500,000", "api": "2,800,000/5,000,000",
         "team": "6/25", "created": "2025-06-01", "billing_day": 20,
         "contacts": "85,000",
@@ -600,7 +619,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_complaint_suspended": {
         "id": "acct_gcs01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "380,000/500,000", "api": "2,000,000/5,000,000",
         "team": "8/25", "created": "2025-02-10", "billing_day": 10,
         "contacts": "120,000",
@@ -614,7 +633,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_ip_warmup": {
         "id": "acct_giw01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "45,000/500,000", "api": "300,000/5,000,000",
         "team": "5/25", "created": "2026-01-15", "billing_day": 15,
         "contacts": "60,000",
@@ -629,7 +648,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_gaming": {
         "id": "acct_ggm01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "461,500/500,000", "api": "4,600,000/5,000,000",
         "team": "15/25", "created": "2025-04-01", "billing_day": 1,
         "contacts": "180,000",
@@ -643,7 +662,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_rate_limited": {
         "id": "acct_grl01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "350,000/500,000", "api": "3,500,000/5,000,000",
         "team": "10/25", "created": "2025-01-01", "billing_day": 1,
         "contacts": "95,000",
@@ -656,7 +675,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_gmail_promo_tab": {
         "id": "acct_ggpt01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "280,000/500,000", "api": "1,500,000/5,000,000",
         "team": "8/25", "created": "2025-03-01", "billing_day": 1,
         "contacts": "75,000",
@@ -670,7 +689,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_cloudflare_dkim": {
         "id": "acct_gcd01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "200,000/500,000", "api": "1,000,000/5,000,000",
         "team": "6/25", "created": "2025-05-01", "billing_day": 1,
         "contacts": "55,000",
@@ -686,7 +705,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_crypto": {
         "id": "acct_gcr01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "180,000/500,000", "api": "2,200,000/5,000,000",
         "team": "8/25", "created": "2025-06-15", "billing_day": 15,
         "contacts": "45,000",
@@ -701,7 +720,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_logistics": {
         "id": "acct_glg01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "420,000/500,000", "api": "3,800,000/5,000,000",
         "team": "12/25", "created": "2025-01-10", "billing_day": 10,
         "contacts": "150,000",
@@ -711,7 +730,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "growth_travel": {
         "id": "acct_gtv01",
-        "plan": "Growth", "price": "€150/mo",
+        "plan": PLANS['growth']["name"], "price": f"{PRICE_BY_PLAN['growth']}/mo",
         "emails": "55,400/500,000", "api": "600,000/5,000,000",
         "team": "7/25", "created": "2025-04-20", "billing_day": 20,
         "contacts": "35,000",
@@ -719,11 +738,11 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         "delivery": "Rate: 97.8%, Bounce rate: 1.0%, Complaint rate: 0.03%",
     },
 
-    # ── SCALE TIER ───────────────────────────────────────────────────────
+    # ── BUSINESS TIER ───────────────────────────────────────────────────────
 
     "scale_deliverability": {
         "id": "acct_sd01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,750,000/2,000,000", "api": "15,000,000/20,000,000",
         "team": "18/50", "created": "2024-03-10", "billing_day": 10,
         "contacts": "189,000",
@@ -743,7 +762,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_sso_issue": {
         "id": "acct_ssi01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,200,000/2,000,000", "api": "10,000,000/20,000,000",
         "team": "35/50", "created": "2024-06-01", "billing_day": 1,
         "contacts": "250,000",
@@ -757,7 +776,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_media": {
         "id": "acct_sme01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,880,000/2,000,000", "api": "16,000,000/20,000,000",
         "team": "25/50", "created": "2024-01-15", "billing_day": 15,
         "contacts": "400,000",
@@ -770,18 +789,18 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_healthcare": {
         "id": "acct_shc01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "800,000/2,000,000", "api": "5,000,000/20,000,000",
         "team": "20/50", "created": "2024-08-01", "billing_day": 1,
         "contacts": "150,000",
         "domains": ["healthclinic.com: Verified (SPF: pass, DKIM: pass, DMARC: reject)"],
         "delivery": "Rate: 99.2%, Bounce rate: 0.4%, Complaint rate: 0.01%",
-        "notes": ["Customer requires HIPAA compliance for patient communications. HIPAA BAA only available on Enterprise plan (€3,000/mo)."],
+        "notes": [f"Customer requires HIPAA compliance for patient communications. HIPAA BAA is only handled under an {ENTERPRISE_CLOUD['name']} agreement ({ENTERPRISE_CLOUD['price']}/mo) — escalate per the never-handle list."],
     },
 
     "scale_subaccounts": {
         "id": "acct_ssub01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,500,000/2,000,000", "api": "12,000,000/20,000,000",
         "team": "30/50", "created": "2024-04-01", "billing_day": 1,
         "contacts": "300,000",
@@ -796,7 +815,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_greylist": {
         "id": "acct_sgl01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "900,000/2,000,000", "api": "8,000,000/20,000,000",
         "team": "15/50", "created": "2024-09-01", "billing_day": 1,
         "contacts": "200,000",
@@ -810,7 +829,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_insurance": {
         "id": "acct_sins01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,100,000/2,000,000", "api": "9,000,000/20,000,000",
         "team": "22/50", "created": "2024-02-01", "billing_day": 1,
         "contacts": "280,000",
@@ -827,7 +846,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "scale_key_rotation": {
         "id": "acct_skr01",
-        "plan": "Scale", "price": "€350/mo",
+        "plan": PLANS['business']["name"], "price": f"{PRICE_BY_PLAN['business']}/mo",
         "emails": "1,400,000/2,000,000", "api": "14,000,000/20,000,000",
         "team": "28/50", "created": "2024-05-01", "billing_day": 1,
         "contacts": "350,000",
@@ -840,11 +859,11 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
         ],
     },
 
-    # ── ENTERPRISE TIER ──────────────────────────────────────────────────
+    # ── ENTERPRISE CLOUD TIER ──────────────────────────────────────────────────
 
     "enterprise_compliance": {
         "id": "acct_ec01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "4,450,000/5,000,000", "api": "Unlimited",
         "team": "45/Unlimited", "created": "2023-09-15", "billing_day": 15,
         "contacts": "1,200,000",
@@ -878,7 +897,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_ecommerce": {
         "id": "acct_eec01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "4,550,000/5,000,000", "api": "Unlimited",
         "team": "60/Unlimited", "created": "2023-06-01", "billing_day": 1,
         "contacts": "2,500,000",
@@ -894,7 +913,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_government": {
         "id": "acct_egov01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "3,200,000/5,000,000", "api": "Unlimited",
         "team": "80/Unlimited", "created": "2023-03-01", "billing_day": 1,
         "contacts": "1,800,000",
@@ -906,7 +925,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_whitelabel": {
         "id": "acct_ewl01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "3,500,000/5,000,000", "api": "Unlimited",
         "team": "40/Unlimited", "created": "2023-08-01", "billing_day": 1,
         "contacts": "900,000",
@@ -921,7 +940,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_dunning": {
         "id": "acct_edn01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "2,800,000/5,000,000", "api": "Unlimited",
         "team": "50/Unlimited", "created": "2023-04-01", "billing_day": 15,
         "contacts": "700,000",
@@ -937,7 +956,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_mfa_lockout": {
         "id": "acct_eml01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "4,000,000/5,000,000", "api": "Unlimited",
         "team": "55/Unlimited", "created": "2023-01-15", "billing_day": 15,
         "contacts": "1,500,000",
@@ -952,7 +971,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_fintech": {
         "id": "acct_eft01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "3,800,000/5,000,000", "api": "Unlimited",
         "team": "70/Unlimited", "created": "2023-05-01", "billing_day": 1,
         "contacts": "2,000,000",
@@ -968,7 +987,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
 
     "enterprise_hipaa": {
         "id": "acct_ehp01",
-        "plan": "Enterprise", "price": "€3,000/mo",
+        "plan": PLANS['enterprise cloud']["name"], "price": f"{PRICE_BY_PLAN['enterprise cloud']}/mo",
         "emails": "2,500,000/5,000,000", "api": "Unlimited",
         "team": "35/Unlimited", "created": "2023-07-01", "billing_day": 1,
         "contacts": "500,000",
@@ -988,7 +1007,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "payg_active": {
         "id": "acct_pa01",
         "plan": "Pay-As-You-Go", "price": "€0 base + usage",
-        "emails": "74,200 this month (PAYG — no fixed limit)", "api": "52,000/100,000 free",
+        "emails": "74,200 this month (PAYG — no fixed limit)", "api": "52,000/30,000 free",
         "team": "1/1", "created": "2025-07-01", "billing_day": 1,
         "contacts": "2,200",
         "domains": [
@@ -1012,7 +1031,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "payg_api_401": {
         "id": "acct_pa401",
         "plan": "Pay-As-You-Go", "price": "€0 base + usage",
-        "emails": "5,000 this month (PAYG)", "api": "10,000/100,000 free",
+        "emails": "5,000 this month (PAYG)", "api": "10,000/30,000 free",
         "team": "1/1", "created": "2025-12-01", "billing_day": 1,
         "contacts": "800",
         "domains": ["microservice.dev: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
@@ -1027,7 +1046,7 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "payg_seasonal": {
         "id": "acct_pase01",
         "plan": "Pay-As-You-Go", "price": "€0 base + usage",
-        "emails": "145,000 this month (PAYG)", "api": "80,000/100,000 free",
+        "emails": "145,000 this month (PAYG)", "api": "80,000/30,000 free",
         "team": "1/1", "created": "2025-03-01", "billing_day": 1,
         "contacts": "50,000",
         "domains": ["seasonalgifts.com: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
@@ -1041,14 +1060,14 @@ EXAMPLE_CONTEXTS: dict[str, dict] = {
     "payg_high_volume": {
         "id": "acct_pahv01",
         "plan": "Pay-As-You-Go", "price": "€0 base + usage",
-        "emails": "580,000 this month (PAYG)", "api": "250,000/100,000 free",
+        "emails": "580,000 this month (PAYG)", "api": "250,000/30,000 free",
         "team": "1/1", "created": "2025-01-01", "billing_day": 1,
         "contacts": "200,000",
         "domains": ["bulksender.com: Verified (SPF: pass, DKIM: pass, DMARC: pass)"],
         "delivery": "Rate: 97.0%, Bounce rate: 1.5%, Complaint rate: 0.03%",
         "notes": [
             "PAYG billing estimate: 0-10K: 10,000 x €0.001 = €10; 10K-100K: 90,000 x €0.0008 = €72; 100K-580K: 480,000 x €0.0005 = €240; total = €322.",
-            "API overage: 150K extra at €0.10/1K = €15",
+            "API overage: 220K extra at €0.10/1K = €22",
         ],
     },
 }

@@ -112,8 +112,8 @@ class EmailsResponseAndRetryTest {
 
             assertEquals("msg_retry", response.id());
             assertEquals(2, http.requestCount());
-            String key1 = http.request(0).headers().firstValue("X-Idempotency-Key").orElseThrow();
-            String key2 = http.request(1).headers().firstValue("X-Idempotency-Key").orElseThrow();
+            String key1 = http.request(0).headers().firstValue("Idempotency-Key").orElseThrow();
+            String key2 = http.request(1).headers().firstValue("Idempotency-Key").orElseThrow();
             assertTrue(!key1.isBlank(), "auto idempotency key must be present");
             assertEquals(key1, key2, "same key must be replayed across retries of one send");
         }
@@ -131,8 +131,8 @@ class EmailsResponseAndRetryTest {
             client.emails().send(request);
             client.emails().send(request);
 
-            String key1 = http.request(0).headers().firstValue("X-Idempotency-Key").orElseThrow();
-            String key2 = http.request(1).headers().firstValue("X-Idempotency-Key").orElseThrow();
+            String key1 = http.request(0).headers().firstValue("Idempotency-Key").orElseThrow();
+            String key2 = http.request(1).headers().firstValue("Idempotency-Key").orElseThrow();
             assertNotEquals(key1, key2, "each logical send must get a fresh key");
         }
     }
@@ -146,7 +146,7 @@ class EmailsResponseAndRetryTest {
             client.emails().batch(List.of(
                 Map.of("from", "a@example.com", "to", "x@example.com", "subject", "1", "text", "x")));
 
-            String key = http.request(0).headers().firstValue("X-Idempotency-Key").orElseThrow();
+            String key = http.request(0).headers().firstValue("Idempotency-Key").orElseThrow();
             assertTrue(!key.isBlank(), "batch must carry an auto idempotency key");
         }
     }

@@ -482,6 +482,154 @@ async fn flush_moves_events_to_postgres_and_clears_the_wal() {
     clear_dlq(&redis).await;
 }
 
+/// F10 (audit): tracking events must actually PRODUCE `analytics_queue` rows.
+/// The analytics worker's only producer used to be its own test helpers, so
+/// the queue was permanently empty in production (live-confirmed 2026-10-06:
+/// 0 rows while open/click events flowed to `events`/ClickHouse) and the
+/// worker's real-time aggregation path could never run. Also pins the replay
+/// contract: a crash-replayed WAL batch must not double-enqueue (the rollup
+/// would double-count), and a refused click is not an analytics signal.
+#[tokio::test]
+async fn flush_produces_analytics_queue_rows_and_replay_is_not_double_enqueued() {
+    let _guard = SERIAL.lock().await;
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
+    let (Some(redis), Some(db)) = (
+        live_redis(),
+        canonical_pool("tracking_analytics_enqueue").await,
+    ) else {
+        eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
+        return;
+    };
+    clear_wal(&redis).await;
+    let tenant = unique("tn_anq");
+    seed_tenant(&db, &tenant).await;
+
+    // A canonical 36-char UUID message id: `analytics_queue.message_id` is
+    // VARCHAR(26), so the producer must store NULL + the full id in metadata,
+    // never a truncated id.
+    let message = uuid::Uuid::new_v4().to_string();
+    let proc = processor(db.clone(), redis.clone());
+    proc.record_open(open_data(&tenant, &message, "anq@example.com"))
+        .await
+        .expect("record open");
+    proc.flush().await.expect("flush");
+
+    #[derive(sqlx::FromRow)]
+    struct QueueRow {
+        event_type: String,
+        message_id: Option<String>,
+        recipient: Option<String>,
+        metadata: Option<serde_json::Value>,
+    }
+    let row: QueueRow = sqlx::query_as(
+        "SELECT event_type, message_id, recipient, metadata \
+         FROM analytics_queue WHERE tenant_id = $1 ORDER BY id",
+    )
+    .bind(&tenant)
+    .fetch_one(&db)
+    .await
+    .expect("the flush must produce an analytics_queue row");
+    assert_eq!(row.event_type, "opened");
+    assert!(
+        row.message_id.is_none(),
+        "VARCHAR(26) cannot hold a UUID — NULL, never a truncated id"
+    );
+    assert_eq!(row.recipient.as_deref(), Some("anq@example.com"));
+    assert_eq!(
+        row.metadata
+            .as_ref()
+            .and_then(|m| m.get("messageId"))
+            .and_then(|v| v.as_str()),
+        Some(message.as_str()),
+        "the full message id survives in metadata: {:?}",
+        row.metadata
+    );
+
+    // Crash-replay: the same batch is written twice (commit landed, WAL ACK
+    // did not). The events insert is idempotent AND the queue must not
+    // double-enqueue.
+    let replay_event = TrackingEvent {
+        id: "evt_anq_replay".into(),
+        event_type: EventType::Clicked,
+        tenant_id: tenant.clone(),
+        message_id: message.clone(),
+        recipient: "anq@example.com".into(),
+        campaign_id: None,
+        link_id: Some("lnk_replay".into()),
+        link_url: Some("https://example.test/replay".into()),
+        unsubscribe_reason: None,
+        user_agent: None,
+        ip_address: None,
+        timestamp: Utc::now(),
+        metadata: None,
+    };
+    proc.write_events(std::slice::from_ref(&replay_event))
+        .await
+        .expect("first write");
+    proc.write_events(std::slice::from_ref(&replay_event))
+        .await
+        .expect("replay write");
+
+    let events_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = $1")
+        .bind(&replay_event.id)
+        .fetch_one(&db)
+        .await
+        .expect("count events");
+    assert_eq!(events_rows, 1, "the events insert is idempotent");
+    let clicked_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM analytics_queue WHERE tenant_id = $1 AND event_type = 'clicked'",
+    )
+    .bind(&tenant)
+    .fetch_one(&db)
+    .await
+    .expect("count analytics rows");
+    assert_eq!(
+        clicked_rows, 1,
+        "a crash-replayed batch must not double-enqueue analytics rows"
+    );
+    let link_id: Option<String> = sqlx::query_scalar(
+        "SELECT metadata->>'linkId' FROM analytics_queue \
+         WHERE tenant_id = $1 AND event_type = 'clicked'",
+    )
+    .bind(&tenant)
+    .fetch_one(&db)
+    .await
+    .expect("link id in metadata");
+    assert_eq!(link_id.as_deref(), Some("lnk_replay"));
+
+    // A refused click is an operator signal, not an analytics count: it is
+    // never enqueued (the worker's event-type parse would discard it).
+    let refused = TrackingEvent {
+        id: "evt_anq_refused".into(),
+        event_type: EventType::ClickRefused,
+        tenant_id: tenant.clone(),
+        message_id: message.clone(),
+        recipient: "anq@example.com".into(),
+        campaign_id: None,
+        link_id: Some("lnk_refused".into()),
+        link_url: Some("https://foreign.example.test/x".into()),
+        unsubscribe_reason: None,
+        user_agent: None,
+        ip_address: None,
+        timestamp: Utc::now(),
+        metadata: Some(serde_json::json!({ "refused": true })),
+    };
+    proc.write_events(std::slice::from_ref(&refused))
+        .await
+        .expect("refused write");
+    let refused_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM analytics_queue WHERE tenant_id = $1 AND event_type = 'click_refused'",
+    )
+    .bind(&tenant)
+    .fetch_one(&db)
+    .await
+    .expect("count refused rows");
+    assert_eq!(
+        refused_rows, 0,
+        "a refused click must never become an analytics count"
+    );
+}
+
 /// P0 WAL-ACK FIX (drain-Lua test updated):the flush now CLAIMS the batch
 /// pending → processing (never deletes it first), re-enqueues on PG failure
 /// via the atomic requeue+release script, and poison entries (retry budget
@@ -891,8 +1039,10 @@ async fn seed_wal(redis: &RedisPool, entries: &[String]) {
 /// container's loopback-only `default` user is passwordless — which a host
 /// test can never use).
 fn live_clickhouse() -> clickhouse::Client {
+    // Compose default port (CLICKHOUSE_HTTP_PORT); hosts that remapped the
+    // container's HTTP port override via CLICKHOUSE_TEST_URL.
     let url =
-        std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+        std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into());
     let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
     let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
     clickhouse::Client::default()
@@ -984,6 +1134,31 @@ async fn flush_success_persists_updates_stats_and_ingests_clickhouse() {
         eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
         return;
     };
+    // Soft-skip without a live ClickHouse (the workspace convention for
+    // infrastructure-gated tests): CI has no ClickHouse, and a host test
+    // reaches the compose container through CLICKHOUSE_TEST_URL +
+    // CLICKHOUSE_TEST_USER/PASSWORD.
+    let ch_reachable = {
+        let url =
+            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into());
+        let authority = url
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        authority
+            .parse()
+            .ok()
+            .and_then(|addr| {
+                std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).ok()
+            })
+            .is_some()
+    };
+    if !ch_reachable {
+        eprintln!(
+            "skipping flush_success...: no live ClickHouse at CLICKHOUSE_TEST_URL (default 127.0.0.1:8123)"
+        );
+        return;
+    }
     clear_wal(&redis).await;
     let tenant = unique("tn_flushok");
     seed_tenant(&db, &tenant).await;

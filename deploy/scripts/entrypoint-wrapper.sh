@@ -66,6 +66,14 @@ export_from_file JWT_PUBLIC_KEY_PEM       || true
 export_from_file API_KEY_HASH_SECRET      || true
 export_from_file WEBHOOK_SIGNING_SECRET   || true
 export_from_file TRACKING_SECRET_KEY      || true
+# Shared HMAC secret for VERP v2 bounce tokens (mta-server + worker). Both
+# production gates refuse to start without it, and the value must be
+# identical on both sides.
+export_from_file VERP_HMAC_SECRET         || true
+# HMAC key signing the audit hash chain (worker DLP/graduation audit rows use
+# the SAME key api-server/billing/compliance sign with — in production the
+# canonical writer fails CLOSED without it).
+export_from_file AUDIT_SIGNING_KEY        || true
 export_from_file INTERNAL_SERVICE_TOKEN   || true
 export_from_file SERVICE_AUTH_TOKEN       || true
 # F9 (audit): per-workload dedicated credential for pdf-renderer. The

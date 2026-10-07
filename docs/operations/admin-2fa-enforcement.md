@@ -342,9 +342,17 @@ redis::cmd("SET")
     .await?;
 ```
 
-### API Key Exemption
+### API Keys and MFA
 
-Admin API keys with `*` scope do NOT bypass 2FA enforcement. Operations via API keys that require admin privileges still require 2FA if the operation is performed from a web session. API key operations that are explicitly administrative (e.g., `POST /v1/admin/keys/revoke`) require an additional `X-2FA-Code` header.
+Password login applies the role MFA policy through `enforce_role_mfa` and
+`role_requires_mfa` in
+[`auth.rs`](../../services/mail-server/crates/api-server/src/routes/auth.rs);
+the control-plane session middleware refuses a session whose signed claims
+carry no `mfa_enabled` flag
+([`cp_auth.rs`](../../services/mail-server/crates/api-server/src/middleware/cp_auth.rs)).
+No route reads an `X-2FA-Code` header. Revocation accepts a key carrying the
+`api-keys:write` scope at `DELETE /v1/auth/api-keys/:id` (see
+[Emergency Key Revocation](emergency-key-revocation.md)).
 
 ---
 
@@ -553,9 +561,9 @@ rate_limiter.check_n_for_tenant(
 
 ## References
 
-- [Emergency Key Revocation](emergency-key-revocation.md) — Related: admin key management
-- [Secret Rotation](secret-rotation.md) — Related: session secret rotation
-- [Auth Middleware](../../services/mail-server/crates/api-server/src/middleware/auth.rs) — Existing auth infrastructure
-- [ATO Protection Crate](../../services/mail-server/crates/ato-protection/src/) — Account takeover prevention
-- [RFC 4226](https://datatracker.ietf.org/doc/html/rfc4226) — HMAC-Based One-Time Password Algorithm
-- [RFC 6238](https://datatracker.ietf.org/doc/html/rfc6238) — TOTP: Time-Based One-Time Password Algorithm
+- [Emergency Key Revocation](emergency-key-revocation.md)
+- [Secret Rotation](secret-rotation.md)
+- [Auth Middleware](../../services/mail-server/crates/api-server/src/middleware/auth.rs)
+- [ATO Protection Crate](../../services/mail-server/crates/ato-protection/src/)
+- [RFC 4226](https://datatracker.ietf.org/doc/html/rfc4226) (HOTP)
+- [RFC 6238](https://datatracker.ietf.org/doc/html/rfc6238) (TOTP)

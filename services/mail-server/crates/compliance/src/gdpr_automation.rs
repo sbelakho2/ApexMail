@@ -12,17 +12,20 @@
 //! Consent:Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade:withdrawing marketing revokes analytics and profiling.
 
-use chrono::{DateTime, Duration, Months, TimeDelta, Utc};
+use std::sync::Arc;
+
+use chrono::{DateTime, Duration, Months, SubsecRound, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 /// HMAC-SHA256 type for consent certificate signing.
 type HmacSha256 = Hmac<Sha256>;
 
+use crate::audit_logger::AuditLogger;
 use crate::legal_archive;
 use crate::retention_classes;
 
@@ -93,11 +96,148 @@ pub struct GdprAutomation {
     db: PgPool,
     redis: RedisPool,
     config: GdprConfig,
+    /// The chained accountability trail (F5). Optional so unit/system
+    /// harnesses that do not model the audit chain keep compiling; the
+    /// production bootstrap (`bootstrap::build_state`) always wires it.
+    audit_logger: Option<Arc<AuditLogger>>,
 }
 
 impl GdprAutomation {
     pub fn new(db: PgPool, redis: RedisPool, config: GdprConfig) -> Self {
-        Self { db, redis, config }
+        Self {
+            db,
+            redis,
+            config,
+            audit_logger: None,
+        }
+    }
+
+    /// Wire the canonical hash-chained audit logger (F5): every terminal DSR
+    /// transition then writes an `audit_logs` entry on the tenant chain, and
+    /// the control-plane `gdpr_requests` mirror is advanced in the same
+    /// completion path.
+    pub fn with_audit_logger(mut self, audit_logger: Arc<AuditLogger>) -> Self {
+        self.audit_logger = Some(audit_logger);
+        self
+    }
+
+    /// F5: record the DSR's terminal transition on the accountability trail
+    /// and advance the control-plane mirror.
+    ///
+    /// * The audit entry is written through the canonical chained logger
+    ///   (`AuditLogger::log`), attributed to the tenant, with the lifecycle
+    ///   marker and the outcome in `details`.
+    /// * `gdpr_requests` is the CP's read model, linked by the verification
+    ///   token hash the mirror copied at submit; it must not stay `pending`
+    ///   after the request is done (operators would re-process or chase
+    ///   overdue work that is already complete).
+    ///
+    /// Both writes are loud on failure (error-level logs): the DSR status is
+    /// already durably recorded, so the process must not be faked into
+    /// "failed" by a mirror/audit hiccup — but the gap must be visible.
+    async fn record_terminal_transition(
+        &self,
+        request: &DataSubjectRequest,
+        status: &str,
+        outcome: AuditOutcome,
+        details: serde_json::Value,
+    ) {
+        if let Some(audit_logger) = &self.audit_logger {
+            let ctx = LogContext {
+                tenant_id: Some(request.tenant_id.clone()),
+                user_id: None,
+                session_id: None,
+                ip_address: None,
+                user_agent: Some("compliance:gdpr_automation".to_string()),
+            };
+            let mut payload = serde_json::Map::new();
+            payload.insert(
+                "action".into(),
+                serde_json::json!(match outcome {
+                    AuditOutcome::Success => "dsr.lifecycle.completed",
+                    AuditOutcome::Failure => "dsr.lifecycle.failed",
+                    AuditOutcome::Denied => "dsr.lifecycle.denied",
+                }),
+            );
+            payload.insert("requestId".into(), serde_json::json!(request.id));
+            payload.insert(
+                "requestType".into(),
+                serde_json::json!(request.request_type.to_string()),
+            );
+            payload.insert("email".into(), serde_json::json!(request.email));
+            payload.insert("status".into(), serde_json::json!(status));
+            if let serde_json::Value::Object(extra) = details {
+                for (key, value) in extra {
+                    payload.insert(key, value);
+                }
+            }
+            if let Err(failure) = audit_logger
+                .log(
+                    AuditAction::Update,
+                    AuditResource::Subscriber,
+                    Some(&request.id),
+                    serde_json::Value::Object(payload),
+                    outcome,
+                    None,
+                    &ctx,
+                )
+                .await
+            {
+                error!(
+                    request_id = %request.id,
+                    tenant_id = %request.tenant_id,
+                    error = %failure,
+                    "GDPR: DSR completion audit entry FAILED to write (the DSR itself is recorded)"
+                );
+            }
+        }
+
+        // The mirror is keyed by the same token hash the submit path copied
+        // into it (its own id is a CP-side `gdr_...` id, not the DSR id).
+        //
+        // `gdpr_requests.status` is VARCHAR(20) and the CP's transition
+        // vocabulary is pending/verified/processing/completed/rejected.
+        // `pending_manual_review` (21 chars) is the one DSR terminal status
+        // that fits neither: the request is out of the automatic path and
+        // awaits an operator, which the CP models as `processing`.
+        let mirror_status = match status {
+            "pending_manual_review" => "processing",
+            other => other,
+        };
+        let mirrored = sqlx::query(
+            "UPDATE gdpr_requests
+             SET status = $1,
+                 fulfilled_at = CASE
+                     WHEN $1 IN ('completed', 'partial', 'rejected') THEN NOW()
+                     ELSE fulfilled_at
+                 END,
+                 updated_at = NOW()
+             WHERE token_hash = $2 AND tenant_id = $3",
+        )
+        .bind(mirror_status)
+        .bind(&request.verification_token_hash)
+        .bind(&request.tenant_id)
+        .execute(&self.db)
+        .await;
+        match mirrored {
+            Ok(updated) if updated.rows_affected() == 0 => {
+                // A DSR without its CP mirror (best-effort insert at submit)
+                // is possible; that is a CP visibility gap, not a DSR defect.
+                warn!(
+                    request_id = %request.id,
+                    "GDPR: no gdpr_requests mirror row matched the completed DSR"
+                );
+            }
+            Ok(_) => {}
+            Err(failure) => {
+                error!(
+                    request_id = %request.id,
+                    tenant_id = %request.tenant_id,
+                    error = %failure,
+                    "GDPR: gdpr_requests mirror update FAILED (the DSR itself is recorded)"
+                );
+            }
+        }
     }
 
     // ── Request Lifecycle ────────────────────────────────────
@@ -194,11 +334,17 @@ impl GdprAutomation {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
+        // Idempotent by construction: migration 245 installs
+        // uq_dsr_outbox_request (tenant_id, request_id), so a replayed
+        // enqueue for the same (tenant, request) collapses to a no-op
+        // instead of staging a second row and re-sending the verification
+        // mail (gates review 2026-10-07).
         sqlx::query(
             "INSERT INTO dsr_verification_outbox
                (id, request_id, tenant_id, email, verification_token,
                 verify_url, status, attempts, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7)",
+             VALUES ($1,$2,$3,$4,$5,$6,'pending',0,$7)
+             ON CONFLICT (tenant_id, request_id) DO NOTHING",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&id)
@@ -454,6 +600,16 @@ impl GdprAutomation {
                     .execute(&self.db)
                     .await
                     .map_err(|e| format!("DB error deferring held erasure: {e}"))?;
+                    // F5: the accountability trail and the CP mirror must
+                    // reflect the deferral too — the mirror otherwise stays
+                    // `pending` for a request that now awaits manual review.
+                    self.record_terminal_transition(
+                        &request,
+                        "pending_manual_review",
+                        AuditOutcome::Success,
+                        serde_json::json!({ "deferred": "legal_hold" }),
+                    )
+                    .await;
                     return Ok(result);
                 }
                 Ok(Some(false)) | Ok(None) => { /* not held — proceed */ }
@@ -500,6 +656,23 @@ impl GdprAutomation {
                 .execute(&self.db)
                 .await
                 .map_err(|e| format!("DB error: {e}"))?;
+
+                // F5: a completed/partial/rejected DSR writes its chained
+                // audit entry and advances the control-plane mirror — an
+                // auditor and the operator console see the same outcome the
+                // subject does.
+                self.record_terminal_transition(
+                    &request,
+                    new_status,
+                    AuditOutcome::Success,
+                    serde_json::json!({
+                        "exportUrl": r.export_url,
+                        "deletedRecords": r.deleted_records,
+                        "partial": r.partial,
+                        "reviewRequired": r.review_required,
+                    }),
+                )
+                .await;
             }
             Err(e) => {
                 // F: transient errors retry with a counter; after
@@ -555,6 +728,15 @@ impl GdprAutomation {
                         .execute(&self.db)
                         .await
                         .map_err(|e| format!("DB error updating GDPR status to failed: {e}"))?;
+                        // F5: the terminal failure is an accountability
+                        // event too (and the mirror must leave `pending`).
+                        self.record_terminal_transition(
+                            &request,
+                            "failed",
+                            AuditOutcome::Failure,
+                            serde_json::json!({ "retryAttempts": attempt }),
+                        )
+                        .await;
                         return Ok(DataSubjectRequestResult {
                             data: Some(retry_state),
                             export_url: None,
@@ -4553,8 +4735,11 @@ mod hostile_db_tests {
         let gdpr = automation_with(pool.clone(), config());
         let tenant = test_support::unique_tenant();
 
-        // A request with a receipt and a persisted statutory clock.
-        let received = Utc::now() - TimeDelta::days(40);
+        // A request with a receipt and a persisted statutory clock. The seed
+        // value is truncated to the microsecond precision TIMESTAMPTZ stores,
+        // so the expected due date computed in memory is exactly the
+        // persisted one.
+        let received = (Utc::now() - TimeDelta::days(40)).trunc_subsecs(6);
         sqlx::query(
             "INSERT INTO data_subject_requests
                (id, tenant_id, request_type, email, verification_token_hash, verified,

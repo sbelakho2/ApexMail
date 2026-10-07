@@ -85,7 +85,7 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"Modern email infrastructure for developers\">\
 {favicon_link}\
-<link rel=\"stylesheet\" href=\"/assets/globals.css\">\
+<link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css>\
 </head>\
     <body class=\"{body_classes} min-h-screen bg-background\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}\
 </body>\
@@ -94,6 +94,7 @@ pub fn web_root_layout(child_html: &str, title: &str) -> String {
         body_classes = WEB_ROOT_BODY_CLASSES,
         title = html_escape(title),
         favicon_link = favicon_link_html(),
+        globals_css = crate::globals_css_url(),
         child_html = child_html,
     )
 }
@@ -127,12 +128,13 @@ pub fn control_plane_root_layout_with_title(child_html: &str, title: &str) -> St
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title}</title>\
 <meta name=\"description\" content=\"ApexMail administration and monitoring\">\
 {favicon_link}\
-<link rel=\"stylesheet\" href=\"/assets/globals.css\">\
+<link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css>\
 </head>\
 <body class=\"antialiased bg-background text-surface-950\"><a href=\"#app-main\" class=\"sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950\">Skip to content</a>{child_html}</body>\
 </html>",
         title = html_escape(title),
         favicon_link = favicon_link_html(),
+        globals_css = crate::globals_css_url(),
         child_html = child_html,
     )
 }
@@ -195,6 +197,30 @@ pub fn control_plane_app_layout_with_role(
     csrf_token: &str,
     user_role: &str,
 ) -> String {
+    control_plane_app_layout_with_session(
+        child_html,
+        page_title,
+        page_description,
+        current_path,
+        csrf_token,
+        user_role,
+        None,
+    )
+}
+
+/// [`control_plane_app_layout_with_role`] plus the active impersonation
+/// session's banner: an operator browsing the control plane while
+/// impersonating keeps the banner and its Terminate form on every page
+/// (dogfood 2026-10-06 — the SSR request path never rendered it).
+pub fn control_plane_app_layout_with_session(
+    child_html: &str,
+    page_title: &str,
+    page_description: &str,
+    current_path: &str,
+    csrf_token: &str,
+    user_role: &str,
+    impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
+) -> String {
     let shell = ControlPlaneShell {
         mobile_menu_open: false,
         user_role: if user_role.is_empty() {
@@ -209,7 +235,11 @@ pub fn control_plane_app_layout_with_role(
         current_path,
         csrf_token,
     };
-    shell.render_html()
+    let page = shell.render_html();
+    match impersonation_banner {
+        Some(banner) => crate::shell::apply_control_plane_impersonation_banner(&page, &banner),
+        None => page,
+    }
 }
 
 // ─── Web pages ──────────────────────────────────────────────
@@ -227,8 +257,8 @@ pub fn web_home_page() -> String {
 <p class=\"mt-5 max-w-2xl text-xl font-medium leading-8 text-surface-600\">Modern email infrastructure for developers</p>\
 <p class=\"mt-4 max-w-2xl text-sm leading-6 text-surface-500\">Open the product console to manage campaigns, domains, analytics, team access, and delivery operations from the same Rust-rendered surface used by the live app.</p>\
 <div class=\"mt-10 flex flex-col gap-3 sm:flex-row\">\
-<a href=\"/campaigns\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold text-white shadow-premium transition-colors hover:bg-brand-700\">Go to Dashboard</a>\
-<a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-card px-8 py-3 text-sm font-bold text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
+<a href=\"/campaigns\" class=\"apex-btn\">Go to Dashboard</a>\
+<a href=\"/login\" class=\"apex-btn apex-btn--secondary\">Sign In</a>\
 </div></div>\
 <div class=\"border border-surface-200 bg-card shadow-premium\">\
 <div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-500\">Workspace Snapshot</p></div>\
@@ -270,13 +300,31 @@ pub fn web_dashboard_layout_with_csrf(
 
 /// Dashboard shell carrying the authenticated session's identity into the
 /// header (design report item 5): the plan label, display name, email, and
-/// avatar initials render from the session instead of the hardcoded
-/// "Free Plan — 30K / mo" / "AM" defaults. `None` keeps the neutral header.
+/// avatar initials render from the session instead of a hardcoded label.
+/// `None` renders NO plan label (never a fabricated one) and no identity
+/// block.
 pub fn web_dashboard_layout_with_user_context(
     child_html: &str,
     current_path: &str,
     csrf_token: &str,
     user_context: Option<&crate::shell::UserContext<'_>>,
+) -> String {
+    web_dashboard_layout_with_session(child_html, current_path, csrf_token, user_context, None)
+}
+
+/// [`web_dashboard_layout_with_user_context`] plus the active impersonation
+/// session's banner.
+///
+/// The banner renders whenever the request carries a verified impersonation
+/// cookie — it is the only in-UI way to end an impersonation session, so the
+/// request path must never drop it (dogfood 2026-10-06: the component
+/// existed, no caller ever passed it).
+pub fn web_dashboard_layout_with_session(
+    child_html: &str,
+    current_path: &str,
+    csrf_token: &str,
+    user_context: Option<&crate::shell::UserContext<'_>>,
+    impersonation_banner: Option<crate::shell::ImpersonationBanner<'_>>,
 ) -> String {
     let avatar_fallback = user_context
         .map(|user| crate::shell::avatar_initials(user.display_name))
@@ -292,7 +340,7 @@ pub fn web_dashboard_layout_with_user_context(
             mobile_menu_open: false,
             user_context: user_context.cloned(),
         },
-        impersonation_banner: None,
+        impersonation_banner,
         // Dead JS-era markup purge (design report item 14): the toast store
         // could never show anything without script — the signed flash cookie
         // is the real feedback channel. The surface renders only when a
@@ -1160,6 +1208,15 @@ fn render_campaign_editor_page_with_data(
         "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
         return_href, breadcrumb_label,
     );
+    // Audit #16: a failed storage read renders a service-problem notice, so
+    // the operator never sees "no lists" as if the workspace were empty.
+    let outage_notice = if editor.unavailable {
+        "<div class=\"apex-callout apex-callout--warning mb-6\" role=\"status\">\
+         <strong>Some of this form could not be loaded</strong>\
+         <span>The workspace store did not answer just now, so lists, segments or the current audience may be missing. This is a service problem — reload before saving.</span></div>"
+    } else {
+        ""
+    };
     let draft_badge = Badge {
         text: "Draft",
         variant: "outline",
@@ -1270,7 +1327,7 @@ fn render_campaign_editor_page_with_data(
         .unwrap_or_default();
 
     format!(
-        "{breadcrumbs}\
+        "{breadcrumbs}{outage_notice}\
 <div class=\"w-full max-w-3xl space-y-6\">\
 <section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
@@ -1289,6 +1346,7 @@ fn render_campaign_editor_page_with_data(
         breadcrumbs = breadcrumbs,
         title = title,
         draft_badge = draft_badge,
+        outage_notice = outage_notice,
         primary_action_label = primary_action_label,
         hidden_id = hidden_id,
         scheduled_value = editor.edit.as_ref().map(|e| e.scheduled_at.clone()).unwrap_or_default(),
@@ -1337,7 +1395,9 @@ fn render_campaign_editor_page_with_data(
 pub fn web_campaign_preview_page(html_body: &str) -> String {
     let safe_html = sanitize_preview_html(html_body);
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"/assets/globals.css\"></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Campaign preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Rendered server-side from your draft. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>"
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Campaign Preview — ApexMail</title><link rel=\"stylesheet\" href=\"{globals_css}\" data-globals-css></head><body class=\"font-apex antialiased bg-surface-50\"><header class=\"border-b border-surface-200 bg-card px-6 py-4\"><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-primary\">Campaign preview</p><p class=\"mt-1 text-sm text-muted-foreground\">Rendered server-side from your draft. Close this tab to return to the editor.</p></header><main class=\"mx-auto max-w-2xl px-6 py-8\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\">{safe_html}</div></main></body></html>",
+        globals_css = crate::globals_css_url(),
+        safe_html = safe_html,
     )
 }
 
@@ -1779,10 +1839,10 @@ pub fn control_plane_home_page() -> String {
                     </a>
                 </div>
                 <div class="mt-6 flex flex-wrap gap-3">
-                    <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-surface-800">Sales Autopilot</a>
-                    <a href="/alerts" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-brand-700">Open Incident Rail</a>
-                    <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
-                    <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
+                    <a href="/sales" class=\"apex-btn apex-btn--sm\">Sales Autopilot</a>
+                    <a href="/alerts" class=\"apex-btn apex-btn--sm\">Open Incident Rail</a>
+                    <a href="/audit" class=\"apex-btn apex-btn--sm apex-btn--secondary\">Review Trust Evidence</a>
+                    <a href="mailto:security@apexmail.ee" class=\"apex-btn apex-btn--sm apex-btn--secondary\">Contact Security</a>
                 </div>
             </div>
             <aside class="border-t border-surface-200 bg-surface-950 px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
@@ -1948,7 +2008,7 @@ fn autonomy_mode_meaning(mode: &str) -> Option<&'static str> {
 /// Dark-panel section wrapper shared by every sales section.
 fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
     format!(
-        r#"<section id="{id}" class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6"><p class="text-xs uppercase tracking-[0.28em] text-surface-500">{eyebrow}</p><h2 class="mt-2 text-2xl font-bold tracking-tight text-white break-words">{title}</h2>{body}</section>"#,
+        r#"<section id="{id}" class="apex-panel"><p class="text-xs uppercase tracking-[0.28em] text-surface-500">{eyebrow}</p><h2 class="apex-panel-title mt-2 text-xl break-words">{title}</h2>{body}</section>"#,
         id = id,
         eyebrow = html_escape(eyebrow),
         title = html_escape(title),
@@ -1959,15 +2019,18 @@ fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
 /// Honest empty/unavailable statement — never a fake row.
 fn sales_note(text: &str) -> String {
     format!(
-        r#"<p class="mt-5 rounded-sm border border-white/10 bg-black/20 p-4 text-sm leading-6 text-surface-300">{}</p>"#,
+        r#"<p class="mt-5 rounded-sm border border-border bg-surface-50 p-4 text-sm leading-6 text-surface-600">{}</p>"#,
         html_escape(text)
     )
 }
 
 /// Warning-toned statement: an engaged kill switch or a data-availability gap.
 fn sales_warning_note(text: &str) -> String {
+    // The theme-safe callout: the old amber-tint + amber-100-text pair was
+    // legible only on a permanently-black panel, and the panel is a flat
+    // surface now (contrast gate: 1.08:1 in light mode).
     format!(
-        r#"<p class="mt-5 rounded-sm border border-warning-300/35 bg-warning-300/10 p-4 text-sm leading-6 text-warning-100">{}</p>"#,
+        r#"<p class="apex-callout apex-callout--warning mt-5" role="status">{}</p>"#,
         html_escape(text)
     )
 }
@@ -1975,7 +2038,7 @@ fn sales_warning_note(text: &str) -> String {
 /// One hero KPI tile (same classes as the previous revision).
 fn sales_kpi_tile(label: &str, value: &str, hint: &str) -> String {
     format!(
-        r#"<article class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">{label}</p><p class="mt-2 text-2xl font-bold tracking-tight text-white break-words">{value}</p><p class="mt-1 text-xs text-surface-500 break-words">{hint}</p></article>"#,
+        r#"<article class="apex-panel apex-panel--flush p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">{label}</p><p class="mt-2 text-2xl font-bold tracking-tight text-foreground break-words">{value}</p><p class="mt-1 text-xs text-surface-500 break-words">{hint}</p></article>"#,
         label = html_escape(label),
         value = html_escape(value),
         hint = html_escape(hint),
@@ -2089,7 +2152,7 @@ fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
         "allowed"
     };
     let blocked_marker = if decision.blocked {
-        r#"<span class="font-bold text-warning-200">BLOCKED</span>"#
+        r#"<span class="font-bold text-warning-700">BLOCKED</span>"#
     } else {
         ""
     };
@@ -2105,16 +2168,16 @@ fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
         }
     }
     let reason_line = if reasons.is_empty() {
-        r#"<p class="mt-1 text-xs leading-5 text-surface-400">Reason: no rationale recorded.</p>"#
+        r#"<p class="mt-1 text-xs leading-5 text-surface-500">Reason: no rationale recorded.</p>"#
             .to_string()
     } else {
         format!(
-            r#"<p class="mt-1 text-xs leading-5 text-surface-300">Reason: {}</p>"#,
+            r#"<p class="mt-1 text-xs leading-5 text-surface-600">Reason: {}</p>"#,
             reasons.join(" · ")
         )
     };
     format!(
-        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-3"><p class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-surface-200">{time}<span class="font-bold text-white">{account}</span><span class="font-mono font-bold text-brand-200">{action}</span><span class="text-surface-400">&rarr; {contact}</span><span>Confidence {confidence}</span><span>Variant: {variant}</span><span>Sender: {sender}</span><span>Legal policy: {legal}</span>{expected}{scheduled}{blocked_marker}</p>{reason_line}</li>"#,
+        r#"<li class="apex-panel apex-panel--flush p-3"><p class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-surface-600">{time}<span class="font-bold text-foreground">{account}</span><span class="font-mono font-bold text-primary">{action}</span><span class="text-surface-500">&rarr; {contact}</span><span>Confidence {confidence}</span><span>Variant: {variant}</span><span>Sender: {sender}</span><span>Legal policy: {legal}</span>{expected}{scheduled}{blocked_marker}</p>{reason_line}</li>"#,
         time = time,
         account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
         action = sales_decision_action(decision),
@@ -2154,7 +2217,7 @@ fn sales_decision_table_row(decision: &SalesDecisionData) -> String {
     let offer = sales_value_or(decision.selected_offer.as_deref(), "none");
     let sequence = sales_value_or(decision.selected_sequence.as_deref(), "none");
     format!(
-        r#"<tr class="align-top"><td class="px-4 py-3 font-mono text-xs font-bold text-surface-100">{action}</td><td class="px-4 py-3 text-xs text-surface-300">{account}</td><td class="px-4 py-3 text-xs text-surface-200">{confidence}</td><td class="px-4 py-3 text-xs text-surface-200">{expected}</td><td class="px-4 py-3 text-xs text-surface-300">{variant}</td><td class="px-4 py-3 text-xs text-surface-300">{sender}</td><td class="px-4 py-3 text-xs text-surface-400">{offer} / {sequence}</td><td class="px-4 py-3 text-xs leading-5 text-surface-400">{rationale}</td></tr>"#,
+        r#"<tr class="align-top"><td class="px-4 py-3 font-mono text-xs font-bold text-surface-100">{action}</td><td class="px-4 py-3 text-xs text-surface-600">{account}</td><td class="px-4 py-3 text-xs text-surface-600">{confidence}</td><td class="px-4 py-3 text-xs text-surface-600">{expected}</td><td class="px-4 py-3 text-xs text-surface-600">{variant}</td><td class="px-4 py-3 text-xs text-surface-600">{sender}</td><td class="px-4 py-3 text-xs text-surface-500">{offer} / {sequence}</td><td class="px-4 py-3 text-xs leading-5 text-surface-500">{rationale}</td></tr>"#,
         action = sales_decision_action(decision),
         account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
         confidence = format_confidence(decision.confidence),
@@ -2190,7 +2253,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
             "text-warning-100",
         )
     } else {
-        ("border-white/10 bg-black/20", "text-surface-400")
+        ("border-border bg-surface-50", "text-surface-500")
     };
     let heading = if decision.blocked {
         "Blocked decision"
@@ -2203,7 +2266,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
         html_escape(decision.rationale.trim())
     };
     format!(
-        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-white">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-300">Rationale: {rationale}</p></li>"#,
+        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-foreground">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-600">Rationale: {rationale}</p></li>"#,
         tone = tone,
         badge = badge,
         heading = heading,
@@ -2218,7 +2281,7 @@ fn sales_exception_item(decision: &SalesDecisionData) -> String {
 /// Compact dead-letter row (Exceptions section).
 fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
     format!(
-        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-4"><p class="font-mono text-xs text-surface-200">{id}</p><p class="mt-1 text-xs text-surface-300">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-300">Last error: {last_error}</p></li>"#,
+        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2239,7 +2302,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-4"><p class="font-mono text-xs text-surface-200">{id}</p><p class="mt-1 text-xs text-surface-300">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-300">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-white/10 bg-black/25 px-4 py-2 text-xs font-bold text-surface-500 opacity-60">Replay</button><p class="text-xs leading-5 text-surface-400">Read-only: replay is the JSON mutation <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
+        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class=\"apex-btn apex-btn--sm\">Replay</button><p class="text-xs leading-5 text-surface-500">Read-only: replay is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2305,9 +2368,9 @@ fn sales_hero(data: &SalesPageData) -> String {
     } else {
         String::new()
     };
-    let session = r#"<section class="rounded-sm border border-white/10 bg-surface-950 p-5"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
+    let session = r#"<section class="apex-panel"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-foreground">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-surface-50 px-1 py-0.5 text-primary">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
     format!(
-        r#"<header class="apex-cp-dark-hero rounded-sm border border-white/10 bg-black/25 p-6 shadow-premium-black/30"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-brand-400">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Zero JavaScript: every mutating form is a plain server-rendered post.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
+        r#"<header class="apex-cp-dark-hero p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-foreground">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-600">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Zero JavaScript: every mutating form is a plain server-rendered post.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
         gap_banner = gap_banner,
         revenue_tile = sales_kpi_tile("Revenue (30d)", &revenue_value, revenue_hint),
         meetings_tile = sales_kpi_tile("Meetings booked (30d)", &meetings_value, meetings_hint),
@@ -2325,7 +2388,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
         ),
         Some(overview) => {
             let window = format!(
-                r#"<p class="mt-4 text-sm leading-6 text-surface-300">Meetings booked (30d): <span class="font-bold text-white">{meetings}</span> · Decisions in the window (24h): <span class="font-bold text-white">{decisions}</span> · Blocked by a hard gate (24h): <span class="font-bold text-white">{blocked}</span></p>"#,
+                r#"<p class="mt-4 text-sm leading-6 text-surface-600">Meetings booked (30d): <span class="font-bold text-foreground">{meetings}</span> · Decisions in the window (24h): <span class="font-bold text-foreground">{decisions}</span> · Blocked by a hard gate (24h): <span class="font-bold text-foreground">{blocked}</span></p>"#,
                 meetings = overview.meetings_booked,
                 decisions = overview.decisions_last_24h,
                 blocked = overview.blocked_last_24h,
@@ -2344,7 +2407,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                     .iter()
                     .map(|row| {
                         format!(
-                            r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{outcome}</td><td class="px-4 py-3 text-xs font-bold text-white">{eur}</td></tr>"#,
+                            r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{outcome}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{eur}</td></tr>"#,
                             outcome = html_escape(&row.outcome),
                             eur = format_eur_amount(row.eur),
                         )
@@ -2353,7 +2416,7 @@ fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
                     .join("");
                 let total = format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum());
                 format!(
-                    r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">Outcome</th><th scope="col" class="px-4 py-3 font-medium">Revenue (EUR)</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}<tr class="bg-black/20"><td class="px-4 py-3 text-xs font-bold text-white">Total</td><td class="px-4 py-3 text-xs font-bold text-white">{total}</td></tr></tbody></table></div>{window}"#,
+                    r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">Outcome</th><th scope="col" class="px-4 py-3 font-medium">Revenue (EUR)</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}<tr class="bg-surface-50"><td class="px-4 py-3 text-xs font-bold text-foreground">Total</td><td class="px-4 py-3 text-xs font-bold text-foreground">{total}</td></tr></tbody></table></div>{window}"#,
                     rows = rows,
                     total = total,
                     window = window,
@@ -2402,7 +2465,7 @@ fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
         .map(|label| html_escape(&label))
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Current mode: <span class="font-mono font-bold text-white">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-200">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-white">{brain}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-white">{execute}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-white">{last_action}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-white">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-400">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/pause</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/resume</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
+        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Current mode: <span class="font-mono font-bold text-foreground">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-600">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-foreground">{brain}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-foreground">{execute}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-foreground">{last_action}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-foreground">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-500">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/pause</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/resume</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
         mode = mode,
         meaning = meaning,
         kill_switch = kill_switch,
@@ -2438,7 +2501,7 @@ fn sales_decision_stream_section(data: &SalesPageData) -> String {
             "No decisions yet — the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
         ),
         Some(decisions) => format!(
-            r#"<p class="mt-4 text-xs leading-5 text-surface-400">Chronological, newest first. Action vocabulary: <span class="font-mono text-surface-200">ENRICH</span> gathers evidence, <span class="font-mono text-surface-200">CONTACT</span> starts or advances outreach, <span class="font-mono text-surface-200">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
+            r#"<p class="mt-4 text-xs leading-5 text-surface-500">Chronological, newest first. Action vocabulary: <span class="font-mono text-surface-600">ENRICH</span> gathers evidence, <span class="font-mono text-surface-600">CONTACT</span> starts or advances outreach, <span class="font-mono text-surface-600">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
             rows = sales_decisions_newest_first(decisions)
                 .into_iter()
                 .map(sales_decision_stream_row)
@@ -2471,7 +2534,7 @@ fn sales_decisions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">Action</th><th scope="col" class="px-4 py-3 font-medium">Account</th><th scope="col" class="px-4 py-3 font-medium">Confidence</th><th scope="col" class="px-4 py-3 font-medium">Expected value</th><th scope="col" class="px-4 py-3 font-medium">Variant</th><th scope="col" class="px-4 py-3 font-medium">Sender</th><th scope="col" class="px-4 py-3 font-medium">Offer / sequence</th><th scope="col" class="px-4 py-3 font-medium">Rationale</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">Action</th><th scope="col" class="px-4 py-3 font-medium">Account</th><th scope="col" class="px-4 py-3 font-medium">Confidence</th><th scope="col" class="px-4 py-3 font-medium">Expected value</th><th scope="col" class="px-4 py-3 font-medium">Variant</th><th scope="col" class="px-4 py-3 font-medium">Sender</th><th scope="col" class="px-4 py-3 font-medium">Offer / sequence</th><th scope="col" class="px-4 py-3 font-medium">Rationale</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
                 rows = rows,
             )
         }
@@ -2499,7 +2562,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
         }
     }
-    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-400">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
+    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
     match data.dead_letters.as_ref() {
         None => parts.push(sales_note(
             "The dead-letter feed is unavailable: the control API did not answer.",
@@ -2514,7 +2577,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             parts.push(format!(
-                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Dead letters</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Dead letters</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
             ));
         }
     }
@@ -2541,7 +2604,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
     };
     let stats = &overview.action_stats;
     let tiles = format!(
-        r#"<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Total actions</dt><dd class="mt-2 text-2xl font-bold text-white">{total}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Due now</dt><dd class="mt-2 text-2xl font-bold text-warning-200">{due_now}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Dead-lettered</dt><dd class="mt-2 text-2xl font-bold text-warning-200">{dead_lettered}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">States reported</dt><dd class="mt-2 text-2xl font-bold text-white">{states}</dd></div></dl>"#,
+        r#"<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Total actions</dt><dd class="mt-2 text-2xl font-bold text-foreground">{total}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Due now</dt><dd class="mt-2 text-2xl font-bold text-warning-700">{due_now}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Dead-lettered</dt><dd class="mt-2 text-2xl font-bold text-warning-700">{dead_lettered}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">States reported</dt><dd class="mt-2 text-2xl font-bold text-foreground">{states}</dd></div></dl>"#,
         total = stats.total,
         due_now = stats.due_now,
         dead_lettered = stats.dead_lettered,
@@ -2555,7 +2618,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             .iter()
             .map(|(state, count)| {
                 format!(
-                    r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{state}</td><td class="px-4 py-3 text-xs font-bold text-white">{count}</td></tr>"#,
+                    r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{state}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{count}</td></tr>"#,
                     state = html_escape(state),
                     count = count,
                 )
@@ -2563,7 +2626,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             .collect::<Vec<_>>()
             .join("");
         format!(
-            r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Action queue counts by state</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Count</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+            r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Action queue counts by state</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Count</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
         )
     };
     let replay = match data.dead_letters.as_ref() {
@@ -2580,14 +2643,12 @@ fn sales_actions_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Dead letters · replay</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Dead letters · replay</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
             )
         }
     };
     let enrichment = format!(
-        r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-white/10 bg-black/15 p-4">{csrf}{notice}<div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-300">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div><button type="submit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run enrichment</button></div><p class="text-xs leading-5 text-surface-400">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#,
-        csrf = csrf_hidden_input_for_sales(data),
-        notice = sales_csrf_notice(data),
+        r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-600">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn">Run enrichment</button></div><p class="text-xs leading-5 text-surface-500">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#,
     );
     sales_panel(
         "sales-actions",
@@ -2613,7 +2674,7 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
                 .iter()
                 .map(|row| {
                     format!(
-                        r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{state}</td><td class="px-4 py-3 text-xs font-bold text-white">{count}</td></tr>"#,
+                        r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-600">{state}</td><td class="px-4 py-3 text-xs font-bold text-foreground">{count}</td></tr>"#,
                         state = html_escape(&row.state),
                         count = row.count,
                     )
@@ -2621,14 +2682,12 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Contact enrollments by state</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Enrolled</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-border"><table class="min-w-full divide-y divide-border text-left text-sm"><caption class="sr-only">Contact enrollments by state</caption><thead class="bg-surface-50 text-surface-600"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Enrolled</th></tr></thead><tbody class="divide-y divide-border text-surface-600">{rows}</tbody></table></div>"#,
             )
         }
     };
     let form = format!(
-        r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-white/10 bg-black/15 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Enroll contacts into a sequence</h3>{csrf}{notice}<div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-300">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-300">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-300">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div><button type="submit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-400">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#,
-        csrf = csrf_hidden_input_for_sales(data),
-        notice = sales_csrf_notice(data),
+        r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-border bg-surface-50 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-500">Enroll contacts into a sequence</h3><div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-600">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-600">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="apex-input w-full" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-600">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="apex-input w-full" /></div><div><button type="submit" class="apex-btn apex-btn--secondary">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-500">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#,
     );
     sales_panel(
         "sales-enrollments",
@@ -2639,31 +2698,13 @@ fn sales_enrollments_section(data: &SalesPageData) -> String {
 }
 
 /// The double-submit CSRF input for the sales SSR forms.
-fn csrf_hidden_input_for_sales(data: &SalesPageData) -> String {
-    format!(
-        r#"<input type="hidden" name="_csrf" value="{}" />"#,
-        escape_attribute_value(&data.csrf_token)
-    )
-}
-
-/// Honest notice when the render carried no CSRF token: the forms below
-/// would be rejected by the double-submit check, so the page says why
-/// instead of letting the operator discover it via a session-expired flash.
-fn sales_csrf_notice(data: &SalesPageData) -> &'static str {
-    if data.csrf_token.trim().is_empty() {
-        r#"<p class="rounded-sm border border-warning-300/35 bg-warning-300/10 p-3 text-xs leading-5 text-warning-100">This render carries no CSRF token, so the post below cannot pass the double-submit check yet. The console render pipeline supplies the token once the sales data loader is wired.</p>"#
-    } else {
-        ""
-    }
-}
-
 /// Compliance: the legal policy hard gate.
 fn sales_compliance_section() -> String {
     sales_panel(
         "sales-compliance",
         "Governance",
         "Compliance",
-        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3 text-sm leading-6 text-surface-300">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
+        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3 text-sm leading-6 text-surface-600">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
     )
 }
 
@@ -2673,7 +2714,7 @@ fn sales_costs_section() -> String {
         "sales-costs",
         "Unit Economics",
         "Costs",
-        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Enrichment and sending cost are not yet instrumented: the sales-autopilot control API exposes no spend or cost counter. This console renders an explicit not-yet-instrumented note rather than a fabricated figure. A cost section ships when the engine reports actual spend per action.</p>"#,
+        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Enrichment and sending cost are not yet instrumented: the sales-autopilot control API exposes no spend or cost counter. This console renders an explicit not-yet-instrumented note rather than a fabricated figure. A cost section ships when the engine reports actual spend per action.</p>"#,
     )
 }
 
@@ -2686,7 +2727,7 @@ fn sales_costs_section() -> String {
 pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
     let overview = data.overview.as_ref();
     format!(
-        r#"<section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{first_response}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
+        r#"<section class="apex-cp-sales rounded-sm bg-background px-4 py-6 text-foreground md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{first_response}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
         hero = sales_hero(data),
         first_response = sales_first_response_section(data),
         revenue = sales_revenue_section(overview),
@@ -2706,7 +2747,7 @@ pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
 /// the honest unavailable contract — never zeros.
 fn sales_first_response_section(data: &SalesPageData) -> String {
     let Some(kpi) = data.first_response.as_ref() else {
-        return "<section aria-label=\"First response\" class=\"rounded-sm border border-white/10 p-5\"><h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-white/60\">First response</h3><p class=\"mt-2 text-sm text-white/70\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
+        return "<section aria-label=\"First response\" class=\"rounded-sm border border-border p-5\"><h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-foreground/60\">First response</h3><p class=\"mt-2 text-sm text-foreground/70\">Latency unavailable — the first-response store could not be read. The figures are unknown, not zero.</p></section>".to_string();
     };
     let pct = |value: Option<f64>| -> String {
         match value {
@@ -2720,15 +2761,15 @@ fn sales_first_response_section(data: &SalesPageData) -> String {
         .map(|ok| if ok { "within target" } else { "above target" })
         .unwrap_or("no closed requests in the window");
     format!(
-        "<section aria-label=\"First response\" class=\"rounded-sm border border-white/10 p-5\">\
-         <h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-white/60\">First response</h3>\
+        "<section aria-label=\"First response\" class=\"rounded-sm border border-border p-5\">\
+         <h3 class=\"text-xs font-bold uppercase tracking-[0.16em] text-foreground/60\">First response</h3>\
          <div class=\"mt-3 grid gap-4 sm:grid-cols-4\">\
-         <div><p class=\"text-2xl font-bold\">{pending}</p><p class=\"text-xs text-white/60\">waiting for a draft</p></div>\
-         <div><p class=\"text-2xl font-bold\">{queued}</p><p class=\"text-xs text-white/60\">queued, last {window}h</p></div>\
-         <div><p class=\"text-2xl font-bold\">{p50}</p><p class=\"text-xs text-white/60\">p50 to queue</p></div>\
-         <div><p class=\"text-2xl font-bold\">{p95}</p><p class=\"text-xs text-white/60\">p95 to queue ({within})</p></div>\
+         <div><p class=\"text-2xl font-bold\">{pending}</p><p class=\"text-xs text-foreground/60\">waiting for a draft</p></div>\
+         <div><p class=\"text-2xl font-bold\">{queued}</p><p class=\"text-xs text-foreground/60\">queued, last {window}h</p></div>\
+         <div><p class=\"text-2xl font-bold\">{p50}</p><p class=\"text-xs text-foreground/60\">p50 to queue</p></div>\
+         <div><p class=\"text-2xl font-bold\">{p95}</p><p class=\"text-xs text-foreground/60\">p95 to queue ({within})</p></div>\
          </div>\
-         <p class=\"mt-3 text-xs text-white/50\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
+         <p class=\"mt-3 text-xs text-foreground/50\">Automated path only: accept to queued reply. Human review time is excluded; the target is {target:.0}s (docs/operations/first-response-slo.md).</p>\
          </section>",
         pending = kpi.pending,
         queued = kpi.queued,
@@ -2781,7 +2822,7 @@ pub fn marketing_not_found_page() -> String {
 <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">404</p>\
 <h1 class=\"mt-4 text-4xl font-bold tracking-tighter text-surface-950\">Page not found</h1>\
 <p class=\"mt-4 text-sm font-medium text-surface-600\">The page you are looking for does not exist or has moved.</p>\
-<a href=\"/\" class=\"mt-8 inline-flex min-h-[48px] items-center justify-center rounded-sm bg-primary px-8 py-3 text-sm font-bold text-white shadow-premium transition-colors hover:bg-brand-700\">Back to the homepage</a>\
+<a href=\"/\" class=\"apex-btn\">Back to the homepage</a>\
 </section>";
     let header = crate::marketing::MarketingHeader {
         is_scrolled: false,
@@ -2947,6 +2988,19 @@ fn csrf_hidden_input(token: &str) -> String {
 // so there is no client-side widget markup here anymore.
 
 fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
+    // `title`/`description` interpolate query-derived values (message, email
+    // address sentences) — escape everything to block reflected XSS.
+    web_auth_notice_rich(intent, title, &html_escape(description))
+}
+
+/// [`web_auth_notice`] with a caller-escaped HTML body, for descriptions that
+/// carry a trusted emphasis fragment (`<strong>` around an already-escaped
+/// address). Every notice on the auth surfaces renders through this ONE
+/// markup + class source, so a notice can never be hand-rolled with a
+/// palette pairing that breaks in one of the themes (dogfood 2026-10-06: the
+/// MFA challenge page hand-rolled its box as `bg-brand-50/80` with no text
+/// color — near-white inherited text on a pale panel in dark mode).
+fn web_auth_notice_rich(intent: &str, title: &str, body_html: &str) -> String {
     let classes = match intent {
         "success" => "border-success-200 bg-success-50/80 text-success-900",
         "warning" => "border-warning-200 bg-warning-50/80 text-warning-900",
@@ -2954,15 +3008,13 @@ fn web_auth_notice(intent: &str, title: &str, description: &str) -> String {
         _ => "border-brand-200 bg-brand-50/80 text-brand-900",
     };
 
-    // `title`/`description` interpolate query-derived values (message, email
-    // address sentences) — escape everything to block reflected XSS.
     format!(
         "<div class=\"apex-auth-notice rounded-xl border px-4 py-4 {classes}\" data-intent=\"{}\">\
 <p class=\"text-sm font-bold\">{}</p>\
 <p class=\"mt-1 text-sm leading-relaxed\">{}</p></div>",
         html_escape(intent),
         html_escape(title),
-        html_escape(description),
+        body_html,
     )
 }
 
@@ -3192,7 +3244,7 @@ pub fn web_verify_email_page_with_state(
             // bounds how often a link can be re-queued.
             format!(
                 "<div class=\"space-y-4\">\
-<form class=\"space-y-3\" action=\"/web/auth/resend-verification\" method=\"POST\">\
+<form class=\"space-y-3\" action=\"/web/auth/resend-verification\" method=\"post\">\
 <label class=\"apex-klabel\" for=\"resend-email\">Email address</label>\
 <input id=\"resend-email\" name=\"email\" type=\"email\" required value=\"{email_value}\" autocomplete=\"email\" placeholder=\"you@company.com\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-medium focus-visible:outline-none transition-all\" />\
 <button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99]\"><span>Send a fresh verification link</span></button>\
@@ -3299,7 +3351,7 @@ pub fn web_dashboard_page() -> String {
 <article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
 <h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health</h3>\
 <p class=\"text-sm leading-6 text-surface-600\">Per-message delivery rates are computed from your own send events. Open Analytics for the current window.</p>\
-<a href=\"/analytics\" class=\"mt-3 inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-4 py-2 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950\">Open Analytics</a>\
+<a href=\"/analytics\" class=\"apex-btn apex-btn--sm apex-btn--secondary\">Open Analytics</a>\
 </article>\
 <article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
 <h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
@@ -4294,6 +4346,24 @@ pub fn web_domains_page() -> String {
     )
 }
 
+/// Display text for a value that may be empty: an empty string falls back to
+/// a named placeholder instead of a blank slot that reads as a rendering
+/// failure. Shared so every surface that renders optional message fields
+/// uses one convention.
+pub fn display_or<'a>(value: &'a str, placeholder: &'static str) -> &'a str {
+    if value.trim().is_empty() {
+        placeholder
+    } else {
+        value
+    }
+}
+
+/// Display text for a message subject (an empty subject renders as
+/// "(no subject)" — the incoming message carried no Subject header).
+pub fn display_subject(subject: &str) -> &str {
+    display_or(subject, "(no subject)")
+}
+
 /// The control-plane AI-drafts review page (`/reviews/ai-drafts`): every
 /// pending draft with its classification (and objection class when recorded),
 /// the drafted reply, and approve/reject forms. Approval queues the reply
@@ -4301,20 +4371,19 @@ pub fn web_domains_page() -> String {
 pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
     let unavailable = data.is_some_and(|d| d.unavailable);
     let drafts = data.map(|d| d.drafts.as_slice()).unwrap_or(&[]);
-    let csrf = data.map(|d| d.csrf_token.clone()).unwrap_or_default();
 
     let mut cards = String::new();
     if unavailable {
         cards.push_str(
-            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-6\">\
-             <p class=\"text-sm font-bold text-surface-900\">The review queue is unavailable</p>\
-             <p class=\"mt-2 text-sm text-surface-600\">The draft store could not be read just now. This is a service problem, not an empty queue.</p></div>",
+            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+             <strong>The review queue is unavailable</strong>\
+             <span>The draft store could not be read just now. This is a service problem, not an empty queue.</span></div>",
         );
     } else if drafts.is_empty() {
         cards.push_str(
-            "<div class=\"rounded-sm border p-8 text-center\">\
-             <p class=\"text-sm font-bold text-surface-900\">No drafts need review</p>\
-             <p class=\"mt-2 text-sm text-surface-600\">Drafts appear here when the assistant answers an inbound message and a human must approve the reply.</p></div>",
+            "<div class=\"apex-panel\" role=\"status\">\
+             <p class=\"apex-panel-title\">No drafts need review</p>\
+             <p class=\"mt-1 text-sm text-surface-600\">Drafts appear here when the assistant answers an inbound message and a human must approve the reply.</p></div>",
         );
     } else {
         for draft in drafts {
@@ -4327,43 +4396,40 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
                 })
                 .unwrap_or_else(|| "not classified".to_string());
             let first_response = if draft.first_response {
-                "<span class=\"ml-2 rounded-sm bg-primary/10 px-2 py-0.5 text-[11px] font-bold text-primary\">first response</span>"
+                " <span class=\"apex-pill apex-pill--brand\">first response</span>"
             } else {
                 ""
             };
             cards.push_str(&format!(
-                "<article class=\"rounded-sm border p-5\">\
+                "<article class=\"apex-panel\">\
                  <div class=\"flex items-baseline justify-between gap-4\">\
-                 <h2 class=\"text-sm font-bold text-surface-950\">{subject}</h2>\
+                 <h2 class=\"apex-panel-title\">{subject}</h2>\
                  <span class=\"text-xs text-surface-500\">{received_at}</span>\
                  </div>\
                  <p class=\"mt-1 text-xs text-surface-500\">From {from} · Workspace {tenant} · {classification}{first_response}</p>\
                  <details class=\"mt-3 text-sm text-surface-800\"><summary class=\"cursor-pointer font-bold\">Draft reply</summary>\
-                 <pre class=\"mt-2 whitespace-pre-wrap rounded-sm bg-surface-50 p-3 text-xs\">{reply}</pre></details>\
-                 <div class=\"mt-4 flex flex-wrap items-end gap-3\">\
+                 <pre class=\"mt-2 whitespace-pre-wrap rounded-[9px_9px_7px_7px] bg-surface-100 p-3 text-xs\">{reply}</pre></details>\
+                 <div class=\"mt-4 grid gap-4 md:grid-cols-2\">\
                  <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/approve\">\
-                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
-                 <div class=\"space-y-1\"><label class=\"block text-xs font-bold text-surface-700\" for=\"note-approve-{id}\">Approval note</label>\
-                 <input id=\"note-approve-{id}\" name=\"note\" class=\"rounded-sm border border-surface-300 px-2 py-1 text-xs\" /></div>\
-                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700\">Approve and queue</button>\
+                 <div class=\"apex-field flex-1\"><label for=\"note-approve-{id}\">Approval note</label>\
+                 <input id=\"note-approve-{id}\" name=\"note\" type=\"text\" /></div>\
+                 <button type=\"submit\" class=\"apex-btn\">Approve and queue</button>\
                  </form>\
                  <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/reject\">\
-                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
-                 <div class=\"space-y-1\"><label class=\"block text-xs font-bold text-surface-700\" for=\"note-reject-{id}\">Rejection reason</label>\
-                 <input id=\"note-reject-{id}\" name=\"note\" class=\"rounded-sm border border-surface-300 px-2 py-1 text-xs\" /></div>\
-                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 px-4 py-2 text-sm font-bold text-surface-800 hover:bg-surface-50\">Reject</button>\
+                 <div class=\"apex-field flex-1\"><label for=\"note-reject-{id}\">Rejection reason</label>\
+                 <input id=\"note-reject-{id}\" name=\"note\" type=\"text\" /></div>\
+                 <button type=\"submit\" class=\"apex-btn apex-btn--secondary\">Reject</button>\
                  </form>\
                  </div>\
                  </article>",
-                subject = html_escape(&draft.subject),
+                subject = html_escape(display_subject(&draft.subject)),
                 received_at = html_escape(&draft.received_at),
-                from = html_escape(&draft.from_email),
+                from = html_escape(display_or(&draft.from_email, "(unknown sender)")),
                 tenant = html_escape(&draft.tenant_id),
                 classification = classification,
                 first_response = first_response,
                 reply = html_escape(&draft.draft_reply),
                 id = html_escape(&draft.id),
-                csrf = html_escape(&csrf),
             ));
         }
     }
@@ -4372,7 +4438,7 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
         "<div class=\"space-y-6\">
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">AI drafts</h1>\
 <p class=\"text-sm text-surface-600\">Every drafted reply is written by the assistant, verified against the published documentation, and held here until a human approves or rejects it. Nothing sends itself.</p>\
-{cards}\
+<div class=\"space-y-4\">{cards}</div>\
 </div>",
         cards = cards,
     )
@@ -4402,10 +4468,10 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
         .and_then(|d| d.viewer_url.as_deref())
         .map(|url| {
             format!(
-                "<div class=\"rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4\">\
-                 <p class=\"text-sm font-bold text-surface-900\">Viewer link — shown once</p>\
-                 <p class=\"mt-1 text-xs text-surface-600\">Share this with the prospect. It is not stored in plaintext, so copy it now.</p>\
-                 <code class=\"mt-2 block break-all font-mono text-xs\">{}</code>\
+                "<div class=\"apex-callout apex-callout--success\" role=\"status\">\
+                 <strong>Viewer link — shown once</strong>\
+                 <span>Share this with the prospect. It is not stored in plaintext, so copy it now.</span>\
+                 <code class=\"apex-mono mt-2 block break-all\">{}</code>\
                  </div>",
                 html_escape(url)
             )
@@ -4415,31 +4481,42 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
     let mut rows = String::new();
     if unavailable {
         rows.push_str(
-            "<tr><td colspan=\"4\" class=\"p-4 text-sm text-surface-600\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
+            "<tr><td colspan=\"5\" class=\"text-surface-600\">The demo list is unavailable right now — this is a service problem, not an empty list.</td></tr>",
         );
     } else if sessions.is_empty() {
         rows.push_str(
-            "<tr><td colspan=\"4\" class=\"p-4 text-sm text-surface-600\">No demo sessions yet. Create one above.</td></tr>",
+            "<tr><td colspan=\"5\" class=\"text-surface-600\">No demo sessions yet. Create one above.</td></tr>",
         );
     } else {
         for session in sessions {
+            // A completed session has nothing left to run (the advance
+            // endpoint refuses to fake a step), so the row offers no button
+            // instead of an action that reports "Step executed." for a no-op
+            // (dogfood 2026-10-06).
+            let action = if session.state == "completed" {
+                "<span class=\"apex-pill\">Completed</span>".to_string()
+            } else {
+                format!(
+                    "<form method=\"post\" action=\"/web/admin/demos/{}/advance\">\
+                 <button type=\"submit\" class=\"apex-btn apex-btn--sm\">Run next step</button>\
+                 </form>",
+                    html_escape(&session.id),
+                )
+            };
             rows.push_str(&format!(
-                "<tr class=\"border-b\">\
-                 <td class=\"p-3 font-mono text-xs\">{id}</td>\
-                 <td class=\"p-3 text-sm\">{script}</td>\
-                 <td class=\"p-3 text-sm\">{state}</td>\
-                 <td class=\"p-3 text-sm\">{done}/{total} steps</td>\
-                 <td class=\"p-3\"><form method=\"post\" action=\"/web/admin/demos/{id}/advance\">\
-                 <input type=\"hidden\" name=\"_csrf\" value=\"{csrf}\" />\
-                 <button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-brand-700\">Run next step</button>\
-                 </form></td>\
+                "<tr>\
+                 <td class=\"apex-mono\">{id}</td>\
+                 <td>{script}</td>\
+                 <td>{state}</td>\
+                 <td>{done}/{total} steps</td>\
+                 <td>{action}</td>\
                  </tr>",
                 id = html_escape(&session.id),
                 script = html_escape(&session.script),
                 state = html_escape(&session.state),
                 done = session.steps_done,
                 total = session.steps_total,
-                csrf = html_escape(&data.map(|d| d.csrf_token.clone()).unwrap_or_default()),
+                action = action,
             ));
         }
     }
@@ -4449,20 +4526,20 @@ pub fn web_demos_page(data: Option<&DemosPageData>) -> String {
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Demos</h1>\
 <p class=\"text-sm text-surface-600\">Scripted, server-driven walkthroughs that execute the real product — the same console, the same API sandbox, the same grader and the same pricing source a customer would use.</p>\
 {viewer_url}\
-<form class=\"space-y-4 rounded-sm border p-6\" method=\"post\" action=\"/web/admin/demos\">\
-<div class=\"space-y-2\">\
-<label class=\"block text-sm font-bold text-surface-900\" for=\"demo-script\">Script</label>\
-<select id=\"demo-script\" name=\"script\" class=\"w-full rounded-sm border border-surface-300 bg-white px-3 py-2 text-sm\">{scripts}</select>\
+<form class=\"apex-panel space-y-4\" method=\"post\" action=\"/web/admin/demos\">\
+<div class=\"apex-field\">\
+<label for=\"demo-script\">Script</label>\
+<select id=\"demo-script\" name=\"script\">{scripts}</select>\
 </div>\
-<button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Create demo session</button>\
+<button type=\"submit\" class=\"apex-btn\">Create demo session</button>\
 </form>\
-<h2 class=\"text-lg font-bold text-surface-950\">Sessions</h2>\
-<div class=\"overflow-x-auto rounded-sm border\"><table class=\"w-full text-left\"><thead><tr class=\"border-b bg-surface-50\">\
-<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Session</th>\
-<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Script</th>\
-<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">State</th>\
-<th class=\"p-3 text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">Progress</th>\
-<th class=\"p-3\"></th></tr></thead><tbody>{rows}</tbody></table></div>\
+<h2 class=\"apex-panel-title\">Sessions</h2>\
+<div class=\"apex-table-wrap\"><table class=\"apex-table\"><thead><tr>\
+<th scope=\"col\">Session</th>\
+<th scope=\"col\">Script</th>\
+<th scope=\"col\">State</th>\
+<th scope=\"col\">Progress</th>\
+<th scope=\"col\"><span class=\"sr-only\">Actions</span></th></tr></thead><tbody>{rows}</tbody></table></div>\
 </div>",
         viewer_url = viewer_url,
         scripts = script_options,
@@ -4480,29 +4557,31 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
     let steps = data.map(|d| d.steps.as_slice()).unwrap_or(&[]);
 
     let banner = match state {
-        "completed" => {
-            "<div class=\"rounded-sm border border-emerald-500/40 bg-emerald-500/10 p-4\">\
-             <p class=\"text-sm font-bold text-surface-900\">This demo has finished</p>\
-             <p class=\"mt-1 text-xs text-surface-600\">You are viewing a replay of every step and its result.</p></div>"
+        "completed" => "<div class=\"apex-callout apex-callout--success\" role=\"status\">\
+             <strong>This demo has finished</strong>\
+             <span>You are viewing a replay of every step and its result.</span></div>"
+            .to_string(),
+        "unavailable" => {
+            // Audit #16: the step read failed — a service problem, not an
+            // empty walkthrough.
+            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+             <strong>The walkthrough could not be loaded</strong>\
+             <span>The demo store did not answer just now. This is a service problem, not an empty walkthrough — reload in a moment.</span></div>"
                 .to_string()
         }
-        "expired" => {
-            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-4\">\
-             <p class=\"text-sm font-bold text-surface-900\">This demo link has expired</p>\
-             <p class=\"mt-1 text-xs text-surface-600\">Ask the ApexMail team for a fresh link to see the walkthrough.</p></div>"
-                .to_string()
-        }
-        "invalid" => {
-            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-4\">\
-             <p class=\"text-sm font-bold text-surface-900\">This demo link is not valid</p>\
-             <p class=\"mt-1 text-xs text-surface-600\">Check the link, or ask the ApexMail team for a new one.</p></div>"
-                .to_string()
-        }
+        "expired" => "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+             <strong>This demo link has expired</strong>\
+             <span>Ask the ApexMail team for a fresh link to see the walkthrough.</span></div>"
+            .to_string(),
+        "invalid" => "<div class=\"apex-callout apex-callout--error\" role=\"status\">\
+             <strong>This demo link is not valid</strong>\
+             <span>Check the link, or ask the ApexMail team for a new one.</span></div>"
+            .to_string(),
         _ => String::new(),
     };
 
     let mut list = String::new();
-    if steps.is_empty() && state != "invalid" {
+    if steps.is_empty() && state != "invalid" && state != "unavailable" {
         list.push_str(
             "<p class=\"text-sm text-surface-600\">Nothing has been shown yet — the presenter has not started the walkthrough.</p>",
         );
@@ -4511,17 +4590,13 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
         for step in steps {
             let status = step
                 .status
-                .map(|s| {
-                    format!(
-                        "<span class=\"ml-2 text-xs font-bold text-surface-500\">HTTP {s}</span>"
-                    )
-                })
+                .map(|s| format!("<span class=\"apex-pill ml-2\">HTTP {s}</span>"))
                 .unwrap_or_default();
             let detail = if step.detail.is_empty() {
                 String::new()
             } else {
                 format!(
-                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-sm bg-surface-50 p-3 font-mono text-[11px]\">{}</pre></details>",
+                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"apex-mono mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-[9px_9px_7px_7px] bg-surface-100 p-3\">{}</pre></details>",
                     html_escape(&step.detail)
                 )
             };
@@ -4536,10 +4611,10 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
                 })
                 .unwrap_or_default();
             list.push_str(&format!(
-                "<li class=\"rounded-sm border p-5\" aria-current=\"false\">\
+                "<li class=\"apex-panel\" aria-current=\"false\">\
                  <div class=\"flex items-baseline justify-between gap-4\">\
-                 <h2 class=\"text-sm font-bold text-surface-950\">{idx}. {title}{status}</h2>\
-                 <span class=\"text-xs font-mono text-surface-400\">{kind}</span>\
+                 <h2 class=\"apex-panel-title\">{idx}. {title}{status}</h2>\
+                 <span class=\"apex-pill\">{kind}</span>\
                  </div>\
                  <p class=\"mt-2 text-sm text-surface-700\">{summary}</p>\
                  {detail}{ran}\
@@ -4555,7 +4630,7 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
     }
 
     format!(
-        "<div class=\"mx-auto max-w-3xl space-y-6 py-8\">
+        "<div class=\"mx-auto max-w-3xl space-y-6 py-8\">\
 <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">ApexMail walkthrough</p>\
 <h1 class=\"text-3xl font-bold tracking-tighter text-surface-950\">{script}</h1>\
 {banner}\
@@ -4621,7 +4696,7 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
 <textarea id=\"assistant-message\" name=\"message\" rows=\"4\" maxlength=\"4000\" required class=\"w-full rounded-sm border border-surface-300 bg-white px-3 py-2 text-sm text-surface-900\" placeholder=\"What does the Pro plan include?\"></textarea>\
 </div>\
 <div class=\"flex items-center gap-3\">\
-<button type=\"submit\" class=\"inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Send</button>\
+<button type=\"submit\" class=\"apex-btn apex-btn--sm\">Send</button>\
 <span class=\"text-xs text-surface-500\">AI-generated answers; cited when grounded.</span>\
 </div>\
 </form>\
@@ -5159,7 +5234,7 @@ pub fn control_plane_dashboard_page() -> String {
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">worker</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">queue</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500" style="color:#09090b">all nominal</span>
+        <span class="apex-pill apex-pill--success" style="color:rgb(var(--foreground))">all nominal</span>
     </section>
 
     <!-- WINDING receipt (mark DNA): the platform's proof line under the
@@ -6350,6 +6425,13 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
     // Deferred-feature 1: the recovery-code path rides the same
     // /web/auth/mfa/verify endpoint (single-use consumption, shared lockout)
     // through a no-JS <details> disclosure below the authenticator form.
+    //
+    // Renders as a SIBLING of the authenticator form, never inside it: the
+    // HTML parser discards a nested <form> start tag, which merged both
+    // control sets into one form whose required recovery input could never
+    // be filled from the invisible half — "Verify and sign in" then produced
+    // no request at all (dogfood P0, 2026-10-06; pinned by GATE D's
+    // no_rendered_document_nests_a_form_inside_another_form).
     let recovery_form = format!(
         "<details class=\"mt-4 rounded-[8px_8px_7px_7px] border border-surface-200 bg-surface-50 px-4 py-3\">\
 <summary class=\"cursor-pointer text-sm font-bold text-primary\">Use a recovery code instead</summary>\
@@ -6371,24 +6453,29 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 {csrf}\
 <input type=\"hidden\" name=\"email\" value=\"{email}\" />\
 <input type=\"hidden\" name=\"return_to\" value=\"{return_to}\" />\
-<div class=\"rounded-xl border border-brand-200 bg-brand-50/80 px-4 py-4\" role=\"status\">\
-<p class=\"text-sm font-bold\">Two-factor verification required</p>\
-<p class=\"mt-1 text-sm leading-relaxed\">Password accepted for <strong>{email}</strong>. Enter the 6-digit code from your authenticator app to finish signing in.</p>\
-</div>\
+{status_notice}\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"mfaCode\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
 <input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app. Lost your device? Use a recovery code below.</p>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
+</form>\
 {recovery_form}\
-<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>\
-</form>",
+<div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>",
         csrf = csrf,
         email = html_escape(email),
         return_to = html_escape(safe_return_to),
         arrow = web_auth_arrow_icon(),
         recovery_form = recovery_form,
+        status_notice = web_auth_notice_rich(
+            "info",
+            "Two-factor verification required",
+            &format!(
+                "Password accepted for <strong>{}</strong>. Enter the 6-digit code from your authenticator app to finish signing in.",
+                html_escape(email),
+            ),
+        ),
     );
 
     web_auth_shell(
@@ -6685,7 +6772,9 @@ mod tests {
         assert!(html.contains("Modern email infrastructure for developers"));
         assert!(html.contains("href=\"/campaigns\""));
         assert!(html.contains("Go to Dashboard"));
-        assert!(html.contains("bg-primary"));
+        // The CTA composes the canonical recipe now — `apex-btn` carries the
+        // primary fill, so assert the recipe rather than the raw utility.
+        assert!(html.contains("apex-btn") || html.contains("bg-primary"));
     }
 
     #[test]
@@ -6769,7 +6858,6 @@ mod tests {
     fn sales_page_data_fixture() -> SalesPageData {
         SalesPageData {
             first_response: None,
-            csrf_token: "csrf-test-token".to_string(),
             overview: Some(SalesOverviewData {
                 autonomy: SalesAutonomyData {
                     mode: "autonomous_guarded".to_string(),
@@ -7077,7 +7165,6 @@ mod tests {
     fn sales_page_empty_states_are_explicit_not_zero_rows() {
         let data = SalesPageData {
             first_response: None,
-            csrf_token: "t".to_string(),
             overview: Some(SalesOverviewData::default()),
             decisions: Some(Vec::new()),
             exceptions: Some(Vec::new()),
@@ -7490,24 +7577,42 @@ mod tests {
                 "{name}: <div> imbalance ({opens} opens vs {closes} closes)"
             );
 
-            let form_start = html
-                .find("<form")
-                .unwrap_or_else(|| panic!("{name}: no <form>"));
-            let form_end = html
-                .find("</form>")
-                .unwrap_or_else(|| panic!("{name}: no </form>"));
-            assert!(form_end > form_start, "{name}: empty form range");
-            assert!(
-                html[form_start..form_end].contains("<button type=\"submit\""),
-                "{name}: submit button not inside the form"
-            );
+            // Every form is well-formed (has a submit control) and every
+            // control sits inside SOME form. Auth pages may legitimately
+            // carry more than one form (e.g. the MFA challenge's
+            // authenticator + recovery-code paths); what must never happen
+            // is a control rendered outside every form — or a form nested
+            // inside another, which the parser silently collapses
+            // (dogfood 2026-10-06; pinned by GATE D's nested-form gate).
+            let form_ranges: Vec<(usize, usize)> = {
+                let mut ranges = Vec::new();
+                let mut from = 0;
+                while let Some(offset) = html[from..].find("<form") {
+                    let start = from + offset;
+                    let end = html[start..]
+                        .find("</form>")
+                        .map(|o| start + o + "</form>".len())
+                        .unwrap_or_else(|| panic!("{name}: unclosed <form> at {start}"));
+                    assert!(end > start, "{name}: empty form range at {start}");
+                    assert!(
+                        html[start..end].contains("<button type=\"submit\""),
+                        "{name}: submit button missing from the form starting at {start}"
+                    );
+                    ranges.push((start, end));
+                    from = end;
+                }
+                assert!(!ranges.is_empty(), "{name}: no <form>");
+                ranges
+            };
             for tag in ["<input", "<button", "<label"] {
                 let mut from = 0;
                 while let Some(offset) = html[from..].find(tag) {
                     let pos = from + offset;
                     assert!(
-                        pos > form_start && pos < form_end,
-                        "{name}: {tag} element rendered outside the form"
+                        form_ranges
+                            .iter()
+                            .any(|(start, end)| pos > *start && pos < *end),
+                        "{name}: {tag} element rendered outside every form"
                     );
                     from = pos + tag.len();
                 }

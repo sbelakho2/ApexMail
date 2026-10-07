@@ -1,14 +1,22 @@
 // ApexMail Email Send API Load Test — k6 script
 // Targets POST /v1/messages with ramp-up stages: 10 → 50 → 100 concurrent users.
 //
+// Real API contract (services/mail-server/crates/api-server):
+//   * Auth: `X-API-Key: am_…` (middleware/auth.rs) — NOT Authorization: Bearer.
+//   * Body: SendMessageRequest is deny_unknown_fields and accepts
+//     {from, to[], subject, html?, text?, tags?: string[]} — html_body/
+//     text_body/tags-as-object are a guaranteed 422.
+//   * Response: 202 {"data":{"id","status","created_at"},"error":null}.
+//
 // Thresholds:
 //   - p95 http_req_duration < 500ms
 //   - p99 http_req_duration < 1000ms
 //   - Error rate < 1%
 //
-// Usage:
-//   k6 run email-send-load-test.js
-//   K6_API_BASE=http://staging.apexmail.ee K6_API_KEY=xxx k6 run email-send-load-test.js
+// Run (manual/on-demand — the load-gate workflow is archived, ci/README.md §2):
+//   K6_API_KEY=am_live_… K6_API_BASE=http://localhost:8080 \
+//     K6_FROM_EMAIL=sender@verified.example \
+//     k6 run email-send-load-test.js
 
 import http from 'k6/http';
 import { check, sleep, group } from 'k6';
@@ -21,12 +29,12 @@ const totalRequests = new Counter('total_requests');
 
 // ── Configuration ────────────────────────────────────────────────────────────
 const API_BASE = __ENV.K6_API_BASE || 'http://localhost:3000';
-const API_KEY = __ENV.K6_API_KEY || 'test-api-key-00000000000000000000000000000';
+const API_KEY = __ENV.K6_API_KEY || '';
+const FROM_EMAIL = __ENV.K6_FROM_EMAIL || 'loadtest@example.com';
 
 const AUTH_HEADERS = {
-  'Authorization': `Bearer ${API_KEY}`,
+  'X-API-Key': API_KEY,
   'Content-Type': 'application/json',
-  'X-Tenant-ID': `tenant-${__VU}`,
 };
 
 // ── Options ──────────────────────────────────────────────────────────────────
@@ -46,10 +54,21 @@ export const options = {
   },
   tags: {
     test: 'email-send-load',
-    endpoint: 'v1-email-send',
+    endpoint: 'v1-messages',
     service: 'api-server',
   },
 };
+
+// ── Setup ────────────────────────────────────────────────────────────────────
+export function setup() {
+  if (!API_KEY) {
+    throw new Error(
+      'K6_API_KEY is required (X-API-Key: am_… for the target tenant); ' +
+        'POST /v1/messages rejects every request without it'
+    );
+  }
+  return { start_time: Date.now() };
+}
 
 // ── Helper: Generate test payloads ───────────────────────────────────────────
 function randomEmail() {
@@ -59,17 +78,12 @@ function randomEmail() {
 
 function emailPayload() {
   return JSON.stringify({
+    from: FROM_EMAIL,
     to: [randomEmail()],
-    from: `sender-${__VU}@apexmail.ee`,
     subject: `Email Send Load Test — VU ${__VU} — ${Date.now()}`,
-    text_body: `Load test email body. VU=${__VU}, time=${Date.now()}`,
-    html_body: `<html><body><p>Load test email</p><p>VU=${__VU}</p></body></html>`,
-    tags: { load_test: 'true', vu: String(__VU) },
-    options: {
-      track_opens: false,
-      track_clicks: false,
-      priority: 'normal',
-    },
+    text: `Load test email body. VU=${__VU}, time=${Date.now()}`,
+    html: `<html><body><p>Load test email</p><p>VU=${__VU}</p></body></html>`,
+    tags: ['email-send-load'],
   });
 }
 
@@ -86,8 +100,8 @@ export default function () {
 
     check(res, {
       'email send status is 202': (r) => r.status === 202,
-      'email send has message_id': (r) => {
-        try { return JSON.parse(r.body).message_id !== undefined; }
+      'email send returns the queued message envelope': (r) => {
+        try { return JSON.parse(r.body).data.id !== undefined; }
         catch { return false; }
       },
       'email send duration < 500ms': (r) => r.timings.duration < 500,
@@ -96,9 +110,4 @@ export default function () {
 
   // ── Think time: simulate real user behavior ──
   sleep(Math.random() * 0.5 + 0.1); // 100–600ms between requests
-}
-
-// ── Teardown ─────────────────────────────────────────────────────────────────
-export function teardown() {
-  console.log(`Email send load test complete. Total requests: ${totalRequests.name}`);
 }

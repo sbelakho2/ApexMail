@@ -2,25 +2,32 @@
 """
 sweep_currency_to_eur.py — One-shot, auditable currency/price sweep.
 
-Rewrites the committed training data and prompt builder so that every
-ApexMail price matches the canonical EUR table from
-services/mail-server/crates/billing-service/src/plans.rs (mirrored in
-docs/pricing.md):
+Rewrites legacy training data and prompt builders so that every ApexMail
+price matches the canonical catalog in
+services/mail-server/crates/platform-catalog (pinned by
+tools/check_knowledge_consistency.py):
 
-    Free €0/30K, Starter €25/50K, Pro €65/150K, Growth €150/500K,
-    Scale €350/2M, Enterprise €3,000/5M,
-    PAYG €0.001/€0.0008/€0.0005/€0.0003, overage €0.40 per 1,000,
-    dedicated IP add-on €30/mo.
+    Free €0 / 3,000 emails / 30,000 API (plus a one-time 30,000-email launch
+    allowance in the first 30 days), Developer €29 / 50,000 / 500,000,
+    Pro €89 / 150,000 / 2,000,000, Growth €229 / 500,000 / 5,000,000,
+    Business €699 / 2,000,000 / 20,000,000,
+    Enterprise Cloud €1,750 / 5,000,000 / unlimited API,
+    PAYG €0.001/€0.0008/€0.0005/€0.0003,
+    overage €0.80 (Developer) / €0.60 (Pro) / €0.35 (Growth+) per 1,000,
+    dedicated IP add-on €30/mo, annual = 10× monthly.
 
+The pre-2026-09-08 table (Free 30,000 / Starter €25 / Pro €65 / Growth
+€150 / Scale €350 / Enterprise €3,000) is what this script migrates FROM.
 Rules applied (in order, each counted):
-  1. Targeted golden_qa.jsonl answer rewrites (A/B testing gate, HIPAA/SOC 2
-     claims, Enterprise pricing, annual billing).
-  2. Wrong plan-price numbers in plan-named contexts: $15→€25 (Starter),
-     $79→€65 (Pro). Legit computed totals with the same digits (e.g. the
-     PAYG API "$15" = 150K × $0.10/1K) keep their number.
+  1. Targeted golden_qa answer rewrites (A/B testing gate, HIPAA/SOC 2
+     claims, Enterprise Cloud pricing, annual billing).
+  2. Plan-adjacent legacy prices and quotas via
+     validate_pricing.canonize_text() — ONE shared implementation, derived
+     from CANONICAL_PRICING.
   3. PAYG tier-3 per-1K rate bug: $0.40/1K (and "Beyond 100K: $0.40 per
      1,000") → €0.50 — 0.0005 × 1,000 = €0.50, not €0.40.
-  4. Enterprise "custom pricing" price claims → €3,000/month.
+  4. Enterprise "custom pricing" price claims → the canonical Enterprise
+     Cloud price.
   5. Third-party USD facts (bug bounties, VMC certificates, CAN-SPAM fines)
      reworded to "USD N" so they are not ApexMail EUR prices.
   6. Remaining "$" price symbols → "€".
@@ -34,24 +41,24 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DATA_DIR = REPO_ROOT / "data"
-TRAINING_DIR = REPO_ROOT / "apps" / "ai" / "training"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from validate_pricing import (  # noqa: E402
+    ENTERPRISE_CLOUD,
+    PRICE_BY_PLAN,
+    canonize_text,
+)
 
-SWEEP_FILES = [
-    DATA_DIR / "golden_qa.jsonl",
-    DATA_DIR / "train.jsonl",
-    DATA_DIR / "val.jsonl",
-    DATA_DIR / "test.jsonl",
-    DATA_DIR / "train_agent.jsonl",
-    DATA_DIR / "recovered_training.jsonl",
-    DATA_DIR / "system_prompts.json",
-]
+REPO_ROOT = Path(__file__).resolve().parents[3]
+TRAINING_DIR = REPO_ROOT / "apps" / "ai" / "training"
+DATA_DIR = TRAINING_DIR / "data"
+
+# The tracked corpus this pipeline owns. Root /data is a retired, gitignored
+# scratch directory (data/README.md) and is not swept.
+SWEEP_FILES = sorted(DATA_DIR.glob("*.jsonl"))
 
 # Every training-corpus generator/fixture script: the corpus is what the
 # model trains on, so scripts that still emit USD prices reintroduce the
@@ -85,69 +92,36 @@ SCRIPT_FILES = [
 # ── Rule 1: targeted golden_qa rewrites ───────────────────────────────────
 
 GOLDEN_REWRITES: dict[str, str] = {
-    # Line 12: plans.rs grants ab_testing from growth, not pro.
+    # A/B testing starts at Growth, not Pro.
     "A/B testing is available starting from the **Pro plan** ($79/month) and above. The Free and Starter plans do not include A/B testing. With A/B testing on Pro, you can test different subject lines, content, and send times to optimize your campaigns.":
-        "A/B testing is available starting from the **Growth plan** (€150/month) and above (Growth, Scale, Enterprise). The Free, Starter, and Pro plans do not include A/B testing. With A/B testing on Growth, you can test different subject lines, content, and send times to optimize your campaigns.",
-    # Line 15: plans.rs sets hipaa_compliance/soc2_compliance to false.
+        "A/B testing is available starting from the **Growth plan** (€229/month) and above (Growth, Business, Enterprise Cloud). The Free, Developer, and Pro plans do not include A/B testing. With A/B testing on Growth, you can test different subject lines, content, and send times to optimize your campaigns.",
+    # platform-catalog sets hipaa_compliance/soc2_compliance to false.
     "ApexMail's **Enterprise plan** includes **HIPAA** and **SOC 2** compliance certifications. The Enterprise plan also offers white-label capabilities, BYOIP, a dedicated Customer Success Manager, and a 99.9% SLA with 25% credit for violations. If your organization requires HIPAA or SOC 2 compliance, Enterprise is the plan you need.":
-        "ApexMail is **not currently certified** for HIPAA and does not offer SOC 2 certification on any plan, including Enterprise. Enterprise does offer white-label capabilities, BYOIP, a dedicated Customer Success Manager, and a 99.9% SLA with 25% credit for violations. If you need to process regulated workloads, contact support@apexmail.ee so we can discuss requirements and required agreements in writing.",
-    # Line 51: annual billing is defined (10x monthly = two months free).
+        "ApexMail is **not currently certified** for HIPAA and does not offer SOC 2 certification on any plan, including Enterprise Cloud. Enterprise Cloud does offer white-label capabilities, BYOIP, a dedicated Customer Success Manager, and a 99.9% SLA with 25% credit for violations. If you need to process regulated workloads, contact support@apexmail.ee so we can discuss requirements and required agreements in writing.",
+    # Annual billing is 10x monthly = two months free.
     "I don't have specific information about annual billing discounts in our current pricing documentation. Our standard published pricing is monthly:":
         "Yes — annual billing is 10x the monthly price, effectively giving you two months free (about a 17% discount). Our published monthly prices are:",
-    # Line 48: arithmetic consistency (Starter base is €25, so €25 + €2.40).
-    "Your total bill: €15 + €2.40 = **€27.40**":
-        "Your total bill: €25 + €2.40 = **€27.40**",
+    # Enterprise is priced in the catalog, never "custom".
     "- Enterprise: custom pricing":
-        "- Enterprise: €3,000/mo (annual €30,000/year; annual-contract sales flow)",
+        f"- Enterprise Cloud: {ENTERPRISE_CLOUD['price']}/mo (annual {ENTERPRISE_CLOUD['annual']}/year; annual-contract sales flow)",
 }
 
-# ── Rules 2-4: exact-string price corrections ─────────────────────────────
-
-def _plan_context_correction(wrong: str, canonical: str, plan_word: str):
-    """Replace `wrong` with `canonical` only when `plan_word` appears within
-    ±150 characters, so computed totals that happen to share digits (e.g. the
-    PAYG API overage "$15" = 150K × $0.10/1K) are left to the plain symbol
-    swap instead of being re-priced."""
-
-    pattern = re.compile(wrong)
-    plan_re = re.compile(plan_word, re.IGNORECASE)
-    window = 150
-
-    def _fix(text: str, counters: dict[str, int]) -> str:
-        out = []
-        last = 0
-        replaced = 0
-        for m in pattern.finditer(text):
-            ctx_start = max(0, m.start() - window)
-            ctx_end = min(len(text), m.end() + window)
-            if plan_re.search(text[ctx_start:ctx_end]):
-                out.append(text[last:m.start()])
-                out.append(canonical)
-                last = m.end()
-                replaced += 1
-        out.append(text[last:])
-        if replaced:
-            counters[wrong] = counters.get(wrong, 0) + replaced
-        return "".join(out)
-
-    return _fix
-
-
-# Rule 2 — wrong plan prices, only in plan-named contexts. Both the '$'
-# originals and any '€' leftovers from a previous partial sweep are covered.
-FIX_STARTER_PRICE = _plan_context_correction(r"[$€]15\b", "€25", r"\bstarter\b")
-FIX_PRO_PRICE = _plan_context_correction(r"[$€]79\b", "€65", r"\bpro\b")
+# ── Rules 2-6: canonical corrections ─────────────────────────────────────
 
 CORRECTIONS: list[tuple[re.Pattern, str]] = [
     # Rule 3 — PAYG tier-3 per-1K rate: 0.0005 × 1,000 = €0.50.
     (re.compile(r"\$0\.40/1K"), "€0.50/1K"),
     (re.compile(r"Beyond 100K: \$0\.40 per 1,000"), "Beyond 100K: €0.50 per 1,000"),
     (re.compile(r"beyond 100K, and \$0\.40/1K"), "beyond 100K, and €0.50/1K"),
-    # Rule 4 — Enterprise is €3,000/month in plans.rs, not "custom".
-    (re.compile(r"\*\*custom pricing\*\* and includes"), "€3,000/month and includes"),
-    (re.compile(r"\(custom pricing, 10 IPs\)"), "(€3,000/month, 10 IPs)"),
-    (re.compile(r"Enterprise \(custom pricing\)"), "Enterprise (€3,000/month)"),
-    (re.compile(r"custom pricing \(5,000,000 emails\)"), "€3,000/month (5,000,000 emails)"),
+    # Rule 4 — Enterprise Cloud is priced in platform-catalog, not "custom".
+    (re.compile(r"\*\*custom pricing\*\* and includes"),
+     f"{ENTERPRISE_CLOUD['price']}/month and includes"),
+    (re.compile(r"\(custom pricing, 10 IPs\)"),
+     f"({ENTERPRISE_CLOUD['price']}/month, 10 IPs)"),
+    (re.compile(r"Enterprise \(custom pricing\)"),
+     f"Enterprise Cloud ({ENTERPRISE_CLOUD['price']}/month)"),
+    (re.compile(r"custom pricing \(5,000,000 emails\)"),
+     f"{ENTERPRISE_CLOUD['price']}/month (5,000,000 emails)"),
     # Rule 5 — genuinely-USD third-party facts (not ApexMail prices).
     (re.compile(r"up to \*\*\$51,744 per email\*\*"), "up to **USD 51,744 per email**"),
     (re.compile(r"~\$1,000-1,500/year"), "~USD 1,000-1,500/year"),
@@ -167,8 +141,9 @@ def sweep_text(text: str, counters: dict[str, int]) -> str:
         if old in text:
             text = text.replace(old, new)
             counters["golden_rewrites"] += 1
-    text = FIX_STARTER_PRICE(text, counters)
-    text = FIX_PRO_PRICE(text, counters)
+    # Rule 2 — plan-adjacent legacy prices, quotas, names and overage rates.
+    # ONE shared implementation derived from CANONICAL_PRICING.
+    text, _ = canonize_text(text, counters)
     for pattern, replacement in CORRECTIONS:
         text, n = pattern.subn(replacement, text)
         if n:
@@ -193,10 +168,22 @@ def sweep_domain_refs(text: str, counters: dict[str, int]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
+    parser.add_argument(
+        "--include-scripts", action="store_true",
+        help="Also sweep the historical source fixtures (one-shot migration; "
+             "never run this against already-canonical sources)",
+    )
     args = parser.parse_args()
 
     grand_total = 0
-    for path in SWEEP_FILES + SCRIPT_FILES:
+    # Default: the tracked JSONL corpus only. The source fixtures were swept
+    # once during the migration; re-sweeping canonical .py sources can corrupt
+    # migration patterns and computed examples, so it is opt-in.
+    paths = list(SWEEP_FILES)
+    if args.include_scripts:
+        paths += [p for p in SCRIPT_FILES
+                  if p.name not in {"sweep_currency_to_eur.py", "validate_pricing.py"}]
+    for path in paths:
         if not path.exists():
             print(f"SKIP (missing): {path}")
             continue
@@ -217,14 +204,14 @@ def main() -> int:
             path.write_text(swept, encoding="utf-8")
 
     # Refresh the integrity checksum for system_prompts.json when changed.
-    prompts_json = DATA_DIR / "system_prompts.json"
-    prompts_sha = DATA_DIR / "system_prompts.json.sha256"
+    prompts_json = REPO_ROOT / "data" / "system_prompts.json"
+    prompts_sha = REPO_ROOT / "data" / "system_prompts.json.sha256"
     if not args.dry_run and prompts_json.exists() and prompts_sha.exists():
         digest = hashlib.sha256(prompts_json.read_bytes()).hexdigest()
         expected = prompts_sha.read_text(encoding="utf-8", errors="replace").split()[0]
         if digest != expected:
             prompts_sha.write_text(
-                f"{digest}  system_prompts.json\\n", encoding="utf-8"
+                f"{digest}  system_prompts.json\n", encoding="utf-8"
             )
             print(f"refreshed {prompts_sha.relative_to(REPO_ROOT)}")
 

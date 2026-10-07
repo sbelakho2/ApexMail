@@ -27,17 +27,21 @@ tested-path versions.
 
 ## Identify the rollback target
 
-The pipeline writes the sha of the last fully deployed (but possibly
-verify-failed) rollout to `ci/.last-deployed-sha`; `ci/stages/verify.sh`
-ALREADY rolls back automatically to that sha when the post-deploy probes
-fail. Manual rollback is for when auto-rollback was disabled, incomplete, or
-the failure was detected later:
+`ci/.last-deployed-sha` ALWAYS names the last **verified** rollout — the
+verify stage advances it only after every probe passes. For the automatic
+rollback, the deploy stage also records the sha that was verified live
+BEFORE the current rollout in `$RUN_DIR/pre-deploy-sha` (the pipeline run
+dir, e.g. `ci/runs/<ts>_<pid>/`); when the post-deploy probes fail,
+`ci/stages/verify.sh` rolls back to exactly that sha. Manual rollback is for
+when auto-rollback was disabled, incomplete, or the failure was detected
+later:
 
 ```bash
 ssh <deploy-host>
 cd /opt/apexmail
 
-cat ci/.last-deployed-sha                 # previous green deploy's sha
+cat ci/.last-deployed-sha                 # last VERIFIED deploy's sha
+cat "$(cat ci/runs/latest)/pre-deploy-sha" 2>/dev/null || true  # current run's rollback target
 docker images 'ghcr.io/sbelakho2/apexmail/*' --format '{{.Repository}}:{{.Tag}}' | sort
 # pick a known-good :<sha> that still exists locally (images stage keeps ~5)
 ```
@@ -51,11 +55,11 @@ cd /opt/apexmail
 SHA=<known-good-sha>   # must exist: docker images | grep ":${SHA}"
 
 # NOTE: this list must match ci/stages/verify.sh + deploy.sh (they also
-# include compliance, analytics-worker and the backup schedulers).
+# include compliance, analytics-worker and the four backup schedulers).
 for svc in api-server mta imap-server mailstore worker enterprise \
            tracking-service observability marketing status-server \
            billing-service sales-autopilot compliance analytics-worker \
-           postgres-backup clickhouse-backup migrator; do
+           postgres-backup clickhouse-backup redis-backup analytics-backup migrator; do
   docker image inspect "ghcr.io/sbelakho2/apexmail/${svc}:${SHA}" >/dev/null \
     || { echo "missing ${svc}:${SHA}"; exit 1; }
   docker tag "ghcr.io/sbelakho2/apexmail/${svc}:${SHA}" \

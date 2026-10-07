@@ -63,6 +63,15 @@ identical in:
 
    `Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64 < StepUp < Deny`
 
+   Policy grammar (both parsers, identical acceptance set): the policy
+   config carries `global_floors` as the five canonical levels `0..4`,
+   each declared exactly once, with level 0 = `allow`. A missing,
+   partial, non-canonical or duplicated level is refused — neither
+   implementation substitutes a default for an operator-omitted level (a
+   silent substitution could swap an intended floor for a different
+   action), and a config one language refuses to load is never accepted
+   by the other.
+
    Default score bands (configurable in policy, hard floors on top):
 
    | band | action |

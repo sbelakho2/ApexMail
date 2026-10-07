@@ -59,6 +59,18 @@ class FakeClient:
                 "created_at": "2026-08-29T00:00:00Z",
                 "updated_at": "2026-08-29T00:00:00Z",
             }
+        if path.endswith("/rotate-secret"):
+            # webhooks.rs rotate_webhook_secret: the NEW secret is returned
+            # once, alongside the flat WebhookResponse.
+            return {
+                "id": "wh_1",
+                "url": "https://example.com/hook",
+                "events": ["message.delivered"],
+                "secret": "whsec_rotated",
+                "status": "active",
+                "created_at": "2026-08-29T00:00:00Z",
+                "updated_at": "2026-08-29T00:00:05Z",
+            }
         if path.startswith("/v1/webhooks/"):
             return {
                 "id": "wh_1",
@@ -191,6 +203,16 @@ class BatchCoercionContract(unittest.TestCase):
         message = self.client.calls[0]["json"]["messages"][0]
         self.assertEqual(message["from"], "hello@example.com")
 
+    def test_send_batch_alias_uses_the_batch_endpoint(self) -> None:
+        # docs/api/sdk-reference.md names this method send_batch(); it must
+        # be the same POST /v1/messages/batch call as batch().
+        results = self.resource.send_batch(
+            [{"from": "hello@example.com", "to": "user@example.com", "subject": "Hi", "text": "Hello"}]
+        )
+        self.assertEqual(results[0].id, "msg_1")
+        self.assertEqual("POST", self.client.calls[0]["method"])
+        self.assertEqual("/v1/messages/batch", self.client.calls[0]["path"])
+
 
 class WebhookPayloadContract(unittest.TestCase):
     def setUp(self) -> None:
@@ -227,19 +249,30 @@ class WebhookPayloadContract(unittest.TestCase):
             call["json"],
         )
 
+    def test_rotate_secret_posts_to_the_rotate_route(self) -> None:
+        webhook = self.resource.rotate_secret("wh_1")
+        call = self.client.calls[0]
+        self.assertEqual("POST", call["method"])
+        self.assertEqual("/v1/webhooks/wh_1/rotate-secret", call["path"])
+        self.assertEqual("whsec_rotated", webhook.secret)
+        self.assertEqual("wh_1", webhook.id)
+
     def test_update_rejects_unknown_status(self) -> None:
         with self.assertRaises(_ValidationError):
             self.resource.update("wh_1", status="enabled")
 
     def test_known_events_match_server_list(self) -> None:
-        # webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary)
+        # webhooks.rs KNOWN_WEBHOOK_EVENTS (canonical message.* vocabulary,
+        # the campaign lifecycle events, and the wildcard).
         self.assertEqual(
             (
                 "message.accepted", "message.queued", "message.attempted",
                 "message.deferred", "message.delivered", "message.bounced",
                 "message.complained", "message.suppressed", "message.opened",
                 "message.clicked", "message.cancelled",
-                "recipient.unsubscribed", "placement_test.completed",
+                "recipient.unsubscribed",
+                "campaign.started", "campaign.ab_winner_selected", "campaign.completed",
+                "placement_test.completed",
                 "inbound", "*",
             ),
             tuple(webhooks_module.KNOWN_WEBHOOK_EVENTS),

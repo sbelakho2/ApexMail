@@ -72,22 +72,68 @@ full_backup() {
     ensure_backup_dir
     mkdir -p "${backup_root}"
 
-    n=0
+    # Audit P2: the table listing used to run as the LEFT side of a pipeline
+    # into `while`, so its exit status was invisible and the loop ran in a
+    # subshell — a failed query (auth error, server down) produced an empty
+    # backup and "Backup complete: ..." with exit 0, after which the
+    # production scheduler pruned older GOOD archives. Capture the listing to
+    # a temp file and fail on a non-zero query status.
+    _tables_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-chbackup.XXXXXX")
+    _q_rc=0
     ch_query "SELECT database, name FROM system.tables WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') ORDER BY database, name" \
-        | while IFS="$(printf '\t')" read -r db table; do
-            [ -n "${db}" ] || continue
-            [ -n "${table}" ] || continue
-            n=$((n + 1))
-            echo "  Backing up: ${db}.${table}"
-            ch_query "SHOW CREATE TABLE ${db}.${table}" > "${backup_root}/${n}.schema.sql"
-            ch_query "SELECT * FROM ${db}.${table} FORMAT Native" > "${backup_root}/${n}.data.native"
-            printf '%s\t%s\n' "${db}" "${table}" >> "${backup_root}/manifest"
-        done
-
-    if [ ! -s "${backup_root}/manifest" ]; then
-        echo "WARNING: no non-system tables found — backup is empty." >&2
+        >"${_tables_tmp}" 2>&1 || _q_rc=$?
+    if [ "${_q_rc}" -ne 0 ]; then
+        echo "ERROR: ClickHouse table listing failed (exit ${_q_rc}) — refusing to report a backup:" >&2
+        cat "${_tables_tmp}" >&2 || true
+        rm -f "${_tables_tmp}"
+        rm -rf "${backup_root}"
+        exit 1
     fi
-    echo "Backup complete: ${backup_root}"
+
+    n=0
+    while IFS="$(printf '\t')" read -r db table; do
+        [ -n "${db}" ] || continue
+        [ -n "${table}" ] || continue
+        n=$((n + 1))
+        echo "  Backing up: ${db}.${table}"
+        ch_query "SHOW CREATE TABLE ${db}.${table}" > "${backup_root}/${n}.schema.sql" || {
+            echo "ERROR: SHOW CREATE TABLE ${db}.${table} failed — abandoning the backup" >&2
+            rm -f "${_tables_tmp}"
+            rm -rf "${backup_root}"
+            exit 1
+        }
+        ch_query "SELECT * FROM ${db}.${table} FORMAT Native" > "${backup_root}/${n}.data.native" || {
+            echo "ERROR: data dump of ${db}.${table} failed — abandoning the backup" >&2
+            rm -f "${_tables_tmp}"
+            rm -rf "${backup_root}"
+            exit 1
+        }
+        printf '%s\t%s\n' "${db}" "${table}" >> "${backup_root}/manifest"
+    done <"${_tables_tmp}"
+    rm -f "${_tables_tmp}"
+
+    # Verify BEFORE reporting success: a non-empty manifest whose every line
+    # has a non-empty schema + data pair. The old code only warned on an
+    # empty manifest and still returned 0 (audit P2).
+    if [ ! -s "${backup_root}/manifest" ]; then
+        echo "ERROR: no non-system tables found — refusing to report an empty backup." >&2
+        rm -rf "${backup_root}"
+        exit 1
+    fi
+    # (a table with zero rows legitimately produces an empty .data.native, so
+    # only the file's PRESENCE is required there — the schema must be non-empty.)
+    _v_n=0
+    while IFS="$(printf '\t')" read -r db table; do
+        [ -n "${db}" ] || continue
+        _v_n=$((_v_n + 1))
+        if [ ! -s "${backup_root}/${_v_n}.schema.sql" ] || [ ! -f "${backup_root}/${_v_n}.data.native" ]; then
+            echo "ERROR: backup verification failed for ${db}.${table} (missing schema/empty dump file) — refusing to report success" >&2
+            rm -rf "${backup_root}"
+            exit 1
+        fi
+    done <"${backup_root}/manifest"
+
+    echo "Backup complete: ${backup_root} (${_v_n} tables verified)"
     echo "Size: $(du -sh "${backup_root}" | cut -f1)"
     echo "Restore with: $0 --restore ${backup_root}"
 }

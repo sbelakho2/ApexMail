@@ -661,14 +661,18 @@ async fn export_and_outbox_purges_respect_legal_holds() {
         .execute(&pool)
         .await
         .expect("export");
+        // Distinct request ids per row: migration 245's
+        // uq_dsr_outbox_request (tenant_id, request_id) is the queue's
+        // idempotency identity — a shared literal would (correctly) collide.
         sqlx::query(
             "INSERT INTO dsr_verification_outbox
                (id, request_id, tenant_id, email, verification_token, verify_url, status, attempts, created_at)
-             VALUES ($1, 'r', $2, 'e@example.test', 'tok', 'u', 'pending', 0, NOW() - $3::interval)",
+             VALUES ($1, $4, $2, 'e@example.test', 'tok', 'u', 'pending', 0, NOW() - $3::interval)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(tenant)
         .bind(age)
+        .bind(uuid::Uuid::new_v4().to_string())
         .execute(&pool)
         .await
         .expect("outbox");
@@ -705,4 +709,64 @@ async fn export_and_outbox_purges_respect_legal_holds() {
         held_outbox, 2,
         "the raw token must not be purged under hold"
     );
+}
+
+/// Migration 245 (gates review 2026-10-07): dsr_verification_outbox carries
+/// the same natural idempotency identity its sibling ledgers do — a replayed
+/// enqueue for the same (tenant, request_id) must NOT stage a second row
+/// (before the identity it re-sent the verification mail), while the
+/// identity stays tenant-scoped (cross-tenant placeholders must not collide).
+#[tokio::test]
+async fn dsr_outbox_replays_collapse_on_the_tenant_request_identity() {
+    let pool = match sweep_db("dsr_outbox_identity").await {
+        Some(pool) => pool,
+        None => return,
+    };
+    let tenant = "t_dsr_identity";
+    seed_tenant(&pool, tenant, false, None).await;
+
+    let index_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND indexname = 'uq_dsr_outbox_request')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("index probe");
+    assert!(
+        index_exists,
+        "migration 245's uq_dsr_outbox_request is missing"
+    );
+
+    let enqueue = |row_id: String, tenant: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO dsr_verification_outbox
+                   (id, request_id, tenant_id, email, verification_token,
+                    verify_url, status, attempts, created_at)
+                 VALUES ($1, 'r_identity', $2, 'e@example.test', 'tok', 'u',
+                         'pending', 0, NOW())",
+            )
+            .bind(row_id)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+        }
+    };
+
+    enqueue(uuid::Uuid::new_v4().to_string(), tenant.to_string())
+        .await
+        .expect("first enqueue");
+    let replay = enqueue(uuid::Uuid::new_v4().to_string(), tenant.to_string()).await;
+    assert!(
+        replay.is_err(),
+        "a replayed enqueue for the same (tenant, request) staged a second row"
+    );
+
+    let other = "t_dsr_identity_other";
+    seed_tenant(&pool, other, false, None).await;
+    enqueue(uuid::Uuid::new_v4().to_string(), other.to_string())
+        .await
+        .expect("the identity must not collide across tenants");
 }

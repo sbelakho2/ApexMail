@@ -29,6 +29,9 @@ class Webhooks
         'message.clicked',
         'message.cancelled',
         'recipient.unsubscribed',
+        'campaign.started',
+        'campaign.ab_winner_selected',
+        'campaign.completed',
         'placement_test.completed',
         'inbound',
         '*',
@@ -113,5 +116,18 @@ class Webhooks
     public function test(string $id): array
     {
         return $this->client->request('POST', '/v1/webhooks/' . urlencode($id) . '/test');
+    }
+
+    /**
+     * Rotate the webhook's signing secret (`POST /:id/rotate-secret`).
+     *
+     * The new secret is returned in this response only — the previous secret
+     * stops verifying deliveries immediately, so update the receiver before
+     * rotating. The secret is used verbatim (the full `whsec_…` string) when
+     * verifying signatures with {@see Client::verifyWebhookSignature()}.
+     */
+    public function rotateSecret(string $id): array
+    {
+        return $this->client->request('POST', '/v1/webhooks/' . urlencode($id) . '/rotate-secret');
     }
 }

@@ -13,7 +13,7 @@ This inventory documents **backend API routes** (mounted under `/v1/*` and `/api
 | Frontend UI routes | `ui-baseline-manifest.json` | Browser-visible pages rendered by the Rust UI router |
 | Marketing pages | `ui-baseline-manifest.json` (marketing/ marketing-zola surfaces) | Public-facing marketing pages served by Zola |
 
-> **Validation:** All routes in `ui-baseline-manifest.json` for the `web` surface correspond to Rust UI router entries in `ui-foundation/src/routing.rs`. Backend API routes are validated via integration tests in `api-server/src/app.rs`. The manifest was last reconciled with the route inventory on 2026-04-14.
+> **Validation (historical):** the 2026-04-14 reconciliation checked the `web` surface of `ui-baseline-manifest.json` against the Rust UI router, which now lives in `ui-foundation/src/axum_router.rs` (there is no `routing.rs`). The April snapshot predates the 2026 UI migrations and the route surface has changed since; treat this page as a dated inventory and re-run the reconciliation before relying on it.
 
 ## Scope
 

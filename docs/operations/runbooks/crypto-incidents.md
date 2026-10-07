@@ -92,24 +92,25 @@
      api-server worker mta | grep -iE "key.*(anomal|reject|fail)"
    
    # Check audit logs for suspicious key usage
-   curl -s "https://api.apexmail.ee/v1/admin/audit-logs?filter=action:key.*&since=1h" \
-     -H "Authorization: Bearer <admin-token>" | jq '.'
+   curl -s "https://api.apexmail.ee/v1/admin/audit?limit=200" \
+     -H "Authorization: Bearer <system-tenant-admin-token>" \
+     | jq '.[] | select(.action | test("key"))'
    ```
 
 2. **Revoke the compromised key immediately:**
    ```bash
-   # Use the emergency key revocation API
-   curl -X POST https://api.apexmail.ee/v1/admin/keys/revoke \
-     -H "Authorization: Bearer <admin-token>" \
-     -H "X-2FA-Code: <totp-code>" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "key_ids": ["kid-compromised"],
-       "reason": "Confirmed key compromise — SEV1 incident",
-       "rotate_immediately": true,
-       "notify_affected_tenants": false
-     }'
+   # Tenant API key (the tenant's own key id from the console or api_keys)
+   curl -i -X DELETE https://api.apexmail.ee/v1/auth/api-keys/<key-id> \
+     -H "Authorization: Bearer <session-or-api-key-with-api-keys:write>"
+
+   # Enterprise sub-account API key
+   curl -i -X POST \
+     https://enterprise.apexmail.ee/api/enterprise/sub-accounts/<sub-id>/api-keys/<key-id>/revoke \
+     -H "Authorization: Bearer <enterprise-token>"
    ```
+   There is no admin bulk-revocation endpoint. See
+   [Emergency Key Revocation](../emergency-key-revocation.md) for the full
+   surface list and the platform-wide secret-rotation path.
    **Do not notify tenants yet** — wait for assessment.
 
 3. **Force rotate all keys derived from the compromised material:**
@@ -333,7 +334,7 @@ ApexMail OU hereby notifies the following personal data breach:
 | Data Source | Collection Method | Retention |
 |-------------|-------------------|-----------|
 | Application logs (key usage) | `docker compose logs --since 24h <service>` | Preserve for 90 days |
-| Audit logs (auth events) | API query `/v1/admin/audit-logs` | Preserve for 90 days |
+| Audit logs (auth events) | API query `/v1/admin/audit` | Preserve for 90 days |
 | Redis state (sessions) | `redis-cli --rdb dump.rdb` | Snapshot immediately |
 | Database state (keys) | `pg_dump -t api_keys -t encryption_keys` | Snapshot immediately |
 | Network logs | From reverse proxy / WAF | Preserve for 90 days |
@@ -344,7 +345,7 @@ ApexMail OU hereby notifies the following personal data breach:
 
 ```bash
 #!/bin/bash
-# scripts/forensic-collect-crypto.sh
+# Inline emergency script (not a shipped file; run it by pasting it on the host)
 # Collect forensic data for cryptographic incident investigation
 
 set -euo pipefail
@@ -368,8 +369,8 @@ done
 
 # 2. Audit log export
 echo "2. Exporting audit logs..."
-curl -s "https://api.apexmail.ee/v1/admin/audit-logs?since=24h" \
-  -H "Authorization: Bearer <admin-token>" > "${COLLECT_DIR}/audit-logs.json"
+curl -s "https://api.apexmail.ee/v1/admin/audit?limit=1000" \
+  -H "Authorization: Bearer <system-tenant-admin-token>" > "${COLLECT_DIR}/audit-logs.json"
 
 # 3. Key metadata (redacted — NAMES only, never values)
 echo "3. Collecting key metadata..."
@@ -444,7 +445,7 @@ After key rotation, verify each service independently:
 
 ```bash
 #!/bin/bash
-# scripts/verify-crypto-recovery.sh
+# Inline emergency script (not a shipped file; run it by pasting it on the host)
 
 echo "=== Cryptographic Recovery Verification ==="
 PASS=0

@@ -176,16 +176,20 @@ the shape of it:
 - Every image is built **locally on the host** and tagged with both `:<sha>`
   (the rollback pins, newest ~5 kept per service) and `:latest` (what
   `docker compose up` resolves). Nothing is pulled from a registry.
-- The pipeline records the last fully-deployed sha in `ci/.last-deployed-sha`,
-  and the verify stage **rolls back automatically** to it when the
-  post-deploy probes fail (`CI_ROLLBACK_ON_VERIFY_FAIL`, default on).
+- The pipeline records the last verified rollout's sha in
+  `ci/.last-deployed-sha` (the deploy stage first snapshots the previously
+  verified sha into `$RUN_DIR/pre-deploy-sha`), and the verify stage
+  **rolls back automatically** to that pre-deploy sha when the post-deploy
+  probes fail (`CI_ROLLBACK_ON_VERIFY_FAIL`, default on). It advances
+  `.last-deployed-sha` only after a rollout verifies green, so the file is
+  never a failed sha.
 - Manual rollback = retag the known-good `:<sha>` as `:latest` on the host,
   then recreate:
 
   ```bash
   ssh <deploy-host>
   cd /opt/apexmail
-  cat ci/.last-deployed-sha                     # previous green deploy
+  cat ci/.last-deployed-sha                     # last VERIFIED deploy
   docker tag ghcr.io/sbelakho2/apexmail/api-server:<sha> \
              ghcr.io/sbelakho2/apexmail/api-server:latest
   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
@@ -258,7 +262,7 @@ Stage 4: 100% traffic → Full rollout
 | Corrupt data from bad migration | Restore from backup (point-in-time recovery) | Variable | High |
 | Failed partial rollout (service-level canary) | Retag + `up -d` that one service | None | Low |
 | Failed canary (silent data corruption) | Full rollback + PITR database restore | Variable | High |
-| Failed full rollout (auto-caught) | Verify-stage auto-rollback to `ci/.last-deployed-sha` | Seconds | Low |
+| Failed full rollout (auto-caught) | Verify-stage auto-rollback to the run's `pre-deploy-sha` (the last verified rollout) | Seconds | Low |
 
 ---
 
@@ -268,13 +272,17 @@ The pipeline automates the rollback — no manual hook wiring required:
 
 - **`ci/stages/verify.sh`** runs post-deploy health probes and a content
   smoke (pages render, forms present, 404s). On failure it calls
-  `rollback_to_previous_sha` — retagging every service to the sha recorded
-  in `ci/.last-deployed-sha` and `up -d`-ing the canonical stack
-  (`CI_ROLLBACK_ON_VERIFY_FAIL=1` by default; `=0` disables loudly).
+  `rollback_to_previous_sha` — retagging every service to the pre-deploy sha
+  the deploy stage recorded in `$RUN_DIR/pre-deploy-sha` (falling back to
+  `ci/.last-deployed-sha`, which also names a verified rollout) and `up -d`-ing
+  the canonical stack (`CI_ROLLBACK_ON_VERIFY_FAIL=1` by default; `=0`
+  disables loudly). A missing canonical image aborts the rollback instead of
+  silently retagging a subset, and only a fully green verify advances
+  `.last-deployed-sha`.
 - **`ci/stages/migrate.sh`** backs up the `_sqlx_migrations` table into the
   run dir before every migration run, so the migration ledger itself is
   always restorable.
-- Migrations are **never** auto-reverted — a bad migration is fixed forward
+- Migrations are never auto-reverted — a bad migration is fixed forward
   (§1.5), because the ledger only moves forward.
 
 ```bash

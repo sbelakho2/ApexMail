@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `$client->emails` resource — `send`, `batch`, `get`, `list`.
 - `$client->domains` resource — `create`, `list`, `get`, `verify`, `delete`.
 - `$client->webhooks` resource — `create`, `list`, `get`, `update` (PATCH), `delete`.
-- `$client->templates` resource — `create`, `list`, `get`, `getBySlug`, `update` (PUT), `delete`, `duplicate`, `rollback`, `render`.
+- `$client->templates` resource — `create`, `list`, `get`, `update` (PUT), `delete`, `duplicate`, `rollback`, `render`.
 - `$client->suppressions` resource — `add`, `list`, `check`, `delete`, `bulk`.
 - `$client->events` resource — `list`, `getByMessage`, `get`, `stats`, `timeseries`.
 - `$client->analytics` resource — `get` with date range, grouping, tag, and domain filters.
@@ -26,6 +26,32 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Retry-After header parsing (integer seconds and HTTP-date).
 - Strict types enforced throughout.
 - Redacted API key in `__toString` for safe logging.
+
+## [Unreleased]
+
+### Fixed
+
+- **Live envelope unwrap (SDK-PHP-1).** The api-server success envelope always
+  serialises `"error": null`, and `isset()` is false for JSON null — the old
+  `decodeResponseBody()` guard therefore returned the raw envelope instead of
+  `data` for every single-object response. `emails->send()` (and `get`,
+  `batch`, `analytics->dashboard/volume/engagement/deliverability/export/
+  analyzeSubjectLine`) now unwrap correctly; error bodies are still passed
+  through whole so `throwApiError()` keeps its code/message.
+  Regression tests: `tests/EnvelopeAndSurfaceTest.php`,
+  `test.php` stub `error: null` envelopes.
+
+### Added
+
+- `Emails::cancel($id)` → `POST /v1/messages/:id/cancel` (mounted in
+  messages.rs; implemented by the Python/Ruby/Java SDKs and documented as
+  `emails.cancel(id)` in docs/api/sdk-reference.md).
+- `Webhooks::rotateSecret($id)` → `POST /v1/webhooks/:id/rotate-secret`.
+
+### Corrected
+
+- The 1.0.0 entry listed a `getBySlug` templates method; the API has no
+  by-slug route and the method never existed — removed from the record.
 
 ## [1.0.1] — 2026-05-14
 

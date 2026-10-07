@@ -29,7 +29,7 @@ Two proof-of-work algorithms are supported, selected per deployment via
 
 - **`sha256` (default)** — the client grinds a nonce until the SHA-256 hash
   of `challenge || nonce` has at least `KIWI_DIFFICULTY_BITS` leading zero
-  bits (default 16; the production compose sets 20).
+  bits (default 20; the production compose sets 20).
 - **`argon2id` (optional)** — memory-hard variant with parameters
   `KIWI_ARGON_M_KIB` (memory in KiB, e.g. 50000), `KIWI_ARGON_T` (iterations),
   and `KIWI_ARGON_P` (parallelism). Difficulty for this mode is
@@ -68,7 +68,7 @@ Error semantics:
 | `KIWI_ENABLED` | No | Enables server-side verification when `true`. Prod compose default: `true`. **Beware:** with the flag on and no widget rendered, browser clients cannot obtain a token — see the status note above. |
 | `KIWI_SECRET_KEY` | Yes when enabled | HMAC secret key for challenge signing (default: `dev` — must be overridden in production; the prod compose reads it from the `kiwi_secret_key` Docker secret) |
 | `KIWI_ALGORITHM` | No | `sha256` (default) or `argon2id` |
-| `KIWI_DIFFICULTY_BITS` | No | Leading zero bits required for SHA-256 challenges (default 16; prod compose: 20) |
+| `KIWI_DIFFICULTY_BITS` | No | Leading zero bits required for SHA-256 challenges (default 20; prod compose: 20) |
 | `KIWI_ARGON2_DIFFICULTY_BITS` | No | Difficulty for Argon2id challenges (default 8) |
 | `KIWI_ARGON_M_KIB` | No | Argon2id memory cost in KiB (only when `KIWI_ALGORITHM=argon2id`) |
 | `KIWI_ARGON_T` | No | Argon2id time cost (iterations) |

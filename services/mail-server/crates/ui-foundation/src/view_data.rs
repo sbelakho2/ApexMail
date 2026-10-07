@@ -221,6 +221,9 @@ pub struct CampaignEditData {
 pub struct CampaignEditorData {
     pub lists: Vec<(String, String)>,
     pub segments: Vec<(String, String)>,
+    /// A storage read failed: the editor renders a service-problem notice
+    /// instead of pretending the workspace has no lists/audience (audit #16).
+    pub unavailable: bool,
     pub edit: Option<CampaignEditData>,
     /// Prefilled audience/segment/content/sender/tracking/UTM/settings
     /// values for the EDIT mode; empty strings in create mode.
@@ -404,9 +407,6 @@ pub struct SalesOverviewData {
 /// an explicit empty state instead of an empty table.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SalesPageData {
-    /// Double-submit CSRF token for the SSR form posts (empty when the
-    /// render pipeline had none).
-    pub csrf_token: String,
     /// First-response rail (plan §5.4): queue depth and the measured
     /// accept→enqueue percentiles. `None` when the query could not answer —
     /// the tile then renders the unavailable contract, never zeros.
@@ -437,9 +437,6 @@ pub struct AssistantTurnData {
 /// could not reach the session store, which is NOT an empty conversation.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AssistantPageData {
-    /// Double-submit CSRF token for the SSR form post (empty when the render
-    /// pipeline had none).
-    pub csrf_token: String,
     pub session_id: Option<String>,
     pub turns: Vec<AssistantTurnData>,
     pub unavailable: bool,
@@ -473,7 +470,6 @@ pub struct DemoSessionData {
 /// failure state of the list query.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DemosPageData {
-    pub csrf_token: String,
     pub scripts: Vec<DemoScriptData>,
     pub sessions: Vec<DemoSessionData>,
     pub unavailable: bool,
@@ -524,7 +520,6 @@ pub struct AiDraftData {
 /// Control-plane AI-drafts review page (`/reviews/ai-drafts`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AiDraftsPageData {
-    pub csrf_token: String,
     pub drafts: Vec<AiDraftData>,
     pub unavailable: bool,
 }

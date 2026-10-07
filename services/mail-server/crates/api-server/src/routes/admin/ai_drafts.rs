@@ -296,10 +296,19 @@ pub(crate) async fn approve_draft_core(
         if let Some(request_id) = first_response_request_id.as_deref() {
             // The request becomes terminal once its reply left the queue;
             // best-effort INSIDE the transaction so it commits with the send.
+            // `queued_at` IS the approval marker (migration 241: "a human
+            // approval is the next step, not a state here"; migration 244
+            // indexes it for the queue-side SLO percentiles). The old
+            // `state = 'pending'` guard never matched a drafted lead — the
+            // mailbot always moves the request to 'drafted' while it waits
+            // for the human — so queued_at stayed NULL and the measured
+            // accept→enqueue interval had no end for every approved reply
+            // (dogfood 2026-10-06). Idempotent on queued_at so a repeated
+            // approval cannot re-stamp it.
             let _ = sqlx::query(
                 "UPDATE first_response_requests \
-                 SET state = 'drafted', updated_at = NOW(), queued_at = NOW() \
-                 WHERE id = $1 AND state = 'pending'",
+                 SET updated_at = NOW(), queued_at = NOW() \
+                 WHERE id = $1 AND queued_at IS NULL",
             )
             .bind(request_id)
             .execute(&mut *tx)
@@ -803,11 +812,15 @@ mod approval_http_tests {
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             );
 
-            // The request this draft answers.
+            // The request this draft answers. It is seeded in the state the
+            // MAILBOT leaves it in ('drafted' — the AI wrote the reply and
+            // is waiting for the human), NOT the initial 'pending'. Seeding
+            // 'pending' made this test pass while every real approval left
+            // queued_at NULL (dogfood 2026-10-06).
             let request_id = format!("frr_{}", &uuid::Uuid::new_v4().simple().to_string()[..22]);
             sqlx::query(
-                "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload) \
-                 VALUES ($1, 'system', 'contact_form', $2, '{}'::jsonb)",
+                "INSERT INTO first_response_requests (id, tenant_id, kind, subject_ref, payload, state) \
+                 VALUES ($1, 'system', 'contact_form', $2, '{}'::jsonb, 'drafted')",
             )
             .bind(&request_id)
             .bind(format!("lead-{}", &request_id[..10]))
@@ -856,14 +869,39 @@ mod approval_http_tests {
                 "a first-response reply rides the priority lane"
             );
 
-            // …and the request it answers is closed.
-            let request_state: String =
-                sqlx::query_scalar("SELECT state FROM first_response_requests WHERE id = $1")
+            // …and the request it answers carries the approval marker: the
+            // measured accept→enqueue interval needs a non-NULL queued_at,
+            // and the human approval is what supplies it.
+            let (queued_at, updated_at): (Option<chrono::DateTime<chrono::Utc>>, chrono::DateTime<chrono::Utc>) =
+                sqlx::query_as(
+                    "SELECT queued_at, updated_at FROM first_response_requests WHERE id = $1",
+                )
+                .bind(&request_id)
+                .fetch_one(&pool)
+                .await
+                .expect("request state");
+            assert!(
+                queued_at.is_some(),
+                "approval stamps the request's queued_at — the only marker of the human step"
+            );
+
+            // A repeated approval must not re-stamp the interval (the guard
+            // is idempotent on queued_at).
+            let (status2, _) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            let (_status2b, _) = (status2, ());
+            let queued_after: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT queued_at FROM first_response_requests WHERE id = $1")
                     .bind(&request_id)
                     .fetch_one(&pool)
                     .await
                     .expect("request state");
-            assert_eq!(request_state, "drafted");
+            assert_eq!(
+                queued_after, queued_at,
+                "a repeated approval leaves the original enqueue instant intact"
+            );
+            let _ = updated_at;
 
             let _ = sqlx::query("DELETE FROM first_response_requests WHERE id = $1")
                 .bind(&request_id)

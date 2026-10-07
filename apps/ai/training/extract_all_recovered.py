@@ -9,14 +9,15 @@ Extracts and transforms all content from:
 - /tmp/apexmail_scenarios/customer_profiles.py (60 profiles)
 - /tmp/apexmail_scenarios/expand_dataset.py (training patterns)
 
-All pricing transformed: Schema A → Canonical
-  €29→€25, €59→€65, €129→€150, €399→€350, €1,299→€3,000
-  Free: 1K→30K emails, 10K→300K API
-  Starter: 25K→50K emails, 250K→500K API
+All pricing transformed: Schema A (USD) → canonical EUR catalog
+  USD 29→€29 (Developer), USD 59→€89 (Pro), USD 129→€229 (Growth),
+  USD 399→€699 (Business), USD 1299→€1,750 (Enterprise Cloud)
+  Free: 1K→3K emails/mo, 10K→30K API (30K launch allowance separate)
+  Developer: 25K→50K emails, 250K→500K API
   Pro: 50K→150K emails, 500K→2M API
   Growth: 100K→500K emails, 1M→5M API
-  Scale: 500K→2M emails, 5M→20M API
-  Enterprise: 2M→5M emails
+  Business: 500K→2M emails, 5M→20M API
+  Enterprise Cloud: 2M→5M emails, 20M→unlimited API
 """
 
 import ast
@@ -30,6 +31,8 @@ import tempfile
 os.chdir(os.path.dirname(__file__) or ".")
 sys.path.insert(0, ".")
 
+from validate_pricing import PLAN_BY_NAME  # noqa: E402
+
 TEMP_DIR = os.environ.get("TEMP_DIR", "/tmp/apexmail_scenarios")
 RECOVERED_DIR = TEMP_DIR
 
@@ -38,47 +41,53 @@ RECOVERED_DIR = TEMP_DIR
 # ══════════════════════════════════════════════════════════════════════════════
 
 def transform_text(text: str) -> str:
-    """Transform Schema A pricing to canonical in any text."""
+    """Transform Schema A (USD, pre-2026-09-08 limits) to the canonical EUR
+    catalog. Targets are derived from validate_pricing.CANONICAL_PRICING."""
+    ets = PLAN_BY_NAME["enterprise cloud"]
     replacements = [
-        # Prices
-        (r'\$29/mo', '€25/mo'), (r'\$29', '€25'),
-        (r'\$59/mo', '€65/mo'), (r'\$59', '€65'),
-        (r'\$129/mo', '€150/mo'), (r'\$129', '€150'),
-        (r'\$399/mo', '€350/mo'), (r'\$399', '€350'),
-        (r'\$1,299/mo', '€3,000/mo'), (r'\$1,299', '€3,000'),
-        (r'\$1299', '€3,000'),
-        
-        # Free plan
-        (r'1,000 email', '3,000 email'),
-        (r'1K email', '30K email'),
-        (r'10,000 API', '300,000 API'),
-        (r'10K API', '300K API'),
-        
-        # Starter plan
-        (r'25,000 email', '50,000 email'),
-        (r'25K email', '50K email'),
-        (r'250,000 API', '500,000 API'),
-        (r'250K API', '500K API'),
-        
-        # Pro plan (was 50K/500K, now 150K/2M)
-        # Be careful not to hit Starter's new values
-        # Pro specific context
-        (r'Pro plan.*?50,000 email', 'Pro plan with 150,000 email'),
-        (r'Pro.*?500,000 API', 'Pro with 2,000,000 API'),
-        
-        # Growth plan (was 100K/1M, now 500K/5M)
-        (r'Growth.*?100,000 email', 'Growth with 500,000 email'),
-        (r'Growth.*?1,000,000 API', 'Growth with 5,000,000 API'),
-        (r'"100,000"', '"500,000"'),  # Growth limit checks
+        # Schema A USD prices → canonical EUR plan names are attached by the
+        # fixture text itself (the sweep adds names where needed).
+        (r'\$29/mo', f"{PLAN_BY_NAME['developer']['price']}/mo"),
+        (r'\$29', PLAN_BY_NAME['developer']['price']),
+        (r'\$59/mo', f"{PLAN_BY_NAME['pro']['price']}/mo"),
+        (r'\$59', PLAN_BY_NAME['pro']['price']),
+        (r'\$129/mo', f"{PLAN_BY_NAME['growth']['price']}/mo"),
+        (r'\$129', PLAN_BY_NAME['growth']['price']),
+        (r'\$399/mo', f"{PLAN_BY_NAME['business']['price']}/mo"),
+        (r'\$399', PLAN_BY_NAME['business']['price']),
+        (r'\$1,299/mo', f"{ets['price']}/mo"),
+        (r'\$1,299', ets['price']),
+        (r'\$1299', ets['price']),
+
+        # Free plan: 1,000 → 3,000 emails/mo, 10,000 → 30,000 API.
+        (r'1,000 email', f"{PLAN_BY_NAME['free']['emails']:,} email"),
+        (r'1K email', "3K email"),
+        (r'10,000 API', f"{PLAN_BY_NAME['free']['api_calls']:,} API"),
+        (r'10K API', "30K API"),
+
+        # Developer plan: 25K→50K emails, 250K→500K API.
+        (r'25,000 email', f"{PLAN_BY_NAME['developer']['emails']:,} email"),
+        (r'25K email', "50K email"),
+        (r'250,000 API', f"{PLAN_BY_NAME['developer']['api_calls']:,} API"),
+        (r'250K API', "500K API"),
+
+        # Pro plan: 50K→150K emails, 500K→2M API.
+        (r'Pro plan.*?50,000 email', f"Pro plan with {PLAN_BY_NAME['pro']['emails']:,} email"),
+        (r'Pro.*?500,000 API', f"Pro with {PLAN_BY_NAME['pro']['api_calls']:,} API"),
+
+        # Growth plan: 100K→500K emails, 1M→5M API.
+        (r'Growth.*?100,000 email', f"Growth with {PLAN_BY_NAME['growth']['emails']:,} email"),
+        (r'Growth.*?1,000,000 API', f"Growth with {PLAN_BY_NAME['growth']['api_calls']:,} API"),
+        (r'"100,000"', f'"{PLAN_BY_NAME["growth"]["emails"]:,}"'),
         (r'"100K"', '"500K"'),
-        
-        # Scale plan (was 500K/5M, now 2M/20M)
-        (r'Scale.*?500,000 email', 'Scale with 2,000,000 email'),
-        (r'Scale.*?5,000,000 API', 'Scale with 20,000,000 API'),
-        
-        # Enterprise (was 2M/20M, now 5M/Unlimited)
-        (r'Enterprise.*?2,000,000 email', 'Enterprise with 5,000,000 email'),
-        (r'Enterprise.*?20,000,000 API', 'Enterprise with Unlimited API'),
+
+        # Business plan: 500K→2M emails, 5M→20M API.
+        (r'Business.*?500,000 email', f"Business with {PLAN_BY_NAME['business']['emails']:,} email"),
+        (r'Business.*?5,000,000 API', f"Business with {PLAN_BY_NAME['business']['api_calls']:,} API"),
+
+        # Enterprise Cloud: 2M→5M emails, 20M→unlimited API.
+        (r'Enterprise Cloud.*?2,000,000 email', f"Enterprise Cloud with {ets['emails']:,} email"),
+        (r'Enterprise Cloud.*?20,000,000 API', "Enterprise Cloud with Unlimited API"),
     ]
     
     result = text
@@ -179,7 +188,7 @@ STRESS_TEST_R34_CATEGORIES = {
     # ── E: Webhooks & Events ─────────────────────────────────────────────
     "webhook_troubleshooting": [
         {"q": "I configured a webhook but I'm on the Free plan. Why am I not receiving events?",
-         "checks": {"must_contain_any": ["Free", "not available", "Starter", "paid", "no webhook"]}},
+         "checks": {"must_contain_any": ["Free", "not available", "Developer", "paid", "no webhook"]}},
         {"q": "How do I verify that a webhook is really from ApexMail and not spoofed?",
          "checks": {"must_contain_any": ["HMAC", "SHA256", "signature", "signing secret", "verify"]}},
         {"q": "My webhook endpoint is slow. What happens if it takes over 30 seconds?",
@@ -226,11 +235,11 @@ STRESS_TEST_R34_CATEGORIES = {
          "checks": {"must_contain": ["IP", "domain"],
                     "must_contain_any": ["separate", "both", "different", "independent"]}},
         {"q": "I want separate IPs for transactional and marketing email. What plans support this?",
-         "checks": {"must_contain_any": ["Scale", "€350", "Enterprise", "IP pool"]}},
+         "checks": {"must_contain_any": ["Business", "€699", "Enterprise Cloud", "IP pool"]}},
         {"q": "How do I check if I'm on a blocklist like Spamhaus?",
          "checks": {"must_contain_any": ["Spamhaus", "check.spamhaus.org", "blocklist", "DNSBL"]}},
         {"q": "I'm on the Free plan. Can I get a dedicated IP address?",
-         "checks": {"must_contain_any": ["no", "Pro", "€65", "not available"]}},
+         "checks": {"must_contain_any": ["no", "Pro", "€89", "not available"]}},
     ],
 
     # ── H: Templates, Rendering & Content ────────────────────────────────
@@ -250,7 +259,7 @@ STRESS_TEST_R34_CATEGORIES = {
 
     # ── I: API Rate Limits ───────────────────────────────────────────────
     "api_rate_limits": [
-        {"q": "What are the API rate limits on the Starter plan?",
+        {"q": "What are the API rate limits on the Developer plan?",
          "checks": {"must_contain_any": ["500,000", "500K", "per month"]}},
         {"q": "Can I burst 10,000 API calls in one minute?",
          "checks": {"must_contain_any": ["no", "rate", "throttle", "spread"]}},
@@ -267,7 +276,7 @@ STRESS_TEST_R34_CATEGORIES = {
         {"q": "How many failed login attempts before lockout?",
          "checks": {"must_contain_any": ["5", "five", "lockout", "15 minute"]}},
         {"q": "Can I require MFA for all team members?",
-         "checks": {"must_contain_any": ["yes", "Scale", "Enterprise", "enforce"]}},
+         "checks": {"must_contain_any": ["yes", "Business", "Enterprise Cloud", "enforce"]}},
         {"q": "How long do team invites stay valid?",
          "checks": {"must_contain_any": ["72", "hour", "3 day", "expire"]}},
         {"q": "How do I rotate my API keys without downtime?",
@@ -299,11 +308,11 @@ STRESS_TEST_R34_CATEGORIES = {
         {"q": "Is ApexMail GDPR compliant?",
          "checks": {"must_contain_any": ["yes", "GDPR", "DPA", "EU"]}},
         {"q": "Does ApexMail offer a Data Processing Agreement (DPA)?",
-         "checks": {"must_contain_any": ["yes", "DPA", "contact", "Enterprise"]}},
+         "checks": {"must_contain_any": ["yes", "DPA", "contact", "Enterprise Cloud"]}},
         {"q": "What happens to my data if I cancel my account?",
          "checks": {"must_contain_any": ["delete", "retention", "days", "export"]}},
         {"q": "Is ApexMail HIPAA compliant?",
-         "checks": {"must_contain_any": ["Enterprise", "BAA", "contact", "HIPAA"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "BAA", "contact", "HIPAA"]}},
         {"q": "Where is my data stored geographically?",
          "checks": {"must_contain_any": ["EU", "Europe", "Hetzner", "Germany"]}},
     ],
@@ -356,10 +365,10 @@ STRESS_TEST_R34_CATEGORIES = {
 
     # ── R: IP & Infrastructure ───────────────────────────────────────────
     "ip_infrastructure": [
-        {"q": "How many dedicated IPs are included with Scale?",
+        {"q": "How many dedicated IPs are included with Business?",
          "checks": {"must_contain_any": ["3", "three"]}},
         {"q": "Can I bring my own IP address (BYOIP)?",
-         "checks": {"must_contain_any": ["Enterprise", "contact", "BYOIP"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "contact", "BYOIP"]}},
         {"q": "How much does an additional dedicated IP cost?",
          "checks": {"must_contain_any": ["€30", "30", "month"]}},
     ],
@@ -407,7 +416,7 @@ STRESS_TEST_R34_CATEGORIES = {
     # ── W: Billing & SLA ─────────────────────────────────────────────────
     "billing_sla": [
         {"q": "What's the email overage rate per 1,000 emails?",
-         "checks": {"must_contain_any": ["€0.40", "0.40", "40 cent"]}},
+         "checks": {"must_contain_any": ["€0.80", "0.40", "40 cent"]}},
         {"q": "What's the ApexMail uptime SLA?",
          "checks": {"must_contain_any": ["99.9", "SLA"]}},
         {"q": "How do I get credits for downtime?",
@@ -419,11 +428,11 @@ STRESS_TEST_R34_CATEGORIES = {
     # ── X: Security Advanced ─────────────────────────────────────────────
     "security_advanced": [
         {"q": "Does ApexMail support SOC2 compliance?",
-         "checks": {"must_contain_any": ["Enterprise", "SOC2", "SOC 2", "contact"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "SOC2", "SOC 2", "contact"]}},
         {"q": "Can I get audit logs for my team's actions?",
-         "checks": {"must_contain_any": ["Scale", "Enterprise", "audit"]}},
+         "checks": {"must_contain_any": ["Business", "Enterprise Cloud", "audit"]}},
         {"q": "Is there SSO support with SAML?",
-         "checks": {"must_contain_any": ["Scale", "Enterprise", "SSO", "SAML"]}},
+         "checks": {"must_contain_any": ["Business", "Enterprise Cloud", "SSO", "SAML"]}},
         {"q": "Can I restrict API keys to specific IPs?",
          "checks": {"must_contain_any": ["yes", "allowlist", "IP restriction"]}},
     ],
@@ -473,7 +482,7 @@ STRESS_TEST_EXTRA_CATEGORIES = {
     ],
 
     "mixed_intent_advanced": [
-        {"q": "Hello, I want to upgrade from Starter to Growth and also need to fix my DKIM. Oh and what's my current usage?",
+        {"q": "Hello, I want to upgrade from Developer to Growth and also need to fix my DKIM. Oh and what's my current usage?",
          "checks": {"must_contain_any": ["upgrade", "DKIM", "usage", "Growth"]}},
         {"q": "My emails aren't delivering. Also I want to add a new domain. And what's the API limit on my plan?",
          "checks": {"must_contain_any": ["deliver", "domain", "API"]}},
@@ -481,7 +490,7 @@ STRESS_TEST_EXTRA_CATEGORIES = {
 
     "tricky_numbers": [
         {"q": "I send 2,000,001 emails. What plan handles that?",
-         "checks": {"must_contain_any": ["Enterprise", "Scale + overage"]}},
+         "checks": {"must_contain_any": ["Enterprise Cloud", "Business + overage"]}},
         {"q": "With Growth's 5M API calls, how many emails can I send with one API call each?",
          "checks": {"must_contain_any": ["500,000", "email limit", "separate"]}},
     ],
@@ -490,8 +499,8 @@ STRESS_TEST_EXTRA_CATEGORIES = {
         {"q": "Free plan: emails, API calls, team size, domains - all the limits please.",
          "checks": {"must_contain": ["3,000"],
                     "must_contain_any": ["50,000", "1", "team", "domain"]}},
-        {"q": "Scale plan: everything - price, emails, API, team, domains, IPs, features.",
-         "checks": {"must_contain": ["€350"],
+        {"q": "Business plan: everything - price, emails, API, team, domains, IPs, features.",
+         "checks": {"must_contain": ["€699"],
                     "must_contain_any": ["2,000,000", "20,000,000", "SSO", "IP"]}},
     ],
 }
@@ -524,8 +533,8 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=€0/30K/300K, Starter=€25/50K/500K, Pro=€65/150K/2M,
-  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/∞
+  Free=€0/30K/300K, Developer=€29/50K/500K, Pro=€89/150K/2M,
+  Growth=€229/500K/5M, Business=€699/2M/20M, Enterprise Cloud=€1,750/5M/∞
 """
 
 '''

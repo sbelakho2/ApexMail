@@ -554,8 +554,12 @@ mod aead_properties {
 
             let envelope = apexmail_lib::secret_at_rest::encrypt_at_rest(&plaintext, &aad)
                 .expect("encryption with the pinned key");
-            let b64 = envelope
-                .strip_prefix("enc:v1:")
+            // Shape-agnostic payload extraction: current writes are
+            // `enc:v2:<keyid>:<b64>` and legacy reads `enc:v1:<b64>`, so the
+            // payload is everything after the LAST ':' (the round-trip
+            // property pins the `enc:`/`is_encrypted` shape).
+            let (prefix, b64) = envelope
+                .rsplit_once(':')
                 .expect("is_encrypted shape checked by the round-trip property");
 
             let mut bytes = base64::engine::general_purpose::STANDARD
@@ -563,7 +567,10 @@ mod aead_properties {
                 .expect("our own envelope must be valid base64");
             let idx = byte_index % bytes.len();
             bytes[idx] ^= 0x01;
-            let tampered = format!("enc:v1:{}", base64::engine::general_purpose::STANDARD.encode(&bytes));
+            let tampered = format!(
+                "{prefix}:{}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            );
 
             let err = apexmail_lib::secret_at_rest::decrypt_at_rest(&tampered, &aad)
                 .expect_err("a tampered envelope must NOT decrypt");

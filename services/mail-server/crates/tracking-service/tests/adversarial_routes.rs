@@ -104,6 +104,7 @@ fn test_config(redis_url: &str, jwt_public_pem: &str) -> Config {
             trusted_proxies: Vec::new(),
             max_redirect_url_len: 2048,
             token_max_age_days: None,
+            allowed_redirect_domains: Vec::new(),
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -327,7 +328,8 @@ async fn pixel_always_returns_the_gif_and_never_leaks_recipient_data() {
 /// The click handler's domain authorization must consult the canonical
 /// `domains` table when neither the in-memory nor the Redis cache has an
 /// answer: a tenant-owned verified domain redirects and records, an
-/// unowned domain falls back and records nothing.
+/// unowned domain is refused with the named reason (400) and recorded as an
+/// explicit `click_refused` event — never bounced to the vendor fallback.
 #[tokio::test]
 async fn click_redirect_authorises_owned_domains_via_the_database() {
     let Some(db) = canonical_pool("tracking_click_domain").await else {
@@ -379,7 +381,9 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     drop_wal_entries(&redis, &tenant).await;
 
     // A domain owned by nobody (no row, no cache entry for this tenant)
-    // must fall back and record NOTHING.
+    // must be REFUSED with the reason — never redirected to the vendor
+    // fallback (dogfood 2026-10-06) — and recorded as an explicit
+    // `click_refused` event, not as a real click.
     let stranger_tenant = unique("tn_clk2");
     let stranger_message = unique("msg");
     let stranger = click_token(
@@ -389,21 +393,22 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
         "https://not-owned-anywhere.example/phish",
     );
     let response = srv.get(&format!("/c/{stranger}")).await;
-    assert_eq!(response.status_code().as_u16(), 302);
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    assert_eq!(location, "https://fallback.test.example/");
-    // Bounded settle for the (correctly absent) fire-and-forget recorder.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(response.status_code().as_u16(), 400);
+    let body = response.text();
+    assert!(
+        body.contains("not-owned-anywhere.example") && body.contains("not authorized"),
+        "the refusal names the host and the reason: {body}"
+    );
+    assert!(wait_for_wal(&redis, &stranger_tenant).await);
     let entries: Vec<String> =
         redis_cmd(&redis, &["LRANGE", "apexmail:events:pending", "0", "-1"]).await;
-    assert!(
-        !entries.iter().any(|e| e.contains(&stranger_message)),
-        "unowned-domain click must not be recorded"
-    );
+    let refused: Vec<&String> = entries
+        .iter()
+        .filter(|e| e.contains(&stranger_message))
+        .collect();
+    assert_eq!(refused.len(), 1, "one explicit refusal, got: {refused:?}");
+    assert!(refused[0].contains("click_refused"), "{refused:?}");
+    drop_wal_entries(&redis, &stranger_tenant).await;
 
     // The patterns tier of the same lookup: `tenant_settings.allowed_
     // redirect_domains` is a JSONB array — a `*.wild.example` entry must
@@ -434,7 +439,8 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
     assert_eq!(location, "https://promo.wild.example/offer");
 
     // The wildcard must NOT authorise the bare apex (documented semantics:
-    // `*.example` matches `sub.example` only).
+    // `*.example` matches `sub.example` only) — the apex is refused, not
+    // bounced to the fallback.
     let apex = click_token(
         &wildcard_tenant,
         &unique("msg"),
@@ -442,12 +448,7 @@ async fn click_redirect_authorises_owned_domains_via_the_database() {
         "https://wild.example/offer",
     );
     let response = srv.get(&format!("/c/{apex}")).await;
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    assert_eq!(location, "https://fallback.test.example/");
+    assert_eq!(response.status_code().as_u16(), 400);
 }
 
 // ── Unsubscribe ──────────────────────────────────────────────────────────────

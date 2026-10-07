@@ -1114,6 +1114,57 @@ mod tests {
             RiskPolicy::from_config(3, &cfg),
             Err(PolicyError::InvalidGlobalFloors(_))
         ));
+        // Missing entirely -> rejected.
+        let mut cfg = config();
+        cfg.as_object_mut().unwrap().remove("global_floors");
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidGlobalFloors(_))
+        ));
+        // Non-canonical level spelling -> rejected.
+        let mut cfg = config();
+        cfg["global_floors"] = json!({
+            "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "01": "sha20"
+        });
+        assert!(matches!(
+            RiskPolicy::from_config(3, &cfg),
+            Err(PolicyError::InvalidGlobalFloors(_))
+        ));
+    }
+
+    #[test]
+    fn global_floors_grammar_matches_the_php_port_acceptance_set() {
+        // The cross-language lock-in for the policy grammar: exactly the
+        // shapes the PHP `RiskPolicy::fromConfig` regression test
+        // (`testGlobalFloorsRequireEveryCanonicalLevelExactlyOnce`)
+        // refuses are refused here, and the canonical five-level set is
+        // accepted by both. Parse of the same JSON config must never
+        // diverge (a config one engine loads and the other refuses is a
+        // mixed-fleet policy split).
+        let rejected = [
+            json!({ "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20" }), // no level 0
+            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20" }), // no level 4
+            json!({ "0": "allow", "1": "sha16", "2": "sha18" }),               // partial
+            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "01": "sha20" }), // non-canonical spelling
+            json!({ "0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "4": "sha20", "5": "deny" }), // out of range
+        ];
+        for floors in rejected {
+            let mut cfg = config();
+            cfg["global_floors"] = floors.clone();
+            assert!(
+                matches!(
+                    RiskPolicy::from_config(3, &cfg),
+                    Err(PolicyError::InvalidGlobalFloors(_))
+                ),
+                "the non-total global_floors {floors} must be refused"
+            );
+        }
+
+        let canonical = config();
+        assert!(
+            RiskPolicy::from_config(3, &canonical).is_ok(),
+            "the canonical five-level set must parse"
+        );
     }
 
     #[test]

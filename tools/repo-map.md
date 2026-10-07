@@ -98,7 +98,7 @@ Source of truth: `docs/development/capability-registry.json` (ladder: implemente
 
 ## 4b. Schema migrations
 
-`services/mail-server/migrations/`: **216 `*.sql` files**, latest `244_first_response_queue_metrics.sql` (regenerated as the `ls | tail`).
+`services/mail-server/migrations/`: **217 `*.sql` files**, latest `245_dsr_outbox_idempotency.sql` (regenerated as the `ls | tail`).
 
 `tools/migrations/`: 35 `*.sql` files.
 

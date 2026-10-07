@@ -13,7 +13,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - `AsyncApexMail` asynchronous client with identical API surface.
 - `client.emails` resource — `send`, `batch`, `get`, `list`, `cancel`.
 - `client.domains` resource — `create`, `list`, `get`, `verify`, `delete`.
-- `client.templates` resource — `create`, `list`, `get`, `get_by_slug`, `update` (PUT), `delete`, `duplicate`, `rollback`, `render`.
+- `client.templates` resource — `create`, `list`, `get`, `update` (PUT), `delete`, `duplicate`, `rollback`, `render`.
 - `client.suppressions` resource — `create`, `add`, `list`, `delete`, `check`, `bulk`.
 - `client.events` resource — `list`, `get_by_message`, `get`, `stats`, `timeseries`.
 - `client.webhooks` resource — `create`, `list`, `get`, `update`, `delete`.
@@ -29,6 +29,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Structured exception hierarchy for authentication, validation, and rate-limiting failures.
 - Retry-After header parsing (seconds and HTTP-date).
 - Webhook signature verification (`verify_webhook_signature`).
+
+## [Unreleased]
+
+### Added
+
+- `client.webhooks.rotate_secret(id)` (sync and async) →
+  `POST /v1/webhooks/:id/rotate-secret`; the new secret is returned once.
+- `client.emails.send_batch(...)` (sync and async), the method name documented
+  in docs/api/sdk-reference.md — same `POST /v1/messages/batch` call as
+  `batch()`.
+
+### Corrected
+
+- The 1.0.0 entry listed a `get_by_slug` templates method; the API has no
+  by-slug route and the method never existed — removed from the record.
+- `Templates`/`Suppressions`/`Events` never had server-side cursor pagination
+  (their query structs are `deny_unknown_fields` and reject `cursor` with
+  HTTP 400); those `list()` methods reject `cursor` client-side with a
+  precise error. Only `emails.list()` (and `webhooks.list`) support
+  limit/offset pagination today.
 
 ## [1.0.1] — 2026-05-14
 

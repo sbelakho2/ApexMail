@@ -309,9 +309,17 @@ async fn clickhouse_queries_survive_hostile_filters_and_empty_datasets() {
     assert!(engine.health_check().await.expect("health"));
 
     // GDPR: the ingested IP is masked, never the full address.
-    let raw = clickhouse::Client::default()
-        .with_url(&clickhouse_config("apexmail_test").expect("config").url)
-        .with_database("apexmail_test");
+    // The raw verification client must carry the configured credentials —
+    // clickhouse-rs defaults to user `default`/no password, which the compose
+    // server (loopback-only `default`) rejects from a host connection.
+    let raw_config = clickhouse_config("apexmail_test").expect("config");
+    let mut raw = clickhouse::Client::default()
+        .with_url(&raw_config.url)
+        .with_database("apexmail_test")
+        .with_user(&raw_config.user);
+    if !raw_config.password.is_empty() {
+        raw = raw.with_password(&raw_config.password);
+    }
     let stored_ip: String = raw
         .query("SELECT ip_address FROM events WHERE tenant_id = ? LIMIT 1")
         .bind(&tenant)

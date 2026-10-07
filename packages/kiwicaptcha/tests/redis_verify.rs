@@ -1944,10 +1944,26 @@ fn execution_armed_record_at_the_register_maximum_verifies_through_the_productio
         })
         .map(|op| op.opcode)
         .collect();
-    assert_eq!(
-        spine_codes.len(),
-        4,
-        "the max-register program carries the version-5 spine ops"
+    // The four spine opcodes must EACH be carried by the max-register
+    // program. The count is not pinned to exactly 4: the version-5
+    // extra-probe pool legitimately contains OP_DOM_URL_CANON, so a
+    // drawn extra probe may add a second URL-canon entry (the fixed
+    // spine always contributes exactly one of each). Asserting an exact
+    // total made the test a coin flip on the PRF-drawn nonce.
+    for spine in [
+        execution::OP_DOM_CLONE,
+        execution::OP_DOM_REPARENT,
+        execution::OP_DOM_URL_CANON,
+        execution::OP_DOM_TEXT_MUTATE,
+    ] {
+        assert!(
+            spine_codes.contains(&spine),
+            "the max-register program must carry spine op {spine}"
+        );
+    }
+    assert!(
+        spine_codes.len() >= 4,
+        "the version-5 spine contributes at least one of each op"
     );
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
     let (digest, trace_b64) = execution_evidence(&issued.record);
@@ -2178,8 +2194,16 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
     // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
     // protocol v3 canonical extension, so a v2 record carrying one is
     // malformed — such a record cannot have been signed by a conforming
-    // issuer. The explicit rejection fires before any signature work and
-    // burns the record like every terminal cheap failure.
+    // issuer. The rejection is enforced at the record's deserialization
+    // boundary: `ChallengeRecord`'s validating Deserialize runs the
+    // shared structural authority (`record_is_structurally_valid`), so
+    // the hand-rolled v2-plus-decoy envelope is undecodable. The Redis
+    // storage decoder maps an undecodable value to Missing — the lenient
+    // corrupt-key rule documented on `decode_stored`, mirroring PHP's
+    // `RedisStorage::decodeEnvelope` — so the verifier answers
+    // RecordNotFound: the token is rejected closed and no proof is ever
+    // derived (it can never reach the cheap phase's MalformedRecord
+    // verdict, because there is no decodable record to validate).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("v2-decoy");
     let issued = issue_challenge(
@@ -2203,8 +2227,8 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
     verifier.store().store(&tampered).unwrap();
     assert_eq!(
         verify_at(&verifier, &token, tampered.issued_at_ns),
-        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-        "a v2 record with a decoy_field is rejected explicitly"
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "the undecodable v2-plus-decoy envelope reads as Missing and the token is rejected closed"
     );
     assert_eq!(
         verify_at(
@@ -2216,7 +2240,7 @@ fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
             issued.record.issued_at_ns
         ),
         VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-        "the malformed v2-plus-decoy record is consumed by the cheap failure"
+        "the unreadable envelope stays Missing: nothing rewrites or resurrects it"
     );
 }
 

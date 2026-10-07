@@ -1190,6 +1190,13 @@ services:
       # bounces+{message_id}=...@{VERP_DOMAIN} recipients. Kept in lockstep
       # with the worker's VERP_DOMAIN so generated Return-Paths parse here.
       VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
+      # Shared HMAC secret authenticating VERP v2 bounce tokens (MtaConfig
+      # production gate). MUST equal the worker's; >= 32 bytes. Blanked so the
+      # entrypoint wrapper's _FILE bridge owns the value — missing secret
+      # fails validation CLOSED instead of silently recording every bounce as
+      # a non-authoritative observation.
+      VERP_HMAC_SECRET: ""
+      VERP_HMAC_SECRET_FILE: /run/secrets/verp_hmac_secret
       # ── Inbound content security (crates/mta servers/content_security.rs) ──
       # Three engines on the inbound DATA path, each env-gated and DEFAULT
       # OFF: spam/phishing scoring (SpamEngine, X-Spam-* verdict headers),
@@ -1206,6 +1213,7 @@ services:
       - postgres_password
       - redis_password
       - internal_service_token
+      - verp_hmac_secret
     depends_on:
       postgres:
         condition: service_healthy
@@ -1421,10 +1429,17 @@ services:
       # Production validation refuses to start without this key (log-stream
       # destination credentials are encrypted at rest with it).
       LOG_STREAM_ENCRYPTION_KEY: ${LOG_STREAM_ENCRYPTION_KEY:?LOG_STREAM_ENCRYPTION_KEY must be set in production}
+      # Enterprise SSO mints the canonical `am_session` console cookie with the
+      # SHARED RS256 key (dogfood F8/report F5: the api-server already mounts
+      # this secret; without it the SSO callback logged "JWT_PRIVATE_KEY_PEM is
+      # not configured" and returned an enterprise-only token, so console SSO
+      # was dead). The same key as the api-server's, mounted read-only.
+      JWT_PRIVATE_KEY_PEM_FILE: /run/secrets/jwt_private_key_pem
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
     secrets:
       - postgres_password
       - redis_password
+      - jwt_private_key_pem
       - jwt_public_key_pem
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
@@ -1524,6 +1539,18 @@ services:
       # MUST equal the MTA bounce server's VERP_DOMAIN so generated addresses
       # land back on the platform bounce parser.
       VERP_DOMAIN: ${VERP_DOMAIN:-bounces.apexmail.ee}
+      # Shared HMAC secret minting the v2 VERP tokens (worker's production
+      # startup gate). MUST equal the MTA bounce server's; >= 32 bytes.
+      # Blanked so the wrapper's _FILE bridge owns the value — a missing
+      # secret fails the production gate CLOSED instead of silently
+      # shipping mail with no authenticated Return-Path.
+      VERP_HMAC_SECRET: ""
+      VERP_HMAC_SECRET_FILE: /run/secrets/verp_hmac_secret
+      # Canonical audit-chain signing key (worker DLP/graduation audit rows
+      # go through the migration-105 canonical writer, which fails CLOSED in
+      # production without it). Same key api-server/billing/compliance use.
+      AUDIT_SIGNING_KEY: ""
+      AUDIT_SIGNING_KEY_FILE: /run/secrets/audit_signing_key
     secrets:
       - postgres_password
       - redis_password
@@ -1534,6 +1561,8 @@ services:
       - smtp_username
       - smtp_password
       - tracking_secret_key
+      - verp_hmac_secret
+      - audit_signing_key
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     healthcheck:
       # F12 (audit): the worker serves GET /health on the SAME injected
@@ -2017,6 +2046,12 @@ secrets:
     file: ${PROD_WEBHOOK_SIGNING_SECRET_FILE:?PROD_WEBHOOK_SIGNING_SECRET_FILE is required in production}
   tracking_secret_key:
     file: ${PROD_TRACKING_SECRET_KEY_FILE:?PROD_TRACKING_SECRET_KEY_FILE is required in production}
+  # Shared HMAC secret authenticating VERP v2 bounce tokens — mounted into
+  # BOTH the mta-server bounce parser and the worker token minter; >= 32
+  # bytes and identical on both sides (each refuses to start in production
+  # without it). Generate with: openssl rand -base64 48
+  verp_hmac_secret:
+    file: ${PROD_VERP_HMAC_SECRET_FILE:?PROD_VERP_HMAC_SECRET_FILE is required in production}
   internal_service_token:
     file: ${PROD_INTERNAL_SERVICE_TOKEN_FILE:?PROD_INTERNAL_SERVICE_TOKEN_FILE is required in production}
   # F9 (audit) — pdf-renderer's dedicated per-workload credential (P1 #6).

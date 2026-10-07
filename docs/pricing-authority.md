@@ -4,7 +4,10 @@
 
 ApexMail plan entitlements, prices, limits, and feature gates are operationally
 owned by [the billing plan seeds](../services/mail-server/crates/billing-service/src/plans.rs),
-the active `plans` database rows, and verified Stripe webhooks. The database
+the active `plans` database rows, and verified Stripe webhooks. The plan facts
+themselves (names, prices, limits, overage rates) are defined once in the
+canonical [platform catalog](../services/mail-server/crates/platform-catalog/src/lib.rs);
+`plans.rs` seeds the runtime tables from it. The database
 rows also bind approved Stripe price IDs to plan IDs.
 
 A tenant receives paid access only after the verified Stripe subscription
@@ -32,7 +35,7 @@ runtime billing configuration:
 - [marketing calculator data](../apps/marketing-zola/data/pricing.json)
 - [marketing pricing templates](../apps/marketing-zola/templates/partials/pricing/)
 - [company/claims snapshot](../apps/marketing-zola/data/canonical.json)
-- [company/claims Rust constants](../compliance/src/legal_entity.rs)
+- [company/claims Rust constants](../../services/mail-server/crates/compliance/src/legal_entity.rs)
 
 The canonical company snapshot deliberately contains no plan catalog. It must
 not be used to calculate bills, grant entitlement, or configure Stripe.

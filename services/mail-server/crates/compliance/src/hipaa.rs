@@ -11,7 +11,7 @@
 //! immutable history so the BAA evidence trail is tamper-evident and
 //! defensible during a HIPAA audit.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -573,7 +573,12 @@ impl HipaaService {
         payload: serde_json::Value,
     ) -> Result<(), String> {
         let id = Uuid::new_v4().to_string();
-        let now = Utc::now();
+        // The event hash covers `occurred_at`, and the column is TIMESTAMPTZ
+        // (microsecond precision): a nanosecond `Utc::now()` would be rounded
+        // by Postgres on INSERT, so the recomputed hash would differ from the
+        // stored one and the chain could NEVER verify. Truncate to whole
+        // microseconds — a value Postgres stores exactly — before hashing.
+        let now = Utc::now().trunc_subsecs(6);
         // Acquire the previous hash (cache-first, DB fallback).
         let previous_hash = {
             let cache = self.last_hashes.read().await;

@@ -45,12 +45,16 @@ widget.css           sha384-<VALUE-FROM-SRI.txt>
 Use the SRI script-tag pattern for every asset you serve:
 
 ```html
-<script src="https://cdn.example.com/kiwicaptcha/v1.6.20/widget-driver.js"
-        integrity="sha384-osA8vjEQw8Gbqp8Z7Ap9Avv1rH03DOAJVKB7bFMvDSbgZ7N+UU7zFEdKrMfocdQR"
+<script src="https://cdn.example.com/kiwicaptcha/v1.7.0/widget-driver.js"
+        integrity="sha384-<VALUE-FROM-SRI.txt>"
         crossorigin="anonymous"></script>
 ```
 
-The example path uses the release version.
+The example path uses the release version; the integrity value is a
+placeholder on purpose — a literal hash pasted into this document goes
+stale on the next asset rebuild, and copying it would pin bytes that no
+longer exist. Always paste the value the tool just printed for YOUR
+build (or the release's `SRI.txt`).
 The solver protocol id is a protocol/ABI label, not an artifact identity; see the Immutable versioned URLs section below.
 
 Notes:

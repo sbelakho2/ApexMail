@@ -144,7 +144,7 @@ Each component has separate availability tracking:
 
 | System | Purpose | Provider |
 |--------|---------|----------|
-| Status Page | Public availability display | status.apexmail.io |
+| Status Page | Public availability display | status.apexmail.ee |
 | Internal Monitoring | Probe-based monitoring | Prometheus + Grafana |
 | External Monitoring | Multi-region synthetic probes | Independent service |
 | Real-User Monitoring | Client-side performance | Where enabled per consent |

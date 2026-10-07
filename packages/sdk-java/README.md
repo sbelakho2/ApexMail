@@ -79,12 +79,13 @@ Emails.BatchResponse batch = client.emails().batch(List.of(
     Map.of("from", "hello@example.com", "to", List.of("user2@example.com"), "subject", "Hi", "html", "<p>Hello</p>")
 ));
 
-// Get email status
-Emails.GetResponse email = client.emails().get("email_id");
-System.out.println(email.message().status()); // "delivered"
+// Get email status (flat MessageDetail; there is no {"email": ...} wrapper)
+Emails.EmailDetail email = client.emails().get("email_id");
+System.out.println(email.status()); // "delivered"
 
-// List emails
-Emails.ListResponse emails = client.emails().list(Map.of(
+// List emails (the envelope's `data` is unwrapped to the bare list; the
+// pagination meta stays available via client.getLastResponseMeta())
+java.util.List<Emails.EmailDetail> emails = client.emails().list(Map.of(
     "status", "delivered",
     "limit", 50
 ));
@@ -96,16 +97,17 @@ Emails.ListResponse emails = client.emails().list(Map.of(
 import ee.apexmail.Domains;
 
 // Add a domain
-Domains.CreateResponse domain = client.domains().create("example.com");
+Domains.Domain domain = client.domains().create("example.com");
 
 // Verify domain DNS configuration
 Domains.VerifyResponse verified = client.domains().verify("domain_id");
 
-// List domains
-Domains.ListResponse domains = client.domains().list();
+// List domains (bare array; the API has no envelope here)
+java.util.List<Domains.Domain> domains = client.domains().list();
 
-// Check domain health
-Domains.HealthResponse health = client.domains().health("domain_id");
+// Check domain health (alias of get(): GET /v1/domains/:id carries the
+// spf/dkim/dmarc/return_path booleans)
+Domains.Domain health = client.domains().health("domain_id");
 ```
 
 ### Webhooks
@@ -116,14 +118,14 @@ import ee.apexmail.Webhooks;
 import java.util.List;
 import java.util.Map;
 
-// Create a webhook
-Webhooks.WebhookResponse webhook = client.webhooks().create(Map.of(
+// Create a webhook (the signing secret is returned on create only)
+Webhooks.Webhook webhook = client.webhooks().create(Map.of(
     "url", "https://your-app.com/webhooks/apexmail",
     "events", List.of("message.delivered", "message.bounced", "message.opened")
 ));
 
-// List webhooks
-Webhooks.WebhookListResponse webhooks = client.webhooks().list();
+// List webhooks (bare array)
+List<Webhooks.Webhook> webhooks = client.webhooks().list();
 
 // Delete webhook
 client.webhooks().delete("webhook_id");

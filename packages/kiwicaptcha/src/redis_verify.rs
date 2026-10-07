@@ -3325,23 +3325,47 @@ impl ProductionVerifier {
     /// Resolve the record's signing secret: the single-key path uses the
     /// configured secret; the `secrets_by_kid` path selects per the
     /// record's kid with the forward/rollback guard.
+    ///
+    /// The documented 16-byte HMAC secret minimum is enforced here,
+    /// fail closed: the single-key path and every `secrets_by_kid`
+    /// entry must clear the same minimum that
+    /// [`crate::challenge::sign_canonical_v2`] enforces at issuance and
+    /// that the PHP `Config`/`Verifier` constructors enforce. This is
+    /// the production verifier's only secret-resolution seam; the
+    /// cached-`DerivedKeys` fast path (`verify_signature_v2_with_keys`)
+    /// deliberately skips the generic `verify_canonical_v2` length gate,
+    /// so without this check a deployment configured with a short
+    /// master secret would verify challenges that no conforming issuer
+    /// could have signed. A short secret is a configuration fault, never
+    /// an authentic record: it answers [`VerifyError::BadSignature`] —
+    /// the exact mapping the generic verifier produces for
+    /// [`SignError::KeyTooShort`](crate::challenge::SignError::KeyTooShort)
+    /// — before any key derivation.
     fn resolve_signing_secret<'a>(
         &'a self,
         record: &ChallengeRecord,
     ) -> Result<&'a str, VerifyError> {
-        match &self.secrets_by_kid {
+        let secret = match &self.secrets_by_kid {
             Some(secrets) => {
                 let max_kid = secrets.keys().max().copied().unwrap_or(0);
                 if record.kid > max_kid {
                     return Err(VerifyError::UnknownKid);
                 }
                 match secrets.get(&record.kid) {
-                    Some(secret) => Ok(secret.as_str()),
-                    None => Err(VerifyError::UnknownKid),
+                    Some(secret) => secret.as_str(),
+                    None => return Err(VerifyError::UnknownKid),
                 }
             }
-            None => Ok(&self.secret_key),
+            None => self.secret_key.as_str(),
+        };
+        if secret.len() < 16 {
+            // The documented HMAC minimum (the PHP Config/Verifier
+            // constructors and the issuance signer enforce the same):
+            // fail closed instead of deriving purpose keys from a
+            // brute-forceable master.
+            return Err(VerifyError::BadSignature);
         }
+        Ok(secret)
     }
 
     /// The `HKDF` purpose keys of the record's signing secret, derived once
@@ -4929,6 +4953,102 @@ mod tests {
             outcome,
             VerifyOutcome::Invalid(VerifyError::MalformedRecord),
             "a consumed envelope with a foreign nonce never replays the stored result"
+        );
+    }
+
+    // ── the documented 16-byte HMAC secret minimum ─────────────────────
+    //
+    // The production verifier's cached-DerivedKeys fast path bypasses the
+    // generic verify_canonical_v2 KeyTooShort gate, so the minimum is
+    // enforced at the secret-resolution seam (resolve_signing_secret). A
+    // record signed under the short secret — the exact shape a weak
+    // deployment would present — must answer BadSignature, never Valid,
+    // on both the single-key and the per-kid paths.
+    #[test]
+    fn short_signing_secret_fails_closed_on_the_production_path() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+
+        let Some(url) = redis_url() else { return };
+        // 11 bytes: below the documented 16-byte minimum the issuance
+        // signer, the generic verifier, and the PHP Config/Verifier
+        // constructors all enforce.
+        let short = "short-secret";
+        assert!(short.len() < 16);
+
+        // An authentic 32-byte-secret record re-signed under the short
+        // secret's derived keys — signature AND nonce-bound binding tag —
+        // i.e. the fully self-consistent shape a short-secret deployment
+        // would issue and accept (the bypass this test pins). The
+        // canonical is computed AFTER the binding tag is patched, since
+        // the tag is part of the signed payload.
+        let config = sha_config(4);
+        let issued =
+            issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+        let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+        let short_keys = DerivedKeys::from_master(short, None);
+        let mut forged = issued.record.clone();
+        forged.binding_tag =
+            crate::challenge::binding_tag_with_keys(&forged.nonce, IP, &short_keys)
+                .expect("the IP literal parses");
+        let canonical = crate::challenge::canonical_signing_input_v2(&forged);
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(short_keys.challenge_key()).unwrap();
+        mac.update(canonical.as_bytes());
+        forged.challenge = format!(
+            "{}.{}",
+            B64.encode(canonical.as_bytes()),
+            hex::encode(mac.finalize().into_bytes())
+        );
+        forged.prefix = format!("{}|{}|", forged.challenge, forged.salt);
+        let token = encode_token(&forged.nonce, counter);
+        // A deterministic receipt past the timing floor: without the
+        // secret gate every OTHER invariant of the forged record passes,
+        // so the pre-fix verdict is a full Valid (the bypass), not a
+        // timing accident.
+        let receipt_ns = forged.issued_at_ns + 10_000_000;
+
+        // Single-key path.
+        let store = RedisChallengeStore::new(
+            redis::Client::open(url.clone()).unwrap(),
+            format!("kiwitest:short-secret-single:{}:", std::process::id()),
+        );
+        store.store(&forged).unwrap();
+        let single = ProductionVerifier::new(store, short);
+        assert_eq!(
+            single.verify(
+                &token,
+                "login",
+                IP,
+                receipt_ns,
+                None,
+                RequestBindingExpectation::Unenforced
+            ),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "a sub-16-byte configured secret must fail closed, never verify"
+        );
+
+        // Per-kid path: a short entry in the rotation map is refused at
+        // resolution exactly like PHP's Verifier constructor refuses it.
+        let ringed = forged.clone();
+        let store2 = RedisChallengeStore::new(
+            redis::Client::open(url).unwrap(),
+            format!("kiwitest:short-secret-kid:{}:", std::process::id()),
+        );
+        store2.store(&ringed).unwrap();
+        let ring = ProductionVerifier::new(store2, SECRET)
+            .with_secrets_by_kid([(1u32, short.to_string())]);
+        assert_eq!(
+            ring.verify(
+                &token,
+                "login",
+                IP,
+                receipt_ns,
+                None,
+                RequestBindingExpectation::Unenforced
+            ),
+            VerifyOutcome::Invalid(VerifyError::BadSignature),
+            "a sub-16-byte per-kid secret must fail closed too"
         );
     }
 }

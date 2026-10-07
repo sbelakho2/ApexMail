@@ -146,8 +146,7 @@ impl ConsentEnforcer {
     ) -> Result<SendDecision, String> {
         let normalized_email = email.trim().to_lowercase();
 
-        let is_suppressed =
-            self.check_suppression(tenant_id, &normalized_email).await?;
+        let is_suppressed = self.check_suppression(tenant_id, &normalized_email).await?;
         if is_suppressed.is_some() {
             let reason = is_suppressed.unwrap();
             warn!(
@@ -161,9 +160,7 @@ impl ConsentEnforcer {
             )));
         }
 
-        let consent = self
-            .fetch_consent(tenant_id, &normalized_email)
-            .await?;
+        let consent = self.fetch_consent(tenant_id, &normalized_email).await?;
 
         let has_active_marketing_consent = consent.as_ref().map_or(false, |c| {
             c.granted
@@ -176,16 +173,16 @@ impl ConsentEnforcer {
         });
 
         let has_expired_marketing = consent.as_ref().map_or(false, |c| {
-            c.granted && c.consent_type == ConsentType::Marketing && is_consent_expired(c.expires_at)
+            c.granted
+                && c.consent_type == ConsentType::Marketing
+                && is_consent_expired(c.expires_at)
         });
 
         let has_pending_double_opt_in = self
             .check_double_opt_in_pending(tenant_id, &normalized_email)
             .await?;
 
-        let strict_required = frameworks
-            .iter()
-            .any(|f| f.requires_strict_consent());
+        let strict_required = frameworks.iter().any(|f| f.requires_strict_consent());
 
         if strict_required {
             if has_revoked_marketing {
@@ -274,8 +271,7 @@ impl ConsentEnforcer {
     ) -> Result<SendDecision, String> {
         let normalized_email = email.trim().to_lowercase();
 
-        let is_suppressed =
-            self.check_suppression(tenant_id, &normalized_email).await?;
+        let is_suppressed = self.check_suppression(tenant_id, &normalized_email).await?;
         if is_suppressed.is_some() {
             let reason = is_suppressed.unwrap();
             warn!(
@@ -292,9 +288,8 @@ impl ConsentEnforcer {
         let transactional = is_transactional_email(is_transactional, tags, subject);
 
         if transactional {
-            let has_transactional_bypass = frameworks
-                .iter()
-                .all(|f| f.allows_transactional_bypass());
+            let has_transactional_bypass =
+                frameworks.iter().all(|f| f.allows_transactional_bypass());
             if has_transactional_bypass {
                 debug!(
                     tenant_id = %tenant_id,
@@ -305,9 +300,7 @@ impl ConsentEnforcer {
             }
         }
 
-        let consent = self
-            .fetch_consent(tenant_id, &normalized_email)
-            .await?;
+        let consent = self.fetch_consent(tenant_id, &normalized_email).await?;
 
         let has_active_marketing_consent = consent.as_ref().map_or(false, |c| {
             c.granted
@@ -320,16 +313,16 @@ impl ConsentEnforcer {
         });
 
         let has_expired_marketing = consent.as_ref().map_or(false, |c| {
-            c.granted && c.consent_type == ConsentType::Marketing && is_consent_expired(c.expires_at)
+            c.granted
+                && c.consent_type == ConsentType::Marketing
+                && is_consent_expired(c.expires_at)
         });
 
         let has_pending_double_opt_in = self
             .check_double_opt_in_pending(tenant_id, &normalized_email)
             .await?;
 
-        let strict_required = frameworks
-            .iter()
-            .any(|f| f.requires_strict_consent());
+        let strict_required = frameworks.iter().any(|f| f.requires_strict_consent());
 
         if strict_required {
             if has_revoked_marketing {
@@ -565,7 +558,11 @@ fn is_consent_expired(expires_at: Option<DateTime<Utc>>) -> bool {
 ///
 /// The keyword hint is retained only for observability via
 /// [`transactional_keyword_hint`].
-pub fn is_transactional_email(declared_transactional: bool, tags: &[String], subject: &str) -> bool {
+pub fn is_transactional_email(
+    declared_transactional: bool,
+    tags: &[String],
+    subject: &str,
+) -> bool {
     let _ = (tags, subject);
     declared_transactional
 }
@@ -712,7 +709,11 @@ mod tests {
             &["password-reset".into()],
             "Reset your password"
         ));
-        assert!(!is_transactional_email(false, &["billing".into()], "Your invoice"));
+        assert!(!is_transactional_email(
+            false,
+            &["billing".into()],
+            "Your invoice"
+        ));
         assert!(!is_transactional_email(
             false,
             &["receipt".into()],
@@ -727,11 +728,23 @@ mod tests {
 
     #[test]
     fn test_is_transactional_email_subject() {
-        assert!(!is_transactional_email(false, &[], "Password reset request"));
+        assert!(!is_transactional_email(
+            false,
+            &[],
+            "Password reset request"
+        ));
         assert!(!is_transactional_email(false, &[], "Your billing receipt"));
         assert!(!is_transactional_email(false, &[], "Account notification"));
-        assert!(!is_transactional_email(false, &[], "Login verification code"));
-        assert!(!is_transactional_email(false, &[], "Big sale this weekend!"));
+        assert!(!is_transactional_email(
+            false,
+            &[],
+            "Login verification code"
+        ));
+        assert!(!is_transactional_email(
+            false,
+            &[],
+            "Big sale this weekend!"
+        ));
     }
 
     #[test]
@@ -795,9 +808,21 @@ mod tests {
     #[test]
     fn test_all_frameworks_parse() {
         let frameworks = [
-            "gdpr", "casl", "can_spam", "canspam", "lgpd", "pdpa", "popia",
-            "eprivacy", "e_privacy", "ccpa", "iso27001", "iso_27001", "hipaa",
-            "soc2", "soc_2",
+            "gdpr",
+            "casl",
+            "can_spam",
+            "canspam",
+            "lgpd",
+            "pdpa",
+            "popia",
+            "eprivacy",
+            "e_privacy",
+            "ccpa",
+            "iso27001",
+            "iso_27001",
+            "hipaa",
+            "soc2",
+            "soc_2",
         ];
         for f in &frameworks {
             assert!(

@@ -12248,7 +12248,17 @@ mod transactional_email_contracts {
             pool.close().await;
             return None;
         };
-        let redis_url = format!("{}/{REDIS_DB}", base.trim_end_matches('/'));
+        // Accept both base forms: with or without a trailing /<db> segment —
+        // this helper owns its logical DB either way (a URL carrying "/0"
+        // then here appended "/14" parsed as an invalid database number).
+        let base = base.trim_end_matches('/');
+        let base = match base.rsplit_once('/') {
+            Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => {
+                head.to_string()
+            }
+            _ => base.to_string(),
+        };
+        let redis_url = format!("{base}/{REDIS_DB}");
         let redis = deadpool_redis::Config::from_url(&redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("redis pool");

@@ -158,6 +158,28 @@ fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> Sal
                 "suppression lookup is temporarily unavailable".into(),
             ))
         }
+        // F4 consent gate: a marketing recipient without active consent is a
+        // TERMINAL refusal (retrying cannot create consent and is the loop
+        // the release gates forbid), so it takes the non-retryable skip.
+        SendAdmissionError::ConsentRefused { email, reason } => {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                email = %email,
+                reason = %reason,
+                "sales send refused admission: marketing consent missing (non-retryable skip)"
+            );
+            SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+        }
+        SendAdmissionError::ConsentUnavailable(error) => {
+            tracing::error!(
+                error = %error,
+                tenant_id = %tenant_id,
+                "sales consent lookup failed — failing closed (retryable)"
+            );
+            SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(
+                "consent lookup is temporarily unavailable".into(),
+            ))
+        }
     }
 }
 

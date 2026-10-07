@@ -9,19 +9,45 @@ import (
 	"testing"
 )
 
-func TestDecodeAPIResponseEnvelopeMergesPaginationMeta(t *testing.T) {
+func TestDecodeAPIResponseCapturesMessagesListMeta(t *testing.T) {
 	t.Parallel()
 
-	body := []byte(`{"data":{"events":[{"id":"evt_123","messageId":"msg_123","eventType":"delivered","recipientEmail":"user@example.com","timestamp":"2026-05-05T12:00:00Z"}]},"error":null,"meta":{"pagination":{"total":1,"limit":50,"offset":0,"hasMore":false}}}`)
+	// Real GET /v1/messages shape (routes/messages.rs list_messages):
+	// {"data":[...],"error":null,"meta":{"hasMore":...,"nextCursor":...}} —
+	// camelCase keys, the array payload itself cannot carry the meta.
+	body := []byte(`{"data":[{"id":"msg_1","from":"sender@example.com","to":["user@example.com"],"subject":"Hi","status":"queued","tags":null,"metadata":null,"scheduled_at":null,"sent_at":null,"created_at":"2026-10-06T12:00:00Z"}],"error":null,"meta":{"hasMore":true,"nextCursor":"00112233aabbccdd"}}`)
+	var out ListEmailsResponse
+	if err := decodeAPIResponse(body, &out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(out.Messages) != 1 || out.Messages[0].ID != "msg_1" || out.Messages[0].CreatedAt != "2026-10-06T12:00:00Z" {
+		t.Fatalf("unexpected messages: %#v", out.Messages)
+	}
+	if !out.HasMore() || out.NextCursor() != "00112233aabbccdd" {
+		t.Fatalf("meta not captured: hasMore=%v nextCursor=%q", out.HasMore(), out.NextCursor())
+	}
+	if !out.Pagination.HasMore || out.Pagination.Cursor != "00112233aabbccdd" {
+		t.Fatalf("pagination not populated: %#v", out.Pagination)
+	}
+}
+
+func TestDecodeAPIResponseEventsBareArray(t *testing.T) {
+	t.Parallel()
+
+	// Real GET /v1/events shape: a BARE array of flat snake_case
+	// EventResponse objects — no envelope and no {"events": ...} wrapper
+	// (routes/events.rs list_events → Json(rows…collect())).
+	body := []byte(`[{"id":"evt_123","message_id":"msg_123","event_type":"delivered","recipient":"user@example.com","metadata":null,"timestamp":"2026-05-05T12:00:00Z"}]`)
 	var out ListEventsResponse
 	if err := decodeAPIResponse(body, &out); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(out.Events) != 1 || out.Events[0].ID != "evt_123" {
+	if len(out.Events) != 1 {
 		t.Fatalf("unexpected events: %#v", out.Events)
 	}
-	if out.Pagination.Total != 1 || out.Pagination.Limit != 50 || out.Pagination.HasMore {
-		t.Fatalf("unexpected pagination: %#v", out.Pagination)
+	event := out.Events[0]
+	if event.ID != "evt_123" || event.MessageID != "msg_123" || event.EventType != "delivered" || event.Recipient != "user@example.com" || event.Timestamp != "2026-05-05T12:00:00Z" {
+		t.Fatalf("snake_case fields not mapped: %#v", event)
 	}
 }
 

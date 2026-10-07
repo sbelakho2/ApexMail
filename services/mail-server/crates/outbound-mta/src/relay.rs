@@ -363,10 +363,15 @@ impl Relay {
     }
 
     /// The delivery-contract fingerprint (migration 230): the send_unit's
-    /// idempotency is only sound while the CONTRACT is identical. A repeat with
-    /// a different fingerprint is a typed conflict (the ledger raises it), so a
-    /// re-selected route or an edited message can never silently inherit the
-    /// stored state.
+    /// idempotency is only sound while the CONTRACT is identical. A repeat
+    /// against a TERMINAL row (`accepted`/`failed`) with a different
+    /// fingerprint raises a typed conflict, so a re-selected route or an
+    /// edited message can never silently inherit a terminal outcome. A repeat
+    /// against a still NON-TERMINAL row ADOPTS the stored row instead: the
+    /// worker re-renders the MIME on every retry (fresh `Date`/MIME
+    /// boundary/tracking IVs), so the byte digest of an otherwise identical
+    /// logical send changes, and the first submission's bytes are the
+    /// authoritative copy the relay delivers.
     pub fn request_fingerprint(request: &SubmitRequest) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -570,7 +575,11 @@ impl Relay {
                             .unwrap_or_default()
                     );
                     let now = Utc::now();
-                    match self.config.retry.next_attempt_at(attempt, now) {
+                    match self.config.retry.next_attempt_at_with_ceiling(
+                        attempt,
+                        now,
+                        row.max_attempts,
+                    ) {
                         Some(next_attempt_at) => {
                             self.ledger
                                 .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
@@ -607,7 +616,11 @@ impl Relay {
                     // send rather than letting an unaccounted attempt hit
                     // the wire.
                     let now = Utc::now();
-                    match self.config.retry.next_attempt_at(attempt, now) {
+                    match self.config.retry.next_attempt_at_with_ceiling(
+                        attempt,
+                        now,
+                        row.max_attempts,
+                    ) {
                         Some(next_attempt_at) => {
                             self.ledger
                                 .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
@@ -891,7 +904,11 @@ impl Relay {
 
         // Transient failure: retry with backoff, bounded by max_attempts.
         let now = Utc::now();
-        match self.config.retry.next_attempt_at(attempt, now) {
+        match self
+            .config
+            .retry
+            .next_attempt_at_with_ceiling(attempt, now, row.max_attempts)
+        {
             Some(next_attempt_at) => {
                 let reason = summarize_failures(&transient_failures, &rejected_results);
                 self.ledger
@@ -2182,6 +2199,79 @@ mod tests {
         let messages = harness.server.messages();
         let dsn = String::from_utf8_lossy(&messages[0].data);
         assert!(dsn.contains("Status: 4.4.7"), "DSN: {dsn}");
+    }
+
+    /// Regression (dogfood 2026-10-06, P3): the ledger's per-row
+    /// `max_attempts` column is the ROW's budget. The ceiling decision used to
+    /// consult only the process-wide `OUTBOUND_MTA_MAX_ATTEMPTS`, silently
+    /// retrying a row past its stored budget (and making the effective ceiling
+    /// non-deterministic from the row data alone).
+    #[tokio::test]
+    async fn per_row_max_attempts_bounds_the_ladder_not_the_process_config() {
+        let mut config = relay_config();
+        config.retry.max_attempts = 12; // the process-wide ceiling
+        let mut server_config = FakeSmtpConfig::default();
+        // Every attempt defers (4xx): only the ceiling decides the outcome.
+        server_config.rcpt_replies(
+            "user@example.com",
+            vec![
+                ReplySpec::new(450, "4.2.1 busy"),
+                ReplySpec::new(450, "4.2.1 busy"),
+            ],
+        );
+        let harness = harness(config, server_config).await;
+
+        let now = Utc::now();
+        let unit = "email_queue:unit-row-budget:user@example.com";
+        let mut seeded = request();
+        seeded.send_unit = unit.to_string();
+        let claimed = harness
+            .ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: seeded.send_unit.clone(),
+                    tenant_id: seeded.tenant_id.clone(),
+                    queue_id: seeded.queue_id,
+                    request_fingerprint: Some(Relay::request_fingerprint(&seeded)),
+                    envelope_from: seeded.envelope_from.clone(),
+                    recipients: seeded.recipients.clone(),
+                    message: seeded.message.clone(),
+                    requested_source_ip: seeded.requested_source_ip,
+                    // The row's OWN budget — deliberately far below the
+                    // process ceiling.
+                    max_attempts: 1,
+                },
+                // Claim with an already-expired lease so the due sweep picks
+                // it up immediately.
+                now - chrono::Duration::seconds(61),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("seed the row");
+        assert!(matches!(claimed, ClaimOutcome::Claimed(_)));
+
+        let report = harness
+            .relay
+            .process_due(now, 10)
+            .await
+            .expect("process due");
+        assert_eq!(
+            report.permanently_failed, 1,
+            "the row's own budget (1) must dead-letter it on the first retry: {report:?}"
+        );
+        assert_eq!(
+            report.retry_scheduled, 0,
+            "the process ceiling (12) must NOT override the row's stored budget"
+        );
+        let row = ledger_row(&harness, unit).await;
+        assert_eq!(row.state, "failed");
+        assert!(
+            row.last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("retry ceiling")),
+            "last_error: {:?}",
+            row.last_error
+        );
     }
 
     #[tokio::test]

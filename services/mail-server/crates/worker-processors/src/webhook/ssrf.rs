@@ -111,7 +111,19 @@ impl SsrfValidator {
         let url =
             Url::parse(url_str).map_err(|e| ProcessorError::Job(format!("Invalid URL: {}", e)))?;
 
-        let allow_http = std::env::var("ALLOW_WEBHOOK_HTTP").is_ok();
+        // Presence is NOT truth: `ALLOW_WEBHOOK_HTTP=false` used to ENABLE
+        // plaintext webhook delivery because `var().is_ok()` only asks whether
+        // the variable exists (dogfood finding 2026-10-06). Only an explicit
+        // truthy value opens the hatch.
+        let allow_http = std::env::var("ALLOW_WEBHOOK_HTTP")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
         if url.scheme() == "http" && !allow_http {
             return Err(ProcessorError::Job(
                 "Webhook URL must use HTTPS (set ALLOW_WEBHOOK_HTTP to allow HTTP in non-production)".to_string()
@@ -645,6 +657,36 @@ mod adversarial_tests {
         assert!(!validator.is_blocked_hostname("example.com"));
         std::env::remove_var("ALLOW_WEBHOOK_HTTP");
         std::env::remove_var("WEBHOOK_BLOCKED_HOSTS");
+    }
+
+    /// Regression (dogfood 2026-10-06, P2): `ALLOW_WEBHOOK_HTTP` used to be
+    /// presence-based (`std::env::var(..).is_ok()`), so the natural
+    /// `ALLOW_WEBHOOK_HTTP=false` — or an empty value — ENABLED plaintext
+    /// webhook delivery (signed payloads and secrets in cleartext). Only an
+    /// explicit truthy value may open the hatch.
+    #[test]
+    fn allow_http_is_value_parsed_and_false_never_opens_the_hatch() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for value in ["false", "0", "no", "off", "", "  "] {
+            std::env::set_var("ALLOW_WEBHOOK_HTTP", value);
+            let validator = SsrfValidator::new();
+            let error = futures::executor::block_on(
+                validator.validate_and_resolve_url("http://8.8.8.8/hook"),
+            )
+            .expect_err("a non-truthy value must NOT permit plaintext webhooks");
+            assert!(
+                error.to_string().contains("HTTPS"),
+                "value {value:?} must be refused by the TLS policy, got {error}"
+            );
+        }
+        // Explicit truthy values still open the documented dev hatch.
+        for value in ["true", "1", "TRUE", "Yes"] {
+            std::env::set_var("ALLOW_WEBHOOK_HTTP", value);
+            let validator = SsrfValidator::new();
+            futures::executor::block_on(validator.validate_and_resolve_url("http://8.8.8.8/hook"))
+                .unwrap_or_else(|e| panic!("value {value:?} must admit http: {e}"));
+        }
+        std::env::remove_var("ALLOW_WEBHOOK_HTTP");
     }
 
     #[tokio::test]

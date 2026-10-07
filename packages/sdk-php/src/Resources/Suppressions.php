@@ -47,18 +47,25 @@ class Suppressions
     /**
      * List suppressed addresses.
      *
-     * The server's ListSuppressionsQuery accepts {limit, offset, cursor,
-     * reason} only — unknown query parameters are rejected.
+     * The server's ListSuppressionsQuery (deny_unknown_fields) accepts
+     * {limit, offset, reason} only — a `cursor` parameter is rejected with
+     * HTTP 400, so it now fails fast client-side.
      *
-     * @param array $options { reason, limit, offset, cursor }
+     * @param array $options { reason, limit, offset }
      */
     public function list(array $options = []): array
     {
+        if (isset($options['cursor'])) {
+            throw new \InvalidArgumentException(
+                'GET /v1/suppressions does not support cursor pagination '
+                . '(the server rejects `cursor` with HTTP 400); use limit/offset'
+            );
+        }
+
         $query = http_build_query(array_filter([
             'reason' => $options['reason'] ?? null,
             'limit'  => $options['limit']  ?? 50,
             'offset' => $options['offset'] ?? 0,
-            'cursor' => $options['cursor'] ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/suppressions' . ($query ? '?' . $query : ''));

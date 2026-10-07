@@ -98,15 +98,14 @@ mail.bg, abv.bg, dir.bg, gmail.ru
 | **Warm-up Data** | Most recently used templates per tenant |
 | **Warm-up Method** | Pre-compile top-N templates from database |
 
-### 2.6 Session Cache (API Server)
+### 2.6 Session and Credential Lookups (API Server)
 
-| Property | Value |
-|----------|-------|
-| **Location** | `api-server/src/auth.rs` |
-| **Cache Type** | moka |
-| **Capacity** | 50,000 entries |
-| **Warm-up Data** | Active sessions for authenticated users |
-| **Warm-up Method** | Pre-load from Redis session store; sessions re-validated on first use |
+There is no in-process session cache. Sessions live in Redis plus the
+`sessions` table, and JWTs are validated per request. The auth middleware keeps
+two Redis caches that a warm-up can populate: API-key lookups
+(`apexmail:api_key_cache:<key_hash>`) and tenant user-status entries, both in
+[`api-server/src/middleware/auth.rs`](../../services/mail-server/crates/api-server/src/middleware/auth.rs).
+There is no moka session cache to warm.
 
 ## 3. Warming Implementation
 
@@ -236,31 +235,11 @@ ssh <hetzner-host> 'cd /opt/apexmail && bash deploy/scripts/cache-warm.sh'
 
 The shell script at [`deploy/scripts/cache-warm.sh`](../../deploy/scripts/cache-warm.sh) orchestrates cache warming for all services.
 
-### 4.3 Init Container (Alternative)
+### 4.3 Kubernetes (roadmap only)
 
-For services where cache warming must complete before the main container starts:
-
-```yaml
-initContainers:
-  - name: cache-warm
-    image: apexmail/cache-warmer:latest
-    env:
-      - name: DATABASE_URL
-        valueFrom:
-          secretKeyRef:
-            name: apexmail-db
-            key: url
-      - name: REDIS_URL
-        valueFrom:
-          secretKeyRef:
-            name: apexmail-redis
-            key: url
-    command:
-      - /usr/local/bin/cache-warm
-      - --dns-domains=/etc/cache-warm/top-domains.txt
-      - --rate-limiter
-      - --db-query-cache
-```
+ApexMail deploys as Docker Compose on a single host. Kubernetes deployment
+manifests, including an init-container form of cache warming, are not part of
+the shipped deployment; treat any Kubernetes example as roadmap material.
 
 ## 5. Monitoring Cache Warmth
 
@@ -286,21 +265,20 @@ Cache warmth is visualized in the [Infrastructure Overview](../../deploy/grafana
 
 | Scenario | Impact | Mitigation |
 |----------|--------|------------|
-| **Pod restart (single)** | Local moka cache cold | DNS query cache refills naturally within TTL |
-| **Deployment rolling update** | All caches cold for ~30s | Post-start hook warms before readiness probe passes |
-| **Scale-up event** | New pod(s) cold | HPA behavior configured with 60s stabilization to allow warming |
-| **Redis failover** | Rate limiter state lost | Local moka cache serves as fallback; Redis re-populates from DB |
-| **Full cluster restart** | All caches cold | Cache warming job runs before services accept traffic |
+| **Single container restart** | Local caches cold | DNS query cache refills naturally within TTL |
+| **Compose recreate** | All caches cold for ~30s | Run `deploy/scripts/cache-warm.sh` after the recreate |
+| **Additional replica** | New process cold | Each replica warms its own in-process caches from the shared Redis/DB |
+| **Redis failover** | Rate limiter state lost | Redis re-populates from the database |
+| **Host restart** | All caches cold | The deploy procedure re-runs warming before traffic |
 
-## 7. Top 100 Domains File
+## 7. Top Domains List
 
-The list of top email domains for DNS cache warming is maintained at:
-
-```
-deploy/config/top-email-domains.txt
-```
-
-This file is loaded by the cache warming script and should be updated quarterly based on traffic analysis.
+`deploy/scripts/cache-warm.sh` defaults `TOP_DOMAINS_FILE` to
+`deploy/config/top-email-domains.txt`, but that file is not shipped in the
+repository and `deploy/config/` does not exist. The script falls back to its
+inline list of common provider domains, so DNS warm-up still runs; set
+`TOP_DOMAINS_FILE` to a real file (any file with one domain per line) to
+override the inline list.
 
 ## 8. Performance Budget
 
@@ -310,4 +288,4 @@ This file is loaded by the cache warming script and should be updated quarterly 
 | Rate limiter cache warm (1000 tenants) | < 10s | Batch Redis SET operations |
 | DB query cache warm (8 queries) | < 5s | EXPLAIN (ANALYZE, TIMING false) |
 | Template cache warm (500 templates) | < 10s | Parallel compilation |
-| **Total warming time** | **< 30s** | Well within pod readiness grace period |
+| **Total warming time** | **< 30s** | Run after the Compose recreate, before the deploy is announced complete |

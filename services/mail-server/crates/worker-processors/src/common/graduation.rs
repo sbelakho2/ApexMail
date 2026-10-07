@@ -49,48 +49,27 @@ pub async fn graduate_mature_warmup_ips(db: &PgPool) -> Result<Vec<String>, Stri
     .map_err(|error| format!("graduation update failed: {error}"))?;
     for (id,) in &graduated {
         // Audit inside the same transaction, chained onto the canonical
-        // audit hash chain (previous_hash → hash): a graduation without
-        // evidence is an unreviewable lifecycle change.
-        let previous_hash: Option<String> =
-            sqlx::query_scalar("SELECT hash FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|error| format!("graduation audit chain read failed: {error}"))?
-                .flatten();
+        // audit hash chain. The append advances the single `audit_chain_head`
+        // row atomically (migration 105) instead of reading the newest
+        // `audit_logs` row with no lock — the old pattern forked the chain
+        // under concurrency and left the platform sequencer blind to the
+        // worker's rows. A graduation without evidence is an unreviewable
+        // lifecycle change.
         let details = serde_json::json!({
             "reason": "canonical 60-day warmup term complete",
             "by": "worker:graduation-reconciler",
-        })
-        .to_string();
-        let timestamp = chrono::Utc::now();
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest as _;
-        hasher.update(b"system");
-        hasher.update(b"|ip.warmup_graduated|");
-        hasher.update(id.as_bytes());
-        hasher.update(details.as_bytes());
-        hasher.update(timestamp.to_rfc3339().as_bytes());
-        if let Some(previous) = &previous_hash {
-            hasher.update(previous.as_bytes());
-        }
-        let hash = hasher.finalize();
-        let hash_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        sqlx::query(
-            r#"
-            INSERT INTO audit_logs
-                (id, tenant_id, action, resource, resource_id, details,
-                 outcome, timestamp, hash, previous_hash, signature)
-            VALUES (gen_random_uuid(), 'system', 'ip.warmup_graduated', 'dedicated_ip',
-                    $1, $2::jsonb, 'success', $3, $4, $5, $6)
-            "#,
+        });
+        crate::common::audit::append_audit_log(
+            &mut *tx,
+            crate::common::audit::AuditEntry {
+                tenant_id: Some("system"),
+                action: "ip.warmup_graduated",
+                resource: "dedicated_ip",
+                resource_id: Some(id),
+                details,
+                outcome: "success",
+            },
         )
-        .bind(id)
-        .bind(&details)
-        .bind(timestamp)
-        .bind(&hash_hex)
-        .bind(&previous_hash)
-        .bind(format!("graduation:{hash_hex}"))
-        .execute(&mut *tx)
         .await
         .map_err(|error| format!("graduation audit write failed for {id}: {error}"))?;
     }
@@ -199,6 +178,80 @@ mod db_tests {
         .await
         .unwrap();
         assert_eq!(audit, 1, "no duplicate audit rows on the second pass");
+        db.close().await;
+        Ok(())
+    }
+
+    /// Regression (dogfood 2026-10-06, P1): the graduation audit row used to
+    /// chain onto the newest `audit_logs` row with no lock and never advanced
+    /// `audit_chain_head`, forking the canonical chain. The worker's append
+    /// must BE the chain head, sequence it, and re-derive under the shared
+    /// 7-segment hash contract.
+    #[tokio::test]
+    async fn graduation_audit_row_advances_the_canonical_chain_head(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(db) =
+            crate::test_support::canonical_pool("warmup_graduation_chain", "wp_grad_chain").await
+        else {
+            return Ok(());
+        };
+        seed_ip(&db, "grad-chain", 70, "warming").await;
+
+        let before: Option<i64> =
+            sqlx::query_scalar("SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_optional(&db)
+                .await
+                .expect("head seq");
+        let graduated = graduate_mature_warmup_ips(&db)
+            .await
+            .expect("graduation pass");
+        assert_eq!(graduated, vec!["grad-chain".to_string()]);
+
+        let after: i64 =
+            sqlx::query_scalar("SELECT head_seq FROM audit_chain_head WHERE chain_id = 'global'")
+                .fetch_one(&db)
+                .await
+                .expect("head seq after");
+        assert_eq!(
+            after,
+            before.unwrap_or(0) + 1,
+            "the worker's audit append must advance the canonical sequencer"
+        );
+
+        let (head_hash, row_hash, previous_hash, details, timestamp): (
+            String,
+            String,
+            Option<String>,
+            serde_json::Value,
+            chrono::DateTime<chrono::Utc>,
+        ) = sqlx::query_as(
+            "SELECT h.head_hash, a.hash, a.previous_hash, a.details, a.timestamp \
+             FROM audit_chain_head h, audit_logs a \
+             WHERE h.chain_id = 'global' \
+               AND a.action = 'ip.warmup_graduated' AND a.resource_id = 'grad-chain'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("the worker's audit row and the chain head");
+        assert_eq!(
+            head_hash, row_hash,
+            "the worker's row IS the canonical chain head, not a fork"
+        );
+
+        let expected = apexmail_lib::audit::audit_hash(
+            Some("system"),
+            None,
+            "ip.warmup_graduated",
+            "dedicated_ip",
+            Some("grad-chain"),
+            &details,
+            timestamp,
+        );
+        assert_eq!(
+            row_hash, expected,
+            "the row hash must follow the shared canonical byte contract"
+        );
+        let _ = previous_hash;
         db.close().await;
         Ok(())
     }

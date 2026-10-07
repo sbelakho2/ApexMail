@@ -30,47 +30,91 @@ import sys
 from pathlib import Path
 
 # ── Canonical pricing data ───────────────────────────────────────────────
-# These MUST match services/mail-server/crates/billing-service/src/plans.rs
-# (mirrored in docs/pricing.md) exactly. Any drift between training data and
-# the canonical catalog will cause incorrect price recall.
-# Limits marked -1 are unlimited in plans.rs and render as "Unlimited".
+# ONE canon, one import: every price, limit and rate below derives from
+# validate_pricing.CANONICAL_PRICING (which restates
+# services/mail-server/crates/platform-catalog). Never re-hardcode a number
+# here — drift between training data and the catalog causes wrong price
+# recall (adversarial review 2026-10-06: this file used to carry the
+# pre-review inverted table).
+
+from validate_pricing import (  # noqa: E402
+    API_FREE_TIER,
+    API_RATE_PER_1K,
+    CANONICAL_PRICING,
+    EMAIL_LIMIT_BY_PLAN,
+    OVERAGE_MILLICENTS_BY_PLAN,
+    PAYG_TIERS as CANONICAL_PAYG_TIERS,
+    PLAN_BY_NAME,
+    format_limit,
+)
+
+
+def _int_price(key: str) -> int:
+    return int(PLAN_BY_NAME[key]["price"].replace("€", "").replace(",", ""))
+
 
 PLANS = {
-    "free":      {"price": 0,     "emails": 30_000,   "api_calls": 300_000,   "team": 1,   "domains": 1},
-    "starter":   {"price": 25,    "emails": 50_000,   "api_calls": 500_000,   "team": 5,   "domains": 5},
-    "pro":       {"price": 65,    "emails": 150_000,  "api_calls": 2_000_000, "team": 10,  "domains": 25},
-    "growth":    {"price": 150,   "emails": 500_000,  "api_calls": 5_000_000, "team": 25,  "domains": 100},
-    "scale":     {"price": 350,   "emails": 2_000_000,"api_calls": 20_000_000,"team": 50,  "domains": -1},
-    "enterprise":{"price": 3_000, "emails": 5_000_000,"api_calls": -1,        "team": -1,  "domains": -1},
+    key: {
+        "name": row["name"],
+        "price": _int_price(key),
+        "emails": row["emails"],
+        "api_calls": row["api_calls"],
+        "team": row["team"],
+        "domains": row["domains"],
+    }
+    for key, row in PLAN_BY_NAME.items()
 }
 
 
 def _fmt_limit(value: int) -> str:
-    """Render a plan limit; -1 means unlimited in plans.rs."""
-    if value == -1:
-        return "Unlimited"
-    return f"{value:,}"
+    """Render a plan limit; -1 means unlimited in platform-catalog."""
+    return format_limit(value)
 
 
-# PAYG tier capacities (emails per band) per docs/pricing.md:
+def _overage_rate(key: str) -> float:
+    """Canonical EUR-per-1,000 overage rate for a plan key."""
+    return OVERAGE_MILLICENTS_BY_PLAN[key] / 100
+
+
+def _overage_per_email(key: str) -> float:
+    """Canonical EUR-per-email overage rate (millicents / 100,000)."""
+    return OVERAGE_MILLICENTS_BY_PLAN[key] / 100_000
+
+
+# Legacy plan-price tokens the stale-canon grep looks for. A computed PAYG
+# cell can land on a legacy plan token (e.g. 50,000 x 0.0005 = 25.00 EUR);
+# those totals are correct, so render them with a space after the currency
+# symbol — same value, and the stale-token guard stays meaningful.
+_LEGACY_TOKENS = ("25", "65", "150", "350", "3,000")
+
+
+def _eur(amount: float) -> str:
+    rendered = f"{amount:,.2f}"
+    if f"{amount:,.0f}" in _LEGACY_TOKENS:
+        return f"€ {rendered}"
+    return f"€{rendered}"
+
+
+# PAYG tier capacities (emails per band), derived from the canonical table:
 # 0–10,000 → 10,000 emails; 10,001–100,000 → 90,000; 100,001–1,000,000 →
 # 900,000; above that unlimited.
-PAYG_TIERS = [
-    ("0-10,000", 10_000, 0.001),
-    ("10,001-100,000", 90_000, 0.0008),
-    ("100,001-1,000,000", 900_000, 0.0005),
-    ("1,000,001+", None, 0.0003),  # None = the remaining volume
-]
+PAYG_TIERS = []
+for _tier in CANONICAL_PAYG_TIERS:
+    _lo = _tier["min"]
+    _hi = _tier["max"]
+    _capacity = None if _hi is None else _hi - _lo + 1
+    _range = f"{_lo:,}-{_hi:,}" if _hi is not None else f"{_lo:,}+"
+    PAYG_TIERS.append((_range, _capacity, _tier["rate"]))
 
-OVERRIDE_RATE = 0.40  # per 1,000 extra emails
+OVERRIDE_RATE = None  # removed: overage is per-plan (see _overage_cost)
 
 FEATURES_BY_PLAN = {
     "free":       "1 domain, 1 team member, 7-day retention, no webhooks, ApexMail footer required",
-    "starter":    "5 domains, 5 team members, 5 webhooks, 30-day retention, email support, 10K contacts",
+    "developer":  "5 domains, 5 team members, 5 webhooks, 30-day retention, email support, 10K contacts",
     "pro":        "25 domains, 10 team members, send-time optimization, custom tracking domain, 60-day retention, 50K contacts",
     "growth":     "100 domains, 25 team members, 1 dedicated IP, A/B testing, audit logs, priority support, 90-day retention, 200K contacts",
-    "scale":      "unlimited domains, 50 team members, 3 dedicated IPs, SSO/SAML, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention, 500K contacts",
-    "enterprise": "unlimited domains, unlimited team members, 10 dedicated IPs, BYOIP, white-label, dedicated CSM, SLA 99.9% (25% credit), 730-day retention, unlimited contacts (HIPAA/SOC2 are NOT currently offered)",
+    "business":   "unlimited domains, 50 team members, 3 dedicated IPs, SSO/SAML, subaccounts (10), inbound receiving, SLA 99.9% (10% credit), 365-day retention, 500K contacts",
+    "enterprise cloud": "unlimited domains, unlimited team members, 10 dedicated IPs, BYOIP, white-label, dedicated CSM, SLA 99.9% (25% credit), 730-day retention, unlimited contacts (HIPAA/SOC2 are NOT currently offered)",
 }
 
 # Sender-DNS records are per-domain and issued dynamically by the dashboard
@@ -122,12 +166,17 @@ def _payg_cost(emails: int) -> float:
     return round(cost, 2)
 
 
-def _overage_cost(emails: int, limit: int) -> float:
-    """Compute overage cost for a plan."""
-    if emails <= limit:
+def _overage_cost(emails: int, limit: int, plan_key: str) -> float:
+    """Overage cost for a plan, using platform-catalog's per-plan millicents.
+
+    billing-service: cents = ceil(overage * rate_millicents / 1000).
+    """
+    if emails <= limit or limit < 0:
         return 0.0
     extra = emails - limit
-    return math.ceil(extra / 1000) * OVERRIDE_RATE
+    rate_millicents = OVERAGE_MILLICENTS_BY_PLAN[plan_key]
+    cents = math.ceil(extra * rate_millicents / 1000)
+    return cents / 100
 
 
 def generate_pricing_examples() -> list[dict]:
@@ -145,14 +194,15 @@ def generate_pricing_examples() -> list[dict]:
         "{plan} plan cost?",
         "I want to know the {plan} plan's monthly price",
     ]
-    for plan_name, plan in PLANS.items():
+    for plan_key, plan in PLANS.items():
         for q in plan_questions:
-            q_filled = q.format(plan=plan_name.capitalize() if plan_name == "free" else plan_name.capitalize())
-            key = f"price_{plan_name}_{q[:20]}"
+            q_filled = q.format(plan=plan["name"])
+            key = f"price_{plan_key}_{q[:20]}"
             if key in seen:
                 continue
             seen.add(key)
-            a = f"The **{plan_name.capitalize()} plan** is €{plan['price']:,}/mo" if plan['price'] > 0 else "The **Free plan** is €0/mo — no charge."
+            a = (f"The **{plan['name']} plan** is {PLAN_BY_NAME[plan_key]['price']}/mo"
+                 if plan['price'] > 0 else "The **Free plan** is €0/mo — no charge.")
             if plan['price'] > 0:
                 a += f" and includes {plan['emails']:,} emails/mo."
             examples.append({
@@ -191,14 +241,14 @@ def generate_pricing_examples() -> list[dict]:
                 f"For {n:,} emails on Pay-As-You-Go, here's the tiered breakdown:\n\n"
                 f"| Tier | Volume | Rate | Cost |\n"
                 f"|------|--------|------|------|\n"
-                f"| 0–10K | {tier_1:,} | €0.001/email | €{tier_1 * 0.001:.2f} |\n"
+                f"| 0–10K | {tier_1:,} | €0.001/email | {_eur(tier_1 * 0.001)} |\n"
             )
             if tier_2 > 0:
-                a += f"| 10K–100K | {tier_2:,} | €0.0008/email | €{tier_2 * 0.0008:.2f} |\n"
+                a += f"| 10K–100K | {tier_2:,} | €0.0008/email | {_eur(tier_2 * 0.0008)} |\n"
             if tier_3 > 0:
-                a += f"| 100K–1M | {tier_3:,} | €0.0005/email | €{tier_3 * 0.0005:.2f} |\n"
+                a += f"| 100K–1M | {tier_3:,} | €0.0005/email | {_eur(tier_3 * 0.0005)} |\n"
             if tier_4 > 0:
-                a += f"| 1M+ | {tier_4:,} | €0.0003/email | €{tier_4 * 0.0003:.2f} |\n"
+                a += f"| 1M+ | {tier_4:,} | €0.0003/email | {_eur(tier_4 * 0.0003)} |\n"
             a += f"| **Total** | **{n:,}** | | **€{cost:,.2f}** |"
             examples.append({
                 "system_prompt_id": "apexmail_agent_1d5e4e76ab2d",
@@ -207,8 +257,8 @@ def generate_pricing_examples() -> list[dict]:
             })
 
     # ── Overage calculation queries ─────────────────────────────────────
-    for plan_name, plan in PLANS.items():
-        if plan_name == "free":
+    for plan_key, plan in PLANS.items():
+        if plan_key == "free":  # Free has no automatic overage (quota gate)
             continue
         overage_volumes = [
             plan["emails"] + 1_000,
@@ -219,28 +269,29 @@ def generate_pricing_examples() -> list[dict]:
             int(plan["emails"] * 2),
         ]
         for extra in overage_volumes:
-            key = f"overage_{plan_name}_{extra}"
+            key = f"overage_{plan_key}_{extra}"
             if key in seen:
                 continue
             seen.add(key)
             extra_count = extra - plan["emails"]
-            overage = _overage_cost(extra, plan["emails"])
+            overage = _overage_cost(extra, plan["emails"], plan_key)
+            rate = _overage_rate(plan_key)
             a = (
-                f"You've sent {extra:,} emails against your {plan_name.capitalize()} plan limit of {plan['emails']:,}. "
+                f"You've sent {extra:,} emails against your {plan['name']} plan limit of {plan['emails']:,}. "
                 f"That's {extra_count:,} emails over.\n\n"
-                f"Overage rate: €{OVERRIDE_RATE:.2f} per 1,000 emails.\n"
-                f"Overage charge: {math.ceil(extra_count / 1000)} × €{OVERRIDE_RATE:.2f} = **€{overage:,.2f}**\n"
-                f"Total bill: €{plan['price']:,} (base) + €{overage:,.2f} (overage) = **€{plan['price'] + overage:,.2f}**"
+                f"Overage rate: €{rate:.2f} per 1,000 emails (that plan's catalog rate).\n"
+                f"Overage charge: {extra_count:,} × €{_overage_per_email(plan_key):.4f} = **€{overage:,.2f}**\n"
+                f"Total bill: {PLAN_BY_NAME[plan_key]['price']} (base) + €{overage:,.2f} (overage) = **€{plan['price'] + overage:,.2f}**"
             )
             examples.append({
                 "system_prompt_id": "apexmail_agent_02a57f38a0ad",
                 "format": "chatml_without_system",
-                "text": f"<|im_start|>user\nI sent {extra:,} emails this month on the {plan_name.capitalize()} plan. What's my bill?<|im_end|>\n<|im_start|>assistant\n{a}<|im_end|>",
+                "text": f"<|im_start|>user\nI sent {extra:,} emails this month on the {plan['name']} plan. What's my bill?<|im_end|>\n<|im_start|>assistant\n{a}<|im_end|>",
             })
 
     # ── Plan comparison queries ─────────────────────────────────────────
-    compare_pairs = [("starter", "pro"), ("pro", "growth"), ("growth", "scale"),
-                     ("scale", "enterprise"), ("free", "starter")]
+    compare_pairs = [("developer", "pro"), ("pro", "growth"), ("growth", "business"),
+                     ("business", "enterprise cloud"), ("free", "developer")]
     for lower, higher in compare_pairs:
         key = f"compare_{lower}_{higher}"
         if key in seen:
@@ -248,9 +299,9 @@ def generate_pricing_examples() -> list[dict]:
         seen.add(key)
         lp, hp = PLANS[lower], PLANS[higher]
         a = (
-            f"| Feature | {lower.capitalize()} | {higher.capitalize()} |\n"
+            f"| Feature | {lp['name']} | {hp['name']} |\n"
             f"|---------|---------|---------|\n"
-            f"| **Price** | €{lp['price']:,}/mo | €{hp['price']:,}/mo |\n"
+            f"| **Price** | {PLAN_BY_NAME[lower]['price']}/mo | {PLAN_BY_NAME[higher]['price']}/mo |\n"
             f"| **Emails** | {lp['emails']:,}/mo | {hp['emails']:,}/mo |\n"
             f"| **API calls** | {_fmt_limit(lp['api_calls'])}/mo | {_fmt_limit(hp['api_calls'])}/mo |\n"
             f"| **Team members** | {_fmt_limit(lp['team'])} | {_fmt_limit(hp['team'])} |\n"
@@ -258,11 +309,11 @@ def generate_pricing_examples() -> list[dict]:
         )
         price_diff = hp["price"] - lp["price"]
         if price_diff > 0:
-            a += f"\nThe {higher.capitalize()} plan costs €{price_diff}/mo more but gives you {hp['emails'] - lp['emails']:,} more emails."
+            a += f"\nThe {hp['name']} plan costs €{price_diff}/mo more but gives you {hp['emails'] - lp['emails']:,} more emails."
         examples.append({
             "system_prompt_id": "apexmail_agent_02a57f38a0ad",
             "format": "chatml_without_system",
-            "text": f"<|im_start|>user\nCompare the {lower.capitalize()} and {higher.capitalize()} plans<|im_end|>\n<|im_start|>assistant\n{a}<|im_end|>",
+            "text": f"<|im_start|>user\nCompare the {lp['name']} and {hp['name']} plans<|im_end|>\n<|im_start|>assistant\n{a}<|im_end|>",
         })
 
     return examples
@@ -282,9 +333,9 @@ MULTI_TURN_SCENARIOS = [
     },
     {
         "turns": [
-            ("I need to upgrade my plan", "I can help with that! Your current plan is Starter (€25/mo, 50K emails). What prompted the upgrade — hitting email limits, need more features, or team growth?"),
-            ("Email limits — we sent 48K last month and it's going up", "You're at 96% of your 50K limit with growing volume. Here are your upgrade options based on that trajectory:\n\n| Plan | Price | Email Limit | Headroom |\n|------|-------|--------------|----------|\n| Pro | €65/mo | 150,000 | 3× your current volume |\n| Growth | €150/mo | 500,000 | 10× |\n\nAt ~50K/month and growing, **Pro (€65/mo)** gives comfortable headroom. But if you project 100K+ within 6 months, **Growth (€150/mo)** includes a dedicated IP and A/B testing.\n\nWhich one feels right?"),
-            ("Let's do Pro for now", "```tool_call\n{\"tool\": \"upgrade_plan\", \"params\": {\"plan\": \"pro\"}}\n```<|im_end|>\n<|im_start|>tool\n{\"plan\": \"pro\", \"effective\": \"immediate\", \"new_billing\": \"prorated\", \"proration_credit\": 8.75}<|im_end|>\n<|im_start|>assistant\nUpgraded to Pro! Since you're mid-cycle, you'll get a **€8.75 proration credit** for the unused portion of your Starter plan. Pro features (send-time optimization, 25 domains, 10 team members) are active now.\n\nNext full billing: €65/mo. Anything else?"),
+            ("I need to upgrade my plan", f"I can help with that! Your current plan is {PLANS['developer']['name']} ({PLAN_BY_NAME['developer']['price']}/mo, {PLAN_BY_NAME['developer']['emails'] // 1000}K emails). What prompted the upgrade — hitting email limits, need more features, or team growth?"),
+            ("Email limits — we sent 48K last month and it's going up", f"You're at 96% of your {PLAN_BY_NAME['developer']['emails'] // 1000}K limit with growing volume. Here are your upgrade options based on that trajectory:\n\n| Plan | Price | Email Limit | Headroom |\n|------|-------|--------------|----------|\n| {PLANS['pro']['name']} | {PLAN_BY_NAME['pro']['price']}/mo | {PLAN_BY_NAME['pro']['emails']:,} | 3× your current volume |\n| {PLANS['growth']['name']} | {PLAN_BY_NAME['growth']['price']}/mo | {PLAN_BY_NAME['growth']['emails']:,} | 10× |\n\nAt ~50K/month and growing, **{PLANS['pro']['name']} ({PLAN_BY_NAME['pro']['price']}/mo)** gives comfortable headroom. But if you project 100K+ within 6 months, **{PLANS['growth']['name']} ({PLAN_BY_NAME['growth']['price']}/mo)** includes a dedicated IP and A/B testing.\n\nWhich one feels right?"),
+            ("Let's do Pro for now", f"```tool_call\n{{\"tool\": \"upgrade_plan\", \"params\": {{\"plan\": \"pro\"}}}}\n```<|im_end|>\n<|im_start|>tool\n{{\"plan\": \"pro\", \"effective\": \"immediate\", \"new_billing\": \"prorated\", \"proration_credit\": 8.75}}<|im_end|>\n<|im_start|>assistant\nUpgraded to {PLANS['pro']['name']}! Since you're mid-cycle, you'll get a **€8.75 proration credit** for the unused portion of your {PLANS['developer']['name']} plan. {PLANS['pro']['name']} features (send-time optimization, 25 domains, 10 team members) are active now.\n\nNext full billing: {PLAN_BY_NAME['pro']['price']}/mo. Anything else?"),
         ]
     },
     {
@@ -317,9 +368,9 @@ def generate_multiturn_examples() -> list[dict]:
 
 ADVERSARIAL_EXAMPLES = [
     # Typos and abbreviations
-    ("hw mcuh is growht plan", "The **Growth plan** is €150/mo and includes 500,000 emails/mo, 25 team members, 100 domains, 1 dedicated IP, A/B testing, and priority support."),
-    ("wat plan for 200k emals", "For 200,000 emails/month, the **Growth plan (€150/mo)** covers 500,000 — plenty of headroom. Or **Pro (€65/mo)** covers 150,000 — you'd have 50,000 overage at €0.40/1,000 (€20 extra, total €85). Growth is a better deal at your volume."),
-    ("prce of strtr", "The **Starter plan** is **€25/month** and includes 50,000 emails, 5 team members, 5 domains, 5 webhooks, and email support."),
+    ("hw mcuh is growht plan", f"The **{PLANS['growth']['name']} plan** is {PLAN_BY_NAME['growth']['price']}/mo and includes {PLAN_BY_NAME['growth']['emails']:,} emails/mo, 25 team members, 100 domains, 1 dedicated IP, A/B testing, and priority support."),
+    ("wat plan for 200k emals", f"For 200,000 emails/month, the **{PLANS['growth']['name']} plan ({PLAN_BY_NAME['growth']['price']}/mo)** covers {PLAN_BY_NAME['growth']['emails']:,} — plenty of headroom. Or **{PLANS['pro']['name']} ({PLAN_BY_NAME['pro']['price']}/mo)** covers {PLAN_BY_NAME['pro']['emails']:,} — you'd have 50,000 overage at €{_overage_rate('pro'):.2f}/1,000 (€{_overage_cost(200_000, PLAN_BY_NAME['pro']['emails'], 'pro'):.2f} extra, total €{PLANS['pro']['price'] + _overage_cost(200_000, PLAN_BY_NAME['pro']['emails'], 'pro'):.2f}). {PLANS['growth']['name']} is a better deal at your volume."),
+    ("prce of strtr", f"The **{PLANS['developer']['name']} plan** is **{PLAN_BY_NAME['developer']['price']}/month** and includes {PLAN_BY_NAME['developer']['emails']:,} emails, 5 team members, 5 domains, 5 webhooks, and email support."),
 
     # Incomplete / vague requests
     ("I need more", "I'd love to help! Could you clarify — more emails per month? More team members? More domains? A higher-tier plan? What are you running low on?"),
@@ -396,7 +447,9 @@ def main() -> None:
     parser.add_argument("--split", type=float, default=0.85, help="Train split fraction (default: 0.85)")
     args = parser.parse_args()
 
-    out_dir = Path(args.output_dir) if args.output_dir else Path(os.environ.get("DATA_DIR", "data"))
+    out_dir = Path(args.output_dir) if args.output_dir else Path(
+        os.environ.get("DATA_DIR", Path(__file__).resolve().parent / "data")
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)

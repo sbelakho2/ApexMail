@@ -46,10 +46,11 @@ COPY . .
 
 # Build CSS and Zola site
 RUN tailwindcss -i static/css/input.css -o static/css/styles.css --minify
-# Patch: ensure dark-mode media query has :not(.light) guard so the JS toggle
-# can override OS-level dark mode. Tailwind's minifier normalizes :root:not(.light)
-# back to :root inside @media, so we fix it AFTER the Tailwind build.
-RUN sed -i 's/@media(prefers-color-scheme:dark){:root/@media(prefers-color-scheme:dark){:root:not(.light)/g; s/@media (prefers-color-scheme:dark){:root/@media (prefers-color-scheme:dark){:root:not(.light)/g' static/css/styles.css
+# Note: the dark-mode media query's :root:not(.light) guard so the JS toggle
+# can override OS-level dark mode is authored in static/css/input.css and the
+# pinned Tailwind v3.4.17 preserves it verbatim (verified against the pinned
+# binary, 2026-10-07). The old post-build sed that re-added the guard is gone:
+# with the guard authored, it double-applied it (:not(.light):not(.light)).
 # Cachebust @font-face src URLs in the built CSS so they match the cachebusted
 # <link rel=preload> URLs that base.html emits via Zola's get_url(cachebust=true).
 # Without this, browsers fetch each font twice on a cold cache (preload with

@@ -252,6 +252,40 @@ async fn delete_suppression(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["suppressions:write"])?;
 
+    // The compliance crate's documented removal protections ARE the contract
+    // this endpoint must honour (dogfood finding 2026-10-06: the module was
+    // unreachable pure code, so any `suppressions:write` key could delete a
+    // complaint or unsubscribe suppression and the next campaign would mail a
+    // complainant/unsubscriber). Read the row, ask the policy, then delete.
+    let reason: Option<String> =
+        sqlx::query_scalar("SELECT reason FROM suppressions WHERE id = $1 AND tenant_id = $2")
+            .bind(&id)
+            .bind(&auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some(reason) = reason else {
+        return Err(ApiError::NotFound("suppression not found".into()));
+    };
+    // The compliance crate's documented policy IS the contract this endpoint
+    // honours (dogfood finding 2026-10-06: the module was unreachable pure
+    // code, so any `suppressions:write` key could delete a complaint or
+    // unsubscribe suppression and the next campaign would mail them).
+    // The `reason` column is FREE TEXT (operators write "manual", "spam trap",
+    // …); only the canonical protected tokens carry policy. An unknown reason
+    // is therefore an ordinary, removable block — never a 500.
+    let parsed = compliance::suppressions::parse_reason(&reason)
+        .unwrap_or(compliance::suppressions::SuppressionReason::Policy);
+    let permission_level = if auth.scopes.iter().any(|s| s == "*" || s == "admin") {
+        "admin"
+    } else {
+        "operator"
+    };
+    if let Err(violation) = compliance::suppressions::removal_allowed(parsed, permission_level) {
+        return Err(ApiError::Forbidden(format!(
+            "this suppression cannot be removed: {violation}"
+        )));
+    }
+
     let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
         .bind(&id)
         .bind(&auth.tenant_id)
@@ -531,6 +565,43 @@ mod adversarial_tests {
     use axum::http::StatusCode;
 
     use crate::app::test_support::adv::AdvEnv;
+
+    /// The compliance policy the endpoint enforces (dogfood P1 2026-10-06:
+    /// before this wiring, `DELETE` removed ANY reason, so a
+    /// `suppressions:write` key could un-suppress a complainant).
+    #[tokio::test]
+    async fn complaint_and_unsubscribe_suppressions_cannot_be_deleted() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_protected_removal").await else {
+            return;
+        };
+        let (env, _tenant) =
+            AdvEnv::tenant(pool.clone(), &["suppressions:read", "suppressions:write"]).await;
+        for reason in ["complaint", "marketing_unsubscribe"] {
+            let email = format!(
+                "{}-{}@example.com",
+                reason,
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let (status, body) = env
+                .post(
+                    "/v1/suppressions",
+                    &serde_json::json!({ "email": email, "reason": reason }).to_string(),
+                )
+                .await;
+            assert!(status.is_success(), "create {reason}: {status} {body}");
+            let id = body["id"].as_str().expect("id").to_string();
+            let (status, body) = env.delete(&format!("/v1/suppressions/{id}")).await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{reason} suppression must be irremovable: {body}"
+            );
+            // …and it still suppresses.
+            let (status, body) = env.get(&format!("/v1/suppressions/check/{email}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["suppressed"], true, "{body}");
+        }
+    }
 
     #[tokio::test]
     async fn suppression_lifecycle_create_check_list_delete() {

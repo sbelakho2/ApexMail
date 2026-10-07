@@ -153,9 +153,18 @@ def mask(text: str) -> str:
                     out[i] = " "
                 i += 2
                 continue
-            if ch == '"' or ch == "\n":
+            if ch == '"':
                 state = "code"
-            out[i] = " "
+                out[i] = " "
+                i += 1
+                continue
+            # Rust string literals may span lines (multi-line SQL is common
+            # here); ONLY the closing quote ends the string. Treating a
+            # newline as a terminator desynchronized the whole mask on every
+            # multi-line literal (found by the 2026-10-07 gates review: the
+            # `#[cfg(test)] mod` brace match then ran to EOF).
+            if ch != "\n":
+                out[i] = " "
             i += 1
             continue
         if state == "raw_string":
@@ -176,9 +185,16 @@ def mask(text: str) -> str:
             i += 1
             continue
         if state == "char":
-            if ch == "'" or ch == "\n":
+            if ch == "'":
                 state = "code"
-            out[i] = " "
+                out[i] = " "
+                i += 1
+                continue
+            # Same rule as strings: a bare newline inside a char literal is
+            # impossible in valid Rust, but if the masker is ever desynced the
+            # newline must survive (line numbers) rather than silently close.
+            if ch != "\n":
+                out[i] = " "
             i += 1
             continue
     return "".join(out)
@@ -228,7 +244,10 @@ def blank_test_regions(masked: str) -> str:
                         break
                 j += 1
             stop = j + 1
-        for k in range(pos, stop):
+        # A construct that runs to EOF yields stop == len(masked) + 1; clamp so
+        # the masking loop cannot index past the buffer (a gate must REPORT,
+        # not crash — this fired on the last item of a file, 2026-10-06).
+        for k in range(pos, min(stop, len(out))):
             if out[k] != "\n":
                 out[k] = " "
     return "".join(out)

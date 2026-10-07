@@ -34,12 +34,17 @@
 #   9. the satellite Rust crates (CI_SATELLITE_CHECK)
 #  10. static lint gates: shellcheck/hadolint/py_compile
 #      (CI_STATIC_LINT_CHECK)
+#  11. browser suite: tests/browser Playwright specs against the PHP port
+#      (php -S), chromium lane (CI_BROWSER_SUITE_CHECK; BR-1)
 #
-# DB/Redis policy: GitHub-parity by default (CI_TEST_DB=none, CI_TEST_REDIS=0)
-# — the DB/Redis-gated tests self-skip exactly as they do on GitHub runners.
-# CI_TEST_DB=ephemeral spins a postgres, applies the canonical SCHEMA and
-# exports TEST_DATABASE_URL; CI_TEST_REDIS=1 spins a redis and exports
-# TEST_REDIS_URL. See ci/README.md § "Known failing tests" before enabling.
+# DB/Redis policy (audit P3 — this header used to claim GitHub-parity
+# defaults while ci/pipeline.conf has shipped the real thing since the
+# "defaults that gated nothing" fix): CI_TEST_DB=ephemeral and
+# CI_TEST_REDIS=1 by default. CI_TEST_DB=ephemeral spins a postgres, applies
+# the canonical SCHEMA and exports TEST_DATABASE_URL; CI_TEST_REDIS=1 spins a
+# redis and exports TEST_REDIS_URL. `none`/`0` is the deliberate
+# GitHub-parity reproduction mode (the DB/Redis-gated tests self-skip).
+# See ci/README.md § "Known failing tests" before downgrading.
 # =============================================================================
 set -eu
 
@@ -448,36 +453,8 @@ apply_test_schema() {
 }
 
 # --- shared lane-tool gating --------------------------------------------------------
-# lane_tool_status <tool> <lane-label> <flag> — print the lane disposition on
-# stdout: `run`, `skip` (advisory lane, tool absent) or `fail` (required
-# lane, tool absent). Backed by ci_have_tool semantics: on the deploy host a
-# missing tool DIES (fail closed, CI_MISSING_TOOLS=auto); on a dev machine
-# the lane flag decides — REQUIRED turns the gap into a stage failure,
-# `advisory` logs and skips. In dry-run (selftest) the lane is assumed
-# runnable: presence is a real-run concern and selftest machines are not
-# required to carry every toolchain (the deploy host installs them all via
-# ci/install.sh).
-lane_tool_status() {
-    _lt_tool=$1 _lt_lane=$2 _lt_flag=${3:-required}
-    if ci_dry; then
-        printf 'run\n'
-        return "$CI_EXIT_OK"
-    fi
-    if ci_have_tool "$_lt_tool"; then
-        printf 'run\n'
-        return "$CI_EXIT_OK"
-    fi
-    # ci_have_tool has warned already; decide fail-vs-skip.
-    if [ "$_lt_flag" = required ]; then
-        ci_err "$_lt_lane: '$_lt_tool' missing — lane is REQUIRED \
-(install it via ci/install.sh, or set the lane's CI_*_CHECK=advisory for a triage window)"
-        printf 'fail\n'
-        return "$CI_EXIT_OK"
-    fi
-    ci_warn "ADVISORY: $_lt_lane skipped — '$_lt_tool' missing"
-    printf 'skip\n'
-    return "$CI_EXIT_OK"
-}
+# lane_tool_status() now lives in ci/lib.sh (shared with the ui/validate stages,
+# which route their REQUIRED python3/zola lanes through it — audit P2).
 
 # --- 7. PHP suites (REQUIRED) --------------------------------------------------------
 # Previously each suite silently skipped when vendor/bin/phpunit was absent —
@@ -945,14 +922,104 @@ run_layout_gates() {
 # translations. Requires the marketing site to be built (self-provisions via
 # zola build when zola is present, mirroring the other marketing gates).
 run_i18n_gate() {
-    command -v python3 >/dev/null 2>&1 || { ci_warn "python3 missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
+    # Audit P2/P3: this REQUIRED gate used to warn-and-skip on a missing
+    # python3 AND shell out to the HOST zola (bypassing the ci_zola pin —
+    # zola 0.23 cannot build these 0.22 templates at all). Both now follow
+    # the repo lane conventions: lane_tool_status fails closed for the
+    # missing runtime; the build uses the pinned ci_zola or fails loudly.
+    _i18n_st=$(lane_tool_status python3 i18n-gate required)
+    case $_i18n_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
     [ -f "$REPO_ROOT/apps/marketing-zola/data/i18n.json" ] || { ci_warn "marketing i18n data missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
     if [ ! -f "$REPO_ROOT/apps/marketing-zola/public/index.html" ]; then
-        command -v zola >/dev/null 2>&1 || { ci_warn "marketing public/ not built and zola missing — i18n gate skipped"; return "$CI_EXIT_OK"; }
-        (cd "$REPO_ROOT/apps/marketing-zola" && zola build >/dev/null 2>&1) || { ci_err "zola build failed for i18n gate"; return "$CI_EXIT_FAIL"; }
+        _i18n_zola=''
+        _i18n_zola=$(ci_zola 2>/dev/null) || _i18n_zola=''
+        if [ -z "$_i18n_zola" ]; then
+            ci_err "marketing public/ not built and no pinned zola obtainable — the REQUIRED i18n gate cannot run (install zola/curl via ci/install.sh)"
+            return "$CI_EXIT_FAIL"
+        fi
+        (cd "$REPO_ROOT/apps/marketing-zola" && "$_i18n_zola" build >/dev/null 2>&1) \
+            || { ci_err "zola build failed for i18n gate"; return "$CI_EXIT_FAIL"; }
     fi
     (cd "$REPO_ROOT" && ci_check "i18n completeness gate (tools/i18n-audit.py)" \
         python3 tools/i18n-audit.py) || { ci_err "i18n gate FAILED — see output above"; return "$CI_EXIT_FAIL"; }
+}
+
+# --- 8d. browser suite (Playwright against the PHP port) -------------------------------
+# tests/browser/** is the KiwiCaptcha browser suite (18 specs; 220 tests on the
+# default chromium lane, 481 across all lanes). It is a black-box harness that
+# boots the PHP port (packages/kiwicaptcha-php + router.php) through the
+# config's own webServer block (`php -S 127.0.0.1:8085`) and drives the widget,
+# security/adversarial and a11y spec set in a real browser. BR-1: the suite
+# previously had NO CI lane at all — the only in-repo Playwright usage was
+# tools/contrast-audit, so the "Playwright suite used by CI" claim was false.
+#
+# Wired here behind CI_BROWSER_SUITE_CHECK (default `required`, matching the
+# UI-gate convention). Prerequisites are fail-closed: node, php, and the
+# chromium executable the workspace's LOCKED @playwright/test expects (the CI
+# image bakes that browser in at build time — the lock pins the exact version
+# the image carries, like tools/contrast-audit). A missing runtime FAILS the
+# lane; `advisory` is a bounded triage-window override that logs a clear
+# skipped-by-config message instead.
+provision_browser_node_modules() {
+    _bn_dir=$REPO_ROOT/tests/browser
+    [ -x "$_bn_dir/node_modules/.bin/playwright" ] && return "$CI_EXIT_OK"
+    if ci_dry; then
+        ci_info "dry-run: npm ci in tests/browser (@playwright/test from the committed lockfile)"
+        return "$CI_EXIT_OK"
+    fi
+    if [ ! -f "$_bn_dir/package-lock.json" ]; then
+        ci_err "tests/browser/package-lock.json missing — the browser suite cannot be provisioned deterministically (commit the lockfile)"
+        return "$CI_EXIT_FAIL"
+    fi
+    ci_info "tests/browser: node_modules absent — npm ci from the committed lockfile (BR-1)"
+    (cd "$_bn_dir" && npm ci --no-audit --no-fund) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "npm ci failed in tests/browser — the REQUIRED browser suite cannot run"; return "$CI_EXIT_FAIL"; }
+    return "$CI_EXIT_OK"
+}
+
+run_browser_suite() {
+    _bs_st=$(lane_tool_status node browser-suite "${CI_BROWSER_SUITE_CHECK:-required}")
+    case $_bs_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    _bs_st=$(lane_tool_status php browser-suite "${CI_BROWSER_SUITE_CHECK:-required}")
+    case $_bs_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    provision_browser_node_modules || return "$CI_EXIT_FAIL"
+    if ci_dry; then
+        ci_info "check (dry-run): browser suite (tests/browser, PHP port + locked chromium)"
+        return "$CI_EXIT_OK"
+    fi
+
+    # Runtime precondition (BR-1): the chromium build the workspace's locked
+    # Playwright resolves must exist. Asking Playwright itself (instead of a
+    # hardcoded path) means a lock/image skew surfaces as a missing executable
+    # here, not as a mid-suite launch failure.
+    _bs_chromium=''
+    _bs_chromium=$(cd "$REPO_ROOT/tests/browser" \
+        && node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())' 2>/dev/null) \
+        || _bs_chromium=''
+    if [ -z "$_bs_chromium" ] || [ ! -x "$_bs_chromium" ]; then
+        if [ "${CI_BROWSER_SUITE_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: browser suite skipped — the Playwright chromium runtime for tests/browser is missing \
+(run 'npx playwright install chromium' locally, or use the CI image which bakes it in). CI_BROWSER_SUITE_CHECK=advisory is a triage-window override only."
+            return "$CI_EXIT_OK"
+        fi
+        ci_err "browser-suite runtime missing: the locked @playwright/test chromium executable is not installed \
+(run 'npx playwright install chromium' in tests/browser, or build/use the CI image that bakes it in; audit BR-1). Lane is REQUIRED — \
+set CI_BROWSER_SUITE_CHECK=advisory only for a bounded triage window."
+        return "$CI_EXIT_FAIL"
+    fi
+
+    (cd "$REPO_ROOT/tests/browser" && ci_check "browser suite (tests/browser, PHP port + chromium)" \
+        ./node_modules/.bin/playwright test) || return "$CI_EXIT_FAIL"
+    return "$CI_EXIT_OK"
 }
 
 # --- formatting gate ------------------------------------------------------------
@@ -1016,7 +1083,15 @@ stage_main() {
     fmt_gate
     clippy_gate
 
-    if command -v python3 >/dev/null 2>&1; then
+    # Audit P2: these gates are REQUIRED; a missing python3 must FAIL the
+    # stage (lane_tool_status) instead of warn-and-skipping the whole block —
+    # the old path let a python-less host report test green with the cycles,
+    # feature-flag, entitlement and audit-coverage gates never running.
+    _py_st=$(lane_tool_status python3 repo-python-gates required)
+    case $_py_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) : ;;
+        run)
         (cd "$REPO_ROOT" && ci_check "workspace dependency cycles" python3 tools/check_cargo_cycles.py)
         (cd "$REPO_ROOT" && ci_check "security feature flags" python3 tools/validate_security_feature_flags.py)
         # Release gate: every PlanFeatures field must be classified
@@ -1045,9 +1120,8 @@ stage_main() {
                 ci_warn "ADVISORY: audit coverage ledger drift (log: $RUN_DIR/audit-coverage.log) — fix the ledger, then CI_AUDIT_COVERAGE_CHECK=required"
             fi
         fi
-    else
-        ci_warn "python3 missing — repo python gates skipped"
-    fi
+        ;;
+    esac
 
     cargo_tool_gates
     run_cargo_tests
@@ -1064,6 +1138,7 @@ stage_main() {
     run_contrast_gate
     run_layout_gates
     run_i18n_gate
+    run_browser_suite
 
     ci_ephem_cleanup
     ci_info "test: all suites green"

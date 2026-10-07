@@ -38,6 +38,11 @@ pub struct TrackingPayload {
     /// Recipient email (hashed for privacy).
     #[serde(rename = "r")]
     pub recipient_hash: String,
+    /// Stable per-anchor link identity (dogfood 2026-10-06 P2): the
+    /// tracking-service stores it on the click event so per-link click
+    /// analytics work. `None` for open-pixel tokens (there is no anchor).
+    #[serde(rename = "l", skip_serializing_if = "Option::is_none")]
+    pub link_id: Option<String>,
     /// Original URL (for click tracking).
     #[serde(rename = "u", skip_serializing_if = "Option::is_none")]
     pub original_url: Option<String>,
@@ -103,19 +108,26 @@ fn serialize_payload(
     tenant_id: &str,
     message_id: &str,
     recipient: &str,
+    link_id: Option<&str>,
     original_url: Option<&str>,
 ) -> Vec<u8> {
+    let link_bytes = link_id.unwrap_or("").as_bytes();
     let url_bytes = original_url.unwrap_or("").as_bytes();
     let version: u8 = if original_url.is_some() { 3 } else { 2 };
     let mut buf = Vec::with_capacity(
-        1 + 2 * 5 + tenant_id.len() + message_id.len() + recipient.len() + url_bytes.len(),
+        1 + 2 * 5
+            + tenant_id.len()
+            + message_id.len()
+            + recipient.len()
+            + link_bytes.len()
+            + url_bytes.len(),
     );
     buf.push(version);
     for field in [
         tenant_id.as_bytes(),
         message_id.as_bytes(),
         recipient.as_bytes(),
-        b"",
+        link_bytes,
     ] {
         write_u16be(&mut buf, field.len() as u16);
         buf.extend_from_slice(field);
@@ -146,6 +158,7 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static 
         &payload.tenant_id,
         &payload.message_id,
         &payload.recipient_hash,
+        payload.link_id.as_deref(),
         payload.original_url.as_deref(),
     );
 
@@ -268,7 +281,11 @@ fn raw_text_tag_open_before_offset(before: &str, tag: &str) -> bool {
 }
 
 /// Build a common tracking payload from a job.
-fn build_payload(job: &EmailJob, original_url: Option<String>) -> TrackingPayload {
+fn build_payload(
+    job: &EmailJob,
+    original_url: Option<String>,
+    link_id: Option<String>,
+) -> TrackingPayload {
     TrackingPayload {
         message_id: job.message_id.clone(),
         // RAW identifiers (see build_payload_carries_raw_identifiers): the
@@ -278,9 +295,22 @@ fn build_payload(job: &EmailJob, original_url: Option<String>) -> TrackingPayloa
         // ClickHouse ingest via recipient_for_analytics.
         tenant_id: job.tenant_id.clone(),
         recipient_hash: job.to.clone(),
+        link_id,
         original_url,
         campaign_id: job.campaign_id.clone(),
     }
+}
+
+/// A stable per-anchor link identity: FNV-1a 64 of the original href, hex.
+/// Deterministic on purpose — a retried/resent message maps the same anchor
+/// to the same id, so click attribution cannot drift between attempts.
+fn link_id_for(href: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in href.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("lnk_{hash:016x}")
 }
 
 /// Add an invisible tracking pixel to HTML content.
@@ -289,7 +319,7 @@ fn build_payload(job: &EmailJob, original_url: Option<String>) -> TrackingPayloa
 /// element and inserts the pixel before `</body>`. Falls back to appending if
 /// no `<body>` element is found in the parse tree.
 pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
-    let payload = build_payload(job, None);
+    let payload = build_payload(job, None, None);
     let tracking_id = match encode_tracking_id(&payload) {
         Ok(id) => id,
         Err(missing) => {
@@ -381,7 +411,11 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
             continue;
         }
 
-        let payload = build_payload(job, Some(href_attr.to_string()));
+        let payload = build_payload(
+            job,
+            Some(href_attr.to_string()),
+            Some(link_id_for(href_attr)),
+        );
         let tracking_id = match encode_tracking_id(&payload) {
             Ok(id) => id,
             Err(missing) => {
@@ -576,6 +610,7 @@ mod tests {
             message_id: "msg_123".to_string(),
             tenant_id: "ten_456".to_string(),
             recipient_hash: "user@example.com".to_string(),
+            link_id: Some("lnk_sample".to_string()),
             original_url: Some("https://example.com".to_string()),
             campaign_id: Some("camp_789".to_string()),
         }
@@ -594,7 +629,7 @@ mod tests {
         job.message_id = "msg_raw".to_string();
         job.tenant_id = "01JRAW_TENANT_ID_000001".to_string();
         job.to = "real@example.com".to_string();
-        let payload = build_payload(&job, None);
+        let payload = build_payload(&job, None, None);
         assert_eq!(payload.tenant_id, "01JRAW_TENANT_ID_000001");
         assert_eq!(payload.recipient_hash, "real@example.com");
     }
@@ -615,15 +650,18 @@ mod tests {
         assert_eq!(decoded.tenant_id, payload.tenant_id);
         assert_eq!(decoded.recipient, payload.recipient_hash);
         assert_eq!(decoded.original_url.as_deref(), Some("https://example.com"));
-        // linkId is not used by the worker path.
-        assert!(decoded.link_id.is_none());
+        // Dogfood 2026-10-06 P2: the link identity rides in the token, so the
+        // click event is attributable to a link instead of "unknown".
+        assert_eq!(decoded.link_id.as_deref(), Some("lnk_sample"));
     }
 
-    /// Open-pixel tokens (no original URL) use payload v2 and also decode.
+    /// Open-pixel tokens (no original URL, no link) use payload v2 and also
+    /// decode — with `link_id: None`, never a fabricated id.
     #[test]
     fn worker_open_token_decodes_in_tracking_service_codec() {
         let _guard = with_test_secret();
         let payload = TrackingPayload {
+            link_id: None,
             original_url: None,
             ..sample_payload()
         };
@@ -632,6 +670,59 @@ mod tests {
         let decoded = codec.decode(&token).expect("decode open token");
         assert_eq!(decoded.message_id, "msg_123");
         assert!(decoded.original_url.is_none());
+        assert!(decoded.link_id.is_none());
+    }
+
+    /// Dogfood 2026-10-06 P2 regression: rewrite_links must stamp a stable
+    /// link id into the click token, and the tracking-service codec must
+    /// decode it. Without this the encoder wrote an empty linkId and every
+    /// recorded click said `link_id=unknown`.
+    #[test]
+    fn rewritten_click_tokens_carry_a_decodable_link_id() {
+        let _guard = with_test_secret();
+        let html = r#"<a href="https://example.com/cta?x=1">CTA</a>"#;
+        let tracked = rewrite_links(html, &make_test_job(), &make_test_config());
+        let token = tracked
+            .split("https://track.example.com/c/")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the anchor was rewritten to a /c/ token");
+
+        let codec = tracking_service::codec::TrackingCodec::new(TEST_SECRET);
+        let decoded = codec.decode(token).expect("decodable click token");
+        assert_eq!(
+            decoded.link_id.as_deref(),
+            Some(link_id_for("https://example.com/cta?x=1").as_str()),
+            "the token carries the anchor's stable link id"
+        );
+        assert_eq!(
+            decoded.original_url.as_deref(),
+            Some("https://example.com/cta?x=1")
+        );
+
+        // The id is deterministic across renders (retry-safe attribution).
+        let again = rewrite_links(html, &make_test_job(), &make_test_config());
+        let token_again = again
+            .split("https://track.example.com/c/")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("second render token");
+        let decoded_again = codec.decode(token_again).expect("decode");
+        assert_eq!(decoded.link_id, decoded_again.link_id);
+    }
+
+    /// A distinct anchor gets a distinct link id (per-link analytics).
+    #[test]
+    fn distinct_anchors_get_distinct_link_ids() {
+        assert_ne!(
+            link_id_for("https://example.com/a"),
+            link_id_for("https://example.com/b")
+        );
+        assert_eq!(
+            link_id_for("https://example.com/a"),
+            link_id_for("https://example.com/a"),
+            "stable per href"
+        );
     }
 
     /// A wrong key must fail decode (AEAD tag mismatch), not return garbage.

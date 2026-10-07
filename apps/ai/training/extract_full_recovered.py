@@ -11,12 +11,12 @@ Sources:
   - /tmp/apexmail_scenarios/adversarial-gym.test.ts (1,100 scenarios → multi-turn training)
 
 Canonical pricing applied:
-  Free: €0, 30K emails, 300K API
-  Starter: €25, 50K emails, 500K API
-  Pro: €65, 150K emails, 2M API
-  Growth: €150, 500K emails, 5M API
-  Scale: €350, 2M emails, 20M API
-  Enterprise: €3,000, 5M emails, unlimited API
+  Free: €0 30K emails, 300K API
+  Developer: €29 50K emails, 500K API
+  Pro: €89 150K emails, 2M API
+  Growth: €229 500K emails, 5M API
+  Business: €699 2M emails, 20M API
+  Enterprise Cloud: €1,750 5M emails, unlimited API
 """
 
 import json
@@ -35,22 +35,22 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_PRICES = {
     "0": "Free",
-    "25": "Starter",
+    "25": "Developer",
     "65": "Pro",
     "150": "Growth",
-    "350": "Scale",
-    "3000": "Enterprise",
+    "350": "Business",
+    "3000": "Enterprise Cloud",
 }
 
 # Also match human-readable forms
 CANONICAL_PRICE_PATTERNS = [
     r"€0",
-    r"€25",
-    r"€65",
-    r"€150",
-    r"€350",
-    r"€3,000",
-    r"€3000",
+    r"€29",
+    r"€89",
+    r"€229",
+    r"€699",
+    r"€1,750",
+    r"€1,750",
     r'"plan_price": "0"',
     r'"plan_price": "25"',
     r'"plan_price": "65"',
@@ -60,8 +60,8 @@ CANONICAL_PRICE_PATTERNS = [
 ]
 
 # Known plan display names
-KNOWN_PLANS = ["Free", "Starter", "Pro", "Growth", "Scale", "Enterprise"]
-KNOWN_PRICES = ["€0", "€25", "€65", "€150", "€350", "€3,000"]
+KNOWN_PLANS = ["Free", "Developer", "Pro", "Growth", "Business", "Enterprise Cloud"]
+KNOWN_PRICES = ["€0", "€29", "€89", "€229", "€699", "€1,750"]
 
 
 def validate_recovered_price(text: str, source: str = "unknown") -> bool:
@@ -109,26 +109,26 @@ def validate_recovered_price(text: str, source: str = "unknown") -> bool:
 
 PRICE_FIXES = {
     # Monthly prices
-    r"\$29/mo": "€25/mo",
-    r"\$29 per month": "€25 per month",
-    r"\$29/month": "€25/month",
-    r"Starter \(\$29\)": "Starter (€25)",
-    r"\$59/mo": "€65/mo",
-    r"\$59 per month": "€65 per month",
-    r"\$59/month": "€65/month",
-    r"Pro \(\$59\)": "Pro (€65)",
-    r"\$129/mo": "€150/mo",
-    r"\$129 per month": "€150 per month",
-    r"\$129/month": "€150/month",
-    r"Growth \(\$129\)": "Growth (€150)",
-    r"\$399/mo": "€350/mo",
-    r"\$399 per month": "€350 per month",
-    r"\$399/month": "€350/month",
-    r"Scale \(\$399\)": "Scale (€350)",
-    r"\$1,299/mo": "€3,000/mo",
-    r"\$1,299 per month": "€3,000 per month",
-    r"\$1,299/month": "€3,000/month",
-    r"Enterprise \(\$1,299\)": "Enterprise (€3,000)",
+    r"\$29/mo": "€29/mo",
+    r"\$29 per month": "€29 per month",
+    r"\$29/month": "€29/month",
+    r"Developer \(\$29\)": "Developer (€29)",
+    r"\$59/mo": "€89/mo",
+    r"\$59 per month": "€89 per month",
+    r"\$59/month": "€89/month",
+    r"Pro \(\$89\)": "Pro (€89)",
+    r"\$129/mo": "€229/mo",
+    r"\$129 per month": "€229 per month",
+    r"\$129/month": "€229/month",
+    r"Growth \(\$229\)": "Growth (€229)",
+    r"\$399/mo": "€699/mo",
+    r"\$399 per month": "€699 per month",
+    r"\$399/month": "€699/month",
+    r"Business \(\$699\)": "Business (€699)",
+    r"\$1,299/mo": "€1,750/mo",
+    r"\$1,299 per month": "€1,750 per month",
+    r"\$1,299/month": "€1,750/month",
+    r"Enterprise Cloud \(\$1,750\)": "Enterprise Cloud (€1,750)",
     # Plan price fields
     r'"plan_price": "29"': '"plan_price": "25"',
     r'"plan_price": "59"': '"plan_price": "65"',
@@ -142,10 +142,10 @@ EMAIL_LIMIT_FIXES = {
     # Free: 1K → 30K
     r'"email_limit": "1,000"': '"email_limit": "3,000"',
     r'"api_call_limit": "10,000"': '"api_call_limit": "50,000"',
-    r"1,000 emails/month": "30,000 emails/month",
-    r"1,000 emails per month": "30,000 emails per month",
+    r"1,000 emails/month": "3,000 emails/month",
+    r"1,000 emails per month": "3,000 emails per month",
     r"out of 1,000 emails": "out of 30,000 emails",
-    # Starter: 25K → 50K
+    # Developer: 25K → 50K
     r'"email_limit": "25,000"': '"email_limit": "50,000"',
     r'"api_call_limit": "250,000"': '"api_call_limit": "500,000"',
     r"25,000 emails/month": "50,000 emails/month",
@@ -163,7 +163,7 @@ EMAIL_LIMIT_FIXES = {
     r"100,000 emails/month": "500,000 emails/month",
     r"100,000 emails per month": "500,000 emails per month",
     r"out of 100,000 emails": "out of 500,000 emails",
-    # Scale: 500K → 2M
+    # Business: 500K → 2M
     r'"email_limit": "500,000"': '"email_limit": "2,000,000"',
     r'"api_call_limit": "5,000,000"': '"api_call_limit": "20,000,000"',
     r"500,000 emails/month": "2,000,000 emails/month",
@@ -201,7 +201,7 @@ NEW_PROFILES = {
         "domain_count": "1",
         "domain_details": "- myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: none)",
         "recent_events": "- 2,850 sent, 2,793 delivered (98.0%), 23 bounced (0.8%), 0 complaints",
-        "open_issues": "- Approaching email limit: 28,500/30,000 (95% used)",
+        "open_issues": "- Approaching email limit: 285/30,000 (95% used)",
     },
     "free_spf_broken_v2": {
         "account_id": "acct_sp2f8z",
@@ -218,10 +218,10 @@ NEW_PROFILES = {
         "open_issues": "- SPF failure: 2 SPF TXT records found (ApexMail + Mailchimp). Only 1 SPF record per domain allowed.",
     },
     
-    # === STARTER TIER PROFILES (€25, 50K emails, 500K API) ===
+    # === STARTER TIER PROFILES (€29, 50K emails, 500K API) ===
     "starter_healthy_v2": {
         "account_id": "acct_8f3k2j",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "36,240",
         "email_limit": "50,000",
@@ -237,7 +237,7 @@ NEW_PROFILES = {
     },
     "starter_webhook_dead_v2": {
         "account_id": "acct_wh7d3k",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "24,800",
         "email_limit": "50,000",
@@ -251,7 +251,7 @@ NEW_PROFILES = {
     },
     "starter_dmarc_quarantine": {
         "account_id": "acct_dmq2k3",
-        "plan_name": "Starter",
+        "plan_name": "Developer",
         "plan_price": "25",
         "emails_sent": "18,500",
         "email_limit": "50,000",
@@ -264,7 +264,7 @@ NEW_PROFILES = {
         "open_issues": "- DMARC policy causing quarantine of 5% of emails to strict ISPs",
     },
     
-    # === PRO TIER PROFILES (€65, 150K emails, 2M API) ===
+    # === Pro TIER PROFILES (€89 150K emails, 2M API) ===
     "pro_healthy_v2": {
         "account_id": "acct_pr65k8",
         "plan_name": "Pro",
@@ -306,7 +306,7 @@ NEW_PROFILES = {
         "open_issues": "- Dedicated IP 192.0.2.50 in warmup phase (day 8 of 30). Sending throttled to 15K/day.",
     },
     
-    # === GROWTH TIER PROFILES (€150, 500K emails, 5M API) ===
+    # === Growth TIER PROFILES (€229 500K emails, 5M API) ===
     "growth_bounce_spike_v2": {
         "account_id": "acct_gw150k",
         "plan_name": "Growth",
@@ -350,10 +350,10 @@ NEW_PROFILES = {
         "open_issues": "- Subaccount 'client3' approaching 90% of allocated quota",
     },
     
-    # === SCALE TIER PROFILES (€350, 2M emails, 20M API) ===
+    # === Business TIER PROFILES (€699 2M emails, 20M API) ===
     "scale_deliverability_v2": {
         "account_id": "acct_sc350k",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "1,450,000",
         "email_limit": "2,000,000",
@@ -368,7 +368,7 @@ NEW_PROFILES = {
     },
     "scale_api_rate_limit": {
         "account_id": "acct_arl9k2",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "1,200,000",
         "email_limit": "2,000,000",
@@ -382,7 +382,7 @@ NEW_PROFILES = {
     },
     "scale_greylist_delays": {
         "account_id": "acct_gry6m8",
-        "plan_name": "Scale",
+        "plan_name": "Business",
         "plan_price": "350",
         "emails_sent": "980,000",
         "email_limit": "2,000,000",
@@ -395,10 +395,10 @@ NEW_PROFILES = {
         "open_issues": "- Greylisting causing 15-30 minute delays on ~8% of sends to Microsoft 365 recipients",
     },
     
-    # === ENTERPRISE TIER PROFILES (€3,000, 5M emails, unlimited API) ===
+    # === Enterprise Cloud TIER PROFILES (€1,750 5M emails, unlimited API) ===
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "3,625,000",
         "email_limit": "5,000,000",
@@ -414,7 +414,7 @@ NEW_PROFILES = {
     },
     "enterprise_sso_issue": {
         "account_id": "acct_sso4j7",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "2,150,000",
         "email_limit": "5,000,000",
@@ -428,7 +428,7 @@ NEW_PROFILES = {
     },
     "enterprise_multi_region": {
         "account_id": "acct_mrg2l5",
-        "plan_name": "Enterprise",
+        "plan_name": "Enterprise Cloud",
         "plan_price": "3000",
         "emails_sent": "4,200,000",
         "email_limit": "5,000,000",
@@ -449,12 +449,12 @@ def generate_profiles_file():
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
 Canonical pricing:
-  Free: €0, 30K emails, 300K API
-  Starter: €25, 50K emails, 500K API  
-  Pro: €65, 150K emails, 2M API
-  Growth: €150, 500K emails, 5M API
-  Scale: €350, 2M emails, 20M API
-  Enterprise: €3,000, 5M emails, unlimited API
+  Free: €0 30K emails, 300K API
+  Developer: €29 50K emails, 500K API  
+  Pro: €89 150K emails, 2M API
+  Growth: €229 500K emails, 5M API
+  Business: €699 2M emails, 20M API
+  Enterprise Cloud: €1,750 5M emails, unlimited API
 """
 
 EXTENDED_PROFILES = '''
@@ -474,7 +474,7 @@ EXTENDED_PROFILES = '''
 MULTI_TURN_EXAMPLES = [
     # --- DNS Troubleshooting with tool calls ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Starter plan (€25/mo, 50K emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€29/mo, 50K emails).",
         "user": "My emails aren't being delivered. Can you check what's wrong?",
         "assistant": "I'll check your domain's DNS configuration and deliverability status.\n\n```tool\n{\"action\": \"check_domain_health\", \"params\": {\"domain\": \"acmecorp.com\"}}\n```",
         "tool": '{"spf": "pass", "dkim": "fail", "dmarc": "none", "bounce_rate": "8.2%", "last_check": "2026-02-23T10:15:00Z"}',
@@ -482,15 +482,15 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Billing inquiry with account lookup ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Growth plan (€150/mo, 500K emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Growth plan (€229/mo, 500K emails).",
         "user": "I'm being charged more than expected this month. Why?",
         "assistant": "Let me check your billing details and usage for this billing period.\n\n```tool\n{\"action\": \"get_billing_summary\", \"params\": {\"account_id\": \"current\"}}\n```",
         "tool": '{"plan": "Growth", "base_price": 150, "emails_used": 623000, "email_limit": 500000, "overage_emails": 123000, "overage_rate": 0.40, "overage_charge": 49.20, "total_due": 199.20}',
-        "assistant_final": "I see why your bill is higher this month:\n\n**Growth Plan base:** €150/mo (includes 500,000 emails)\n**Your usage:** 623,000 emails\n**Overage:** 123,000 emails × €0.40/1,000 = **€49.20**\n\n**Total this month:** €199.20\n\nYou're consistently exceeding your plan. The **Scale plan (€350/mo)** includes 2,000,000 emails — at your current volume, you'd save money and have room to grow.\n\nWould you like me to show a comparison of what you'd pay on Scale vs staying on Growth with overages?"
+        "assistant_final": "I see why your bill is higher this month:\n\n**Growth Plan base:** €229/mo (includes 500,000 emails)\n**Your usage:** 623,000 emails\n**Overage:** 123,000 emails × €0.35 per 1,000 = **€43.05**\n\n**Total this month:** €272.05\n\nYou're consistently exceeding your plan. The **Business plan (€699/mo)** includes 2,000,000 emails — at your current volume, you'd save money and have room to grow.\n\nWould you like me to show a comparison of what you'd pay on Business vs staying on Growth with overages?"
     },
     # --- API authentication troubleshooting ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Pro plan (€65/mo, 150K emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Pro plan (€89/mo, 150K emails).",
         "user": "I'm getting 401 errors from the API. My key was working yesterday.",
         "assistant": "Let me check your API key status and recent activity.\n\n```tool\n{\"action\": \"check_api_key_status\", \"params\": {\"key_prefix\": \"am_live_\"}}\n```",
         "tool": '{"keys": [{"name": "Production", "prefix": "am_live_8f3k...", "status": "revoked", "revoked_at": "2026-02-22T18:30:00Z", "revoked_by": "bob@acmecorp.com"}, {"name": "Test Key", "prefix": "am_test_2j1m...", "status": "active", "last_used": "2026-02-23T09:00:00Z"}]}',
@@ -498,7 +498,7 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Webhook failure diagnosis ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Starter plan (€25/mo).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Developer plan (€29/mo).",
         "user": "My webhook stopped receiving events",
         "assistant": "I'll check your webhook configuration and recent delivery attempts.\n\n```tool\n{\"action\": \"get_webhook_status\", \"params\": {\"webhook_id\": \"wh_bd01\"}}\n```",
         "tool": '{"webhook_id": "wh_bd01", "url": "https://api.bakerydelight.com/email-events", "events": ["delivered", "bounced", "opened"], "status": "auto-disabled", "consecutive_failures": 8, "last_error": "HTTP 500", "last_attempt": "2026-02-22T14:00:00Z", "disabled_at": "2026-02-22T14:30:00Z"}',
@@ -506,7 +506,7 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Template rendering issue ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Pro plan (€65/mo).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Pro plan (€89/mo).",
         "user": "Some of my order confirmation emails are showing {{customer.name}} instead of the actual name",
         "assistant": "Let me check your template and recent send logs for rendering errors.\n\n```tool\n{\"action\": \"get_template_errors\", \"params\": {\"template_id\": \"order-confirmation\"}}\n```",
         "tool": '{"template_id": "order-confirmation", "recent_sends": 1500, "render_failures": 45, "failure_rate": "3.0%", "common_error": "undefined variable: customer.name", "sample_payloads": [{"order_id": "12345", "customerName": "John"}, {"order_id": "12346", "name": "Jane"}]}',
@@ -518,11 +518,11 @@ MULTI_TURN_EXAMPLES = [
         "user": "I keep running out of emails. What are my options?",
         "assistant": "Let me check your usage pattern to recommend the best option.\n\n```tool\n{\"action\": \"get_usage_history\", \"params\": {\"months\": 3}}\n```",
         "tool": '{"usage": [{"month": "Dec 2025", "emails": 28000}, {"month": "Jan 2026", "emails": 29500}, {"month": "Feb 2026", "emails": 29900}], "average": 29133, "trend": "growing", "projected_next_month": 31000}',
-        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 28,000 |\n| Jan 2026 | 29,500 |\n| Feb 2026 | 29,900 |\n\n**Projected next month:** ~31,000 (you'll exceed the 30,000 limit)\n\n**Recommendations:**\n\n1. **Starter Plan (€25/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - about 1.7× more emails for €25\n\n2. **Pay-As-You-Go** — €0 base + €0.40/1,000 emails\n   - At ~30,000 emails/mo, you'd pay about €26/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Starter** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
+        "assistant_final": "Your usage is growing steadily:\n\n| Month | Emails Sent |\n|-------|-------------|\n| Dec 2025 | 28,000 |\n| Jan 2026 | 29,500 |\n| Feb 2026 | 29,900 |\n\n**Projected next month:** ~31,000 (you'll exceed the 30,000 limit)\n\n**Recommendations:**\n\n1. **Developer Plan (€29/mo)** — 50,000 emails\n   - Best value for your growth trajectory\n   - Includes webhooks, 3 domains, 3 team members\n   - about 1.7× more emails for €29\n\n2. **Pay-As-You-Go** — €0 base + €0.35 per 1,000 emails\n   - At ~3,000 emails/mo, you'd pay about €26/mo\n   - Good if volume is unpredictable\n\nGiven your growth trend, I'd recommend **Developer** — it gives you room to scale without worrying about limits.\n\nReady to upgrade? I can walk you through it."
     },
     # --- Complaint rate warning ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on the Scale plan (€350/mo, 2M emails).",
+        "system": "You are ApexMail's AI assistant. The customer is on the Business plan (€699/mo, 2M emails).",
         "user": "We got an email saying our complaint rate is too high. What do I do?",
         "assistant": "Let me check your complaint metrics and identify the source.\n\n```tool\n{\"action\": \"get_complaint_analytics\", \"params\": {\"days\": 30}}\n```",
         "tool": '{"total_sent": 1450000, "complaints": 2175, "complaint_rate": 0.15, "threshold": 0.10, "top_campaigns": [{"name": "Flash Sale Blast", "complaints": 892, "rate": 0.45}, {"name": "Newsletter", "complaints": 215, "rate": 0.05}], "recommendation": "pause_flash_sale"}',
@@ -530,11 +530,11 @@ MULTI_TURN_EXAMPLES = [
     },
     # --- Escalation scenario ---
     {
-        "system": "You are ApexMail's AI assistant. The customer is on Enterprise (€3,000/mo).",
+        "system": "You are ApexMail's AI assistant. The customer is on Enterprise Cloud (€1,750/mo).",
         "user": "We need a custom SLA for our healthcare client. They require 99.99% uptime guarantees and HIPAA BAA.",
         "assistant": "This request requires involvement from our enterprise team. Let me create an escalation.\n\n```tool\n{\"action\": \"create_escalation\", \"params\": {\"type\": \"enterprise_legal\", \"priority\": \"high\", \"subject\": \"Custom SLA + HIPAA BAA request\"}}\n```",
         "tool": '{"ticket_id": "ESC-4521", "assigned_to": "enterprise-team@apexmail.ee", "sla": "24h response", "status": "created"}',
-        "assistant_final": "I've created an escalation ticket for your custom SLA and HIPAA BAA request.\n\n**Ticket:** ESC-4521\n**Priority:** High\n**SLA:** 24-hour response from our Enterprise team\n\n**What happens next:**\n1. Our enterprise team will review your requirements\n2. They'll prepare a custom SLA proposal (99.99% uptime)\n3. Legal will draft the HIPAA Business Associate Agreement\n4. You'll receive the documents for review within 24-48 hours\n\n**Your current plan already includes:**\n✅ SOC2 compliance\n✅ HIPAA-ready infrastructure\n✅ Dedicated account manager\n\nIs there anything else you need for this healthcare client engagement?"
+        "assistant_final": "I've created an escalation ticket for your custom SLA and HIPAA BAA request.\n\n**Ticket:** ESC-4521\n**Priority:** High\n**SLA:** 24-hour response from our Enterprise Cloud team\n\n**What happens next:**\n1. Our enterprise team will review your requirements\n2. They'll prepare a custom SLA proposal (99.99% uptime)\n3. Legal will draft the HIPAA Business Associate Agreement\n4. You'll receive the documents for review within 24-48 hours\n\n**Your current plan already includes:**\n✅ SOC2 compliance\n✅ HIPAA-ready infrastructure\n✅ Dedicated account manager\n\nIs there anything else you need for this healthcare client engagement?"
     },
 ]
 
@@ -597,7 +597,7 @@ ADVERSARIAL_TRAINING = [
     },
     # --- Angry customer de-escalation ---
     {
-        "system": "You are ApexMail's AI assistant. Customer on Scale plan.",
+        "system": "You are ApexMail's AI assistant. Customer on Business plan.",
         "user": "My emails are going to spam and I'm losing money!! This is UNACCEPTABLE! Fix this NOW or I'm canceling!",
         "assistant": "I understand this is impacting your business and I want to get this resolved quickly.\n\nLet me check your deliverability status right now. While I look into this, can you tell me:\n1. Which recipient domain is affected most (Gmail, Outlook, etc.)?\n2. When did you first notice the issue?\n\nWe'll figure out what's happening and get you a fix."
     },
@@ -617,7 +617,7 @@ ADVERSARIAL_TRAINING = [
     {
         "system": "You are ApexMail's AI assistant. Customer role: viewer.",
         "user": "Upgrade our plan to enterprise",
-        "assistant": "Plan changes require admin or owner permissions. Your current role is Viewer, which has read-only access.\n\nTo upgrade:\n1. Ask an admin on your team to upgrade in Dashboard → Billing → Change Plan\n2. Or ask them to upgrade your role to Admin first\n\nI can show you what the Enterprise plan includes if that would help you make the case to your team."
+        "assistant": "Plan changes require admin or owner permissions. Your current role is Viewer, which has read-only access.\n\nTo upgrade:\n1. Ask an admin on your team to upgrade in Dashboard → Billing → Change Plan\n2. Or ask them to upgrade your role to Admin first\n\nI can show you what the Enterprise Cloud plan includes if that would help you make the case to your team."
     },
     # --- Multi-step ambiguous request ---
     {
@@ -629,7 +629,7 @@ ADVERSARIAL_TRAINING = [
     {
         "system": "You are ApexMail's AI assistant. Customer on trial.",
         "user": "Why should I use ApexMail instead of SendGrid or Postmark?",
-        "assistant": "Great question! Here's what makes ApexMail stand out:\n\n**vs SendGrid:**\n- Simpler pricing — no surprise charges\n- Built-in deliverability monitoring\n- Faster support response (avg 2 hours vs 24+)\n\n**vs Postmark:**\n- More flexible — transactional AND marketing emails\n- Better API rate limits on equivalent plans\n- Native analytics without add-ons\n\n**ApexMail strengths:**\n- 99.9% uptime SLA (99.99% on Enterprise)\n- SOC2 and HIPAA compliance built-in\n- Dedicated IPs starting at Pro tier\n\nWhat matters most to you — deliverability, pricing, or specific features? I can give you a more tailored comparison."
+        "assistant": "Great question! Here's what makes ApexMail stand out:\n\n**vs SendGrid:**\n- Simpler pricing — no surprise charges\n- Built-in deliverability monitoring\n- Faster support response (avg 2 hours vs 24+)\n\n**vs Postmark:**\n- More flexible — transactional AND marketing emails\n- Better API rate limits on equivalent plans\n- Native analytics without add-ons\n\n**ApexMail strengths:**\n- 99.9% uptime SLA (99.99% on Enterprise Cloud)\n- SOC2 and HIPAA compliance built-in\n- Dedicated IPs starting at Pro tier\n\nWhat matters most to you — deliverability, pricing, or specific features? I can give you a more tailored comparison."
     },
 ]
 

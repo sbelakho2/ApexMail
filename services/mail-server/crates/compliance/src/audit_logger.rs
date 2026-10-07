@@ -2642,7 +2642,10 @@ mod db_tests {
 
         // ── Canonical writer row (api-server / billing-service shape) ─────
         let canonical_details = serde_json::json!({"event": "wallet.credit", "amount": 500});
-        let canonical_ts = Utc::now() - Duration::seconds(10);
+        // The row hash covers the rfc3339 timestamp, and TIMESTAMPTZ stores
+        // microseconds: seed exactly what the database round-trips (E-3), or
+        // the seeded row could never re-verify.
+        let canonical_ts = truncate_to_micros(Utc::now() - Duration::seconds(10));
         let canonical_hash = apexmail_lib::audit::audit_hash(
             Some(&tenant),
             Some("usr_operator26chars1234567"),

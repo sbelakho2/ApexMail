@@ -1,8 +1,11 @@
 # ApexMail Pricing Reference
 
 This is a public reference for the active subscription catalog. It is not the
-runtime authority for entitlement or charging. The operational authority is
-[the billing plan catalog](../services/mail-server/crates/billing-service/src/plans.rs),
+runtime authority for entitlement or charging. The canonical plan facts
+(names, prices, limits, overage rates) live in
+[the platform catalog](../services/mail-server/crates/platform-catalog/src/lib.rs);
+the operational authority is
+[the billing plan seeds](../services/mail-server/crates/billing-service/src/plans.rs),
 the active `plans` records, and verified Stripe webhooks. See
 [the authority map](pricing-authority.md) for the boundary between runtime and
 presentation data.
@@ -19,8 +22,8 @@ Stripe confirms the subscription through a verified webhook.
 | `starter` | Developer | €29 | €290/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
 | `pro` | Pro | €89 | €890/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
 | `growth` | Growth | €229 | €2,290/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
-| `scale` | Business | €699 | €6,990/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
-| `enterprise` | Enterprise Cloud | €1,750 | €17,500/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
+| `scale` | Business | €699 | €6,990/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 1 included |
+| `enterprise` | Enterprise Cloud | €1,750 | €17,500/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 3 included |
 
 Annual billing is 10 times the monthly price: two months free, or roughly a
 17% discount compared with twelve monthly payments.
@@ -28,10 +31,10 @@ Annual billing is 10 times the monthly price: two months free, or roughly a
 ## Public purchase paths
 
 - **Free** is the initial workspace entitlement.
-- **Starter**, **Pro**, **Growth**, and **Scale** are the supported
-  self-service Checkout plans.
-- **Enterprise** is an annual sales and contract flow; it is not available
-  through generic public Checkout.
+- **Developer** (`starter`), **Pro**, **Growth**, and **Business** (`scale`)
+  are the supported self-service Checkout plans.
+- **Enterprise Cloud** is an annual sales and contract flow; it is not
+  available through generic public Checkout.
 - **PAYG** is configured through an approved billing setup, not a public plan
   switch or generic Checkout flow.
 
@@ -82,10 +85,12 @@ PAYG API calls include the first 100,000 per month; subsequent API usage is
 
 ## Dedicated IPs
 
-Dedicated IPs are add-on eligible from Pro upward. The public calculator uses
-€30/month per additional IP; Growth includes one, Scale includes three, and
-Enterprise includes ten. Provisioning remains subject to operational and abuse
-controls.
+Dedicated IPs are an add-on from €49/month (first) and €69/month (each
+additional) on Pro and above — the same ladder the runtime estimator charges
+(`routes/explorer.rs`). Growth includes one (after qualification), Business
+includes one (a second is assigned where traffic justifies it), and Enterprise
+Cloud includes up to three based on architecture. Provisioning remains subject
+to operational and abuse controls.
 
 ## Billing lifecycle
 

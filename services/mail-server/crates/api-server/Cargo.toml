@@ -87,6 +87,7 @@ inbox-placement = { path = "../inbox-placement" }
 # The CP read contract: the SSR sales-autopilot page consumes the SAME typed
 # read model (`sales_autopilot::control_read`) the sales-autopilot service's
 # `/control/*` admin API serializes, instead of duplicating its SQL.
+compliance = { path = "../compliance" }
 sales-autopilot = { path = "../sales-autopilot" }
 kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 # Account-takeover risk evaluation wired into the real login flows

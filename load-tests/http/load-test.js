@@ -1,214 +1,165 @@
 // =============================================================================
 // ApexMail — Load Test
 // =============================================================================
-// LT-C-02: Standard load test that simulates realistic user traffic. This test
-// measures the API server's performance under expected production load levels.
+// LT-C-01: Standard load test that simulates realistic API traffic against a
+// running api-server.
+//
+// Real API contract (services/mail-server/crates/api-server):
+//   * Auth: authenticated calls send `X-API-Key: am_…` (middleware/auth.rs).
+//     `POST /v1/auth/login` is a CSRF-gated session flow that returns
+//     `{expires_at, user}` (no JSON token), so it is deliberately NOT driven
+//     here — see http-journey/auth-load-test.js for that interactive flow.
+//   * Send: `POST /v1/messages` accepts
+//     {from, to[], subject, html?, text?, tags?: string[]}
+//     (SendMessageRequest, deny_unknown_fields) and answers 202 with
+//     {"data":{"id","status","created_at"},"error":null}.
+//   * Health: GET /health/live and GET /health/ready.
 //
 // Stages:
-//   1. Ramp up:  0 → 50 VUs over 2 minutes   (warm-up, cache priming)
+//   1. Ramp up:  0 → 50 VUs over 2 minutes   (warm-up)
 //   2. Stay:    50 VUs for 5 minutes          (sustained load measurement)
-//   3. Ramp down: 50 → 0 VUs over 2 minutes   (graceful cooldown)
+//   3. Ramp down: 50 → 0 VUs over 2 minutes   (cooldown)
 //
-// Thresholds:
-//   - p(95) response time < 500ms
-//   - Error rate < 1%
-//   - All checks must pass at > 99%
+// Thresholds: p95 < 500ms, p99 < 2000ms, error rate < 1%, per-endpoint
+// trends (LT-1: the trends are now actually DEFINED — the previous thresholds
+// referenced metrics that did not exist, so k6 refused to start at all).
 //
-// This test is designed to run in CI as part of the load-gate workflow.
-// Fail the workflow if thresholds are exceeded.
+// Run (manual/on-demand — the load-gate workflow is archived, ci/README.md §2):
+//   K6_API_KEY=am_live_… K6_API_BASE=http://localhost:8080 \
+//     K6_FROM_EMAIL=sender@verified.example \
+//     k6 run load-tests/http/load-test.js
 // =============================================================================
 
-import { check, group } from 'k6';
+import { check, group, sleep } from 'k6';
 import http from 'k6/http';
-import { randomString, testTags } from './test-options.js';
+import { Trend, Counter } from 'k6/metrics';
+import { API_KEY, BASE_URL, FROM_EMAIL, apiKeyHeaders, testTags } from './test-options.js';
 
-// ── Configuration ───────────────────────────────────────────────────────────
+// ── Custom metrics ──────────────────────────────────────────────────────────
 
-const BASE_URL = __ENV.K6_API_BASE || 'http://localhost:3000';
-const API_KEY = __ENV.K6_API_KEY || '';
+const healthDuration = new Trend('health_duration');
+const authProbeDuration = new Trend('auth_probe_duration');
+const emailSendDuration = new Trend('email_send_duration');
+const emailSendAccepted = new Counter('email_send_accepted');
 
 // ── Test Options ────────────────────────────────────────────────────────────
 
 export const options = {
   stages: [
-    // Ramp up from 0 to 50 VUs over 2 minutes
-    { duration: '2m', target: 50 },
-
-    // Stay at 50 VUs for 5 minutes
-    { duration: '5m', target: 50 },
-
-    // Ramp down from 50 to 0 VUs over 2 minutes
-    { duration: '2m', target: 0 },
+    { duration: '2m', target: 50 },   // Ramp up to 50 VUs
+    { duration: '5m', target: 50 },   // Sustain at 50 VUs
+    { duration: '2m', target: 0 },    // Ramp down
   ],
 
   thresholds: {
-    // ── General HTTP thresholds ─────────────────────────────────────────────
-    http_req_duration: [
-      'p(95)<500',    // 95% of requests under 500ms
-      'p(99)<2000',   // 99% of requests under 2000ms
-      'avg<300',      // Average latency under 300ms
-    ],
-    http_req_failed: [
-      'rate<0.01',    // Less than 1% error rate
-    ],
-
-    // ── Per-group thresholds ────────────────────────────────────────────────
-    // Health checks must be fast (no auth, no DB writes)
-    'health_duration': ['p(95)<200'],
-
-    // Auth login — bounded by bcrypt/hashing cost
-    'auth_login_duration': ['p(95)<800'],
-
-    // Email send — includes validation + queue submission
-    'email_send_duration': ['p(95)<1000'],
+    http_req_duration: ['p(95)<500', 'p(99)<2000', 'avg<300'],
+    http_req_failed: ['rate<0.01'],
+    health_duration: ['p(95)<200'],
+    auth_probe_duration: ['p(95)<800'],
+    email_send_duration: ['p(95)<1000'],
+    // A run that never accepted a single message is not a passing run
+    // (LT-3: the old script silently skipped the whole send scenario).
+    email_send_accepted: ['count>0'],
   },
 
-  // Discard response bodies to reduce memory
-  discardResponseBodies: true,
+  // Bodies are needed to assert the response envelope.
+  discardResponseBodies: false,
+
+  // p(99) must be exported for the baseline-comparison mapping below.
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(95)', 'p(99)', 'count'],
 
   tags: testTags('load-test'),
 };
 
-// ── Test Data ───────────────────────────────────────────────────────────────
+// ── Setup ───────────────────────────────────────────────────────────────────
 
-// Shared credentials for load testing
-const TEST_USERS = [
-  { email: 'loadtest-user-1@apexmail.ee', password: 'loadtest-pass-1' },
-  { email: 'loadtest-user-2@apexmail.ee', password: 'loadtest-pass-2' },
-  { email: 'loadtest-user-3@apexmail.ee', password: 'loadtest-pass-3' },
-  { email: 'loadtest-user-4@apexmail.ee', password: 'loadtest-pass-4' },
-  { email: 'loadtest-user-5@apexmail.ee', password: 'loadtest-pass-5' },
-];
-
-// ── Helper Functions ────────────────────────────────────────────────────────
-
-function getDefaultHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  };
-}
-
-function getAuthHeaders(token) {
-  return {
-    ...getDefaultHeaders(),
-    'Authorization': `Bearer ${token}`,
-  };
+export function setup() {
+  // Fail fast and loudly: without a key every authenticated request would be
+  // a 401 and the send scenario would measure nothing.
+  if (!API_KEY) {
+    throw new Error(
+      'K6_API_KEY is required (X-API-Key: am_… for the target tenant); ' +
+        'refusing to run a load test whose authenticated scenarios cannot succeed'
+    );
+  }
+  console.log(`Load test: base=${BASE_URL} from=${FROM_EMAIL}`);
+  return { start_time: Date.now() };
 }
 
 // ── Main Test Scenario ──────────────────────────────────────────────────────
 
 export default function () {
-  const vuId = __VU;           // Virtual User ID (1–50)
-  const iter = __ITER;         // Iteration number
-
-  // Determine which test user this VU simulates
-  const userIndex = vuId % TEST_USERS.length;
-  const user = TEST_USERS[userIndex];
+  const vuId = __VU;
+  const iter = __ITER;
 
   // ── Group: Health Checks ──────────────────────────────────────────────────
   group('health checks', function () {
-    const livenessResp = http.get(
-      `${BASE_URL}/health/live`,
-      {
-        headers: getDefaultHeaders(),
-        tags: { endpoint: 'liveness' },
-      }
-    );
-
+    const livenessResp = http.get(`${BASE_URL}/health/live`, {
+      tags: { endpoint: 'liveness' },
+    });
+    healthDuration.add(livenessResp.timings.duration);
     check(livenessResp, {
       'liveness status is 200': (r) => r.status === 200,
     });
 
-    // Custom metric for health check duration
-    // k6 will aggregate this under 'health_duration'
-    const readinessResp = http.get(
-      `${BASE_URL}/health/ready`,
-      {
-        headers: getDefaultHeaders(),
-        tags: { endpoint: 'readiness' },
-      }
-    );
-
+    const readinessResp = http.get(`${BASE_URL}/health/ready`, {
+      tags: { endpoint: 'readiness' },
+    });
+    healthDuration.add(readinessResp.timings.duration);
     check(readinessResp, {
       'readiness status is 200': (r) => r.status === 200,
     });
   });
 
-  // ── Group: Authentication ─────────────────────────────────────────────────
-  group('authentication', function () {
-    const loginPayload = JSON.stringify({
-      email: user.email,
-      password: user.password,
+  // ── Group: Authenticated probe (X-API-Key) ────────────────────────────────
+  group('authenticated probe', function () {
+    const probeResp = http.get(`${BASE_URL}/v1/messages?limit=1`, {
+      headers: apiKeyHeaders(),
+      tags: { endpoint: 'auth-probe' },
     });
-
-    const loginResp = http.post(
-      `${BASE_URL}/v1/auth/login`,
-      loginPayload,
-      {
-        headers: getDefaultHeaders(),
-        tags: { endpoint: 'auth-login' },
-      }
-    );
-
-    const loginSuccess = check(loginResp, {
-      'auth login status is 200': (r) => r.status === 200,
-      'auth login has token': (r) => {
-        try {
-          return JSON.parse(r.body).token !== undefined;
-        } catch {
-          return false;
-        }
-      },
+    authProbeDuration.add(probeResp.timings.duration);
+    check(probeResp, {
+      'authenticated read status is 200': (r) => r.status === 200,
     });
-
-    // If login succeeded, use the token for subsequent requests
-    if (loginSuccess) {
-      const token = JSON.parse(loginResp.body).token;
-      __ENV.__TOKEN = token;
-    }
   });
 
   // ── Group: Email Send ─────────────────────────────────────────────────────
   group('email send', function () {
-    const token = __ENV.__TOKEN || '';
-    if (!token) {
-      // Skip if no token available (login may have failed)
-      return;
-    }
-
+    // The real SendMessageRequest shape: html/text (not html_body/text_body)
+    // and tags as a string list (not an object).
     const emailPayload = JSON.stringify({
-      from: `loadtest-${vuId}@apexmail.ee`,
-      to: [`recipient-${vuId}-${iter}@example.com`],
-      subject: `[Load Test] Performance measurement — VU ${vuId} Iteration ${iter}`,
-      text_body: `This is a load test email sent by VU ${vuId} in iteration ${iter}.`,
-      html_body: `<html><body><p>This is a load test email sent by VU ${vuId} in iteration ${iter}.</p></body></html>`,
-      tags: {
-        load_test: 'true',
-        vu_id: String(vuId),
-        iteration: String(iter),
-      },
+      from: FROM_EMAIL,
+      to: [`loadtest-${vuId}-${iter}@example.com`],
+      subject: `[Load Test] VU ${vuId} iteration ${iter}`,
+      text: `Load test message sent by VU ${vuId} in iteration ${iter}.`,
+      html: `<p>Load test message sent by VU ${vuId} in iteration ${iter}.</p>`,
+      tags: ['load-test'],
     });
 
-    const emailResp = http.post(
-      `${BASE_URL}/v1/messages`,
-      emailPayload,
-      {
-        headers: getAuthHeaders(token),
-        tags: { endpoint: 'email-send' },
-      }
-    );
+    const emailResp = http.post(`${BASE_URL}/v1/messages`, emailPayload, {
+      headers: apiKeyHeaders(),
+      tags: { endpoint: 'email-send' },
+    });
+    emailSendDuration.add(emailResp.timings.duration);
 
     check(emailResp, {
-      'email send status is 200 or 202': (r) => r.status === 200 || r.status === 202,
-      'email send has message_id': (r) => {
+      'email send status is 202': (r) => r.status === 202,
+      'email send returns the queued message envelope': (r) => {
         try {
           const body = JSON.parse(r.body);
-          return body.message_id !== undefined || body.id !== undefined;
+          return body.data !== undefined && body.data.id !== undefined;
         } catch {
           return false;
         }
       },
     });
+    if (emailResp.status === 202) {
+      emailSendAccepted.add(1);
+    }
   });
+
+  // Think time: a VU loop without it hammers the API at a rate no real
+  // client produces (and trips per-IP anti-burst middleware even at low VU
+  // counts).
+  sleep(Math.random() * 0.8 + 0.4); // 400–1200ms
 }

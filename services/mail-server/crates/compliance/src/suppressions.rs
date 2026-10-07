@@ -55,7 +55,10 @@ impl std::fmt::Display for SuppressionReason {
 
 impl SuppressionReason {
     pub fn is_removable(&self) -> bool {
-        matches!(self, Self::Temporary | Self::CustomerBlock | Self::AdminBlock)
+        matches!(
+            self,
+            Self::Temporary | Self::CustomerBlock | Self::AdminBlock
+        )
     }
 
     pub fn is_compliance_protected(&self) -> bool {
@@ -329,22 +332,27 @@ pub fn check_suppression(
     ];
 
     for check_scope in &scope_order {
-        if let Some(rec) = records
-            .iter()
-            .find(|r| r.recipient == recipient && r.scope == *check_scope && r.is_active() && {
+        if let Some(rec) = records.iter().find(|r| {
+            r.scope == *check_scope && r.is_active() && {
                 match r.scope {
-                    // Global blocks everything — no scope_id linkage required.
-                    SuppressionScope::Global => true,
-                    // Domain blocks domain sends: the record's scope_id is the
-                    // domain, matched against the recipient's domain.
+                    // Global blocks everything — no scope_id linkage
+                    // required, but the record still names the recipient.
+                    SuppressionScope::Global => r.recipient == recipient,
+                    // Domain blocks domain sends: the record's scope_id
+                    // is the domain, matched against the RECIPIENT's
+                    // domain — the record's own (representative) local
+                    // part is deliberately not compared, or a domain
+                    // suppression could never block another mailbox in
+                    // the domain.
                     SuppressionScope::Domain => recipient_domain(recipient)
                         .map(|d| d.eq_ignore_ascii_case(&r.scope_id))
                         .unwrap_or(false),
-                    // Intermediate scopes: exact scope + scope_id match.
-                    _ => r.scope == scope && r.scope_id == scope_id,
+                    // Intermediate scopes: exact recipient + scope +
+                    // scope_id match.
+                    _ => r.recipient == recipient && r.scope == scope && r.scope_id == scope_id,
                 }
-            })
-        {
+            }
+        }) {
             return Some(rec.clone());
         }
     }
@@ -371,18 +379,20 @@ pub fn bulk_add_suppressions(
     let mut errors = Vec::new();
 
     for entry in &entries {
-        let already_exists = existing
-            .iter()
-            .any(|r| r.recipient == entry.recipient && r.scope == entry.scope && r.scope_id == entry.scope_id && r.reason == entry.reason && r.is_active());
+        let already_exists = existing.iter().any(|r| {
+            r.recipient == entry.recipient
+                && r.scope == entry.scope
+                && r.scope_id == entry.scope_id
+                && r.reason == entry.reason
+                && r.is_active()
+        });
 
         if already_exists {
             skipped += 1;
             continue;
         }
 
-        if entry.reason == SuppressionReason::HardBounce
-            && !entry.recipient.contains('@')
-        {
+        if entry.reason == SuppressionReason::HardBounce && !entry.recipient.contains('@') {
             errors.push(BulkAddError {
                 recipient: entry.recipient.clone(),
                 error: "Invalid recipient format for bounce suppression".into(),
@@ -401,23 +411,51 @@ pub fn bulk_add_suppressions(
     }
 }
 
+/// Parse a database `reason` string into the enum. One parser, used by the
+/// API layer, so the wire vocabulary and the policy cannot drift apart.
+pub fn parse_reason(value: &str) -> Option<SuppressionReason> {
+    Some(match value {
+        "hard_bounce" => SuppressionReason::HardBounce,
+        "complaint" => SuppressionReason::Complaint,
+        // The live rows use BOTH spellings: the pipeline writes
+        // `marketing_unsubscribe` while the console/API writes `unsubscribe`
+        // (dogfood 2026-10-06: the second spelling slipped past the removal
+        // policy, so a live unsubscribe suppression was deletable).
+        "marketing_unsubscribe" | "unsubscribe" => SuppressionReason::MarketingUnsubscribe,
+        "admin_block" => SuppressionReason::AdminBlock,
+        "customer_block" => SuppressionReason::CustomerBlock,
+        "temporary" => SuppressionReason::Temporary,
+        "policy" => SuppressionReason::Policy,
+        _ => return None,
+    })
+}
+
+/// The removal POLICY, expressed over the row's reason — the decision the API
+/// layer needs, without constructing a full record.
+pub fn removal_allowed(
+    reason: SuppressionReason,
+    permission_level: &str,
+) -> Result<(), SuppressionViolation> {
+    if reason == SuppressionReason::Complaint {
+        return Err(SuppressionViolation::ComplaintRemovalAttempted);
+    }
+    if reason == SuppressionReason::MarketingUnsubscribe {
+        return Err(SuppressionViolation::BroadcastUnsubscribeBypass);
+    }
+    if reason == SuppressionReason::HardBounce && permission_level != "admin" {
+        return Err(SuppressionViolation::InsufficientPermission);
+    }
+    Ok(())
+}
+
 /// Permission-controlled removal of a suppression.
 /// Complaint-based suppressions cannot be removed programmatically.
 pub fn permission_controlled_removal(
     record: &SuppressionRecord,
     request: &RemovalRequest,
 ) -> Result<RemovalResult, SuppressionViolation> {
-    if record.reason == SuppressionReason::Complaint {
-        return Err(SuppressionViolation::ComplaintRemovalAttempted);
-    }
-
-    if record.reason == SuppressionReason::MarketingUnsubscribe {
-        return Err(SuppressionViolation::BroadcastUnsubscribeBypass);
-    }
-
-    if record.reason == SuppressionReason::HardBounce && request.permission_level != "admin" {
-        return Err(SuppressionViolation::InsufficientPermission);
-    }
+    // One policy: the record form delegates to the reason form.
+    removal_allowed(record.reason, &request.permission_level)?;
 
     Ok(RemovalResult {
         success: true,
@@ -436,7 +474,7 @@ pub fn export_records(
         .filter(|r| {
             params.scope.as_ref().is_none_or(|s| r.scope == *s)
                 && params.scope_id.as_ref().is_none_or(|id| r.scope_id == *id)
-                && params.reason.as_ref().is_none_or(|rea| r.reason == rea)
+                && params.reason.as_ref().is_none_or(|rea| r.reason == *rea)
                 && params.start_date.map_or(true, |d| r.timestamp >= d)
                 && params.end_date.map_or(true, |d| r.timestamp <= d)
                 && params.active_only.map_or(true, |a| !a || r.is_active())
@@ -463,14 +501,20 @@ pub fn search_suppressions(
     let mut results: Vec<SuppressionRecord> = records
         .iter()
         .filter(|r| {
-            query.recipient.as_ref().map_or(true, |rec| r.recipient.contains(rec))
+            query
+                .recipient
+                .as_ref()
+                .map_or(true, |rec| r.recipient.contains(rec))
                 && query.scope.map_or(true, |s| r.scope == s)
                 && query.scope_id.as_ref().map_or(true, |id| r.scope_id == *id)
                 && query.reason.map_or(true, |rea| r.reason == rea)
                 && query.start_date.map_or(true, |d| r.timestamp >= d)
                 && query.end_date.map_or(true, |d| r.timestamp <= d)
                 && query.active_only.map_or(true, |a| !a || r.is_active())
-                && query.created_by.as_ref().map_or(true, |cb| r.created_by == *cb)
+                && query
+                    .created_by
+                    .as_ref()
+                    .map_or(true, |cb| r.created_by == *cb)
         })
         .cloned()
         .collect();
@@ -491,7 +535,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_record(recipient: &str, reason: SuppressionReason, scope: SuppressionScope) -> SuppressionRecord {
+    fn make_record(
+        recipient: &str,
+        reason: SuppressionReason,
+        scope: SuppressionScope,
+    ) -> SuppressionRecord {
         SuppressionRecord {
             id: uuid::Uuid::new_v4().to_string(),
             recipient: recipient.into(),
@@ -511,24 +559,46 @@ mod tests {
 
     #[test]
     fn test_check_suppression_finds_match() {
-        let rec = make_record("bounce@test.com", SuppressionReason::HardBounce, SuppressionScope::Global);
+        let rec = make_record(
+            "bounce@test.com",
+            SuppressionReason::HardBounce,
+            SuppressionScope::Global,
+        );
         let records = vec![rec.clone()];
-        let result = check_suppression("bounce@test.com", SuppressionScope::Global, "test_scope", &records);
+        let result = check_suppression(
+            "bounce@test.com",
+            SuppressionScope::Global,
+            "test_scope",
+            &records,
+        );
         assert!(result.is_some());
         assert_eq!(result.unwrap().reason, SuppressionReason::HardBounce);
     }
 
     #[test]
     fn test_check_suppression_no_match() {
-        let rec = make_record("good@test.com", SuppressionReason::Temporary, SuppressionScope::Stream);
+        let rec = make_record(
+            "good@test.com",
+            SuppressionReason::Temporary,
+            SuppressionScope::Stream,
+        );
         let records = vec![rec];
-        let result = check_suppression("other@test.com", SuppressionScope::Stream, "test_scope", &records);
+        let result = check_suppression(
+            "other@test.com",
+            SuppressionScope::Stream,
+            "test_scope",
+            &records,
+        );
         assert!(result.is_none());
     }
 
     #[test]
     fn test_complaint_removal_denied() {
-        let rec = make_record("complaint@test.com", SuppressionReason::Complaint, SuppressionScope::Global);
+        let rec = make_record(
+            "complaint@test.com",
+            SuppressionReason::Complaint,
+            SuppressionScope::Global,
+        );
         let req = RemovalRequest {
             suppression_id: rec.id.clone(),
             removed_by: "admin".into(),
@@ -537,12 +607,19 @@ mod tests {
         };
         let result = permission_controlled_removal(&rec, &req);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), SuppressionViolation::ComplaintRemovalAttempted);
+        assert_eq!(
+            result.unwrap_err(),
+            SuppressionViolation::ComplaintRemovalAttempted
+        );
     }
 
     #[test]
     fn test_bulk_add_skips_duplicates() {
-        let existing = vec![make_record("dup@test.com", SuppressionReason::Policy, SuppressionScope::Global)];
+        let existing = vec![make_record(
+            "dup@test.com",
+            SuppressionReason::Policy,
+            SuppressionScope::Global,
+        )];
         let entries = vec![
             BulkSuppressionEntry {
                 recipient: "dup@test.com".into(),
@@ -746,5 +823,44 @@ mod tests {
         assert_eq!(recipient_domain("a@b.c"), Some("b.c"));
         assert_eq!(recipient_domain("no-domain"), None);
         assert_eq!(recipient_domain(""), None);
+    }
+}
+
+#[cfg(test)]
+mod removal_policy_tests {
+    use super::*;
+
+    #[test]
+    fn removal_policy_protects_complaints_and_unsubscribes() {
+        // The policy the API endpoint now enforces for real (it was
+        // unreachable code until the 2026-10-06 dogfood pass).
+        assert!(removal_allowed(SuppressionReason::Complaint, "admin").is_err());
+        assert!(removal_allowed(SuppressionReason::MarketingUnsubscribe, "admin").is_err());
+        assert!(removal_allowed(SuppressionReason::HardBounce, "operator").is_err());
+        assert!(removal_allowed(SuppressionReason::HardBounce, "admin").is_ok());
+        assert!(removal_allowed(SuppressionReason::Temporary, "operator").is_ok());
+        assert!(removal_allowed(SuppressionReason::CustomerBlock, "operator").is_ok());
+    }
+
+    #[test]
+    fn reason_parser_matches_the_wire_vocabulary() {
+        assert_eq!(
+            parse_reason("complaint"),
+            Some(SuppressionReason::Complaint)
+        );
+        assert_eq!(
+            parse_reason("marketing_unsubscribe"),
+            Some(SuppressionReason::MarketingUnsubscribe)
+        );
+        // Both live spellings protect the same record.
+        assert_eq!(
+            parse_reason("unsubscribe"),
+            Some(SuppressionReason::MarketingUnsubscribe)
+        );
+        assert_eq!(
+            parse_reason("hard_bounce"),
+            Some(SuppressionReason::HardBounce)
+        );
+        assert_eq!(parse_reason("nonsense"), None);
     }
 }

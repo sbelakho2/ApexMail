@@ -287,7 +287,7 @@ Dedicated IPs are managed as **Hetzner Cloud floating IPs** by the [`DedicatedIp
 
 #### 3.5.1 Provisioning
 
-Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Stripe webhook → `autoProvisionDedicatedIps()`), or manually via `POST /v1/dedicated-ips`.
+Triggered automatically when a tenant upgrades to a plan with dedicated IPs (Stripe webhook → `auto_provision_dedicated_ips_background()`), or manually via `POST /v1/dedicated-ips`.
 
 ```mermaid
 sequenceDiagram
@@ -297,7 +297,7 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Stripe->>API: plan_change event
-    API->>API: autoProvisionDedicatedIps()
+    API->>API: auto_provision_dedicated_ips_background()
     API->>Hetzner: POST /v1/floating_ips (create)
     Hetzner-->>API: floating_ip { id, ip }
     API->>Hetzner: POST /v1/floating_ips/{id}/actions/assign (to MTA server)
@@ -771,7 +771,7 @@ All events are:
 |---------|-------------|------------|
 | Messages unexpectedly routed to SES | `transport_routing_cache` not updated after IP assignment | Check DB trigger `trg_update_transport_routing` is active; verify `transport_routing_cache` table has the tenant entry |
 | Messages unexpectedly routed to SMTP | Tenant incorrectly has active dedicated IP | Verify `dedicated_ips` table for the tenant; check if retired IPs are still in cache |
-| Upgrade/downgrade not triggering IP provision/release | Stripe webhook not firing | Check Stripe webhook logs; verify `autoProvisionDedicatedIps()` endpoint is reachable |
+| Upgrade/downgrade not triggering IP provision/release | Stripe webhook not firing | Check Stripe webhook logs; verify the Stripe webhook reaches `POST /v1/dedicated-ips` |
 
 ### 7.4 Warmup Schedule Discrepancy
 

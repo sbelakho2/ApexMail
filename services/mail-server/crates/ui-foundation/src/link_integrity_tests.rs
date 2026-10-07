@@ -15,31 +15,11 @@
 
 use crate::gate_support::{
     manifest_route_set, matches_registered_browser_route, render_variant_with_secret,
-    render_with_secret,
+    render_with_secret, STATEFUL_RENDER_VARIANTS,
 };
 use crate::routing;
 
 const APPEARANCE_SURFACES: &[&str] = &["web", "control-plane"];
-
-/// PRG / state variants a bare manifest render cannot reach. Their links are
-/// user-visible right after a real flow (verify, reset, MFA challenge), so
-/// they are part of the integrity contract.
-const STATEFUL_RENDER_VARIANTS: &[(&str, &str, &str)] = &[
-    ("web", "/verify-email", "status=success"),
-    ("web", "/verify-email", "status=error"),
-    (
-        "web",
-        "/reset-password",
-        "token=gate-token&email=owner%40apexmail.ee",
-    ),
-    ("web", "/login", "mfa=1&email=ops%40apexmail.ee"),
-    (
-        "web",
-        "/confirm",
-        "intent=delete-campaign&id=c_spring&return_to=%2Fcampaigns",
-    ),
-    ("control-plane", "/login", "mfa=1&email=ops%40apexmail.ee"),
-];
 
 /// Allowlisted dead links on the web/control-plane surfaces, as
 /// (surface, document path WITH query, unresolvable target path).
@@ -140,26 +120,7 @@ fn every_web_and_cp_href_and_form_action_resolves() {
     let mut dead: Vec<String> = Vec::new();
     for &surface in APPEARANCE_SURFACES {
         let manifest = &manifests[surface];
-        let mut documents: Vec<(String, String)> = routing::surface_routes(surface)
-            .into_iter()
-            .map(|route| {
-                (
-                    route.path.to_string(),
-                    render_with_secret(surface, route.path),
-                )
-            })
-            .collect();
-        for (path, query) in STATEFUL_RENDER_VARIANTS
-            .iter()
-            .filter(|(_, variant_surface, _)| *variant_surface == surface)
-            .map(|(_, path, query)| (*path, *query))
-        {
-            documents.push((
-                format!("{path}?{query}"),
-                render_variant_with_secret(surface, path, query),
-            ));
-        }
-        for (document, html) in documents {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
             for target in link_targets(&html) {
                 if !target_resolves(surface, &target, manifest) {
                     let path_only = target.split(['?', '#']).next().unwrap_or(&target);
@@ -178,6 +139,28 @@ fn every_web_and_cp_href_and_form_action_resolves() {
         "links that do not resolve:\n{}\n\nKnown shipping dead links must be allowlisted in DEAD_LINK_ALLOWLIST with a TODO(batch-2) note.",
         dead.join("\n"),
     );
+}
+
+/// The stateful-variant registry is load-bearing: every entry's surface is a
+/// real gate surface, and every entry is actually rendered into its surface's
+/// gate documents. Pins the 2026-10-06 hole where a tuple-field mix-up made
+/// this sweep render zero variants while reporting success.
+#[test]
+fn every_stateful_variant_is_rendered_by_its_surface_sweep() {
+    for (surface, path, query) in STATEFUL_RENDER_VARIANTS {
+        assert!(
+            APPEARANCE_SURFACES.contains(surface),
+            "stateful variant surface {surface:?} is not a gate surface — typo?",
+        );
+        let document = format!("{path}?{query}");
+        let rendered = crate::gate_support::gate_documents(surface)
+            .into_iter()
+            .any(|(name, _)| name == document);
+        assert!(
+            rendered,
+            "stateful variant [{surface}] {document} is never rendered by the gate sweep — the registry field order and the reader have drifted apart",
+        );
+    }
 }
 
 /// The web/control-plane dead-link allowlist stays honest: every entry must

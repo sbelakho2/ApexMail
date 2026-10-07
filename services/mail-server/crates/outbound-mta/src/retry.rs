@@ -215,7 +215,23 @@ impl RetryPolicy {
     /// `Some(next)` when another attempt may run; `None` when the ceiling is
     /// reached and the unit must be dead-lettered.
     pub fn next_attempt_at(&self, attempts_made: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        if attempts_made >= self.max_attempts {
+        self.next_attempt_at_with_ceiling(attempts_made, now, self.max_attempts)
+    }
+
+    /// [`Self::next_attempt_at`] with an explicit ceiling.
+    ///
+    /// The ledger stores each row's own `max_attempts` (written on submit), so
+    /// a row's budget — not the process-wide `OUTBOUND_MTA_MAX_ATTEMPTS`
+    /// value — bounds its retry ladder. The column used to be written but
+    /// never read, making the effective ceiling non-deterministic from the
+    /// row data alone (dogfood finding 2026-10-06 P3).
+    pub fn next_attempt_at_with_ceiling(
+        &self,
+        attempts_made: u32,
+        now: DateTime<Utc>,
+        max_attempts: u32,
+    ) -> Option<DateTime<Utc>> {
+        if attempts_made >= max_attempts {
             return None;
         }
         let delay = chrono::Duration::from_std(self.backoff(attempts_made)).ok()?;

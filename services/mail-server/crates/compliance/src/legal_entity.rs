@@ -35,3 +35,12 @@ pub const FOUNDING_DATE: &str = "2025";
 pub const RUNTIME_PRICING_AUTHORITY: &str =
     "services/mail-server/crates/billing-service/src/plans.rs";
 
+/// Data-residency wording, deliberately deployment-qualified: commitments
+/// depend on the ACTIVE deployment and the applicable agreement, and the
+/// supplied production configuration only defaults telemetry object storage
+/// to an EU/EEA region. Restored here (2026-10-07) after the root copy that
+/// carried it was deleted in the SM8 F9 cleanup — canonical.json keeps the
+/// same sentence and scripts/consistency-test.sh pins the two together.
+pub const DATA_RESIDENCY_WORDING: &str =
+    "Data-residency commitments depend on the active deployment and applicable agreement. The supplied production configuration defaults telemetry object storage to an EU/EEA region; confirm active storage locations and transfer safeguards with ApexMail.";
+

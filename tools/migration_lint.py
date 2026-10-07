@@ -18,7 +18,12 @@ embeds and production applies):
   (e) GRANT ALL and TRUNCATE are forbidden in migrations;
   (f) files must be valid inside a transaction: no explicit COMMIT and no
       CREATE INDEX CONCURRENTLY (the migrator applies each file inside one
-      transaction; a CONCURRENTLY would abort it).
+      transaction; a CONCURRENTLY would abort it);
+  (g) no unscoped DML: `DELETE FROM` / `UPDATE … SET` statements without a
+      WHERE (dollar-quoted bodies and CTEs included). This is the one defect
+      class where a mistake destroys data rather than merely wedging a
+      deploy — added after the 2026-10-07 gates review proved
+      `DELETE FROM users;` was not reported.
 
 Why a linter and not just review: the chain is 150+ files touched by many
 workstreams; these conventions are what keeps `sqlx migrate run` idempotent
@@ -304,6 +309,69 @@ class LineMap:
         return lo + 1
 
 
+def split_statements(code: str) -> list[tuple[int, int, str]]:
+    """Split code into statements on `;`, dollar-quote and string aware.
+
+    PL/pgSQL bodies (`DO $$ … $$`, `$fn$ … $fn$`) and literals (`'…;…'`)
+    contain semicolons that must not split a statement — without this, the
+    unscoped-DML rule would see fragment halves and could not decide whether
+    a WHERE exists.
+    """
+    out: list[tuple[int, int, str]] = []
+    dollar_tag: str | None = None
+    in_string = False
+    start = 0
+    i = 0
+    n = len(code)
+    while i < n:
+        ch = code[i]
+        if in_string:
+            if ch == "'":
+                if i + 1 < n and code[i + 1] == "'":
+                    i += 2
+                    continue
+                in_string = False
+            i += 1
+            continue
+        if dollar_tag is not None:
+            if ch == "$":
+                m = re.match(r"\$([A-Za-z_]*)\$", code[i:])
+                if m and m.group(1) == dollar_tag:
+                    dollar_tag = None
+                    i += m.end()
+                    continue
+            i += 1
+            continue
+        if ch == "'":
+            in_string = True
+            i += 1
+            continue
+        if ch == "$":
+            m = re.match(r"\$([A-Za-z_]*)\$", code[i:])
+            if m:
+                dollar_tag = m.group(1)
+                i += m.end()
+                continue
+        if ch == ";":
+            out.append((start, i + 1, code[start : i + 1]))
+            start = i + 1
+        i += 1
+    if code[start:].strip():
+        out.append((start, n, code[start:]))
+    return out
+
+
+DELETE_FROM_RE = re.compile(r"\bDELETE\s+FROM\b", re.IGNORECASE)
+# `UPDATE <table> SET` — never `ON CONFLICT DO UPDATE SET` (an upsert updates
+# exactly the conflicting rows) and never `SELECT … FOR UPDATE` /
+# `BEFORE|AFTER UPDATE ON` trigger DDL (no SET follows the table).
+UPDATE_SET_RE = re.compile(
+    r"(?<![Dd][Oo] )(?<![Ff][Oo][Rr] )"
+    r"\bUPDATE\s+(?:ONLY\s+)?[A-Za-z_\"][\w$.\"]*\s+SET\b",
+    re.IGNORECASE,
+)
+
+
 def guarded_lines(code: str, lmap: LineMap) -> set[int]:
     """Line numbers considered 'inside an existence-probing guard'.
 
@@ -483,6 +551,19 @@ def check_file(path: Path) -> list[str]:
             f"{name}:{ln}: [transaction] CREATE INDEX CONCURRENTLY cannot run "
             f"inside the migration transaction"
         )
+
+    # (g) unscoped DML
+    if "g" not in exempt:
+        for start, _end, stmt in split_statements(code):
+            if re.search(r"\bWHERE\b", stmt, re.IGNORECASE):
+                continue
+            for kind, pattern in (("DELETE FROM", DELETE_FROM_RE), ("UPDATE", UPDATE_SET_RE)):
+                for dm in pattern.finditer(stmt):
+                    ln = lmap.line_of(start + dm.start())
+                    problems.append(
+                        f"{name}:{ln}: [dml] `{kind}` with no WHERE — unscoped "
+                        f"DML in a migration touches every row"
+                    )
     return problems
 
 

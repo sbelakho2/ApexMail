@@ -974,8 +974,20 @@ fn verify_tenant_access(
     }
 }
 
+/// Audit F8 / dogfood F6: require an OPERATOR principal.
+///
+/// The `admin: true` JWT claim this gate used to require is emitted by NO
+/// production credential path: password sessions (`api-server`) and
+/// enterprise SSO both mint `scopes = ["*"]` for owner/admin roles and never
+/// set `admin`. The gate therefore answered 403 for every real owner session,
+/// making `POST /sso/configure` (and its issuer-URL validation) unreachable.
+///
+/// The operator class is the wildcard scope set — exactly the authority the
+/// existing [`require_scope`] already honours — or the legacy `admin` claim
+/// for tokens minted outside the canonical minter. Tenant membership is
+/// still enforced separately by each handler (`verify_tenant_access`).
 fn require_admin(auth: &AuthContext) -> Option<(StatusCode, Json<serde_json::Value>)> {
-    if auth.is_admin {
+    if auth.is_admin || auth.scopes.iter().any(|held| held == "*") {
         None
     } else {
         Some(err_json(StatusCode::FORBIDDEN, "Admin access required"))
@@ -4672,12 +4684,30 @@ mod tests {
         mint_sso_token(tenant_id, subject, false)
     }
 
+    /// Mint the session a REAL owner login produces (dogfood F6): no `admin`
+    /// claim, `scopes = ["*"]` — exactly what the api-server password session
+    /// and the enterprise SSO minter (`canonical_scopes_for_role`) emit.
+    fn mint_sso_owner_token(tenant_id: &str, subject: &str) -> String {
+        mint_sso_token_with_scopes(tenant_id, subject, false, &["*"])
+    }
+
     fn mint_sso_token(tenant_id: &str, subject: &str, admin: bool) -> String {
+        mint_sso_token_with_scopes(tenant_id, subject, admin, &[])
+    }
+
+    fn mint_sso_token_with_scopes(
+        tenant_id: &str,
+        subject: &str,
+        admin: bool,
+        scopes: &[&str],
+    ) -> String {
         #[derive(serde::Serialize)]
         struct Claims<'a> {
             sub: &'a str,
             tenant_id: &'a str,
             admin: bool,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            scopes: Vec<String>,
             exp: usize,
         }
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(JWT_TEST_PRIVATE_PEM.as_bytes()).unwrap();
@@ -4687,6 +4717,7 @@ mod tests {
                 sub: subject,
                 tenant_id,
                 admin,
+                scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
                 exp: (Utc::now() + TimeDelta::try_hours(1).unwrap()).timestamp() as usize,
             },
             &key,
@@ -4996,6 +5027,73 @@ mod tests {
         fn token_request_form(&self) -> Vec<(String, String)> {
             self.recorded_form.lock().unwrap().clone()
         }
+    }
+
+    /// Dogfood F6: the configurator must accept the session a real owner
+    /// login produces — `scopes = ["*"]`, NO `admin` claim. The old gate
+    /// checked only `admin` (which no minter emits) and answered 403 for
+    /// every real session, so SSO configuration (and its issuer validation)
+    /// was unreachable.
+    #[tokio::test]
+    async fn sso_configure_accepts_an_owner_session_with_wildcard_scopes() {
+        let (app, state) = provision_sso_router("owner_scope").await;
+        let tenant = sso_flow_tenant("owner_scope");
+        let domain = "owner-scope.routes.example.com";
+        seed_sso_flow_tenant(&state, &tenant).await;
+
+        // A real owner session: non-admin claim, wildcard scopes (exactly
+        // `canonical_scopes_for_role("owner")`).
+        let owner = mint_sso_owner_token(&tenant, "routes-owner");
+        let configure = serde_json::json!({
+            "tenant_id": tenant,
+            "provider_type": "saml",
+            "domain": domain,
+            "enabled": true,
+            "idp_entity_id": "https://idp.routes-owner.example.com/metadata",
+            "sso_url": "https://idp.routes-owner.example.com/sso",
+            "certificate": IDP_CERTIFICATE_PEM,
+            "enforce_sso": false,
+            "session_duration_hours": 8,
+        });
+        let response = post_json(&app, "/sso/configure", &owner, &configure).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "an owner session (scopes [\"*\"], no admin claim) must configure SSO"
+        );
+        let body = response_json(response).await;
+        assert_eq!(body["domain"], domain, "{body}");
+
+        // A member session (scoped authorities, no wildcard) is still
+        // refused — the gate did not widen past the operator class.
+        let member = mint_sso_token_with_scopes(
+            &tenant,
+            "routes-viewer",
+            false,
+            &["messages:read", "domains:read"],
+        );
+        let refused = post_json(&app, "/sso/configure", &member, &configure).await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The unit-level contract: admin claim, wildcard scope or nothing.
+    #[test]
+    fn require_admin_accepts_the_operator_wildcard_scope() {
+        fn ctx(is_admin: bool, scopes: &[&str]) -> AuthContext {
+            AuthContext {
+                user_id: "u".into(),
+                tenant_id: "t".into(),
+                is_admin,
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+        assert!(require_admin(&ctx(true, &[])).is_none());
+        assert!(
+            require_admin(&ctx(false, &["*"])).is_none(),
+            "the owner/admin scope set is the real operator credential"
+        );
+        assert!(require_admin(&ctx(false, &["messages:read"])).is_some());
+        assert!(require_admin(&ctx(false, &[])).is_some());
     }
 
     #[tokio::test]

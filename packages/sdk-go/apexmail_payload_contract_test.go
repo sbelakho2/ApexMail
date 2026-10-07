@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// ── F1/F48: send wire shape — every accepted option is serialized ──────────
+// ── F48/GO-6: send wire shape — every accepted option is serialized ─────────
 
 func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 	t.Parallel()
@@ -29,15 +29,13 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 		Subject: "Hello!",
 		HTML:    "<h1>Hello World</h1>",
 		// F48: every accepted option must reach the wire.
-		ReplyTo:      &EmailAddress{Email: "reply@example.com", Name: "Replies"},
-		TemplateID:   "tpl_1",
-		TemplateData: map[string]string{"name": "Ada"},
-		Priority:     PriorityHigh,
-		Attachments:  []Attachment{{Filename: "a.txt", Content: "eHg="}},
-		Headers:      map[string]string{"X-Custom": "yes"},
-		Tags:         []string{"welcome"},
-		Metadata:     map[string]interface{}{"source": "go-sdk-test"},
-		ScheduledAt:  "2026-09-01T09:00:00Z",
+		ReplyTo:     &EmailAddress{Email: "reply@example.com", Name: "Replies"},
+		Priority:    PriorityHigh,
+		Attachments: []Attachment{{Filename: "a.txt", Content: "eHg="}},
+		Headers:     map[string]string{"X-Custom": "yes"},
+		Tags:        []string{"welcome"},
+		Metadata:    map[string]interface{}{"source": "go-sdk-test"},
+		ScheduledAt: "2026-09-01T09:00:00Z",
 	}
 
 	body, err := json.Marshal(req)
@@ -64,7 +62,7 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 
 	// Every accepted option reaches the wire under its documented
 	// snake_case field name (F48).
-	for _, required := range []string{"reply_to", "template_id", "template_data", "attachments", "priority", "headers"} {
+	for _, required := range []string{"reply_to", "attachments", "priority", "headers", "metadata", "tags"} {
 		if _, present := payload[required]; !present {
 			t.Fatalf("field %q must be serialized (F48: no silently dropped options)", required)
 		}
@@ -72,8 +70,8 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 	if payload["reply_to"] != "Replies <reply@example.com>" {
 		t.Fatalf("reply_to must keep the display name, got %#v", payload["reply_to"])
 	}
-	if payload["template_id"] != "tpl_1" || payload["priority"] != "high" {
-		t.Fatalf("template_id/priority must be serialized, got %#v", payload)
+	if payload["priority"] != "high" {
+		t.Fatalf("priority must be serialized, got %#v", payload)
 	}
 	attachments, _ := payload["attachments"].([]any)
 	if len(attachments) != 1 {
@@ -84,11 +82,62 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 		t.Fatalf("attachment shape mismatch: %#v", attachment)
 	}
 
-	// camelCase spellings must never appear.
-	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "name"} {
+	// camelCase spellings must never appear; GO-6: template fields must never
+	// be serialized at all (the server's deny_unknown_fields
+	// SendMessageRequest answers 422 for them, so Send refuses client-side).
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "name", "template_id", "template_data"} {
 		if _, present := payload[forbidden]; present {
-			t.Fatalf("camelCase field %q must not be serialized", forbidden)
+			t.Fatalf("field %q must not be serialized", forbidden)
 		}
+	}
+}
+
+func TestSendRejectsTemplateFieldsClientSideWithoutRequest(t *testing.T) {
+	t.Parallel()
+
+	var requests int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"m","status":"queued","created_at":"now"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+
+	// The server's SendMessageRequest carries template_id/template_data only
+	// to reject them with an explicit 422 — a body with either field can
+	// never succeed, so the SDK must fail client-side and never put it on the
+	// wire (GO-6).
+	_, err = client.Emails.Send(context.Background(), &SendEmailRequest{
+		From:       EmailAddress{Email: "hello@example.com"},
+		To:         []EmailAddress{{Email: "user@example.com"}},
+		Subject:    "Hi",
+		HTML:       "<p>Hi</p>",
+		TemplateID: "tpl_1",
+	})
+	if err == nil {
+		t.Fatal("expected template_id to be rejected client-side")
+	}
+	if requests != 0 {
+		t.Fatalf("a template request must never reach the server, got %d request(s)", requests)
+	}
+
+	_, err = client.Emails.Batch(context.Background(), &BatchSendRequest{Messages: []*SendEmailRequest{{
+		From:         EmailAddress{Email: "hello@example.com"},
+		To:           []EmailAddress{{Email: "user@example.com"}},
+		Subject:      "Hi",
+		HTML:         "<p>Hi</p>",
+		TemplateData: map[string]string{"name": "Ada"},
+	}}})
+	if err == nil {
+		t.Fatal("expected template_data to be rejected client-side")
+	}
+	if requests != 0 {
+		t.Fatalf("a template batch must never reach the server, got %d request(s)", requests)
 	}
 }
 
@@ -109,20 +158,18 @@ func TestSendOverTheWireUsesExactPayload(t *testing.T) {
 		t.Fatalf("create client: %v", err)
 	}
 	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
-		From:         EmailAddress{Email: "hello@example.com"},
-		To:           []EmailAddress{{Email: "user@example.com"}},
-		Subject:      "Hi",
-		Text:         "Hello",
-		Priority:     PriorityHigh,
-		TemplateID:   "tpl_1",
-		TemplateData: map[string]string{"name": "Ada"},
-		ReplyTo:      &EmailAddress{Email: "reply@example.com"},
+		From:     EmailAddress{Email: "hello@example.com"},
+		To:       []EmailAddress{{Email: "user@example.com"}},
+		Subject:  "Hi",
+		Text:     "Hello",
+		Priority: PriorityHigh,
+		ReplyTo:  &EmailAddress{Email: "reply@example.com"},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
 	// F48: accepted options reach the wire (snake_case), display names survive.
-	for _, required := range []string{"priority", "template_id", "template_data", "reply_to"} {
+	for _, required := range []string{"priority", "reply_to"} {
 		if _, present := gotBody[required]; !present {
 			t.Fatalf("field %q did not reach the wire", required)
 		}
@@ -130,9 +177,9 @@ func TestSendOverTheWireUsesExactPayload(t *testing.T) {
 	if gotBody["from"] != "hello@example.com" {
 		t.Fatalf("from must be an address string, got %#v", gotBody["from"])
 	}
-	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt"} {
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "template_id", "template_data", "text_body", "html_body"} {
 		if _, present := gotBody[forbidden]; present {
-			t.Fatalf("camelCase field %q reached the wire", forbidden)
+			t.Fatalf("field %q reached the wire", forbidden)
 		}
 	}
 }
@@ -436,9 +483,15 @@ func TestMutatingPostsCarryAutoIdempotencyKeyAcrossRetries(t *testing.T) {
 	t.Parallel()
 
 	var keys []string
+	legacySpelling := 0
 	failures := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		keys = append(keys, r.Header.Get("X-Idempotency-Key"))
+		// GO-1: the server reads exactly `Idempotency-Key`
+		// (middleware/idempotency.rs); the historical X- spelling is ignored.
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		if r.Header.Get("X-Idempotency-Key") != "" {
+			legacySpelling++
+		}
 		failures++
 		if failures == 1 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -465,6 +518,9 @@ func TestMutatingPostsCarryAutoIdempotencyKeyAcrossRetries(t *testing.T) {
 	}
 	if keys[0] == "" || keys[0] != keys[1] {
 		t.Fatalf("expected the same auto idempotency key on both attempts, got %v", keys)
+	}
+	if legacySpelling != 0 {
+		t.Fatalf("the ignored X-Idempotency-Key spelling reached the wire %d time(s)", legacySpelling)
 	}
 }
 
@@ -695,8 +751,9 @@ func TestIdempotencyKeyControlCharactersAreStripped(t *testing.T) {
 
 	var gotKey string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("X-Idempotency-Key")
-		_, _ = w.Write([]byte(`{"id":"tpl_1","name":"n","subject":"s","html_body":"<p>x</p>","version":1,"status":"active","created_at":"t","updated_at":"t"}`))
+		gotKey = r.Header.Get("Idempotency-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"msg_1","status":"queued","created_at":"t"}}`))
 	}))
 	defer server.Close()
 
@@ -704,19 +761,25 @@ func TestIdempotencyKeyControlCharactersAreStripped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	// Caller-supplied key with CRLF injection attempt; Send passes it
-	// through opts, and do() must strip control characters.
-	if _, err := client.Templates.Create(context.Background(), &CreateTemplateRequest{
-		Name:    "n",
-		Subject: "s",
-		HTML:    "<p>x</p>",
-	}); err != nil {
-		t.Fatalf("create template: %v", err)
+	// Caller-supplied key with CRLF injection attempt. Send accepts
+	// SendOptions.IdempotencyKey and do() must strip control characters
+	// before setting the header (GO-12: the previous test claimed to do this
+	// but never supplied a caller key).
+	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
+		From:    EmailAddress{Email: "hello@example.com"},
+		To:      []EmailAddress{{Email: "user@example.com"}},
+		Subject: "Hi",
+		Text:    "Hello",
+	}, SendOptions{IdempotencyKey: "key\r\nInjected: evil\x00"}); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 	if gotKey == "" {
-		t.Fatal("auto idempotency key expected on template create")
+		t.Fatal("idempotency key expected on send")
 	}
 	if strings.ContainsAny(gotKey, "\r\n\x00") {
 		t.Fatalf("control characters not stripped from idempotency key: %q", gotKey)
+	}
+	if gotKey != "keyInjected: evil" {
+		t.Fatalf("control characters must be stripped, not altered otherwise: got %q", gotKey)
 	}
 }

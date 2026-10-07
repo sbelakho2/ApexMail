@@ -80,6 +80,12 @@ const MAILBOX_SELECT: &str = "SELECT a.id, a.email, a.domain, a.display_name, a.
 /// receiving plane is shared infrastructure). Tenant owners reach their
 /// mailboxes through the console; this surface is the control plane's.
 async fn require_operator(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
+    // Every admin route file enforces the wildcard operator scope
+    // (routes/admin/mod.rs boundary test) IN ADDITION to the system-tenant
+    // membership check: provisioned mailboxes carry credentials, so the
+    // operator-only surface must not be reachable by a scoped non-operator
+    // credential that merely lives in the system tenant.
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(state, auth).await
 }
 

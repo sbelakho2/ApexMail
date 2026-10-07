@@ -229,3 +229,165 @@ fn form_input_allowlist_is_capped_and_baseline_documented() {
         );
     }
 }
+
+/// Positions of every opening `<form …>` span and closing `</form>` in
+/// document order, as (offset, is_open) events.
+fn form_events(html: &str) -> Vec<(usize, bool)> {
+    let mut events: Vec<(usize, bool)> = crate::gate_support::opening_tag_spans(html, "form")
+        .into_iter()
+        .map(|(start, _)| (start, true))
+        .collect();
+    let mut cursor = 0usize;
+    while let Some(rel) = html[cursor..].find("</form>") {
+        let at = cursor + rel;
+        events.push((at, false));
+        cursor = at + "</form>".len();
+    }
+    events.sort_unstable();
+    events
+}
+
+/// Nested `<form>` elements in one document. The HTML parser DISCARDS a
+/// form start tag inside another form, merging both control sets into the
+/// outer form — which then fails constraint validation whenever either
+/// half's `required` inputs are empty, leaving the form permanently
+/// unsubmittable in every browser with no server-side trace.
+fn nested_form_violations(surface: &str, path: &str, html: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut depth = 0usize;
+    for (at, is_open) in form_events(html) {
+        if is_open {
+            if depth > 0 {
+                let snippet: String = html[at..].chars().take(140).collect();
+                violations.push(format!(
+                    "[{surface}] {path}: <form> nested inside another <form> — the parser merges them and required inputs from both halves must then all be filled: {snippet}",
+                ));
+            }
+            depth += 1;
+        } else {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    if depth != 0 {
+        violations.push(format!(
+            "[{surface}] {path}: unbalanced <form>/</form> (final depth {depth})",
+        ));
+    }
+    violations
+}
+
+/// GATE D (nested forms): no rendered document on either surface may nest a
+/// `<form>` inside another `<form>`. Found by dogfood 2026-10-06: the SSR MFA
+/// challenge page embedded the recovery-code form inside the authenticator
+/// form, so the browser collapsed them into one form whose `required`
+/// recovery input was empty and invisible — "Verify and sign in" produced no
+/// request at all and every MFA-enrolled console login was stuck.
+///
+/// The variants from [`crate::gate_support::STATEFUL_RENDER_VARIANTS`] are
+/// rendered too — the original bug lived only on `/login?mfa=1`, invisible to
+/// a manifest-only sweep.
+#[test]
+fn no_rendered_document_nests_a_form_inside_another_form() {
+    let mut violations = Vec::new();
+    for surface in ["web", "control-plane"] {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            violations.extend(nested_form_violations(surface, &document, &html));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "documents nesting <form> inside <form> (the parser collapses these into one unsubmittable form):\n{}",
+        violations.join("\n"),
+    );
+}
+
+#[cfg(test)]
+mod nested_form_detector_tests {
+    use super::nested_form_violations;
+
+    #[test]
+    fn detects_the_collapsed_mfa_challenge_shape() {
+        // The exact bug shape: recovery form embedded in the authenticator
+        // form (found live 2026-10-06).
+        let html = "<form action=\"/a\"><input name=\"code\" required><form action=\"/a\"><input name=\"recovery_code\" required></form></form>";
+        let found = nested_form_violations("web", "/login", html);
+        assert_eq!(found.len(), 1, "expected one nesting violation: {found:?}");
+    }
+
+    #[test]
+    fn sibling_forms_and_unbalanced_markup_are_handled() {
+        assert!(
+            nested_form_violations("web", "/x", "<form><input></form><form><input></form>")
+                .is_empty()
+        );
+        // A stray close tag is a different (unbalanced) violation class.
+        assert!(nested_form_violations("web", "/x", "<form><input></form></form>").is_empty());
+        assert_eq!(
+            nested_form_violations("web", "/x", "<form><input>").len(),
+            1
+        );
+        // A non-form tag sharing the prefix must not be mistaken for one.
+        assert!(nested_form_violations("web", "/x", "<formatted><form></form>").is_empty());
+    }
+}
+
+/// Does this POST form element carry a hidden `_csrf` field with a
+/// NON-EMPTY value? Returns (has_field, has_non_empty_value).
+fn csrf_field_state(form_element: &str) -> (bool, bool) {
+    let mut has_field = false;
+    let mut has_value = false;
+    for tag in crate::gate_support::opening_tags(form_element, "input") {
+        if attribute_value(tag, "name") == Some("_csrf") {
+            has_field = true;
+            if attribute_value(tag, "value").is_some_and(|value| !value.trim().is_empty()) {
+                has_value = true;
+            }
+        }
+    }
+    (has_field, has_value)
+}
+
+/// GATE D (CSRF token presence): every rendered `POST /web/*` form must
+/// carry a hidden `_csrf` field with a NON-EMPTY, pipeline-minted value.
+///
+/// Found by dogfood 2026-10-06: three new views rendered
+/// `<input type="hidden" name="_csrf" value="{csrf}" />` from a page-data
+/// field their loaders never populated. The render pipeline injects a
+/// correctly-valued token only into forms that LACK one (`inject_csrf_and_
+/// sign_confirms`) — so the explicit empty field blocked the injection and
+/// the browser posted `_csrf=` , which the form-CSRF bridge correctly
+/// refused. The form then could not be submitted by any user, with only a
+/// raw JSON 403 at the end (demo session advance). Views must not render
+/// `_csrf` themselves; this gate makes that structural.
+#[test]
+fn every_rendered_post_form_carries_a_non_empty_csrf_token() {
+    let mut violations = Vec::new();
+    for surface in ["web", "control-plane"] {
+        for (document, html) in crate::gate_support::gate_documents(surface) {
+            for (form_tag, element) in crate::gate_support::form_elements(&html) {
+                let method = attribute_value(form_tag, "method")
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let action = attribute_value(form_tag, "action").unwrap_or("");
+                if method != "post" || !action.starts_with("/web/") {
+                    continue;
+                }
+                let (has_field, has_value) = csrf_field_state(element);
+                if !has_field {
+                    violations.push(format!(
+                        "[{surface}] {document}: POST {action} form has no hidden `_csrf` field",
+                    ));
+                } else if !has_value {
+                    violations.push(format!(
+                        "[{surface}] {document}: POST {action} form carries an EMPTY `_csrf` value — the pipeline only injects a token into forms that lack the field, so this form can never be submitted",
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "POST forms whose CSRF token cannot work:\n{}",
+        violations.join("\n"),
+    );
+}

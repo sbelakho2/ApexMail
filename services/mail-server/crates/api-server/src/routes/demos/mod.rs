@@ -52,59 +52,137 @@ pub(crate) fn token_hash_public(token: &str) -> String {
 }
 
 /// Mint a viewer token (public wrapper for the browser handler).
-pub(crate) fn new_token_public() -> String {
+pub(crate) fn new_token_public() -> Result<String, ApiError> {
     new_token()
 }
 
 /// Run the next unexecuted step for the BROWSER handler: same execution path
-/// as the API (`run_step`), with the same idempotence guard, but returning a
-/// plain message for the flash channel.
+/// as the API (`advance_one_step`), with the same claim/serialisation guard,
+/// but returning a plain message for the flash channel.
 pub(crate) async fn advance_step_for_browser(state: &AppState, id: &str) -> Result<(), String> {
-    let next: Option<(i32, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT idx, kind, input FROM demo_session_steps \
-         WHERE session_id = $1 AND result IS NULL ORDER BY idx ASC LIMIT 1",
+    advance_one_step(state, id)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("could not advance the demo: {error}"))
+}
+
+/// Test-only rendezvous for the concurrency regression test: when set for a
+/// session, the first two (or more) advances of that session meet here
+/// BEFORE taking the session lock, so the test proves real overlap instead
+/// of relying on scheduler luck. Keyed by session id so no other test (even
+/// under a whole-process `cargo test`) is ever gated.
+#[cfg(test)]
+pub(crate) static ADVANCE_RENDEZVOUS: std::sync::OnceLock<(
+    String,
+    std::sync::Arc<tokio::sync::Barrier>,
+)> = std::sync::OnceLock::new();
+
+/// Execute at most ONE unexecuted step for `id`, safely under concurrency.
+///
+/// Concurrency contract (dogfood 2026-10-06 P1): the previous code claimed
+/// idempotence in a comment — "`FOR UPDATE` (inside a transaction) makes two
+/// concurrent advances serialise onto one step" — but opened no transaction
+/// and issued no `FOR UPDATE`, so two simultaneous advances both executed the
+/// same REAL step (a sandbox send, a domain registration, …). This is the
+/// claim the comment described:
+///
+/// 1. snapshot how many steps are already executed, then take the per-session
+///    `pg_advisory_xact_lock` for the WHOLE select+execute+store;
+/// 2. if an advance completed while we waited on the lock, that concurrent
+///    advance already consumed this click burst — this call is the loser and
+///    executes NOTHING (a user clicking "Run next step" only once after the
+///    burst still advances normally: its snapshot is taken after the burst);
+/// 3. otherwise select the next unexecuted step `FOR UPDATE`, run the real
+///    machinery, store the result and the terminal state in the SAME
+///    transaction, so the step row is never observable half-run and the lock
+///    releases at commit (a crash rolls everything back — no stuck state).
+///
+/// Returns the executed step's `idx`, or `None` when there was no unexecuted
+/// step or a concurrent advance owned this burst.
+async fn advance_one_step(state: &AppState, id: &str) -> Result<Option<i32>, sqlx::Error> {
+    // Snapshot BEFORE waiting for the lock (see the contract above).
+    let executed_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM demo_session_steps WHERE session_id = $1 AND result IS NOT NULL",
     )
     .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("could not read the next step: {error}"))?;
+    .fetch_one(&state.db)
+    .await?;
 
-    if let Some((idx, kind, input)) = next {
-        let result = run_step(state, &kind, &input).await;
-        sqlx::query(
-            "UPDATE demo_session_steps SET result = $3::jsonb, ran_at = NOW() \
-             WHERE session_id = $1 AND idx = $2 AND result IS NULL",
-        )
-        .bind(id)
-        .bind(idx)
-        .bind(bound_result(result))
-        .execute(&state.db)
-        .await
-        .map_err(|error| format!("could not store the step result: {error}"))?;
-        let _ = sqlx::query(
-            "UPDATE demo_sessions SET state = 'running', updated_at = NOW() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(&state.db)
-        .await;
+    #[cfg(test)]
+    if let Some((gated_session, barrier)) = ADVANCE_RENDEZVOUS.get() {
+        if gated_session == id {
+            // Bounded: a lone caller (or a leftover gate) can never hang the
+            // suite; it just proceeds after the window.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait()).await;
+        }
     }
+
+    let mut tx = state.db.begin().await?;
+    // One executor per session; `_xact_` releases the lock at commit/rollback.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let executed_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM demo_session_steps WHERE session_id = $1 AND result IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if executed_after != executed_before {
+        tracing::info!(
+            session_id = %id,
+            "a concurrent demo advance completed while this one waited — no step executed"
+        );
+        return Ok(None);
+    }
+
+    // The next unexecuted step, held FOR UPDATE for the whole claim.
+    let next: Option<(i32, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT idx, kind, input FROM demo_session_steps \
+         WHERE session_id = $1 AND result IS NULL ORDER BY idx ASC LIMIT 1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((idx, kind, input)) = next else {
+        return Ok(None);
+    };
+
+    #[cfg(test)]
+    record_step_execution(id);
+    let result = run_step(state, &kind, &input).await;
+    sqlx::query(
+        "UPDATE demo_session_steps SET result = $3::jsonb, ran_at = NOW() \
+         WHERE session_id = $1 AND idx = $2 AND result IS NULL",
+    )
+    .bind(id)
+    .bind(idx)
+    .bind(bound_result(result))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE demo_sessions SET state = 'running', updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
 
     let remaining: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM demo_session_steps WHERE session_id = $1 AND result IS NULL",
     )
     .bind(id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|error| format!("could not count remaining steps: {error}"))?;
+    .fetch_one(&mut *tx)
+    .await?;
     if remaining == 0 {
-        let _ = sqlx::query(
+        sqlx::query(
             "UPDATE demo_sessions SET state = 'completed', updated_at = NOW() WHERE id = $1",
         )
         .bind(id)
-        .execute(&state.db)
-        .await;
+        .execute(&mut *tx)
+        .await?;
     }
-    Ok(())
+
+    tx.commit().await?;
+    Ok(Some(idx))
 }
 
 fn token_hash(token: &str) -> String {
@@ -113,21 +191,34 @@ fn token_hash(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn new_token() -> String {
+/// Build a viewer token from a fill attempt + the buffer it filled.
+///
+/// Extracted from [`new_token`] so the failure branch is testable without a
+/// broken OS RNG. The old code "failed closed" to 64 zeros and relied on the
+/// database to refuse the duplicate hash — there is no unique constraint
+/// that a zero hash collides with, so a predictable publicly derivable
+/// token was minted and returned as a working viewer credential (dogfood
+/// 2026-10-06 P3). An RNG failure is now an ERROR: no session is created.
+fn token_from_fill<E: std::fmt::Display>(
+    fill: Result<(), E>,
+    bytes: [u8; 32],
+) -> Result<String, ApiError> {
+    fill.map_err(|error| {
+        tracing::error!(error = %error, "demo token generation failed: OsRng unavailable");
+        ApiError::ServiceUnavailable(
+            "demo links cannot be created: the OS random source is unavailable".into(),
+        )
+    })?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn new_token() -> Result<String, ApiError> {
     // 32 bytes of OS randomness, hex. The plaintext is returned to the
-    // presenter once and never stored. (Same idiom as the MFA secret
-    // generator: `try_fill_bytes` so a broken OS RNG is an error, not a
-    // silently weak token.)
+    // presenter once and never stored.
     let mut bytes = [0u8; 32];
     use rand::TryRngCore as _;
-    if rand::rngs::OsRng.try_fill_bytes(&mut bytes).is_err() {
-        tracing::error!("demo token generation failed: OsRng unavailable");
-        // Fail closed to an undistinguishable-in-shape but obviously
-        // non-secret value; the insert below cannot succeed with a duplicate
-        // hash, so the caller sees an error rather than a weak link.
-        bytes = [0u8; 32];
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let fill = rand::rngs::OsRng.try_fill_bytes(&mut bytes);
+    token_from_fill(fill, bytes)
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,20 +250,32 @@ pub struct DemoStepOut {
     pub ran_at: Option<String>,
 }
 
-/// Truncate a stored result so a hostile or huge output cannot bloat the row.
-fn bound_result(mut value: serde_json::Value) -> serde_json::Value {
+/// Bound a stored result so a hostile or huge output cannot bloat the row.
+///
+/// The oversized payload is REPLACED by a small envelope, never extended:
+/// the previous implementation inserted the excerpt INTO the oversized
+/// object, so the stored row kept every original byte AND grew by 16 KiB
+/// (dogfood 2026-10-06 P3 — the stated bound did not exist). The excerpt
+/// alone is capped at half the budget, so the envelope's total JSON size
+/// stays under `MAX_STORED_RESULT_BYTES` even for multi-byte text.
+fn bound_result(value: serde_json::Value) -> serde_json::Value {
     let rendered = value.to_string();
     if rendered.len() <= MAX_STORED_RESULT_BYTES {
         return value;
     }
-    let excerpt: String = rendered.chars().take(MAX_STORED_RESULT_BYTES).collect();
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "truncated_excerpt".to_string(),
-            serde_json::Value::String(excerpt),
-        );
+    let budget = MAX_STORED_RESULT_BYTES / 2;
+    let mut excerpt = String::new();
+    for ch in rendered.chars() {
+        if excerpt.len() + ch.len_utf8() > budget {
+            break;
+        }
+        excerpt.push(ch);
     }
-    value
+    serde_json::json!({
+        "truncated": true,
+        "original_bytes": rendered.len(),
+        "truncated_excerpt": excerpt,
+    })
 }
 
 /// Create a demo session from a script. The script must exist; its steps are
@@ -189,7 +292,7 @@ pub async fn create_session(
     let tenant_id = body.tenant_id.unwrap_or_else(|| auth.tenant_id.clone());
 
     let id = apexmail_lib::id::generate_id("dmo", 22);
-    let token = new_token();
+    let token = new_token()?;
     sqlx::query(
         "INSERT INTO demo_sessions (id, token_hash, script_key, state, created_by, expires_at) \
          VALUES ($1, $2, $3, 'created', $4, NOW() + make_interval(hours => $5::int))",
@@ -218,7 +321,18 @@ pub async fn create_session(
         .bind(serde_json::json!({
             "title": step.title,
             "tenant_id": tenant_id,
-            "params": step.params,
+            // The step params are written as an OBJECT: `run_step` reads them
+            // with `.get("path")`-style lookups, and the script declares them
+            // as pairs — serializing the pairs directly produced an ARRAY, so
+            // every parameterised step silently ran its defaults (dogfood
+            // 2026-10-06: three explorer steps all hit GET /v1/domains, the
+            // calculator priced Free/3,000 instead of the script's 600k, the
+            // chat asked the default question instead of Growth's).
+            "params": step
+                .params
+                .iter()
+                .map(|(key, value)| (key.to_string(), serde_json::Value::String(value.to_string())))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
         }))
         .execute(&state.db)
         .await?;
@@ -406,57 +520,43 @@ pub async fn advance_step(
         return read_session(State(state), _auth, Path(id)).await;
     }
 
-    // The next unexecuted step. `FOR UPDATE` (inside a transaction) makes two
-    // concurrent advances serialise onto one step; the unique
-    // `(session_id, idx)` plus the `result IS NULL` guard make the loser a
-    // no-op instead of a second execution.
-    let next: Option<(i32, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT idx, kind, input FROM demo_session_steps \
-         WHERE session_id = $1 AND result IS NULL ORDER BY idx ASC LIMIT 1",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await?;
-
-    if let Some((idx, kind, input)) = next {
-        let result = run_step(&state, &kind, &input).await;
-        let updated = sqlx::query(
-            "UPDATE demo_session_steps SET result = $3::jsonb, ran_at = NOW() \
-             WHERE session_id = $1 AND idx = $2 AND result IS NULL",
-        )
-        .bind(&id)
-        .bind(idx)
-        .bind(bound_result(result))
-        .execute(&state.db)
-        .await?
-        .rows_affected();
-        if updated > 0 {
-            let _ = sqlx::query(
-                "UPDATE demo_sessions SET state = 'running', updated_at = NOW() WHERE id = $1",
-            )
-            .bind(&id)
-            .execute(&state.db)
-            .await;
-        }
-    }
-
-    // Terminal when no unexecuted step remains.
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM demo_session_steps WHERE session_id = $1 AND result IS NULL",
-    )
-    .bind(&id)
-    .fetch_one(&state.db)
-    .await?;
-    if remaining == 0 {
-        let _ = sqlx::query(
-            "UPDATE demo_sessions SET state = 'completed', updated_at = NOW() WHERE id = $1",
-        )
-        .bind(&id)
-        .execute(&state.db)
-        .await;
-    }
+    // The claim IS the concurrency guard: one transaction holds a per-session
+    // advisory lock, selects the next unexecuted step FOR UPDATE, runs it and
+    // stores the result atomically. A concurrent advance executes NOTHING.
+    advance_one_step(&state, &id).await?;
 
     read_session(State(state), _auth, Path(id)).await
+}
+
+/// Test-only tally of `run_step` invocations, keyed by SESSION so the
+/// concurrency regression test proves two simultaneous advances execute the
+/// step ONCE by counting real executions of ITS session (a double execution
+/// of the same row is invisible in the table). A process-global counter
+/// collided with the other demos tests advancing their own sessions under
+/// plain `cargo test` parallelism — the per-session key keeps the test
+/// isolated under both `cargo test` and nextest.
+#[cfg(test)]
+pub(crate) static STEP_EXECUTIONS: std::sync::Mutex<
+    Option<std::collections::HashMap<String, usize>>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn record_step_execution(session_id: &str) {
+    let mut tally = STEP_EXECUTIONS.lock().expect("step execution tally");
+    *tally
+        .get_or_insert_with(std::collections::HashMap::new)
+        .entry(session_id.to_string())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+pub(crate) fn step_executions_for(session_id: &str) -> usize {
+    STEP_EXECUTIONS
+        .lock()
+        .expect("step execution tally")
+        .as_ref()
+        .and_then(|tally| tally.get(session_id).copied())
+        .unwrap_or(0)
 }
 
 /// Execute one step kind against REAL machinery. Errors are returned as a
@@ -622,6 +722,184 @@ mod tests {
     /// The owner-gated presenter API, end to end: create → advance (idempotent)
     /// → read, plus the viewer-token contract (hash stored, plaintext once,
     /// tamper/expiry refused, non-owner refused).
+    /// The stored params must be an OBJECT (what `run_step` reads). As pairs
+    /// they serialized to an array and every parameterised step ran defaults.
+    #[tokio::test]
+    async fn stored_step_params_are_an_object_the_runner_can_read() {
+        let Some(db) = pool("demos_params_shape").await else {
+            return;
+        };
+        let owner = seed_owner(&db).await;
+        let state = crate::app::test_support::test_state_over(db.clone()).await;
+        let Json(created) = create_session(
+            State(state.clone()),
+            owner_auth(&owner),
+            Json(CreateDemoBody {
+                script: "platform-tour".into(),
+                tenant_id: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let rows: Vec<(i32, serde_json::Value)> = sqlx::query_as(
+            "SELECT idx, input FROM demo_session_steps WHERE session_id = $1 ORDER BY idx ASC",
+        )
+        .bind(&created.id)
+        .fetch_all(&db)
+        .await
+        .expect("steps");
+        let mut checked = 0;
+        for (idx, input) in rows {
+            let params = input
+                .get("params")
+                .unwrap_or_else(|| panic!("step {idx} has no params"));
+            assert!(
+                params.is_object(),
+                "step {idx} params must be an OBJECT (the runner reads .get(\"key\")): {params}"
+            );
+            let expected = script::PLATFORM_TOUR.steps[idx as usize].params;
+            for (key, value) in expected {
+                assert_eq!(
+                    params.get(*key).and_then(|v| v.as_str()),
+                    Some(*value),
+                    "step {idx} param {key} must round-trip"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the tour must carry at least one parameter");
+
+        let _ = sqlx::query("DELETE FROM demo_sessions WHERE id = $1")
+            .bind(&created.id)
+            .execute(&db)
+            .await;
+    }
+
+    /// Dogfood 2026-10-06 P3: the RNG-failure branch used to return 64 zeros
+    /// as a working viewer credential. It is now an error and NO token is
+    /// produced — the caller refuses instead of minting a public secret.
+    #[test]
+    fn token_generation_failure_is_an_error_not_an_all_zero_secret() {
+        let error = token_from_fill(Err(std::io::Error::other("os rng unavailable")), [0u8; 32])
+            .expect_err("an RNG failure must not produce a token");
+        assert!(
+            error.to_string().contains("OS random source"),
+            "the reason names the RNG: {error}"
+        );
+
+        // The happy path still mints 64 lowercase hex chars.
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xab;
+        bytes[31] = 0x01;
+        let token = token_from_fill(Ok::<(), std::io::Error>(()), bytes).expect("filled buffer");
+        assert_eq!(token.len(), 64);
+        assert!(token
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert_ne!(token, "0".repeat(64), "never the old fail-open value");
+    }
+
+    /// Dogfood 2026-10-06 P3: an oversized result must be REPLACED by a
+    /// bounded envelope — the old code appended the excerpt to the oversized
+    /// object, so the stored row kept every original byte and grew.
+    #[test]
+    fn bound_result_replaces_an_oversized_result_with_a_bounded_envelope() {
+        // Small results pass through byte-identical.
+        let small = serde_json::json!({"status": 200, "title": "Console"});
+        assert_eq!(bound_result(small.clone()), small);
+
+        // A 40 KiB payload collapses to a bounded envelope that keeps none of
+        // the original structure.
+        let huge = serde_json::json!({
+            "kind": "render_page",
+            "excerpt": "x".repeat(40 * 1024),
+        });
+        let bounded = bound_result(huge.clone());
+        assert_eq!(bounded["truncated"], serde_json::json!(true));
+        assert_eq!(
+            bounded["original_bytes"].as_u64(),
+            Some(huge.to_string().len() as u64)
+        );
+        assert!(bounded.get("excerpt").is_none(), "the original is gone");
+        let serialized = bounded.to_string();
+        assert!(
+            serialized.len() <= MAX_STORED_RESULT_BYTES,
+            "the stored envelope must be bounded, got {} bytes",
+            serialized.len()
+        );
+        assert!(
+            bounded["truncated_excerpt"]
+                .as_str()
+                .is_some_and(|excerpt| !excerpt.is_empty()),
+            "the bounded envelope still carries an excerpt"
+        );
+    }
+
+    /// Dogfood 2026-10-06 P1: the `FOR UPDATE` claim the comment described did
+    /// not exist, so two simultaneous advances both executed the same REAL
+    /// step. The claim now serialises them; the loser executes nothing.
+    #[tokio::test]
+    async fn two_simultaneous_advances_run_the_step_once() {
+        let Some(db) = pool("demos_concurrent_advance").await else {
+            return;
+        };
+        let owner = seed_owner(&db).await;
+        let state = crate::app::test_support::test_state_over(db.clone()).await;
+        let Json(created) = create_session(
+            State(state.clone()),
+            owner_auth(&owner),
+            Json(CreateDemoBody {
+                script: "platform-tour".into(),
+                tenant_id: None,
+            }),
+        )
+        .await
+        .expect("create");
+
+        let before = step_executions_for(&created.id);
+        // Deterministic overlap: both advances meet before taking the
+        // session lock, so the loser is decided by the concurrency contract
+        // rather than by the test scheduler.
+        let _ = ADVANCE_RENDEZVOUS.set((
+            created.id.clone(),
+            std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+        ));
+        let (first, second) = tokio::join!(
+            advance_step(
+                State(state.clone()),
+                owner_auth(&owner),
+                Path(created.id.clone())
+            ),
+            advance_step(
+                State(state.clone()),
+                owner_auth(&owner),
+                Path(created.id.clone())
+            ),
+        );
+        let _ = first.expect("first advance");
+        let _ = second.expect("second advance");
+        let executed = step_executions_for(&created.id) - before;
+        assert_eq!(
+            executed, 1,
+            "two simultaneous advances must run the step exactly ONCE"
+        );
+
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM demo_session_steps WHERE session_id = $1 AND result IS NOT NULL",
+        )
+        .bind(&created.id)
+        .fetch_one(&db)
+        .await
+        .expect("count results");
+        assert_eq!(stored, 1, "exactly one step result is stored");
+
+        let _ = sqlx::query("DELETE FROM demo_sessions WHERE id = $1")
+            .bind(&created.id)
+            .execute(&db)
+            .await;
+    }
+
     #[tokio::test]
     async fn demo_session_lifecycle_advances_idempotently_and_the_viewer_token_is_hashed() {
         let Some(db) = pool("demos_lifecycle").await else {

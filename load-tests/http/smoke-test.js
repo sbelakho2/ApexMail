@@ -1,152 +1,129 @@
 // =============================================================================
 // ApexMail — Smoke Test
 // =============================================================================
-// LT-C-02: Minimal k6 smoke test to verify that the API server is running,
-// responsive, and returning correct responses. A smoke test is the first test
-// to run in CI — it validates basic functionality before investing resources
-// in full-scale load tests.
+// LT-C-02: Minimal k6 smoke test that verifies the API server is running and
+// honouring its documented contract. The first test to run before investing
+// resources in full-scale load tests.
 //
 // Characteristics:
-//   - 1 Virtual User (VU)
-//   - 1 iteration only
-//   - No ramp-up, immediate execution
-//   - Fast execution (< 30s)
+//   - 1 Virtual User (VU), 1 iteration
+//   - No ramp-up, immediate execution (< 30s)
 //
-// What it validates:
-//   - API server is reachable and not crashing
-//   - Health endpoints return 200
-//   - Auth endpoint returns a token
-//   - Email send endpoint returns 202 (accepted)
-//   - No 5xx or connection errors
+// Contract asserted (services/mail-server/crates/api-server):
+//   - GET /health/live and GET /health/ready return 200
+//   - GET /v1/messages with `X-API-Key` returns 200 (authenticated read;
+//     the API key header is X-API-Key, NOT Authorization: Bearer)
+//   - POST /v1/messages with the real SendMessageRequest shape
+//     {from, to[], subject, html?, text?, tags?: string[]} returns 202 and
+//     {"data":{"id","status","created_at"},"error":null}
 //
-// Exit code: 0 on success, 1 on failure
+// Thresholds (LT-2): the previous only gate was `http_req_failed: rate<1`,
+// which a server answering 9 of every 10 requests with an error passed. The
+// smoke test now fails at meaningful error rates and every `check()` gates
+// through the built-in `checks` rate.
+//
+// Run (manual/on-demand — the load-gate workflow is archived, ci/README.md §2):
+//   K6_API_KEY=am_live_… K6_API_BASE=http://localhost:8080 \
+//     K6_FROM_EMAIL=sender@verified.example \
+//     k6 run load-tests/http/smoke-test.js
 // =============================================================================
 
 import { check } from 'k6';
 import http from 'k6/http';
-import { BASE_URL, DEFAULT_HEADERS, testTags } from './test-options.js';
+import { API_KEY, BASE_URL, FROM_EMAIL, apiKeyHeaders, testTags } from './test-options.js';
 
 // ── Test Options ────────────────────────────────────────────────────────────
 
 export const options = {
-  // Single VU, single iteration
   vus: 1,
   iterations: 1,
-
-  // No ramp-up — execute immediately
   stages: [],
 
-  // Light thresholds — smoke test should always pass if server is up
   thresholds: {
-    http_req_duration: ['p(95)<2000'],  // Allow up to 2s for cold start
-    http_req_failed: ['rate<1'],         // Allow up to 100% failure if server is down
+    http_req_duration: ['p(95)<2000'],
+    // LT-2: rate<0.01 — a real error budget, not "allow 100% failure".
+    http_req_failed: ['rate<0.01'],
+    // Every documented-contract check must pass.
+    checks: ['rate>0.99'],
   },
 
-  // Discard response bodies
-  discardResponseBodies: true,
-
-  // Tags for identification
+  discardResponseBodies: false,
   tags: testTags('smoke-test'),
 };
+
+// ── Setup ───────────────────────────────────────────────────────────────────
+
+export function setup() {
+  if (!API_KEY) {
+    throw new Error(
+      'K6_API_KEY is required (X-API-Key: am_… for the target tenant); ' +
+        'the smoke test asserts the authenticated read and send contract'
+    );
+  }
+  return { start_time: Date.now() };
+}
 
 // ── Test Scenario ───────────────────────────────────────────────────────────
 
 export default function () {
   const tags = { test_name: 'smoke-test' };
 
-  // 1. Liveness check
-  //    Basic health check — no authentication required.
-  //    Expected: HTTP 200, body contains "ok" or similar
-  const livenessResp = http.get(
-    `${BASE_URL}/health/live`,
-    { headers: DEFAULT_HEADERS, tags: { ...tags, endpoint: 'liveness' } }
-  );
-
+  // 1. Liveness — no authentication.
+  const livenessResp = http.get(`${BASE_URL}/health/live`, {
+    headers: { Accept: 'application/json' },
+    tags: { ...tags, endpoint: 'liveness' },
+  });
   check(livenessResp, {
     'liveness status is 200': (r) => r.status === 200,
-    'liveness body is valid': (r) => r.body !== undefined && r.body.length > 0,
+    'liveness body is non-empty': (r) => r.body !== undefined && r.body.length > 0,
   });
 
-  // 2. Readiness check
-  //    Deeper health check — validates DB connectivity etc.
-  //    Expected: HTTP 200
-  const readinessResp = http.get(
-    `${BASE_URL}/health/ready`,
-    { headers: DEFAULT_HEADERS, tags: { ...tags, endpoint: 'readiness' } }
-  );
-
+  // 2. Readiness — DB connectivity etc.
+  const readinessResp = http.get(`${BASE_URL}/health/ready`, {
+    headers: { Accept: 'application/json' },
+    tags: { ...tags, endpoint: 'readiness' },
+  });
   check(readinessResp, {
     'readiness status is 200': (r) => r.status === 200,
   });
 
-  // 3. Auth login
-  //    Verify authentication flow works.
-  //    Expected: HTTP 200, JSON body with "token" field
-  const loginPayload = JSON.stringify({
-    email: 'smoke-test@apexmail.ee',
-    password: 'smoke-test-password',
+  // 3. Authenticated read — proves X-API-Key reaches the API key middleware.
+  const listResp = http.get(`${BASE_URL}/v1/messages?limit=1`, {
+    headers: apiKeyHeaders(),
+    tags: { ...tags, endpoint: 'messages-list' },
+  });
+  check(listResp, {
+    'authenticated messages list status is 200': (r) => r.status === 200,
   });
 
-  const loginResp = http.post(
-    `${BASE_URL}/v1/auth/login`,
-    loginPayload,
-    { headers: DEFAULT_HEADERS, tags: { ...tags, endpoint: 'auth' } }
-  );
-
-  check(loginResp, {
-    'auth login status is 200': (r) => r.status === 200,
-    'auth login has token': (r) => {
-      try {
-        return JSON.parse(r.body).token !== undefined;
-      } catch {
-        return false;
-      }
-    },
-  });
-
-  // 4. Email send
-  //    Verify email submission endpoint works.
-  //    Expected: HTTP 202 (accepted for processing)
-  const token = loginResp.status === 200
-    ? JSON.parse(loginResp.body).token
-    : '';
-
+  // 4. Email send — the real SendMessageRequest payload and 202 envelope.
   const emailPayload = JSON.stringify({
-    from: 'smoke-test@apexmail.ee',
-    to: ['recipient@example.com'],
+    from: FROM_EMAIL,
+    to: ['smoke-recipient@example.com'],
     subject: '[Smoke Test] Basic functionality check',
-    text_body: 'This is a smoke test email sent by k6.',
+    text: 'This is a smoke test email sent by k6.',
+    tags: ['smoke-test'],
   });
-
-  const emailResp = http.post(
-    `${BASE_URL}/v1/messages`,
-    emailPayload,
-    {
-      headers: {
-        ...DEFAULT_HEADERS,
-        'Authorization': `Bearer ${token}`,
-      },
-      tags: { ...tags, endpoint: 'email-send' },
-    }
-  );
-
+  const emailResp = http.post(`${BASE_URL}/v1/messages`, emailPayload, {
+    headers: apiKeyHeaders(),
+    tags: { ...tags, endpoint: 'email-send' },
+  });
   check(emailResp, {
-    'email send status is 200 or 202': (r) => r.status === 200 || r.status === 202,
-    'email send has message_id': (r) => {
+    'email send status is 202': (r) => r.status === 202,
+    'email send returns the queued message envelope': (r) => {
       try {
         const body = JSON.parse(r.body);
-        return body.message_id !== undefined || body.id !== undefined;
+        return body.data !== undefined && body.data.id !== undefined && body.data.status !== undefined;
       } catch {
         return false;
       }
     },
   });
 
-  // Summary
   console.log(`Smoke test completed:
     Liveness:  ${livenessResp.status}
     Readiness: ${readinessResp.status}
-    Auth:      ${loginResp.status}
+    List:      ${listResp.status}
     Email:     ${emailResp.status}
   `);
 }

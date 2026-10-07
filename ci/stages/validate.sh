@@ -132,6 +132,40 @@ validate_ci_image_pins() {
     return 0
 }
 
+# backup_service_coverage — every backup sidecar the production compose
+# defines must appear in BOTH canonical service lists (ci/stages/deploy.sh
+# STACK_SERVICES, ci/stages/verify.sh VERIFY_SERVICES). redis-backup and
+# analytics-backup were built, Trivy-gated and digest-pinned by the images
+# stage yet absent from both lists — `up -d $STACK_SERVICES` never started
+# them and verify never noticed (audit P2). Mechanical and docker-free: parse
+# the compose service keys and the two list assignments.
+backup_service_coverage() {
+    _bsc_err=0
+    _bsc_svcs=$(grep -E '^  [a-z0-9][a-z0-9-]*-backup:' "$REPO_ROOT/docker-compose.prod.yml" 2>/dev/null \
+        | sed -E 's/^  ([a-z0-9-]+):.*/\1/' | sort -u || true)
+    if [ -z "$_bsc_svcs" ]; then
+        ci_err "no *-backup services found in docker-compose.prod.yml — the coverage check lost its input (compose layout changed?)"
+        return "$CI_EXIT_FAIL"
+    fi
+    # (strip the leading VAR= of each assignment's first line; fold newlines so
+    # every word is space-delimited for the word-boundary case match below)
+    _bsc_deploy=$(sed -n '/^STACK_SERVICES=/,/"$/p' "$CI_ROOT/stages/deploy.sh" | tr -d '"' | sed 's/^[A-Z_]*=//' | tr '\n' ' ')
+    _bsc_verify=$(sed -n '/^VERIFY_SERVICES=/,/"$/p' "$CI_ROOT/stages/verify.sh" | tr -d '"' | sed 's/^[A-Z_]*=//' | tr '\n' ' ')
+    for _bsc_svc in $_bsc_svcs; do
+        case " $_bsc_deploy " in
+            *" $_bsc_svc "*) ;;
+            *) ci_err "backup service '$_bsc_svc' is in docker-compose.prod.yml but NOT in ci/stages/deploy.sh STACK_SERVICES — it would be built and pinned but never started"; _bsc_err=1 ;;
+        esac
+        case " $_bsc_verify " in
+            *" $_bsc_svc "*) ;;
+            *) ci_err "backup service '$_bsc_svc' is in docker-compose.prod.yml but NOT in ci/stages/verify.sh VERIFY_SERVICES — a stopped scheduler would go unnoticed"; _bsc_err=1 ;;
+        esac
+    done
+    [ "$_bsc_err" -eq 0 ] || return "$CI_EXIT_FAIL"
+    ci_info "PASS: backup-service coverage ($(printf '%s' "$_bsc_svcs" | tr '\n' ' '))"
+    return "$CI_EXIT_OK"
+}
+
 # The successor of "is the workflow YAML valid": the pipeline is only as good
 # as its own configuration, so validate stage contracts, timeouts, and that
 # the README replacement map covers EVERY file in .github/workflows/.
@@ -226,6 +260,12 @@ validate_pipeline_config() {
     grep -qi 'woodpecker' "$CI_ROOT/README.md" 2>/dev/null \
         || { ci_err "ci/README.md does not document the Woodpecker executor"; _vp_err=1; }
 
+    # Backup sidecars: every *-backup service in the prod compose must be
+    # covered by the deploy stage's `up` list and the verify stage's probe
+    # list, or it silently never runs (audit P2). The check has teeth and its
+    # own failure direction — see ci/tests/validate-coverage-selftest.sh.
+    backup_service_coverage || _vp_err=1
+
     [ "$_vp_err" -eq 0 ] || return "$CI_EXIT_FAIL"
     ci_info "PASS: pipeline config sane; no GitHub Actions CI; Woodpecker executor wired to the ci/ stages"
     return "$CI_EXIT_OK"
@@ -235,15 +275,38 @@ validate_pipeline_config() {
 validate_repo_gates() {
     cd "$REPO_ROOT"
 
+    # Audit P2: the python3-driven gates below (panic paths, capability,
+    # pricing, knowledge, eval, repo-map, docs-lint, migration lint) are
+    # REQUIRED; a missing python3 must fail the stage instead of skipping the
+    # block with a warning. lane_tool_status fails closed for a REQUIRED lane
+    # on every host; the tool is installed everywhere by ci/install.sh.
+    _vr_py_st=$(lane_tool_status python3 validate-python-gates required)
+    case $_vr_py_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+    esac
+    # run in both `run` (tool present) and dry-run (assumed runnable) cases.
+    _vr_py=1
+
     # (a) compose image-name drift guard — port of deploy.yml's
     #     deploy-image-name-guard job (canonical map from deploy/DEPLOYMENT.md).
     image_name_guard || return "$CI_EXIT_FAIL"
 
     # (b) brand/product isolation (kiwi-leak-check.yml).
     ci_check "kiwi marketing isolation" bash tools/check-kiwi-marketing-isolation.sh
+    # Risk-WAF Lua parity + trust-neutrality: a real invariant gate that
+    # regressed silently before and was never wired (2026-10-07 review).
+    ci_check "risk lua parity" bash tools/check-risk-lua-parity.sh
 
     # (c) panic-path guardrails (rust-panic-paths.yml).
-    if command -v python3 >/dev/null 2>&1; then
+    if [ "$_vr_py" = 1 ]; then
+        # SDK version invariant (audit SM15 F4 follow-up): packages/README.md
+        # states each SDK's version constant must equal its CHANGELOG's head
+        # entry and declares `python3 packages/check_versions.py` the CI gate
+        # — but nothing invoked it (CV-1). python3-only, so it runs here in
+        # the cheap validate stage, before anything compiles. REQUIRED: a
+        # drift fails the run.
+        ci_check "SDK version lockstep (packages/check_versions.py)" \
+            python3 packages/check_versions.py
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
         ci_check "topology contracts" python3 tools/check_topology_contracts.py
@@ -254,6 +317,10 @@ validate_repo_gates() {
         # patterns stay out of web.rs + web/data.rs production regions and
         # the honest WebActionError surface stays wired.
         ci_check "web error honesty" python3 tools/check_web_error_honesty.py
+        # The meta-proof (2026-10-07 gates review): the gate's own masker
+        # bug (multi-line string desync) made --self-test useless while CI
+        # ran only the gate. Both are required now.
+        ci_check "web error honesty self-test" python3 tools/check_web_error_honesty.py --self-test
         # Immutable image pins (external audit item 5): the checker gates the
         # deploy-time live rendering (ci/stages/deploy.sh); here CI proves its
         # TEETH on committed fixtures, no docker needed — the digest/git-sha
@@ -312,6 +379,15 @@ validate_repo_gates() {
             python3 tools/check_knowledge_consistency.py
             python3 tools/check_knowledge_consistency.py --self-test
         '
+        # Eval-corpus gate (plan §6/§9): the AI goldens in docs/eval must
+        # assert CANONICAL facts — a chat golden requiring a stale price (or
+        # forbidding a canonical one) would bless the regression it exists to
+        # catch. Its --self-test proves the checker reacts to mutated corpora.
+        ci_check "eval corpora vs canonical facts" bash -c '
+            set -eu
+            python3 tools/check_eval_corpora.py
+            python3 tools/check_eval_corpora.py --self-test
+        '
         # docs-lint (adopted from the KiwiCaptcha product): prose ratchet over
         # docs/ + the product root files. Baseline enforced; the integrity
         # check runs against the parent-commit baseline when available so a
@@ -323,14 +399,18 @@ validate_repo_gates() {
                 git show "HEAD~1:tools/docs-lint-baseline.txt" > "$parent_baseline" 2>/dev/null \
                     || { rm -f "$parent_baseline"; parent_baseline=""; }
             fi
+            # The ratchet and the integrity step are separate MODES of the
+            # tool (passing --baseline and --integrity together is a usage
+            # error the gate previously swallowed: docs-lint exited 0 on its
+            # own conflict message, so the required check passed vacuously —
+            # gates review follow-up, 2026-10-07). Run both, read-only.
+            ci_check "docs-lint ratchet" \
+                sh "$REPO_ROOT/tools/docs-lint.sh" --baseline "$REPO_ROOT/tools/docs-lint-baseline.txt"
             if [ -n "$parent_baseline" ] && [ -f "$parent_baseline" ]; then
-                ci_check "docs-lint ratchet + integrity" \
-                    sh "$REPO_ROOT/tools/docs-lint.sh" --baseline "$REPO_ROOT/tools/docs-lint-baseline.txt" --integrity "$parent_baseline"
-                rm -f "$parent_baseline"
-            else
-                ci_check "docs-lint ratchet" \
-                    sh "$REPO_ROOT/tools/docs-lint.sh" --baseline "$REPO_ROOT/tools/docs-lint-baseline.txt"
+                ci_check "docs-lint integrity" \
+                    sh "$REPO_ROOT/tools/docs-lint.sh" --integrity "$parent_baseline" --no-write-adopted
             fi
+            [ -z "$parent_baseline" ] || rm -f "$parent_baseline"
         fi
         # Repo-map drift guard (the coverage-catalog pattern):
         # tools/repo-map.md is GENERATED from the source manifests (workspace
@@ -343,8 +423,6 @@ validate_repo_gates() {
         # `.gitignore` prevents new ones; this proves nothing slipped back.
         ci_check "no generated artifacts tracked" bash -c \
             '! git ls-files | grep -E "\.profraw$|\.profdata$|^apps/ai/training/(output_[0-9]+/|merged_)" | grep -q .'
-    else
-        ci_warn "python3 missing — panic-path guardrails skipped"
     fi
 
     # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):
@@ -356,7 +434,7 @@ validate_repo_gates() {
     # validation on the deploy host) — they are grandfathered inside the
     # checker with justifications, NOT edited. CI_MIGRATION_LINT_CHECK
     # downgrades to advisory for a triage window.
-    if command -v python3 >/dev/null 2>&1; then
+    if [ "$_vr_py" = 1 ]; then
         _ml_rc=0
         (cd "$REPO_ROOT" && ci_check "migration SQL lint (tools/migration_lint.py)" \
             python3 tools/migration_lint.py) || _ml_rc=$?
@@ -365,8 +443,6 @@ validate_repo_gates() {
         elif [ "$_ml_rc" -ne 0 ]; then
             return "$CI_EXIT_FAIL"
         fi
-    else
-        ci_warn "python3 missing — migration SQL lint skipped"
     fi
 
     # (d) legal identity constants (legal-identity.yml rust-legal-entity job,
@@ -380,8 +456,7 @@ validate_repo_gates() {
     ci_check "rollback plan present" test -s deploy/rollback-plan.md
 
     # (g) claim expiry — advisory (monthly cadence upstream).
-    command -v python3 >/dev/null 2>&1 && \
-        ci_check_advisory "claim expiry (warn 30d)" python3 tools/check_claim_expiry.py --warn-days 30
+    ci_check_advisory "claim expiry (warn 30d)" python3 tools/check_claim_expiry.py --warn-days 30
 
     # (h) zola-dependent gates: build the marketing site once, then run the
     #     pricing drift (REQUIRED — a deploy.yml pr-gate check), legal identity
@@ -421,8 +496,12 @@ image_name_guard() {
                     ci_err "non-canonical GHCR image: $_ref (basename '$_base')"
                     _errs=$((_errs + 1))
                 fi
+                # A POSIX case pattern must match from the START of the
+                # string, so the old `:v[0-9]*` could never match
+                # `ghcr.io/.../api-server:v1.2.3` — dead code (audit P3).
+                # Match the tag anywhere after the repository separator.
                 case $_ref in
-                    :v[0-9]*)
+                    *:v[0-9]*)
                         ci_err "version tag in $_ref — only :latest/:<sha> are produced (deploy/DEPLOYMENT.md)"
                         _errs=$((_errs + 1))
                         ;;
@@ -556,10 +635,18 @@ zola_gates() {
     _zg_zola=''
     _zg_zola=$(ci_zola 2>/dev/null) || _zg_zola=''
     if [ -z "$_zg_zola" ]; then
-        if [ "${CI_ZOLA_REQUIRED:-0}" = 1 ]; then
-            ci_die "zola missing and CI_ZOLA_REQUIRED=1 — install zola (ci/install.sh)"
+        # Audit P2: the marketing gates are REQUIRED by default
+        # (CI_MARKETING_VALIDATION=required), so "no pinned zola obtainable"
+        # cannot warn-and-skip — a required gate that silently does not run is
+        # the exact failure this fails closed on. `advisory` keeps the
+        # bounded triage window; CI_ZOLA_REQUIRED=1 forces the failure even
+        # under advisory.
+        if [ "${CI_ZOLA_REQUIRED:-0}" = 1 ] || [ "${CI_MARKETING_VALIDATION:-required}" = required ]; then
+            ci_err "no pinned zola obtainable (ci_zola) — the marketing gates are REQUIRED \
+(install zola + curl via ci/install.sh, or set CI_MARKETING_VALIDATION=advisory for a triage window)"
+            return "$CI_EXIT_FAIL"
         fi
-        ci_warn "zola missing — marketing gates (pricing drift, legal HTML, a11y/seo) skipped"
+        ci_warn "zola missing — marketing gates (pricing drift, legal HTML, a11y/seo) skipped (CI_MARKETING_VALIDATION=advisory)"
         return "$CI_EXIT_OK"
     fi
     if ci_dry; then
@@ -577,18 +664,18 @@ zola_gates() {
     # Forbidden patterns (legal-identity.yml forbidden-patterns job): scans
     # the BUILT output, so it must run AFTER the zola build — it previously
     # ran earlier against whatever stale public/ was lying around.
-    ci_check "forbidden patterns" bash tools/check-forbidden-patterns.sh
+    ci_check "forbidden patterns" bash tools/check-forbidden-patterns.sh --require-build
 
     # template-leak gate over the committed/built output (deploy.yml pre-build)
     ci_check "template leaks (marketing public/)" \
         bash deploy/scripts/check-template-leaks.sh apps/marketing-zola/public
 
-    # pricing drift — REQUIRED (one of deploy.yml's pr-gate required checks)
-    if command -v python3 >/dev/null 2>&1; then
-        ci_check "pricing drift" python3 tools/validate_pricing_drift.py
-        ci_check "legal identity (built HTML)" \
-            python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
-    fi
+    # pricing drift — REQUIRED (one of deploy.yml's pr-gate required checks).
+    # python3 presence is guaranteed by validate_repo_gates' lane_tool_status
+    # gate (audit P2), so there is no silent-skip path left here.
+    ci_check "pricing drift" python3 tools/validate_pricing_drift.py
+    ci_check "legal identity (built HTML)" \
+        python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
 
     # Site-quality validators (html-validation / accessibility / seo — F14,
     # plus the broken-link, content-voice, font/image-optimization,
@@ -609,14 +696,19 @@ zola_gates() {
     # the real signup endpoint against production (creates accounts) —
     # manual-only, see ci/README.md §2a.
     BUILD_DIR=apps/marketing-zola/public
+    # _mv_gate <script> <label> <report> [advisory] — run one marketing
+    # validator; `advisory` forces the advisory path regardless of
+    # CI_MARKETING_VALIDATION (used for checkers whose invariant cannot gate
+    # a merge — see the two callers below). The report-artifact contract
+    # stays: a validator that ran without writing a report fails the stage.
     _mv_gate() {
-        _mvg_script=$1 _mvg_label=$2 _mvg_report=$3
+        _mvg_script=$1 _mvg_label=$2 _mvg_report=$3 _mvg_force=${4:-}
         _mvg_rc=0
-        if [ "$CI_MARKETING_VALIDATION" = required ]; then
+        if [ "$_mvg_force" = advisory ] || [ "$CI_MARKETING_VALIDATION" != required ]; then
+            ci_check_advisory "$_mvg_label" env BUILD_DIR=$BUILD_DIR bash "deploy/tests/$_mvg_script"
+        else
             ci_check "$_mvg_label" env BUILD_DIR=$BUILD_DIR bash "deploy/tests/$_mvg_script" \
                 || _mvg_rc=$CI_EXIT_FAIL
-        else
-            ci_check_advisory "$_mvg_label" env BUILD_DIR=$BUILD_DIR bash "deploy/tests/$_mvg_script"
         fi
         if [ -f "deploy/tests/$_mvg_report" ]; then
             cp "deploy/tests/$_mvg_report" "$RUN_DIR/$_mvg_report" \
@@ -638,8 +730,18 @@ zola_gates() {
     # the same read-only production GETs contrast-check makes above): TTFB,
     # per-class byte budgets and third-party counts from the page HTML —
     # chromium-free since the marketing site is zero-JS (raw HTML == DOM).
-    [ -f deploy/tests/performance-budget.sh ] && { _mv_gate performance-budget.sh "Performance budget (live, read-only)" .performance-budget-report.json || return "$CI_EXIT_FAIL"; }
-    [ -f deploy/tests/cta-tracking-test.sh ] && { _mv_gate cta-tracking-test.sh "CTA tracking wiring" .cta-tracking-report.json || return "$CI_EXIT_FAIL"; }
+    # ADVISORY (audit P3): it gates the STATE OF PRODUCTION from the merge
+    # lane — a prod wobble or a slow path from the executor would fail an
+    # unrelated merge without saying anything about the artifact under test.
+    # The report is still produced and preserved.
+    [ -f deploy/tests/performance-budget.sh ] && { _mv_gate performance-budget.sh "Performance budget (live, read-only)" .performance-budget-report.json advisory || return "$CI_EXIT_FAIL"; }
+    # CTA tracking: ADVISORY (audit P3) — the validator only ever records
+    # `warning` severities (no critical class exists), so wiring it as
+    # REQUIRED was decorative: it could never produce a non-zero exit. The
+    # checked invariant (data-* tracking attributes) also does not match this
+    # zero-JS, server-side-analytics site; enforcing it as required would
+    # gate merges on an attribute convention the product does not use.
+    [ -f deploy/tests/cta-tracking-test.sh ] && { _mv_gate cta-tracking-test.sh "CTA tracking wiring" .cta-tracking-report.json advisory || return "$CI_EXIT_FAIL"; }
     return "$CI_EXIT_OK"
 }
 

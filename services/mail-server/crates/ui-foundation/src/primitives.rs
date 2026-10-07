@@ -337,7 +337,7 @@ impl<'a> Input<'a> {
         // `aria-describedby` always points at the paragraph THIS render
         // emits right after the control.
         let error_id = match self.id {
-            Some(id) => format!("{id}-error"),
+            Some(id) => format!("{}-error", html_escape(id)),
             None => "input-error".to_string(),
         };
         let aria_error = if self.error.is_some() {
@@ -347,7 +347,7 @@ impl<'a> Input<'a> {
         };
         let id_attr = self
             .id
-            .map(|value| format!(" id=\"{}\"", value))
+            .map(|value| format!(" id=\"{}\"", html_escape(value)))
             .unwrap_or_default();
         let autocomplete_attr = self
             .autocomplete
@@ -355,7 +355,7 @@ impl<'a> Input<'a> {
             .unwrap_or_default();
         let name_attr = self
             .name
-            .map(|value| format!(" name=\"{}\"", value))
+            .map(|value| format!(" name=\"{}\"", html_escape(value)))
             .unwrap_or_default();
         let required_attr = if self.required {
             " required aria-required=\"true\""
@@ -368,7 +368,7 @@ impl<'a> Input<'a> {
         // instead of an attribute). Every attribute now sits where it
         // belongs: classes in class=, the rest as real attributes.
         let classes = format!(
-            "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
+            "flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}",
             input_variant_class(resolved_variant),
             input_size_class(self.size),
         );
@@ -377,8 +377,12 @@ impl<'a> Input<'a> {
             input_type = self.input_type,
             name = name_attr,
             id = id_attr,
-            value = self.value,
-            placeholder = self.placeholder,
+            // Server-loaded, user-controlled values: escaping is mandatory
+            // here (a `"` in a campaign name would otherwise break out of the
+            // attribute — the one render path in this crate that did not
+            // escape; dogfood finding 2026-10-06).
+            value = html_escape(self.value),
+            placeholder = html_escape(self.placeholder),
             classes = classes,
             disabled = disabled,
             aria_error = aria_error,
@@ -400,7 +404,9 @@ impl<'a> Input<'a> {
 
         if let Some(error) = self.error {
             return format!(
-                "<div>{base}<p id=\"{error_id}\" class=\"text-xs text-destructive\" role=\"alert\">{error}</p></div>"
+                "<div>{base}<p id=\"{}\" class=\"text-xs text-destructive\" role=\"alert\">{}</p></div>",
+                html_escape(&error_id),
+                html_escape(error),
             );
         }
 
@@ -443,16 +449,16 @@ impl<'a> Textarea<'a> {
             .map(|value| format!(" id=\"{}\"", value))
             .unwrap_or_default();
         let textarea = format!(
-            "<textarea{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{}{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary apex-focus-ring disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
             id_attr,
             name_attr,
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
             self.variant,
             self.resize,
-            self.placeholder,
+            html_escape(self.placeholder),
             describedby,
-            self.value,
+            html_escape(self.value),
         );
 
         if self.show_count {
@@ -584,7 +590,11 @@ impl NativeCheckbox<'_> {
             "<label class=\"flex items-center gap-3 text-sm font-medium text-surface-950 min-h-[44px]\" for=\"{}\"\
 ><input id=\"{}\" name=\"{}\" type=\"checkbox\" value=\"true\"{} class=\"h-4 w-4 rounded-sm border border-surface-300 text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20\" />\
 <span>{}</span></label>",
-            self.id, self.id, self.name, checked, self.label
+            html_escape(self.id),
+            html_escape(self.id),
+            html_escape(self.name),
+            checked,
+            html_escape(self.label),
         )
     }
 }
@@ -667,10 +677,12 @@ impl<'a> Select<'a> {
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
                         "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
-                        i, option.value, option.selected,
+                        i,
+                        html_escape(option.value),
+                        option.selected,
                         disabled,
                         selected,
-                        option.label,
+                        html_escape(option.label),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -697,10 +709,12 @@ impl<'a> Select<'a> {
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
                         "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
-                        i, option.value, option.selected,
+                        i,
+                        html_escape(option.value),
+                        option.selected,
                         disabled,
                         selected,
-                        option.label,
+                        html_escape(option.label),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1681,7 +1695,7 @@ impl<'a> Table<'a> {
                 )
             })
             .unwrap_or_default();
-        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"[&_tr]:border-b sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody class=\"[&_tr:last-child]:border-0\">{}</tbody>{}</table></div>", headers, rows, caption)
+        format!("<div class=\"apex-table-wrap relative w-full overflow-x-auto\"><table class=\"apex-table w-full min-w-[640px] caption-bottom text-sm\"><thead class=\"sticky top-0 z-10 bg-background\"><tr>{}</tr></thead><tbody>{}</tbody>{}</table></div>", headers, rows, caption)
     }
 }
 
@@ -3019,7 +3033,7 @@ mod tests {
         assert!(html.contains("Required"));
         assert!(html.contains("placeholder=\"email\""));
         // Spiral-Lock DNA: the concentric two-arms focus replaced the ring.
-        assert!(html.contains("focus-visible:shadow-[0_0_0_1px_rgb(var(--primary))"));
+        assert!(html.contains("apex-focus-ring"));
     }
 
     #[test]
@@ -4632,5 +4646,52 @@ mod tests {
         }
         .render_html();
         assert!(html.contains("role=\"tooltip\" data-side=\"top\" data-delay=\"700\""));
+    }
+}
+
+#[cfg(test)]
+mod escaping_tests {
+    use super::*;
+
+    #[test]
+    fn hostile_values_cannot_break_out_of_attributes() {
+        // Dogfood 2026-10-06: the form primitives were the one render path in
+        // this crate that interpolated DB-loaded values unescaped.
+        let input = Input {
+            id: Some("x\"><script>alert(1)</script>"),
+            value: "\" onfocus=\"alert(1)",
+            placeholder: "\"><img src=x>",
+            name: Some("n\" onchange=\"evil()"),
+            input_type: "text",
+            variant: "default",
+            size: "default",
+            left_icon: None,
+            right_icon: None,
+            error: Some("<script>alert(2)</script>"),
+            disabled: false,
+            autocomplete: None,
+            required: false,
+        }
+        .render_html();
+        for raw in [
+            "<script>",
+            "onfocus=\"alert",
+            "<img src=x",
+            "onchange=\"evil",
+        ] {
+            assert!(!input.contains(raw), "unescaped {raw:?} in {input}");
+        }
+        assert!(input.contains("&lt;script&gt;"));
+        assert!(input.contains("&quot;"));
+
+        let checkbox = NativeCheckbox {
+            id: "a\"><b>",
+            name: "n\"><i>",
+            checked: false,
+            label: "<b>bold</b>",
+        }
+        .render_html();
+        assert!(!checkbox.contains("<b>bold</b>"));
+        assert!(checkbox.contains("&lt;b&gt;bold&lt;/b&gt;"));
     }
 }

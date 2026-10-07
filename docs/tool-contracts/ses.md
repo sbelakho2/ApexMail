@@ -141,15 +141,15 @@ See [hetzner.md](hetzner.md) for dedicated IP provisioning, warmup, and lifecycl
 
 | Plan | Dedicated IPs | Cost |
 |------|--------------|------|
-| Free / Starter | 0 (SES shared pool) | — |
-| Pro | Add-on ($30/mo per IP) | ~$4/IP/mo (Hetzner) + margin |
-| Growth | 1 included | Included |
-| Scale | 3 included | Included |
-| Enterprise | 10+ included, BYOIP supported | Custom pricing |
+| Free / Developer | 0 (SES shared pool) | — |
+| Pro | Add-on (€49/mo first, €69/mo each additional) | ~€4/IP/mo (Hetzner) + margin |
+| Growth | 1 included (after qualification) | Included |
+| Business | 1 included (a second where traffic justifies it) | Included |
+| Enterprise Cloud | up to 3 included, BYOIP supported | More pools contractual |
 
-> **Pricing note:** The $30/mo customer-facing price is the **consumer price** that includes the underlying Hetzner floating IP cost (~€4/mo ≈ $4.50) plus margin. This is consistent across [pricing.md](../pricing.md#dedicated-ips) and [marketing/pricing.md](../marketing/pricing.md#dedicated-ip-add-on). The Stripe billing contract does not specify per-IP pricing because it applies the add-on as a flat plan modifier rather than a per-unit line item. Hetzner infrastructure costs are detailed in [hetzner.md](../tool-contracts/hetzner.md).
+> **Pricing note:** The €49/€69 customer-facing rates are the **consumer prices** that include the underlying Hetzner floating IP cost (~€4/mo) plus margin. This is the same ladder the runtime estimator quotes (`routes/explorer.rs`) and is consistent across [pricing.md](../pricing.md#dedicated-ips) and [marketing/pricing.md](../marketing/pricing.md#dedicated-ip-add-on). The Stripe billing contract does not specify per-IP pricing because it applies the add-on as a plan modifier rather than a per-unit line item. Hetzner infrastructure costs are detailed in [hetzner.md](../tool-contracts/hetzner.md).
 
-Auto-provisioning occurs on plan change via `autoProvisionDedicatedIps()` in `stripe-integration.ts`, which calls `POST /v1/dedicated-ips` to create Hetzner floating IPs.
+Auto-provisioning occurs on plan activation via `auto_provision_dedicated_ips_background()` in `services/mail-server/crates/billing-service/src/stripe_webhooks.rs`, which calls `POST {api_base_url}/v1/dedicated-ips` to create Hetzner floating IPs.
 
 ---
 

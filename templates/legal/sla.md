@@ -13,15 +13,15 @@ This SLA applies to Customers on the following plans:
 | Plan | SLA Included |
 |---|---|
 | Free | Best-effort — no SLA commitment |
-| Starter | Best-effort — no SLA commitment |
-| Scale | Yes — 99.9% uptime |
-| Enterprise | Yes — 99.9% uptime (enhanced SLA) |
+| Developer | Best-effort — no SLA commitment |
+| Business | Yes — 99.9% uptime |
+| Enterprise Cloud | Yes — 99.9% uptime (enhanced SLA) |
 | Dedicated Tenant | Yes — 99.95% uptime (custom) |
 | BYOC | Application SLA only — infrastructure availability is Customer's responsibility |
 
 ## 2. Uptime Commitment
 
-### 2.1 Scale Plan
+### 2.1 Business Plan
 
 | Service | Monthly Uptime Target |
 |---|---|
@@ -30,7 +30,7 @@ This SLA applies to Customers on the following plans:
 | Dashboard | 99.9% |
 | Webhook Delivery | Best-effort (excluded from SLA credits; retried for up to 72 hours) |
 
-### 2.2 Enterprise Plan
+### 2.2 Enterprise Cloud Plan
 
 | Service | Monthly Uptime Target |
 |---|---|
@@ -103,7 +103,7 @@ Credits are calculated as a percentage of the monthly fee based on the size of t
 
 ### 5.2 Credit Caps
 
-The ladder above is capped per plan: **Scale** credits never exceed 10% of the monthly fee, and **Enterprise** credits never exceed 25% of the monthly fee. Credits in a calendar month never exceed the Customer's plan cap. Dedicated Tenant and custom agreements may negotiate different caps as part of the contract; absent an agreed cap, the ladder in 5.1 applies in full.
+The ladder above is capped per plan: **Business** (`scale`) credits never exceed 30% of the monthly fee, and **Enterprise Cloud** (`enterprise`) credits never exceed 25% of the monthly fee. These are the same caps the billing system enforces (`sla_credit_percentage` per plan in the billing plan seeds). Credits in a calendar month never exceed the Customer's plan cap. Dedicated Tenant and custom agreements may negotiate different caps as part of the contract; absent an agreed cap, the ladder in 5.1 applies in full.
 
 Credits are the sole and exclusive remedy for SLA breaches.
 
@@ -178,9 +178,9 @@ Dedicated Tenant customers may negotiate custom maintenance windows as part of t
 | Plan | Standard Response | Priority Response |
 |---|---|---|
 | Free | Best-effort | N/A |
-| Starter | 24 hours | N/A |
-| Scale | 8 hours | 4 hours |
-| Enterprise | 4 hours | 1 hour |
+| Developer | 24 hours | N/A |
+| Business | 8 hours | 4 hours |
+| Enterprise Cloud | 4 hours | 1 hour |
 | Dedicated Tenant | 1 hour | 30 minutes |
 
 Response time is measured from ticket creation to first human response during business hours (Mon–Fri, 09:00–18:00 EET). Priority response is available for Severity 1 incidents (service down).

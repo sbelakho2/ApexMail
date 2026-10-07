@@ -65,9 +65,11 @@ BEGIN
         DROP INDEX IF EXISTS idx_email_queue_campaign;
         DROP INDEX IF EXISTS idx_email_queue_sent_at;
         
-        -- Create partitioned table (includes ALL columns from the original schema +
-        -- the uid column that was added by migration 002, plus any CHECK constraints
-        -- added by migration 046, all expressed inline).
+        -- Create partitioned table (includes ALL columns from the original schema,
+        -- plus any CHECK constraints added by migration 046, all expressed inline).
+        -- NOTE: `uid` belongs to mail_messages (added by migration 002), not to
+        -- email_queue — an earlier revision of this comment said otherwise while
+        -- the positional INSERT ... SELECT * below stayed column-for-column equal.
         CREATE TABLE email_queue (
             id              UUID        NOT NULL DEFAULT gen_random_uuid(),
             from_address    TEXT        NOT NULL,
@@ -187,7 +189,11 @@ BEGIN
             status = EXCLUDED.status,
             updated_at = EXCLUDED.updated_at;
         
-        -- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
+        -- H-08: Verify data integrity before dropping old table. ANY shortfall
+        -- aborts the whole migration (sqlx applies the file in one transaction,
+        -- so the old table survives); it is dropped only when counts agree.
+        -- (An earlier revision warned on a partial shortfall and then dropped
+        -- the only complete copy — gates review 2026-10-07.)
         DO $i$
         DECLARE
             v_old_count BIGINT;
@@ -200,9 +206,9 @@ BEGIN
                 RAISE EXCEPTION 'email_queue: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
             END IF;
             IF v_old_count > v_new_count THEN
-                RAISE WARNING 'email_queue: % rows in old table but only % in new table — some data may have been lost during migration', v_old_count, v_new_count;
+                RAISE EXCEPTION 'email_queue: % rows in old table but only % in new table — aborting to prevent data loss!', v_old_count, v_new_count;
             END IF;
-            -- Only drop old table if migration succeeded
+            -- Counts agree (a mismatch raised above): drop the migrated copy.
             EXECUTE 'DROP TABLE IF EXISTS email_queue_old';
             RAISE NOTICE 'email_queue: old table dropped successfully';
         END $i$;
@@ -305,7 +311,11 @@ BEGIN
             status = EXCLUDED.status,
             error_message = EXCLUDED.error_message;
         
-        -- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
+        -- H-08: Verify data integrity before dropping old table. ANY shortfall
+        -- aborts the whole migration (sqlx applies the file in one transaction,
+        -- so the old table survives); it is dropped only when counts agree.
+        -- (An earlier revision warned on a partial shortfall and then dropped
+        -- the only complete copy — gates review 2026-10-07.)
         DO $i$
         DECLARE
             v_old_count BIGINT;
@@ -318,7 +328,7 @@ BEGIN
                 RAISE EXCEPTION 'email_delivery_log: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
             END IF;
             IF v_old_count > v_new_count THEN
-                RAISE WARNING 'email_delivery_log: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+                RAISE EXCEPTION 'email_delivery_log: % rows in old table but only % in new table — aborting to prevent data loss!', v_old_count, v_new_count;
             END IF;
             EXECUTE 'DROP TABLE IF EXISTS email_delivery_log_old';
             RAISE NOTICE 'email_delivery_log: old table dropped successfully';
@@ -468,7 +478,11 @@ BEGIN
             is_read = EXCLUDED.is_read,
             updated_at = EXCLUDED.updated_at;
         
-        -- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
+        -- H-08: Verify data integrity before dropping old table. ANY shortfall
+        -- aborts the whole migration (sqlx applies the file in one transaction,
+        -- so the old table survives); it is dropped only when counts agree.
+        -- (An earlier revision warned on a partial shortfall and then dropped
+        -- the only complete copy — gates review 2026-10-07.)
         DO $i$
         DECLARE
             v_old_count BIGINT;
@@ -481,7 +495,7 @@ BEGIN
                 RAISE EXCEPTION 'mail_messages: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
             END IF;
             IF v_old_count > v_new_count THEN
-                RAISE WARNING 'mail_messages: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+                RAISE EXCEPTION 'mail_messages: % rows in old table but only % in new table — aborting to prevent data loss!', v_old_count, v_new_count;
             END IF;
             EXECUTE 'DROP TABLE IF EXISTS mail_messages_old';
             RAISE NOTICE 'mail_messages: old table dropped successfully';
@@ -596,7 +610,11 @@ BEGIN
             resource = EXCLUDED.resource,
             outcome = EXCLUDED.outcome;
         
-        -- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
+        -- H-08: Verify data integrity before dropping old table. ANY shortfall
+        -- aborts the whole migration (sqlx applies the file in one transaction,
+        -- so the old table survives); it is dropped only when counts agree.
+        -- (An earlier revision warned on a partial shortfall and then dropped
+        -- the only complete copy — gates review 2026-10-07.)
         DO $i$
         DECLARE
             v_old_count BIGINT;
@@ -609,7 +627,7 @@ BEGIN
                 RAISE EXCEPTION 'audit_logs: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
             END IF;
             IF v_old_count > v_new_count THEN
-                RAISE WARNING 'audit_logs: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+                RAISE EXCEPTION 'audit_logs: % rows in old table but only % in new table — aborting to prevent data loss!', v_old_count, v_new_count;
             END IF;
             EXECUTE 'DROP TABLE IF EXISTS audit_logs_old';
             RAISE NOTICE 'audit_logs: old table dropped successfully';
@@ -712,7 +730,11 @@ BEGIN
             hard_bounces = EXCLUDED.hard_bounces,
             updated_at = EXCLUDED.updated_at;
         
-        -- H-08: Verify data integrity before dropping old table. Only DROP if counts match.
+        -- H-08: Verify data integrity before dropping old table. ANY shortfall
+        -- aborts the whole migration (sqlx applies the file in one transaction,
+        -- so the old table survives); it is dropped only when counts agree.
+        -- (An earlier revision warned on a partial shortfall and then dropped
+        -- the only complete copy — gates review 2026-10-07.)
         DO $i$
         DECLARE
             v_old_count BIGINT;
@@ -725,7 +747,7 @@ BEGIN
                 RAISE EXCEPTION 'bounce_analytics_daily: 0 rows migrated from % rows in old table — aborting to prevent data loss!', v_old_count;
             END IF;
             IF v_old_count > v_new_count THEN
-                RAISE WARNING 'bounce_analytics_daily: % rows in old table but only % in new table — some data may have been lost', v_old_count, v_new_count;
+                RAISE EXCEPTION 'bounce_analytics_daily: % rows in old table but only % in new table — aborting to prevent data loss!', v_old_count, v_new_count;
             END IF;
             EXECUTE 'DROP TABLE IF EXISTS bounce_analytics_daily_old';
             RAISE NOTICE 'bounce_analytics_daily: old table dropped successfully';

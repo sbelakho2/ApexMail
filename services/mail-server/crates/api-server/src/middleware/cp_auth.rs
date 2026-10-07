@@ -622,7 +622,12 @@ pub async fn require_cp_auth(
     }
 }
 
-async fn log_cp_access(
+/// Record one CP access event: a tracing line plus a `cp_access_log` row.
+/// `pub(crate)`: the SSR gate also calls it to record the EFFECTIVE status
+/// when it deliberately renders a page the session gate denied (the MFA
+/// enrollment page), so the access log never shows a 403 the browser did
+/// not receive.
+pub(crate) async fn log_cp_access(
     state: &AppState,
     email: Option<&str>,
     path: &str,

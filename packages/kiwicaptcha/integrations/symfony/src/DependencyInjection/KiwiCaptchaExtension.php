@@ -366,6 +366,24 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // pass is a pure int-key projection.
         $config['secrets_by_kid'] = self::canonicalHistoricalSecrets($config['secrets_by_kid']);
 
+        // Literal-secret minimum, build-time lane: the tree's
+        // empty-tolerant closures reject literal non-empty shorts, but an
+        // empty value must pass the tree so the documented
+        // %env(KIWI_CAPTCHA_SECRET)% form keeps working (Symfony refuses
+        // a validated node that denies empty values outright). A LITERAL
+        // value is visible here and fails closed at container build with
+        // the same message the tree used to emit for it; an env
+        // placeholder is opaque and the RESOLVED value is refused by the
+        // consumers (the core Config constructor, createRiskKeys(), the
+        // chain ticket service, ExecutionChallengeGenerator).
+        if (!self::isEnvPlaceholder($config['secret_key'])
+            && \strlen((string) $config['secret_key']) < 16
+        ) {
+            throw new \InvalidArgumentException(
+                'kiwi_captcha.secret_key must be a string of at least 16 bytes (32 random bytes recommended) — the core Config enforces the same minimum at issuance and the verifier refuses a shorter secret at verify time'
+            );
+        }
+
         // Advisory build notes (never throw): signing-key rotation
         // (kid > 1 or a non-empty historical map) is the documented
         // deployment model, and a routine rotation must not silently
@@ -1076,7 +1094,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
             $riskMaster = $riskConfig['master_secret'] ?? $config['secret_key'];
             $container->setDefinition('kiwi_captcha.risk.keys', (new Definition(RiskKeys::class))
-                ->setFactory([RiskKeys::class, 'fromMaster'])
+                // Runtime guard: the resolved master must clear the
+                // documented 16-byte minimum (see createRiskKeys()) —
+                // the load-time lane never sees an env-resolved value.
+                ->setFactory([self::class, 'createRiskKeys'])
                 ->setArguments([$riskMaster])
                 ->setPublic(true));
             $container->setDefinition('kiwi_captcha.risk.identity_factory', new Definition(RiskIdentityFactory::class, [
@@ -2557,6 +2578,33 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return new \Predis\Client($dsn);
+    }
+
+    /**
+     * Runtime construction guard for the risk identity keys: the
+     * container resolves the %env(KIWI_RISK_SECRET)% placeholder (or the
+     * secret_key fallback) to the real master before invoking this
+     * factory, so the documented 16-byte minimum is enforced on the
+     * RESOLVED value — the load-time lane cannot see it (env
+     * placeholders are opaque at extension time, and a validated config
+     * node carrying a placeholder is refused by Symfony outright, so the
+     * tree only checks literal values). PHP's `RiskKeys::fromMaster()`
+     * and the Rust reference derive from any byte string without a
+     * length gate; without this guard a short or empty env-resolved
+     * master silently yields predictable pseudonyms, exactly the
+     * weakness the dedicated-secret guidance exists to prevent. Mirrors
+     * createDsnClient().
+     */
+    public static function createRiskKeys(string $master): RiskKeys
+    {
+        if (\strlen($master) < 16) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.risk.master_secret (or its secret_key fallback) must resolve to a string of at least 16 bytes (32 random bytes recommended) — got %d byte(s). A short or empty master makes every derived risk pseudonym predictable; set KIWI_RISK_SECRET (or configure a dedicated master_secret) to a high-entropy value.',
+                \strlen($master),
+            ));
+        }
+
+        return RiskKeys::fromMaster($master);
     }
 
     /**

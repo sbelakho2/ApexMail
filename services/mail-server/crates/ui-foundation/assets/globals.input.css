@@ -1,3 +1,18 @@
+
+/* ── Text selection highlight ────────────────────────────────────────────
+   No stylesheet defined ::selection, so the browser painted its default
+   grey-on-grey (and grey-on-black in dark mode) — selection made text
+   disappear on every surface (owner review 2026-10-06). One rule per
+   sheet: the classic ApexMail red behind white ink, identical in both
+   themes. */
+::selection {
+  background-color: rgb(var(--primary));
+  color: #fff;
+}
+::-moz-selection {
+  background-color: rgb(var(--primary));
+  color: #fff;
+}
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -52,11 +67,11 @@
     --card-foreground: 9 9 11;
     --popover: 255 255 255;
     --popover-foreground: 9 9 11;
-    --primary: 220 38 38;
+    --primary: 185 28 28; /* brand-700: AA as text on the light canvas */
     --primary-foreground: 255 255 255;
     --secondary: 244 244 245;
     --secondary-foreground: 9 9 11;
-    --muted: 244 244 245;
+    --muted: 238 238 240;
     /* zinc-600 (#52525b) not zinc-500: muted text must clear AA (4.5:1) even
        on zinc-100/amber-tinted surfaces, where zinc-500 lands at 4.3-4.4:1.
        Dark mode keeps zinc-400 below. */
@@ -72,8 +87,8 @@
     --error: 220 38 38;
 
     --surface-50: 250 250 250;
-    --surface-100: 244 244 245;
-    --surface-200: 228 228 231;
+    --surface-100: 238 238 240;
+    --surface-200: 212 212 216;
     --surface-300: 212 212 216;
     --surface-400: 161 161 170;
     --surface-500: 113 113 122;
@@ -95,18 +110,18 @@
     --brand-900: 69 10 10;
     --brand-950: 45 10 10;
 
-    --success-50: 240 253 244;
-    --success-100: 220 252 231;
-    --success-200: 187 247 208;
-    --success-300: 134 239 172;
-    --success-400: 74 222 128;
-    --success-500: 34 197 94;
-    --success-600: 22 163 74;
-    --success-700: 21 128 61;
-    --success-800: 22 101 52;
-    --success-900: 20 83 45;
-    --success-950: 5 46 22;
-    --success: 22 163 74;
+    --success-50: 250 250 250;
+    --success-100: 244 244 245;
+    --success-200: 228 228 231;
+    --success-300: 212 212 216;
+    --success-400: 161 161 170;
+    --success-500: 82 82 91;
+    --success-600: 63 63 70;
+    --success-700: 39 39 42;
+    --success-800: 24 24 27;
+    --success-900: 9 9 11;
+    --success-950: 9 9 11;
+    --success: 63 63 70;
 
     --warning-50: 255 251 235;
     --warning-100: 254 243 199;
@@ -1370,7 +1385,7 @@
   /* Success-tinted chips stay light green otherwise (1.7:1 with the light
      success-400 text mapped in dark) — map to the success-900 step blend. */
   .dark .bg-success-50 {
-    background-color: rgb(20 83 45 / 0.35) !important;
+    background-color: rgb(9 9 11 / 0.35) !important;
   }
 
   .dark .text-primary {
@@ -1399,9 +1414,9 @@
   }
 
   .dark .apex-auth-notice[data-intent="success"] {
-    color: rgb(220 252 231) !important;
+    color: rgb(244 244 245) !important;
     border-color: rgb(var(--success-400) / 0.5) !important;
-    background-color: rgb(20 83 45 / 0.28) !important;
+    background-color: rgb(9 9 11 / 0.28) !important;
   }
 
   .dark .apex-auth-notice[data-intent="warning"] {
@@ -1741,7 +1756,7 @@
     }
 
     :root:not(.light) .bg-success-50 {
-      background-color: rgb(20 83 45 / 0.35) !important;
+      background-color: rgb(9 9 11 / 0.35) !important;
     }
 
     :root:not(.light) .text-primary {
@@ -1769,9 +1784,9 @@
     }
 
     :root:not(.light) .apex-auth-notice[data-intent="success"] {
-      color: rgb(220 252 231) !important;
+      color: rgb(244 244 245) !important;
       border-color: rgb(var(--success-400) / 0.5) !important;
-      background-color: rgb(20 83 45 / 0.28) !important;
+      background-color: rgb(9 9 11 / 0.28) !important;
     }
 
     :root:not(.light) .apex-auth-notice[data-intent="warning"] {

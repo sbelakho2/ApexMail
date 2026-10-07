@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 /** Manage API keys for the authenticated account. */
@@ -37,12 +38,25 @@ public final class APIKeys {
         return client.request("POST", "/v1/auth/api-keys", body, new TypeReference<Map<String, Object>>() {});
     }
 
-    public Map<String, Object> list(Map<String, Object> options) {
+    /**
+     * List API keys. The server's ListApiKeysQuery (deny_unknown_fields)
+     * accepts {@code limit}/{@code offset} only and returns a BARE ARRAY
+     * ({@code [{id, name, key_prefix, scopes, last_used_at, created_at,
+     * expires_at}]}) — there is no envelope and no cursor pagination
+     * (a {@code cursor} is answered with HTTP 400).
+     */
+    public List<Map<String, Object>> list(Map<String, Object> options) {
+        if (options != null && options.containsKey("cursor")) {
+            throw new IllegalArgumentException(
+                "GET /v1/auth/api-keys does not support cursor pagination "
+                    + "(the server rejects `cursor` with HTTP 400); use limit/offset");
+        }
         String query = options != null && !options.isEmpty() ? "?" + buildQuery(options) : "";
-        return client.request("GET", "/v1/auth/api-keys" + query, null, new TypeReference<Map<String, Object>>() {});
+        return client.request("GET", "/v1/auth/api-keys" + query, null,
+            new TypeReference<List<Map<String, Object>>>() {});
     }
 
-    public Map<String, Object> list() {
+    public List<Map<String, Object>> list() {
         return list(Map.of("limit", 50, "offset", 0));
     }
 

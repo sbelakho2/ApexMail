@@ -51,6 +51,35 @@ pub struct RouteData {
     pub demo_viewer: Option<crate::view_data::DemoViewerData>,
     /// Control-plane AI-drafts review data (`/reviews/ai-drafts`).
     pub ai_drafts: Option<crate::view_data::AiDraftsPageData>,
+    /// Authenticated session identity for the console header (display name,
+    /// email, REAL plan label). `None` (or a `None` `plan_label`) renders no
+    /// plan label — the shell never fabricates one.
+    pub session_identity: Option<SessionIdentity>,
+    /// Active impersonation session for this request, when the request
+    /// carries a verified impersonation cookie. The shells render its banner
+    /// (the only in-UI terminate affordance).
+    pub impersonation: Option<ImpersonationView>,
+}
+
+/// Owned session identity threaded from the api-server into the console
+/// shell header.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub display_name: String,
+    pub email: String,
+    /// The tenant's real plan label, resolved from the billing catalog.
+    /// `None` means it could not be resolved — render NO label.
+    pub plan_label: Option<String>,
+}
+
+/// Owned snapshot of an active impersonation session threaded from the
+/// api-server into the shells' banner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImpersonationView {
+    pub tenant_id: String,
+    pub operator_name: String,
+    pub time_remaining: String,
+    pub end_session_error: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -914,6 +943,23 @@ pub fn render_route_with_form_fields_and_csrf(
         .filter(|token| !token.is_empty() && csrf_secret.is_some())
         .map(str::to_string)
         .unwrap_or_else(|| csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token));
+    // Session-derived shell data (header identity + impersonation banner).
+    // Absent on public/unauthenticated renders, in which case the shells
+    // render no plan label and no banner.
+    let session_identity = data.and_then(|data| data.session_identity.as_ref());
+    let impersonation = data.and_then(|data| data.impersonation.as_ref());
+    let user_context = session_identity.map(|identity| crate::shell::UserContext {
+        display_name: &identity.display_name,
+        email: &identity.email,
+        plan_label: identity.plan_label.as_deref().unwrap_or(""),
+    });
+    let impersonation_banner = impersonation.map(|view| crate::shell::ImpersonationBanner {
+        tenant_id: &view.tenant_id,
+        operator_name: &view.operator_name,
+        time_remaining: &view.time_remaining,
+        end_session_error: view.end_session_error.as_deref(),
+        ending_session: false,
+    });
     let html = match surface {
         "web" => {
             let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
@@ -923,7 +969,13 @@ pub fn render_route_with_form_fields_and_csrf(
                 "/login" | "/signup" | "/forgot-password" | "/reset-password" | "/verify-email"
                 | "/" | "/not-found" => leptos_views::web_root_layout(&inner, &title),
                 _ => leptos_views::web_root_layout(
-                    &leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf_token),
+                    &leptos_views::web_dashboard_layout_with_session(
+                        &inner,
+                        path,
+                        &csrf_token,
+                        user_context.as_ref(),
+                        impersonation_banner.clone(),
+                    ),
                     &title,
                 ),
             }
@@ -935,12 +987,14 @@ pub fn render_route_with_form_fields_and_csrf(
                 "/login" => inner,
                 _ => {
                     let (title, description) = control_plane_route_context(path);
-                    leptos_views::control_plane_app_layout_with_title(
+                    leptos_views::control_plane_app_layout_with_session(
                         &inner,
                         title,
                         description,
                         path,
                         &csrf_token,
+                        crate::leptos_views::CONTROL_PLANE_ROLE_PLACEHOLDER,
+                        impersonation_banner.clone(),
                     )
                 }
             };
@@ -1480,7 +1534,13 @@ fn inject_csrf_and_sign_confirms(
             .find("</form>")
             .map(|offset| end + offset)
             .unwrap_or(rest.len());
-        let posts_to_web = tag.contains("method=\"post\"") && tag.contains("action=\"/web/");
+        // Case-insensitive: HTML method names are case-insensitive, so a
+        // view that writes method="POST" must still receive the injected
+        // token (the old lowercase-only check silently skipped it, leaving
+        // that form unsubmittable — found by GATE D's CSRF-presence gate).
+        let lowered = tag.to_ascii_lowercase();
+        let posts_to_web =
+            lowered.contains("method=\"post\"") && lowered.contains("action=\"/web/");
         if posts_to_web && !rest[start..element_end].contains("name=\"_csrf\"") {
             output.push_str(&rest[..end]);
             output.push_str(&csrf_input);
@@ -2143,6 +2203,81 @@ mod tests {
                 path
             );
         }
+    }
+
+    /// Dogfood 2026-10-06 P1/P2: the session identity and the active
+    /// impersonation session must reach the rendered shells. The web header
+    /// renders the REAL plan (never the fabricated "Free Plan — 30K / mo"),
+    /// and both surfaces render the impersonation banner when the request
+    /// carries a session.
+    #[test]
+    fn session_identity_and_impersonation_reach_the_rendered_shells() {
+        let data = RouteData {
+            session_identity: Some(SessionIdentity {
+                display_name: "Ada Operator".into(),
+                email: "ada@apexmail.ee".into(),
+                plan_label: Some("Business Plan — 2M / mo".into()),
+            }),
+            impersonation: Some(ImpersonationView {
+                tenant_id: "tenant_42".into(),
+                operator_name: "Operator Jane".into(),
+                time_remaining: "29:59".into(),
+                end_session_error: None,
+            }),
+            ..RouteData::default()
+        };
+        let (web, _) = render_route_with_form_fields_and_csrf(
+            "web",
+            "/dashboard",
+            None,
+            Some("csrf-secret-for-tests"),
+            &[],
+            Some(&data),
+            None,
+            None,
+        )
+        .expect("web dashboard renders");
+        assert!(web.contains("Business Plan — 2M / mo"));
+        assert!(web.contains("Ada Operator"));
+        assert!(web.contains("ada@apexmail.ee"));
+        assert!(
+            !web.contains("Free Plan"),
+            "a resolved session must never fall back to the fabricated plan"
+        );
+        assert!(web.contains("Impersonation Active"));
+        assert!(web.contains("tenant_42"));
+        assert!(web.contains("action=\"/web/auth/impersonate/end\""));
+
+        let (cp, _) = render_route_with_form_fields_and_csrf(
+            "control-plane",
+            "/dashboard",
+            None,
+            Some("csrf-secret-for-tests"),
+            &[],
+            Some(&data),
+            None,
+            None,
+        )
+        .expect("control-plane dashboard renders");
+        assert!(cp.contains("Impersonation Active"));
+        assert!(cp.contains("action=\"/web/auth/impersonate/end\""));
+
+        // An anonymous render (no route data at all): no banner, no plan
+        // label, no fabricated identity.
+        let (anon, _) = render_route_with_form_fields_and_csrf(
+            "web",
+            "/dashboard",
+            None,
+            Some("csrf-secret-for-tests"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("web dashboard renders without data");
+        assert!(!anon.contains("Free Plan"));
+        assert!(!anon.contains("Impersonation Active"));
+        assert!(!anon.contains("data-plan-label"));
     }
 
     #[test]
@@ -2880,16 +3015,8 @@ mod tests {
                 .collect(),
         });
         RouteData {
-            ai_drafts: None,
-            demos: None,
-            demo_viewer: None,
             list: Some(data),
-            sales: None,
-            campaign_edit: None,
-            campaign_editor: None,
-            list_edit: None,
-            mfa_setup: None,
-            assistant: None,
+            ..RouteData::default()
         }
     }
 
@@ -3000,13 +3127,6 @@ mod tests {
     #[test]
     fn campaign_edit_with_values_updates_in_place() {
         let data = RouteData {
-            ai_drafts: None,
-            demos: None,
-            demo_viewer: None,
-            list: None,
-            sales: None,
-            assistant: None,
-            campaign_editor: None,
             campaign_edit: Some(CampaignEditData {
                 id: "c_123".into(),
                 name: "Spring Winback".into(),
@@ -3014,8 +3134,7 @@ mod tests {
                 html_body: "<p>Hello</p>".into(),
                 scheduled_at: "2026-09-01T09:00".into(),
             }),
-            list_edit: None,
-            mfa_setup: None,
+            ..RouteData::default()
         };
         let html =
             render_route_with_data("web", "/campaigns/c_123/edit", None, None, &[], Some(&data))
@@ -3033,19 +3152,11 @@ mod tests {
     #[test]
     fn mfa_setup_data_renders_qr_and_secret() {
         let data = RouteData {
-            ai_drafts: None,
-            demos: None,
-            demo_viewer: None,
-            list: None,
-            sales: None,
-            assistant: None,
-            campaign_edit: None,
-            campaign_editor: None,
-            list_edit: None,
             mfa_setup: Some(crate::view_data::MfaSetupData {
                 secret: "JBSWY3DPEHPK3PXP".into(),
                 otpauth: "otpauth://totp/ApexMail:ops%40apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail".into(),
             }),
+            ..RouteData::default()
         };
         for path in ["/cp/security", "/settings/security"] {
             let html = render_route_with_data("control-plane", path, None, None, &[], Some(&data))
@@ -3276,16 +3387,8 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
-                ai_drafts: None,
-                demos: None,
-                demo_viewer: None,
                 list: Some(data),
-                sales: None,
-                campaign_edit: None,
-                campaign_editor: None,
-                list_edit: None,
-                mfa_setup: None,
-                assistant: None,
+                ..RouteData::default()
             }),
         )
         .unwrap();
@@ -3341,16 +3444,8 @@ mod tests {
             None,
             &[],
             Some(&RouteData {
-                ai_drafts: None,
-                demos: None,
-                demo_viewer: None,
                 list: Some(data),
-                sales: None,
-                campaign_edit: None,
-                campaign_editor: None,
-                list_edit: None,
-                mfa_setup: None,
-                assistant: None,
+                ..RouteData::default()
             }),
         )
         .unwrap();
@@ -4058,7 +4153,6 @@ mod tests {
             campaign_editor: None,
             sales: Some(crate::view_data::SalesPageData {
                 first_response: None,
-                csrf_token: "tok".into(),
                 overview: Some(crate::view_data::SalesOverviewData {
                     autonomy: crate::view_data::SalesAutonomyData {
                         mode: "shadow".into(),

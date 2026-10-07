@@ -164,8 +164,15 @@ class Client
                 // length; printable-token validation happens where the key
                 // is generated (uuid4) and any hostile input collapses to a
                 // harmless value here rather than splitting the request.
+                //
+                // SDK-IDEM: the server reads `Idempotency-Key`
+                // (middleware/idempotency.rs IDEMPOTENCY_HEADER;
+                // docs/api/endpoints/messages.md). The historical
+                // `X-Idempotency-Key` spelling is ignored by the server —
+                // every generated key was silently dropped and a retried
+                // POST could duplicate.
                 $safeKey = preg_replace('/[\x00-\x1F\x7F]/', '', $idempotencyKey) ?? '';
-                $headers[] = 'X-Idempotency-Key: ' . substr($safeKey, 0, 128);
+                $headers[] = 'Idempotency-Key: ' . substr($safeKey, 0, 128);
             }
 
             $responseBody = '';
@@ -269,17 +276,24 @@ class Client
                     ? $this->decodeResponseBody($responseBody)
                     : [];
             } catch (\JsonException $e) {
-                // Non-JSON body (e.g. an HTML 502 page from a proxy): raise a
-                // proper SDK exception instead of leaking a JsonException.
-                throw new Exceptions\ApiException(
-                    'Invalid JSON response from API (HTTP ' . $statusCode . '): ' . $e->getMessage(),
-                    $statusCode,
-                    'PARSE_ERROR',
-                    $this->lastRateLimit ?? []
-                );
+                // Non-JSON body (e.g. an HTML 502 page from a proxy, or the
+                // plain-text 422 axum emits for a deserialization failure):
+                // keep the status-based error contract — a 422/400 still
+                // surfaces as ValidationException, a 401 as
+                // AuthenticationException, etc. — with code PARSE_ERROR.
+                $this->throwApiError($statusCode, [
+                    'error' => [
+                        'code'    => 'PARSE_ERROR',
+                        'message' => 'Invalid JSON response from API (HTTP ' . $statusCode . '): ' . $e->getMessage(),
+                    ],
+                ], $this->lastRateLimit ?? []);
             }
 
-            if ($statusCode >= 400) {
+            // Every non-2xx status is an error, not just >= 400: a 3xx from a
+            // proxy/CDN (redirects are never followed: CURLOPT_FOLLOWLOCATION
+            // is false) carrying a JSON body must not be returned as a
+            // success payload. 204/empty bodies stay an empty result.
+            if ($statusCode < 200 || $statusCode >= 300) {
                 $this->throwApiError($statusCode, $decoded, $this->lastRateLimit);
             }
 
@@ -492,10 +506,12 @@ class Client
 
     /**
      * Pagination metadata of the last list response: the API envelope is
-     * {"data": [...], "meta": {"has_more": bool, "next_cursor": "..."}} and
-     * the SDK unwraps `data` for the resource methods. Without this
-     * accessor, cursor pagination was unusable — the next cursor was
-     * decoded and then silently discarded.
+     * {"data": [...], "meta": {"hasMore": bool, "nextCursor": "..."}} (the
+     * camelCase spelling from routes/pagination.rs) and the SDK unwraps
+     * `data` for the resource methods. Without this accessor, cursor
+     * pagination was unusable — the next cursor was decoded and then
+     * silently discarded. Reset to null on every response that carries no
+     * envelope.
      */
     public function getLastResponseMeta(): ?array
     {
@@ -505,26 +521,57 @@ class Client
     /** Convenience: the next-page cursor of the last list response, if any. */
     public function getNextCursor(): ?string
     {
-        $cursor = $this->lastResponseMeta['next_cursor'] ?? null;
-        return \is_string($cursor) && $cursor !== '' ? $cursor : null;
+        // The live pagination envelope uses camelCase `meta.nextCursor`
+        // (routes/pagination.rs pagination_meta; docs/api/endpoints/messages.md).
+        // The snake_case spelling is still read for older/self-hosted
+        // deployments — the previous lookup only knew `next_cursor`, so the
+        // cursor was decoded and then silently discarded.
+        foreach (['nextCursor', 'next_cursor'] as $key) {
+            $cursor = $this->lastResponseMeta[$key] ?? null;
+            if (\is_string($cursor) && $cursor !== '') {
+                return $cursor;
+            }
+        }
+        return null;
+    }
+
+    /** Whether the last list response reported another page (meta.hasMore). */
+    public function getHasMore(): bool
+    {
+        $value = $this->lastResponseMeta['hasMore']
+            ?? $this->lastResponseMeta['has_more']
+            ?? false;
+        return (bool) $value;
     }
 
     private function decodeResponseBody(string $responseBody): array
     {
+        // A response without an envelope must not inherit the previous
+        // call's meta: leaving it set made getNextCursor() return a stale
+        // cursor for plain-array lists (domains/templates/...).
+        $this->lastResponseMeta = null;
+
         $decoded = json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
 
-        if (is_array($decoded)) {
-            // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}.
-            // Only unwrap when the envelope shape is unambiguous: a `data`
-            // key holding an array, optionally alongside `error`/`meta`.
-            // A lone `data` array (no envelope siblings) is also an array
-            // payload — return it as-is so nested resources keep their shape.
-            if (isset($decoded['data']) && is_array($decoded['data'])
-                && (isset($decoded['meta']) || isset($decoded['error']) || array_keys($decoded) === ['data'])) {
+        if (is_array($decoded) && array_key_exists('data', $decoded)) {
+            // SDK-111 / live contract: the api-server success envelope is
+            // {"data": ..., "error": null} and the error envelope is
+            // {"data": null, "error": {...}} — the `error` key is ALWAYS
+            // present. The previous guard tested isset($decoded['error']),
+            // which is false for JSON null, so every single-object success
+            // response (send/get/cancel/batch, analytics dashboard, ...)
+            // came back as the raw envelope instead of `data`.
+            //
+            // Unwrap whenever the envelope carries no error; keep error
+            // bodies whole so throwApiError() can still read code/message.
+            $hasError = array_key_exists('error', $decoded) && $decoded['error'] !== null;
+            if (!$hasError) {
                 $this->lastResponseMeta = isset($decoded['meta']) && is_array($decoded['meta'])
                     ? $decoded['meta']
                     : null;
-                return $decoded['data'];
+                $data = $decoded['data'];
+
+                return is_array($data) ? $data : [];
             }
         }
 
@@ -567,6 +614,10 @@ class Client
             $statusCode === 403 => new Exceptions\ForbiddenException($message, $statusCode, $code, $metadata),
             $statusCode === 409 => new Exceptions\ConflictException($message, $statusCode, $code, $metadata),
             $statusCode === 404 => new Exceptions\NotFoundException($message, $statusCode, $code, $metadata),
+            // 422 is the server's deserialization/validation status
+            // (docs/api/errors.md VALIDATION_ERROR) and must surface as a
+            // ValidationException, not the generic API error.
+            $statusCode === 422 => new Exceptions\ValidationException($message, $statusCode, $code, $metadata),
             $statusCode === 400 => new Exceptions\ValidationException($message, $statusCode, $code, $metadata),
             $statusCode === 429 => new Exceptions\RateLimitException($message, $statusCode, $code, $metadata),
             default             => new Exceptions\ApiException($message, $statusCode, $code, $metadata),

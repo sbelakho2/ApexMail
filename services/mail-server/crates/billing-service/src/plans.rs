@@ -303,7 +303,9 @@ pub fn default_plans() -> Vec<PlanSeed> {
     ]
 }
 
-/// Per-plan overage rate in millicents per email (review 2026-09-08 §9).
+/// Per-plan overage rate in millicents per email (review 2026-09-08 §9),
+/// DERIVED from the canonical [`platform_catalog::PLANS`] rows — never a
+/// second hardcoded ladder.
 ///
 /// A single universal rate made Developer economically preferable to Pro
 /// across a substantial range. The differentiated ladder keeps upgrade
@@ -321,12 +323,23 @@ pub fn default_plans() -> Vec<PlanSeed> {
 /// Returns None when the plan has no automatic overage (Free, PAYG,
 /// unknown names) — the caller must skip invoicing for those.
 pub fn plan_overage_rate_millicents(plan_name: &str) -> Option<i64> {
-    match plan_name {
-        "starter" => Some(80),
-        "pro" => Some(60),
-        "growth" | "scale" | "enterprise" => Some(35),
-        // Free has no overage by design; PAYG is usage-priced already.
-        _ => None,
+    platform_catalog::plan_by_name(plan_name)
+        .and_then(|catalog_row| catalog_row.overage_millicents_per_email)
+}
+
+/// Overage cost in cents for a NAMED plan, quoting the canonical catalog
+/// rate for that plan.
+///
+/// This is the helper every customer-facing pricing surface must use: a
+/// hardcoded flat rate quoted €0.40/1k for every plan while the invoice
+/// sweep charged Developer €0.80, Pro €0.60 and Growth/Business €0.35 —
+/// customers saw a price the canonical catalog and their invoice did not
+/// agree with. Plans without an automatic overage (Free, PAYG) and unknown
+/// plan names quote 0.
+pub fn calculate_plan_overage_cost(plan_name: &str, emails_sent: i64, email_limit: i64) -> i64 {
+    match plan_overage_rate_millicents(plan_name) {
+        Some(rate) => calculate_overage_cost_with_rate(emails_sent, email_limit, rate),
+        None => 0,
     }
 }
 
@@ -431,6 +444,158 @@ pub async fn upsert_plan(pool: &PgPool, seed: &PlanSeed) -> Result<Plan, sqlx::E
     // The seed we just wrote round-trips through `PlanFeatures`, so a
     // corrupt read here means storage mangled it — surface it (Fix #10).
     row.try_into_plan().map_err(BillingError::into_sqlx_decode)
+}
+
+/// ON CONFLICT clause for [`reconcile_plans_with_catalog`]: unlike
+/// [`SEED_PLAN_UPSERT_SQL`] (which preserves operator-configured values),
+/// the reconcile FORCES each catalog-owned column to the canonical catalog
+/// value, because the live drift it repairs (Free 30k instead of 3k, Pro
+/// €10 instead of €89, Business €50 instead of €699) IS the seed history.
+///
+/// Stripe price ids are deliberately NOT in the SET list: they are
+/// integration identifiers, not catalog facts, and must survive a
+/// reconcile. `price_cents` (the legacy CP listing column) is kept equal to
+/// `price_monthly`.
+const RECONCILE_PLAN_UPSERT_SQL: &str = r#"
+        INSERT INTO plans (
+            id, name, display_name, description,
+            price_monthly, price_yearly, email_limit, api_call_limit,
+            features, stripe_price_id_monthly, stripe_price_id_yearly,
+            is_active, sort_order, created_at, updated_at, price_cents
+        ) VALUES (
+            'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
+            $4, $5, $6, $7,
+            $8, NULL, NULL, true, $9, $10, $10, CAST($4 AS INTEGER)
+        )
+        ON CONFLICT (name) DO UPDATE SET
+            display_name   = EXCLUDED.display_name,
+            description    = EXCLUDED.description,
+            price_monthly  = EXCLUDED.price_monthly,
+            price_yearly   = EXCLUDED.price_yearly,
+            email_limit    = EXCLUDED.email_limit,
+            api_call_limit = EXCLUDED.api_call_limit,
+            features       = EXCLUDED.features,
+            price_cents    = EXCLUDED.price_cents,
+            sort_order     = EXCLUDED.sort_order,
+            is_active      = true,
+            updated_at     = $10
+        "#;
+
+/// Outcome of one [`reconcile_plans_with_catalog`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlanReconcileReport {
+    /// Catalog plans that had no `plans` row and were inserted.
+    pub inserted: u64,
+    /// Existing catalog-plan rows whose catalog-owned values drifted and
+    /// were repaired to the catalog.
+    pub repaired: u64,
+    /// Active rows whose name is not a catalog plan (test/legacy rows like
+    /// `df5small`) that were deactivated.
+    pub deactivated: u64,
+}
+
+/// Idempotently converge the `plans` table to the canonical
+/// [`platform_catalog::PLANS`] catalog.
+///
+/// Why this exists (audit F1): the live table served Free with a 30,000
+/// email limit (catalog 3,000), Pro at €10 (catalog €89), Business at €50
+/// (catalog €699), missed starter/growth/enterprise/payg entirely, and
+/// exposed two active test rows (`DF5 Small`/`DF5 Big`) to customers —
+/// while [`default_plans`] (pinned to the catalog by the drift tests) was
+/// only reachable through the non-clobbering `POST /plans/seed`, which by
+/// design leaves existing rows untouched and never deactivates anything.
+///
+/// This pass:
+/// 1. upserts every catalog plan, FORCING the catalog values (prices,
+///    limits, features, retention/team through features, display name,
+///    description, sort order, `is_active = true`);
+/// 2. deactivates every active row whose name is not a catalog plan.
+///
+/// Stripe price-id columns are preserved. All SQL runs in ONE transaction,
+/// and the pass is idempotent: a second run reports zero changes.
+pub async fn reconcile_plans_with_catalog(
+    pool: &PgPool,
+) -> Result<PlanReconcileReport, sqlx::Error> {
+    let seeds = default_plans();
+    let names: Vec<&str> = seeds.iter().map(|seed| seed.name).collect();
+    let now = Utc::now();
+
+    let mut tx = pool.begin().await?;
+
+    #[derive(sqlx::FromRow)]
+    struct ExistingPlanRow {
+        name: String,
+        display_name: String,
+        description: String,
+        price_monthly: i64,
+        price_yearly: i64,
+        email_limit: i64,
+        api_call_limit: i64,
+        sort_order: i32,
+        is_active: bool,
+        features: Option<serde_json::Value>,
+    }
+    let existing: Vec<ExistingPlanRow> = sqlx::query_as(
+        "SELECT name, display_name, description, price_monthly, price_yearly,
+                email_limit, api_call_limit, sort_order, is_active, features
+         FROM plans
+         WHERE name = ANY($1)",
+    )
+    .bind(&names)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut report = PlanReconcileReport::default();
+    for seed in &seeds {
+        let features_json =
+            serde_json::to_value(&seed.features).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+
+        match existing.iter().find(|row| row.name == seed.name) {
+            None => report.inserted += 1,
+            Some(row) => {
+                let drifted = row.display_name != seed.display_name
+                    || row.description != seed.description
+                    || row.price_monthly != seed.price_monthly
+                    || row.price_yearly != seed.price_yearly
+                    || row.email_limit != seed.email_limit
+                    || row.api_call_limit != seed.api_call_limit
+                    || row.sort_order != seed.sort_order
+                    || !row.is_active
+                    || row.features.as_ref() != Some(&features_json);
+                if drifted {
+                    report.repaired += 1;
+                }
+            }
+        }
+
+        sqlx::query(RECONCILE_PLAN_UPSERT_SQL)
+            .bind(seed.name)
+            .bind(seed.display_name)
+            .bind(seed.description)
+            .bind(seed.price_monthly)
+            .bind(seed.price_yearly)
+            .bind(seed.email_limit)
+            .bind(seed.api_call_limit)
+            .bind(&features_json)
+            .bind(seed.sort_order)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    report.deactivated = sqlx::query(
+        "UPDATE plans
+         SET is_active = false, updated_at = $2
+         WHERE NOT (name = ANY($1)) AND is_active = true",
+    )
+    .bind(&names)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(report)
 }
 
 pub async fn upsert_plan_input(
@@ -774,12 +939,15 @@ pub fn entitlement_snapshot_for_features(
 /// (Fix I10) stay in sync.
 pub const DEFAULT_OVERAGE_RATE_MILLICENTS: i64 = 40;
 
-/// Calculate overage cost in cents.
-/// `€0.40 / 1 000 emails = 0.04 cents / email`
+/// Calculate overage cost in cents at the LEGACY flat 40-millicent rate
+/// (`€0.40 / 1 000 emails = 0.04 cents / email`).
 ///
-/// Legacy signature kept for API compatibility (api-server callers); uses
-/// the default rate. New call sites should thread the configured rate via
-/// [`calculate_overage_cost_with_rate`].
+/// WARNING: no canonical plan has a 40-millicent rate (the catalog ladder is
+/// 80/60/35/35). This wrapper exists only for the config-default math
+/// ([`crate::config::BillingConfig::overage_rate_per_email_millicents`]) and
+/// historical tests — it must NEVER back a customer-facing quote. Pricing
+/// surfaces quote the plan's canonical rate through
+/// [`calculate_plan_overage_cost`].
 pub fn calculate_overage_cost(emails_sent: i64, email_limit: i64) -> i64 {
     calculate_overage_cost_with_rate(emails_sent, email_limit, DEFAULT_OVERAGE_RATE_MILLICENTS)
 }
@@ -1937,5 +2105,52 @@ mod catalog_drift_tests {
                 seed.name
             );
         }
+    }
+
+    /// Every quoted overage equals the catalog value for that plan (the
+    /// legacy flat 40-millicent quote must never come back).
+    #[test]
+    fn quoted_overage_matches_the_canonical_catalog_for_every_plan() {
+        for row in platform_catalog::PLANS {
+            let limit = row.email_limit.max(0);
+            let sent = if row.email_limit < 0 {
+                1
+            } else {
+                row.email_limit + 1_000
+            };
+            let quoted = calculate_plan_overage_cost(row.name, sent, limit);
+            let expected = match row.overage_millicents_per_email {
+                Some(rate) => calculate_overage_cost_with_rate(sent, limit, rate),
+                None => 0,
+            };
+            assert_eq!(
+                quoted, expected,
+                "{}: quoted overage must equal the canonical catalog rate",
+                row.name
+            );
+        }
+
+        // Concrete pins: the ladder is 80/60/35/35, Free/PAYG quote zero.
+        assert_eq!(calculate_plan_overage_cost("starter", 51_000, 50_000), 80);
+        assert_eq!(calculate_plan_overage_cost("pro", 151_000, 150_000), 60);
+        assert_eq!(calculate_plan_overage_cost("growth", 501_000, 500_000), 35);
+        assert_eq!(
+            calculate_plan_overage_cost("scale", 2_001_000, 2_000_000),
+            35
+        );
+        assert_eq!(
+            calculate_plan_overage_cost("enterprise", 5_001_000, 5_000_000),
+            35
+        );
+        assert_eq!(calculate_plan_overage_cost("free", 10_000, 3_000), 0);
+        assert_eq!(calculate_plan_overage_cost("payg", 10_000, 0), 0);
+        // Unknown plan names have no canonical rate and never borrow the
+        // flat legacy 40.
+        assert_eq!(calculate_plan_overage_cost("df5small", 10_000, 0), 0);
+        assert_ne!(
+            calculate_plan_overage_cost("starter", 51_000, 50_000),
+            calculate_overage_cost(51_000, 50_000),
+            "the legacy flat wrapper must not be the customer quote"
+        );
     }
 }

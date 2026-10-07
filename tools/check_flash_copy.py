@@ -113,6 +113,23 @@ def load_allowlist(path: Path) -> tuple[dict, dict]:
 
 def main(argv: list[str]) -> int:
     roots = [Path(p) for p in argv[1:]] or None
+    if roots:
+        for root in roots:
+            # The extractor maps every file back to a repo-relative path; a
+            # root outside the repository (or a typo) previously died with a
+            # bare ValueError from relative_to(). Fail with a usage error.
+            resolved = root.resolve()
+            if not resolved.exists():
+                print(f"root does not exist: {root}", file=sys.stderr)
+                return 2
+            try:
+                resolved.relative_to(ROOT)
+            except ValueError:
+                print(
+                    f"root must be inside the repository ({ROOT}): {root}",
+                    file=sys.stderr,
+                )
+                return 2
     sites, leaked = all_flash_sites(roots)
     allow_exact, _examples = load_allowlist(ALLOWLIST)
 
@@ -150,4 +167,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    sys.exit(main(sys.argv))

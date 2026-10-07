@@ -78,6 +78,14 @@ public final class ApexMailClient implements AutoCloseable {
     private final ExecutorService executor;
     private final ObjectMapper objectMapper;
     private volatile RateLimitInfo lastRateLimit;
+    /**
+     * Pagination metadata ({@code meta.hasMore} / {@code meta.nextCursor},
+     * routes/pagination.rs) of the last response, or null. Exposed via
+     * {@link #getLastResponseMeta()} so cursor pagination on
+     * {@code GET /v1/messages} is usable (the envelope unwrap previously
+     * discarded it).
+     */
+    private volatile Map<String, Object> lastResponseMeta;
 
     // ── Resource accessors ────────────────────────────────────────────────
 
@@ -225,6 +233,20 @@ public final class ApexMailClient implements AutoCloseable {
     public APIKeys      apiKeys()      { return apiKeys; }
     public Optional<RateLimitInfo> getLastRateLimit() { return Optional.ofNullable(lastRateLimit); }
 
+    /**
+     * Pagination metadata of the last response ({@code meta.hasMore} /
+     * {@code meta.nextCursor} from the API envelope), or empty when the
+     * response carried no envelope.
+     *
+     * <p>The live envelope uses camelCase keys (routes/pagination.rs
+     * {@code pagination_meta}); send {@code meta.nextCursor} back as the
+     * {@code cursor} query parameter to fetch the next page of
+     * {@code GET /v1/messages}.
+     */
+    public Optional<Map<String, Object>> getLastResponseMeta() {
+        return Optional.ofNullable(lastResponseMeta);
+    }
+
     // ── HTTP transport ────────────────────────────────────────────────────
 
     /**
@@ -332,6 +354,9 @@ public final class ApexMailClient implements AutoCloseable {
      */
     private TransportResponse execute(String method, String path, String jsonBody, String idempotencyKey) {
         int attempt = 0;
+        // A fresh logical request must not inherit the previous response's
+        // pagination meta (unwrapEnvelope re-populates it on success).
+        lastResponseMeta = null;
         // Overall budget for the REQUEST ATTEMPTS of this call (the sleeps
         // between them are excluded on purpose — see the javadoc above).
         long deadlineNanos = System.nanoTime()
@@ -425,12 +450,19 @@ public final class ApexMailClient implements AutoCloseable {
     /**
      * Unwrap the API envelope if present. If the response is a JSON object
      * containing a "data" key, return the serialized "data" value.
-     * Otherwise, return the original response body unchanged.
+     * Otherwise, return the original response body unchanged. The envelope's
+     * "meta" object is retained for {@link #getLastResponseMeta()}.
      */
+    @SuppressWarnings("unchecked")
     private String unwrapEnvelope(String responseBody) {
+        lastResponseMeta = null;
         try {
             Map<String, Object> parsed = objectMapper.readValue(responseBody, new TypeReference<Map<String, Object>>() {});
             if (parsed.containsKey("data")) {
+                Object meta = parsed.get("meta");
+                if (meta instanceof Map) {
+                    lastResponseMeta = (Map<String, Object>) meta;
+                }
                 Object data = parsed.get("data");
                 if (data != null) {
                     return objectMapper.writeValueAsString(data);
@@ -480,6 +512,15 @@ public final class ApexMailClient implements AutoCloseable {
             details = errorObj.get("details");
         } else if (errorField != null) {
             message = String.valueOf(errorField);
+            // Non-object error bodies (e.g. the plain-text 400 axum emits for
+            // a QueryRejection) still carry the parser's synthetic code
+            // (`unparseable_error_response`) at the top level — surface it
+            // instead of dropping it. Live error envelopes always nest the
+            // code under `error`, which is handled above.
+            Object topLevelCode = body.get("code");
+            if (topLevelCode != null) {
+                code = String.valueOf(topLevelCode);
+            }
         }
 
         throw switch (status) {
@@ -731,6 +772,13 @@ public final class ApexMailClient implements AutoCloseable {
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             // Header injection: strip control characters (CR/LF/NUL) from
             // caller-supplied keys before they reach the transport.
+            //
+            // SDK-IDEM: the server reads `Idempotency-Key`
+            // (middleware/idempotency.rs IDEMPOTENCY_HEADER;
+            // docs/api/endpoints/messages.md). The historical
+            // `X-Idempotency-Key` spelling is ignored by the server — every
+            // generated key was silently dropped and a retried POST could
+            // duplicate.
             String safeKey = idempotencyKey.codePoints()
                 .filter(cp -> cp >= 0x20 && cp != 0x7F)
                 .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
@@ -739,7 +787,7 @@ public final class ApexMailClient implements AutoCloseable {
                 safeKey = safeKey.substring(0, 128);
             }
             if (!safeKey.isBlank()) {
-                builder.header("X-Idempotency-Key", safeKey);
+                builder.header("Idempotency-Key", safeKey);
             }
         }
 

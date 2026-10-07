@@ -101,7 +101,14 @@ def check() -> list[str]:
         changelog_latest(php / "CHANGELOG.md") or probe("php", "changelog release heading", None),
     ]
 
-    names = ["go"] * 2 + ["python"] * 5 + ["ruby"] * 3 + ["java"] * 3 + ["php"] * 3
+    # Name counts MUST equal the number of probes appended per SDK above
+    # (go 2, python 4, ruby 3, java 3, php 3) or zip() silently pairs a
+    # value with the wrong SDK's label (CV-2: a ruby gemspec drift used to
+    # be reported as a python mismatch).
+    names = ["go"] * 2 + ["python"] * 4 + ["ruby"] * 3 + ["java"] * 3 + ["php"] * 3
+    if len(names) != len(vals):
+        errors.append(f"internal: probe name/value count mismatch ({len(names)} names vs {len(vals)} values)")
+        return errors
     for sdk, value in zip(names, vals):
         if value is None:
             continue

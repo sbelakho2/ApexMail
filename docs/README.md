@@ -9,7 +9,7 @@ Enterprise-grade transactional email platform.
 
 ```text
 docs/
-├── adr/                    # Architecture Decision Records (0001–0015 + TEMPLATE)
+├── adr/                    # Architecture Decision Records (0001–0011, 0015 + TEMPLATE)
 ├── api/                    # API Documentation
 │   ├── endpoints/          # Per-resource endpoint reference (messages, webhooks, …)
 │   ├── authentication.md, changelog.md, errors.md, rate-limits.md
@@ -74,7 +74,7 @@ docs/
 - [Enterprise Overview](enterprise/README.md)
 - [Single Sign-On (SSO)](enterprise/sso.md) · [Sub-Accounts](enterprise/sub-accounts.md) · [White-Label](enterprise/whitelabel.md)
 - [Template Approval](enterprise/template-approval.md) · [Log Streaming](enterprise/log-streaming.md)
-- [Compliance & Data Governance](enterprise/compliance.md) (GDPR workflows production; HIPAA/SOC 2 planned — see [framework status](security/framework-status.md))
+- [Compliance & Data Governance](enterprise/compliance.md) (GDPR controls being mapped; HIPAA/SOC 2 planned — see [framework status](security/framework-status.md))
 - [Private Cloud](enterprise/private-cloud.md) · [Support tiers](enterprise/support.md) · [QBR](enterprise/qbr.md)
 
 ### Billing & Plans
@@ -107,7 +107,7 @@ docs/
 
 - [Contributing Guide](development/contributing.md) (root: [CONTRIBUTING.md](../CONTRIBUTING.md))
 - [Style System](development/style-system.md) · [UX QA Checklist](development/ux-qa-checklist.md)
-- [ADR index](adr/TEMPLATE.md) (records 0001–0015 alongside)
+- [ADR index](adr/TEMPLATE.md) (records 0001–0011 and 0015 alongside)
 - [Load Testing & Performance Baselines](evaluation/load-testing.md)
 
 ## Canonical Sources (avoid restating these elsewhere)

@@ -10,16 +10,21 @@
 -- full ladder).
 
 -- Existing webhooks: raise any maxRetries below 10 to 10. Webhooks that
--- were explicitly configured with a HIGHER ceiling keep it.
+-- were explicitly configured with a HIGHER ceiling keep it. Policies that
+-- are present but lack the key (`{}`) count as below 10; non-numeric values
+-- are left untouched rather than aborting the migration on the cast
+-- (gates review 2026-10-07 — the old matcher skipped `{}` because
+-- NULL::int < 10 is NULL, so those rows kept an empty policy).
 UPDATE webhooks
 SET retry_policy = jsonb_set(
-        jsonb_set(retry_policy, '{maxRetries}', '10'),
+        jsonb_set(COALESCE(retry_policy, '{}'::jsonb), '{maxRetries}', '10'),
         '{retryDelay}', '30'
     )
-WHERE retry_policy IS NULL
-   OR (retry_policy->>'maxRetries')::int < 10;
+WHERE COALESCE(retry_policy->>'maxRetries', '0') ~ '^[0-9]+$'
+  AND COALESCE(retry_policy->>'maxRetries', '0')::int < 10;
 
--- Rows with the table default (NULL policy) adopt the new default shape.
+-- Rows with the table default (NULL policy) adopt the new default shape;
+-- empty-object policies were raised by the statement above.
 UPDATE webhooks
 SET retry_policy = '{"maxRetries":10,"retryDelay":30,"backoffMultiplier":2.0}'::jsonb
 WHERE retry_policy IS NULL;

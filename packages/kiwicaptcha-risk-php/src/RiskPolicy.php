@@ -20,8 +20,10 @@ namespace KiwiCaptcha\Risk;
  *        ],
  *     ].
  *     'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
- *     with index 0 = 'allow' and levels 1..4 valid actions. Missing
- *     levels 1..4 default from the built-in default floors.
+ *     every level 0..4 declared exactly once; index 0 = 'allow'. A
+ *     missing, partial or duplicated level is refused (the Rust
+ *     reference parser's grammar; defaults are never substituted for an
+ *     operator-omitted level).
  *
  * The `hash` is sha256 of the canonical JSON of the config (recursively
  * key-sorted, with unescaped slashes and unescaped unicode).
@@ -63,9 +65,11 @@ final class RiskPolicy
      * Parses and validates a policy config. Rejects: a version that does
      * not match the requested (default: contract) version, base_risk
      * outside 0..1000, scope ids outside 1..4294967295, and global_floors
-     * that are not exactly 5 actions (index 0 = Allow, entries 1..4 valid
-     * actions). Enforced in the parser itself, not only in the Symfony
-     * config layer.
+     * that are not the five canonical levels 0..4 (index 0 = Allow,
+     * each level declared exactly once). Enforced in the parser itself,
+     * not only in the Symfony config layer, and identical to the Rust
+     * reference parser's acceptance set — a policy config one engine
+     * accepts is never refused (or silently re-defaulted) by the other.
      */
     public static function fromConfig(array $config, int $version = self::CONTRACT_VERSION): self
     {
@@ -113,43 +117,55 @@ final class RiskPolicy
             ];
         }
 
-        // global_floors: exactly 5 actions (0..4), index 0 = Allow, entries
-        // 1..4 valid actions. Missing levels 1..4 default from the contract
-        // defaults; anything outside 0..4, or a level-0 action other than
-        // Allow, is rejected.
-        $floors = [0 => RiskAction::Allow];
-        if (isset($config['global_floors'])) {
-            if (!is_array($config['global_floors'])) {
-                throw new \InvalidArgumentException('Policy config "global_floors" must be an array');
-            }
-            foreach ($config['global_floors'] as $level => $action) {
-                // The canonical key grammar: a level key is one of the
-                // five literal spellings 0..4. A non-integer spelling
-                // ('01', '+1', '04') must never be parsed onto a logical
-                // level — the Rust parser's literal-level grammar rejects
-                // the identical forms, and one shared acceptance set is
-                // what keeps the two policy readers in agreement.
-                if (!is_int($level) || $level < 0 || $level > 4) {
-                    throw new \InvalidArgumentException(
-                        sprintf(
-                            'Global floor level %s must be within 0..4',
-                            is_int($level) ? (string) $level : gettype($level),
-                        )
-                    );
-                }
-                $parsed = is_string($action)
-                    ? RiskAction::from($action)
-                    : $action;
-                if ($level === 0 && $parsed !== RiskAction::Allow) {
-                    throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
-                }
-                $floors[$level] = $parsed;
-            }
+        // global_floors: exactly the five canonical levels 0..4, each
+        // declared exactly once, index 0 = Allow — the EXACT grammar the
+        // Rust reference parser enforces. A missing or partial set is a
+        // configuration error, never silently defaulted: defaulting a
+        // level an operator omitted would silently substitute a weaker
+        // (or unintended) floor, and it made PHP accept policy configs
+        // the Rust engine refuses to load — a mixed-fleet divergence.
+        if (!isset($config['global_floors']) || !is_array($config['global_floors'])) {
+            throw new \InvalidArgumentException(
+                'Policy config requires a "global_floors" array of the five canonical levels 0..4'
+            );
         }
-        $floors += self::DEFAULT_GLOBAL_FLOORS;
+        $floors = [];
+        foreach ($config['global_floors'] as $level => $action) {
+            // The canonical key grammar: a level key is one of the
+            // five literal spellings 0..4. A non-integer spelling
+            // ('01', '+1', '04') must never be parsed onto a logical
+            // level — the Rust parser's literal-level grammar rejects
+            // the identical forms, and one shared acceptance set is
+            // what keeps the two policy readers in agreement.
+            if (!is_int($level) || $level < 0 || $level > 4) {
+                throw new \InvalidArgumentException(
+                    sprintf(
+                        'Global floor level %s must be within 0..4',
+                        is_int($level) ? (string) $level : gettype($level),
+                    )
+                );
+            }
+            if (isset($floors[$level])) {
+                throw new \InvalidArgumentException(
+                    sprintf('Global floor level %d is declared more than once', $level)
+                );
+            }
+            $parsed = is_string($action)
+                ? RiskAction::from($action)
+                : $action;
+            if (!$parsed instanceof RiskAction) {
+                throw new \InvalidArgumentException('Global floor actions must be valid action names');
+            }
+            if ($level === 0 && $parsed !== RiskAction::Allow) {
+                throw new \InvalidArgumentException('Global floor level 0 must be "allow"');
+            }
+            $floors[$level] = $parsed;
+        }
         ksort($floors);
         if (count($floors) !== 5) {
-            throw new \InvalidArgumentException('global_floors must resolve to exactly 5 actions (levels 0..4)');
+            throw new \InvalidArgumentException(
+                'global_floors must declare every level 0..4 exactly once (the Rust reference parser enforces the same total grammar)'
+            );
         }
 
         return new self(

@@ -75,11 +75,20 @@ static RAW_MESSAGE_MISSING_WARNING: Once = Once::new();
 /// (`pending_approval = true`). The agent never sends — an outbound queue
 /// insert or SMTP call must never appear on this path; only the separately
 /// authorized approval control plane may release a draft.
+/// Prompt-registry identities for the draft surfaces (plan §6): the plain
+/// reply prompt, and the objection-guided one used when an approved library
+/// entry shaped the draft. Recorded on the row so a regression is traceable
+/// to the prompt that produced it.
+pub const DRAFT_PROMPT_VERSION: &str = "email-reply-v1";
+pub const OBJECTION_RESPONSE_PROMPT_VERSION: &str = "objection-response-v1";
+
 pub(crate) const STORE_DRAFT_SQL: &str = r#"
             UPDATE inbound_messages
             SET processed_at = NOW(), processing = false, processed = true,
                 ai_response = $2, ai_tokens_used = $3,
-                pending_approval = true
+                pending_approval = true,
+                suggested_action = COALESCE(suggested_action, '{}'::jsonb)
+                    || jsonb_build_object('draft_prompt_version', $4::text)
             WHERE id = $1
             "#;
 
@@ -1276,10 +1285,16 @@ impl EmailAnswerer {
         );
         // The approval control plane must revalidate tenant ownership and the
         // selected sender's current DKIM/transport readiness before queueing.
+        let prompt_version = if objection_guidance.is_some() {
+            OBJECTION_RESPONSE_PROMPT_VERSION
+        } else {
+            DRAFT_PROMPT_VERSION
+        };
         sqlx::query(STORE_DRAFT_SQL)
             .bind(&row.id)
             .bind(&reply_body)
             .bind(token_count as i32)
+            .bind(prompt_version)
             .execute(&self.pool)
             .await?;
 

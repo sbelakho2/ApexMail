@@ -689,6 +689,10 @@ async fn web_route_data(
         demos: None,
         demo_viewer: None,
         ai_drafts: None,
+        // The shell identity + impersonation banner are attached by the
+        // api-server render pipeline (they need request headers, which this
+        // loader does not receive).
+        ..RouteData::default()
     }
 }
 
@@ -775,7 +779,6 @@ async fn load_assistant(
     };
 
     AssistantPageData {
-        csrf_token: String::new(),
         session_id: Some(session_id),
         turns,
         unavailable: false,
@@ -783,8 +786,11 @@ async fn load_assistant(
 }
 
 /// The AI-drafts review page's data: every pending draft with its
-/// classification and objection sub-label. `unavailable` on a read failure.
-async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDraftsPageData {
+/// classification, objection sub-label, and whether it answers a
+/// first-response request. `unavailable` on a read failure.
+pub(crate) async fn load_ai_drafts_page(
+    state: &AppState,
+) -> ui_foundation::view_data::AiDraftsPageData {
     use ui_foundation::view_data::{AiDraftData, AiDraftsPageData};
 
     let rows: Result<
@@ -796,15 +802,24 @@ async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDr
             Option<String>,
             Option<String>,
             Option<String>,
+            bool,
             chrono::DateTime<chrono::Utc>,
         )>,
         sqlx::Error,
     > = sqlx::query_as(
+        // First responses are SLA-critical (the requester is waiting on the
+        // published reply time), so they sort ahead of the FIFO backlog; the
+        // `first_response` flag drives the card badge. DOGFOOD 2026-10-06:
+        // the flag was hardcoded `false` in the row mapping, so the badge
+        // could never render no matter what the row said.
         "SELECT id, tenant_id, from_email, subject, ai_response, classification, \
-                suggested_action->>'objection_class', received_at \
+                suggested_action->>'objection_class', \
+                COALESCE((suggested_action->>'first_response') = 'true', false), received_at \
          FROM inbound_messages \
          WHERE pending_approval = true AND ai_response IS NOT NULL \
-         ORDER BY received_at ASC LIMIT 100",
+         ORDER BY COALESCE((suggested_action->>'first_response') = 'true', false) DESC, \
+                  received_at ASC \
+         LIMIT 100",
     )
     .fetch_all(&state.db)
     .await;
@@ -812,7 +827,17 @@ async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDr
         Ok(rows) => rows
             .into_iter()
             .map(
-                |(id, tenant, from, subject, reply, classification, objection, received_at)| {
+                |(
+                    id,
+                    tenant,
+                    from,
+                    subject,
+                    reply,
+                    classification,
+                    objection,
+                    first_response,
+                    received_at,
+                )| {
                     AiDraftData {
                         id,
                         tenant_id: tenant.unwrap_or_default(),
@@ -822,7 +847,7 @@ async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDr
                         received_at: received_at.format("%Y-%m-%d %H:%M UTC").to_string(),
                         classification,
                         objection_class: objection,
-                        first_response: false,
+                        first_response,
                     }
                 },
             )
@@ -837,7 +862,6 @@ async fn load_ai_drafts_page(state: &AppState) -> ui_foundation::view_data::AiDr
     };
 
     AiDraftsPageData {
-        csrf_token: String::new(),
         drafts,
         unavailable: false,
     }
@@ -908,7 +932,6 @@ async fn load_demos_page(
     };
 
     DemosPageData {
-        csrf_token: String::new(),
         scripts,
         sessions,
         unavailable: false,
@@ -986,14 +1009,27 @@ async fn load_demo_viewer(
         serde_json::Value,
         Option<serde_json::Value>,
         Option<chrono::DateTime<chrono::Utc>>,
-    )> = sqlx::query_as(
+    )> = match sqlx::query_as(
         "SELECT idx, kind, input, result, ran_at FROM demo_session_steps \
              WHERE session_id = $1 ORDER BY idx ASC",
     )
     .bind(&id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            // Audit #16: a failed step read is a service problem, never an
+            // empty walkthrough.
+            tracing::error!(error = %error, "demo viewer: step lookup failed");
+            return DemoViewerData {
+                state: "unavailable".into(),
+                script: script_name,
+                expires_at: expires_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                steps: Vec::new(),
+            };
+        }
+    };
 
     DemoViewerData {
         state: session_state,
@@ -1359,7 +1395,9 @@ async fn load_campaign_editor(
     {
         Ok(row) => row,
         Err(error) => {
-            tracing::warn!(error = %error, "campaign editor lookup failed");
+            // Audit #16: an outage must not render as "campaign not found".
+            tracing::error!(error = %error, "campaign editor lookup failed");
+            editor.unavailable = true;
             return editor;
         }
     };
@@ -1383,7 +1421,7 @@ async fn load_campaign_editor(
     };
     // One query, two list-shaped columns: split segment_id/list ids by a
     // second narrow read to keep the bind types simple.
-    let (segment_id, list_ids): (String, Vec<String>) = sqlx::query_as(
+    let (segment_id, list_ids): (String, Vec<String>) = match sqlx::query_as(
         "SELECT COALESCE(segment_id::text, ''), \
                 COALESCE((SELECT array_agg(value) FROM jsonb_array_elements_text(COALESCE(list_ids, '[]'::jsonb)) AS value), '{}') \
          FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
@@ -1392,7 +1430,16 @@ async fn load_campaign_editor(
     .bind(tenant)
     .fetch_one(&state.db)
     .await
-    .unwrap_or_default();
+    {
+        Ok(row) => row,
+        Err(error) => {
+            // Audit #16: a failed audience read must not render as "no
+            // audience selected" — that is a fabricated value.
+            tracing::error!(error = %error, "campaign editor: audience lookup failed");
+            editor.unavailable = true;
+            (String::new(), Vec::new())
+        }
+    };
 
     editor.from_email = from_email.unwrap_or_default();
     editor.from_name = from_name.unwrap_or_default();
@@ -2985,6 +3032,9 @@ async fn control_plane_route_data(
         demos,
         demo_viewer: None,
         ai_drafts,
+        // The shell identity + impersonation banner are attached by the
+        // api-server render pipeline (they need request headers).
+        ..RouteData::default()
     }
 }
 
@@ -3068,7 +3118,6 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
     SalesPageData {
         // The render pipeline injects hidden `_csrf` inputs into every
         // POST /web/* form, so the page does not need to carry a token.
-        csrf_token: String::new(),
         first_response,
         overview,
         decisions,
@@ -6067,11 +6116,32 @@ mod tests {
     #[test]
     fn cp_sales_autopilot_uses_the_shared_control_read_model() {
         let source = include_str!("data.rs");
-        let body = source
+        // Brace-match the loader function itself: the contract is about the
+        // page loader's own SQL, not about unrelated helpers that happen to
+        // sit between it and the next function (the first-response KPI rail
+        // queries first_response_requests, which is not part of the sales
+        // control read model).
+        let rest = source
             .split("async fn cp_sales_autopilot")
             .nth(1)
-            .and_then(|rest| rest.split("fn decision_data").next())
-            .expect("cp_sales_autopilot body");
+            .expect("cp_sales_autopilot exists");
+        let open = rest.find('{').expect("cp_sales_autopilot body");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, ch) in rest[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &rest[..end.expect("cp_sales_autopilot closing brace")];
         assert!(
             body.contains("control_read::load_sales_control_snapshot"),
             "the SSR page must load through the shared control read model"

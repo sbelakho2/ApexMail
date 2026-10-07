@@ -39,6 +39,12 @@ struct Cli {
     /// Internal API base URL.
     #[arg(long, env = "API_BASE_URL", default_value = "http://localhost:3001")]
     api_base_url: String,
+
+    /// Reconcile the `plans` table with the canonical `platform-catalog`
+    /// catalog, print the report and exit (one-shot ops entrypoint; the
+    /// server reconciles on every boot anyway).
+    #[arg(long, env = "BILLING_RECONCILE_PLANS_ONLY", default_value_t = false)]
+    reconcile_plans_only: bool,
 }
 
 fn init_tracing() -> Option<TracingGuard> {
@@ -71,6 +77,39 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    tracing::info!(listen = %cli.listen, "starting billing-service");
+
+    // Database pool.
+    let db = PgPoolOptions::new()
+        .max_connections(20)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .idle_timeout(std::time::Duration::from_secs(300))
+        .max_lifetime(std::time::Duration::from_secs(1800))
+        .connect(&cli.database_url)
+        .await?;
+
+    // F1 (audit): bootstrap reconciliation — the `plans` table is converged
+    // to the canonical `platform-catalog` catalog on every boot (insert
+    // missing tiers, repair drifted prices/limits/features, deactivate
+    // rows that are not catalog plans). Idempotent; stripe price ids
+    // survive. The one-shot flag runs the same pass and exits, so ops can
+    // converge a live deployment without a restart.
+    let reconcile_report = billing_service::plans::reconcile_plans_with_catalog(&db).await?;
+    tracing::info!(
+        inserted = reconcile_report.inserted,
+        repaired = reconcile_report.repaired,
+        deactivated = reconcile_report.deactivated,
+        "plans table reconciled with the canonical catalog"
+    );
+    if cli.reconcile_plans_only {
+        println!(
+            "plans reconcile: inserted={} repaired={} deactivated={}",
+            reconcile_report.inserted, reconcile_report.repaired, reconcile_report.deactivated
+        );
+        return Ok(());
+    }
+
     // BS-001: Fail-fast if Stripe webhook secret is not configured.
     // The /webhooks/stripe endpoint is exempt from service auth and relies
     // entirely on HMAC-SHA256 signature verification. An empty secret would
@@ -84,18 +123,6 @@ async fn main() -> anyhow::Result<()> {
         );
         anyhow::bail!("STRIPE_WEBHOOK_SECRET is required");
     }
-
-    tracing::info!(listen = %cli.listen, "starting billing-service");
-
-    // Database pool.
-    let db = PgPoolOptions::new()
-        .max_connections(20)
-        .min_connections(2)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(300))
-        .max_lifetime(std::time::Duration::from_secs(1800))
-        .connect(&cli.database_url)
-        .await?;
 
     // Migrations are managed externally (apexmail-db crate or deploy tooling).
     // If you need auto-migration, point sqlx::migrate! at the correct path.

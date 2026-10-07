@@ -9482,6 +9482,12 @@ mod unit_arms {
     /// await joins it cleanly.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_serves_imaps_and_shuts_down_cleanly() {
+        // The workspace pulls both rustls providers (aws-lc-rs via the AWS
+        // SDK, ring here), so the process-level default is ambiguous and
+        // TLS init panics without an explicit install — the production run()
+        // path installs ring the same way (this test drives run() in-process).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         // Reserve two free ports and hand them to run().
         let reserve = || {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");

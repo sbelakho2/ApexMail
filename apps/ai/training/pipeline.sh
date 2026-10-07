@@ -15,7 +15,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 CONFIG_PATH="${AI_TRAINING_CONFIG:-$SCRIPT_DIR/config.yaml}"
 MODEL_PATH="${AI_MODEL_BASE:-/workspace/models/Qwen3-Next-80B-A3B-Instruct}"
-DATA_PATH="$PROJECT_ROOT/data/train.jsonl"
+# Tracked corpus lives next to this script (data/README.md); override with
+# AI_TRAIN_DATA_PATH when staging an operator-provided dataset.
+DATA_PATH="${AI_TRAIN_DATA_PATH:-$SCRIPT_DIR/data/train.jsonl}"
 OUTPUT_DIR="${AI_OUTPUT_DIR:-$PROJECT_ROOT/artifacts/ai-training/output}"
 TRAIN_LOG="${AI_TRAIN_LOG:-$PROJECT_ROOT/artifacts/ai-training/train.log}"
 TEST_LOG="${AI_TEST_LOG:-$PROJECT_ROOT/artifacts/ai-training/test.log}"

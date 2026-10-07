@@ -22,7 +22,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PROJECT_ROOT: Path = _PROJECT_ROOT
 
 # ── Data directory (overridable via env) ────────────────────────────────
-DATA_DIR: Path = Path(os.environ.get("DATA_DIR", _PROJECT_ROOT / "data"))
+DATA_DIR: Path = Path(
+    os.environ.get("DATA_DIR", Path(__file__).resolve().parent / "data")
+)
+# The retired scratch dir that still holds the shared system-prompt catalog
+# (data/README.md): the JSONL corpus moved next to this pipeline.
+SCRATCH_DIR: Path = _PROJECT_ROOT / "data"
 
 # ── Common data-file paths ──────────────────────────────────────────────
 TRAIN_JSONL: Path              = DATA_DIR / "train_agent.jsonl"
@@ -30,5 +35,5 @@ VAL_JSONL: Path                = DATA_DIR / "val.jsonl"
 TEST_JSONL: Path               = DATA_DIR / "test.jsonl"
 GOLDEN_QA_JSONL: Path          = DATA_DIR / "golden_qa.jsonl"
 RECOVERED_TRAINING_JSONL: Path = DATA_DIR / "recovered_training.jsonl"
-SYSTEM_PROMPTS_JSON: Path      = DATA_DIR / "system_prompts.json"
-MANIFEST_JSON: Path            = DATA_DIR / "manifest.json"
+SYSTEM_PROMPTS_JSON: Path      = SCRATCH_DIR / "system_prompts.json"
+MANIFEST_JSON: Path            = SCRATCH_DIR / "manifest.json"

@@ -7,7 +7,7 @@
 
 | # | Requirement | Status | Evidence |
 |---|-------------|--------|----------|
-| 1 | Legal entity data is correct everywhere | [x] | `compliance/src/final_checklist.rs:108` — legal_entity_correct=true. Entity checks in `.github/workflows-archive/legal-identity.yml` |
+| 1 | Legal entity data is correct everywhere | [x] | `compliance/src/final_checklist.rs:108` — legal_entity_correct=true. Entity checks in `ci/stages/validate.sh` (legal identity constants + built-HTML validation) |
 | 2 | Obsolete company identifiers return zero results | [x] | `compliance/src/final_checklist.rs:109` — obsolete_identifiers_zero=true. Forbidden pattern scan in `tools/check-forbidden-patterns.sh` |
 | 3 | Legal pages are internally consistent | [x] | `compliance/src/final_checklist.rs:110` — legal_pages_consistent=true. `deploy/review/legal-sign-off-checklist.md` confirms 16 surfaces internally consistent |
 | 4 | Data-location statements match real architecture | [x] | `compliance/src/final_checklist.rs:111` — data_location_matches_architecture=true. EEA-only documented in architecture docs |
@@ -98,13 +98,13 @@ The site is enterprise-ready:
 | `deploy/review/engineering-sign-off-checklist.md` | Engineering review | 7, 9, 11-14, 30-32, 34 |
 | `deploy/review/commercial-sign-off-checklist.md` | Commercial review | 16-19, 35 |
 | `deploy/review/external-trust-test-plan.md` | Buyer review | 23-24 |
-| `.github/workflows-archive/release-gates.yml` | Release CI | 30 |
-| `.github/workflows-archive/broken-link-check.yml` | Link CI | QA |
-| `.github/workflows-archive/html-validation.yml` | HTML CI | QA |
-| `.github/workflows-archive/accessibility-check.yml` | A11y CI | 27 |
-| `.github/workflows-archive/seo-audit.yml` | SEO CI | 28 |
-| `.github/workflows-archive/performance-budget.yml` | Perf CI | 8, 29 |
-| `.github/workflows-archive/mobile-qa.yml` | Mobile CI | 32 |
-| `.github/workflows-archive/pricing-drift.yml` | Pricing CI | 16-18 |
-| `.github/workflows-archive/claim-expiry-check.yml` | Claims CI | 23 |
-| `.github/workflows-archive/legal-identity.yml` | Legal CI | 1-2 |
+| `ci/stages/validate.sh` + `ci/stages/test.sh` | Release CI (current) | 30 |
+| `deploy/tests/broken-links.sh` (wired in `ci/stages/validate.sh`) | Link CI | QA |
+| `deploy/tests/html-validate.sh` (wired in `ci/stages/validate.sh`) | HTML CI | QA |
+| `deploy/tests/contrast-check.sh` + `tools/contrast-audit/gate.sh` | A11y CI | 27 |
+| `deploy/tests/seo-validate.sh` (wired in `ci/stages/validate.sh`) | SEO CI | 28 |
+| `deploy/tests/performance-budget.sh` (advisory in `ci/stages/validate.sh`) | Perf CI | 8, 29 |
+| `deploy/tests/mobile-test.sh` + `deploy/tests/desktop-browser-test.sh` | Mobile CI | 32 |
+| pricing drift (`tools/validate_pricing_drift.py`, `ci/stages/validate.sh`) | Pricing CI | 16-18 |
+| claim expiry (`tools/check_claim_expiry.py`, `ci/stages/validate.sh`) | Claims CI | 23 |
+| legal identity (`ci/stages/validate.sh` + `tools/check-forbidden-patterns.sh`) | Legal CI | 1-2 |

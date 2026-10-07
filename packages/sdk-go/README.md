@@ -23,7 +23,10 @@ import (
 )
 
 func main() {
-	client := apexmail.New("am_live_xxxxxxxxxxxx")
+	client, err := apexmail.New("am_live_xxxxxxxxxxxx")
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	res, err := client.Emails.Send(context.Background(), &apexmail.SendEmailRequest{
 		From:    apexmail.EmailAddress{Email: "hello@yourdomain.com"},
@@ -65,9 +68,12 @@ res, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
 })
 
 // NOTE: EmailAddress display names are serialized as RFC 5322
-// "Name <addr>" forms, and every accepted option (ReplyTo, TemplateID,
-// TemplateData, Priority, Attachments, Headers) is transmitted under its
-// documented snake_case field name.
+// "Name <addr>" forms, and every accepted option (ReplyTo, Priority,
+// Attachments, Headers, Metadata, ScheduledAt) is transmitted under its
+// documented snake_case field name. Template sends are NOT supported by the
+// send API (the server answers 422 for template_id/template_data), so the
+// SDK refuses them client-side — render the template with
+// client.Templates.Render first and send HTML/Text.
 
 // Batch send (up to 1000 emails)
 res, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{
@@ -81,12 +87,20 @@ res, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{
 email, err := client.Emails.Get(ctx, "email_id")
 fmt.Println(email.Status) // "delivered"
 
-// List emails
+// List emails (bare MessageDetail array; the envelope pagination meta is
+// captured on the response)
 limit := 50
-emails, err := client.Emails.List(ctx, apexmail.ListEmailsOptions{
+page, err := client.Emails.List(ctx, apexmail.ListEmailsOptions{
 	Status: "delivered",
 	Limit:  &limit,
 })
+fmt.Println(len(page.Messages), page.HasMore(), page.NextCursor())
+// Continue with the opaque cursor when the API flagged more pages:
+if page.HasMore() {
+	next, err := client.Emails.List(ctx, apexmail.ListEmailsOptions{Cursor: page.NextCursor()})
+	_ = next
+	_ = err
+}
 
 // Cancel scheduled email
 _, err := client.Emails.Cancel(ctx, "email_id")
@@ -105,6 +119,11 @@ domain, err := client.Domains.Verify(ctx, domain.ID)
 
 // List domains
 domains, err := client.Domains.List(ctx)
+
+// DNS records required for verification and the derived auth state
+records, err := client.Domains.DNSRecords(ctx, domain.ID)
+status, err := client.Domains.AuthStatus(ctx, domain.ID)
+fmt.Println(len(records.Records), status.OverallStatus)
 ```
 
 ### Webhooks
@@ -136,7 +155,7 @@ if err != nil {
 	case errors.As(err, &validationErr):
 		fmt.Printf("Validation failed: %s\n", validationErr.Message)
 	case errors.As(err, &rateLimitErr):
-		fmt.Printf("Rate limited. Retry after %d seconds\n", rateLimitErr.RetryAfter)
+		fmt.Printf("Rate limited. Retry after %.0f seconds\n", rateLimitErr.RetryAfter.Seconds())
 	case errors.As(err, &apiErr):
 		fmt.Printf("API error: %s (%s)\n", apiErr.Message, apiErr.Code)
 	default:

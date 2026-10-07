@@ -80,7 +80,8 @@ every 30 seconds in-memory) so routing decisions are O(1).
 
 When a tenant upgrades to a plan with dedicated IPs or purchases an add-on:
 
-1. **Billing webhook** (`stripe-integration.ts`) calls `POST /v1/dedicated-ips`
+1. **Billing webhook** (`billing-service/src/stripe_webhooks.rs`,
+   `auto_provision_dedicated_ips_background()`) calls `POST /v1/dedicated-ips`
 2. **API handler** calls `DedicatedIpProvider::allocate_ip()`
 3. `DedicatedIpProvider` does:
    - Verifies plan eligibility and IP limit
@@ -147,8 +148,9 @@ When a tenant downgrades or releases an IP:
 
 ### SES (shared path)
 
-- **DKIM**: Easy DKIM (AWS manages keys and DNS records)
-- **Bounces/complaints**: SNS → `ses_monitoring.rs`
+- **DKIM**: ApexMail generates the per-domain key and the customer publishes the
+  TXT record. SES Easy DKIM is not used.
+- **Bounces/complaints**: SNS → `api-server/src/routes/ses_notifications.rs` (mounted at `/v1/ses`)
 - **Reputation**: AWS VDM (Virtual Deliverability Manager)
 - **IP pool**: AWS-managed, shared across all ApexMail tenants without dedicated IPs
 
@@ -170,9 +172,9 @@ When a tenant downgrades or releases an IP:
 
 ### Billing Integration
 
-- `autoProvisionDedicatedIps()` in `stripe-integration.ts` calls the API
+- `auto_provision_dedicated_ips_background()` in `billing-service/src/stripe_webhooks.rs` calls the API
 - Plan features control: `dedicated_ip` (boolean), `dedicated_ip_count` (included IPs)
-- Add-on IPs above included count: billed at $30/month via Stripe metered billing
+- Add-on IPs: €49/month for the first, €69/month for each additional (the runtime estimator's ladder)
 - Releasing an IP sets `billing_status = 'pending_cancel'`
 
 ---

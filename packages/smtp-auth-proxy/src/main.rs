@@ -13,13 +13,15 @@
 use std::process::ExitCode;
 
 const NOTICE: &str = "\
-error: smtp-auth-proxy is a placeholder package.
+error: smtp-auth-proxy is a placeholder package and is NOT deployed.
 
-The real SMTP AUTH proxy implementation lives in the mail-server workspace:
+Nothing in docker-compose*.yml or deploy/ references this package; the
+production SMTP ingress (including the SMTP AUTH path) runs the real
+implementation from the mail-server workspace:
 
     services/mail-server/crates/mta
 
-Build and run it from the mail-server workspace root instead:
+Build and run that from the mail-server workspace root instead:
 
     cd services/mail-server
     cargo run -p mta --bin mta-server

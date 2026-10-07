@@ -33,6 +33,18 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
         )
 
 
+def _reject_cursor(cursor: Any) -> None:
+    """ListDomainsQuery accepts {limit, offset} only (deny_unknown_fields):
+    a `cursor` parameter is rejected by the server with HTTP 400. Fail fast
+    client-side instead of emitting a 400."""
+    if cursor is not None:
+        raise ValidationError(
+            "/v1/domains does not support cursor pagination "
+            "(the server rejects `cursor` with HTTP 400); use limit/offset",
+            code="UNSUPPORTED_PAGINATION",
+        )
+
+
 def _parse_domain(data: Any) -> Domain:
     """Parse the flat DomainResponse (tolerating a legacy wrapper)."""
     if isinstance(data, dict) and isinstance(data.get("domain"), dict):
@@ -92,31 +104,33 @@ class DomainsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> DomainListResponse:
         """
         List all domains.
 
-        The server's ListDomainsQuery accepts {limit, offset, cursor} only.
+        The server's ListDomainsQuery accepts {limit, offset} only — a
+        `cursor` parameter is rejected with HTTP 400 (there is no cursor
+        pagination on this endpoint).
 
         Args:
             limit: Maximum number of results
             offset: Number of results to skip
-            cursor: Cursor for pagination
+            cursor: Not supported by the API (passing it raises
+                ValidationError instead of a server 400)
 
         Returns:
             DomainListResponse with domains list
         """
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
 
         data = self._client._request("GET", "/v1/domains", params=params or None)
-        return DomainListResponse(**data)
+        return DomainListResponse.model_validate(data)
 
     def verify(self, domain_id: str) -> dict[str, Any]:
         """
@@ -180,19 +194,18 @@ class AsyncDomainsResource:
         *,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        cursor: Optional[int] = None,
+        cursor: Optional[str] = None,
     ) -> DomainListResponse:
-        """List all domains asynchronously."""
+        """List all domains asynchronously (limit/offset; no cursor support)."""
+        _reject_cursor(cursor)
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         if offset is not None:
             params["offset"] = offset
-        if cursor is not None:
-            params["cursor"] = cursor
 
         data = await self._client._request("GET", "/v1/domains", params=params or None)
-        return DomainListResponse(**data)
+        return DomainListResponse.model_validate(data)
 
     async def verify(self, domain_id: str) -> dict[str, Any]:
         """Trigger domain verification asynchronously."""

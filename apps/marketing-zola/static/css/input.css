@@ -75,14 +75,14 @@
   --brand-300: 252 165 165;
   --brand-400: 248 113 113;
   --brand-500: 239 68 68;     /* Brand Red (#EF4444) */
-  --brand-600: 220 38 38;     /* Brand Deep Red (#DC2626) */
+  --brand-600:185 28 28;     /* Brand Deep Red (#DC2626) */
   --brand-700: 185 28 28;
   --brand-800: 153 27 27;
   --brand-900: 127 29 29;
   --brand-950: 69 10 10;
 
   /* Primary — matches brand-500 */
-  --primary: 239 68 68;
+  --primary:185 28 28;
 
   /* Semantic brand tokens (audit 1.4) — single source of truth for the
      "brand accent", "brand surface tint", and "brand-on-text" concepts
@@ -107,7 +107,7 @@
   --danger-950: 69 10 10;
 
   /* Background and foreground semantic tokens */
-  --background: 250 250 250;
+  --background: 244 244 246;
   --foreground: 9 9 11;
 
   /* Card surface: elevated panel above the section background.
@@ -117,30 +117,34 @@
   --card: 255 255 255;
 
   /* Surfaces — Zinc palette for neutral, industrial feel (Light Mode) */
-  --surface-50: 250 250 250;
-  --surface-100: 244 244 245;
-  --surface-200: 228 228 231;
+  --surface-50: 244 244 246;
+  --surface-100:238 238 240;
+  --surface-200:212 212 216;
   --surface-300: 212 212 216;
-  --surface-400: 161 161 170;
-  --surface-500: 113 113 122;
+  --surface-400:113 113 122;
+  --surface-500:82 82 91;
   --surface-600: 82 82 91;
   --surface-700: 63 63 70;
   --surface-800: 39 39 42;
   --surface-900: 24 24 27;
   --surface-950: 9 9 11;
 
-  /* Semantic Colors */
-  --success-50: 240 253 244;
-  --success-100: 220 252 231;
-  --success-200: 187 247 208;
-  --success-300: 134 239 172;
-  --success-400: 74 222 128;
-  --success-500: 34 197 94;
-  --success-600: 22 163 74;
-  --success-700: 21 128 61;
-  --success-800: 22 101 52;
-  --success-900: 20 83 45;
-  --success: 22 163 74;
+  /* Semantic Colors.
+     "Success" is NEUTRAL INK, not green: green is not part of the ApexMail
+     palette and read as a foreign design element on every status chip
+     (owner review 2026-10-06). Positive states render as ink/grey; the
+     brand red is reserved for primary actions and failures. */
+  --success-50: 250 250 250;
+  --success-100: 244 244 245;
+  --success-200: 228 228 231;
+  --success-300: 212 212 216;
+  --success-400: 161 161 170;
+  --success-500: 82 82 91;
+  --success-600: 63 63 70;
+  --success-700: 39 39 42;
+  --success-800: 24 24 27;
+  --success-900: 9 9 11;
+  --success: 63 63 70;
 
   --warning-50: 255 251 235;
   --warning-100: 254 243 199;
@@ -191,9 +195,11 @@
   --radius-xl: 16px;
   --radius-2xl: 20px;
 
-  /* Brand gradient — applied to primary buttons, headings, and accent elements.
-     Restored to the red brand scale (#DC2626 → #991B1B). */
-  --brand-gradient: linear-gradient(135deg, #a81818, #7f1d1d);
+  /* Brand fill — the CLASSIC ApexMail red, flat (#DC2626). The previous
+     two-tone maroon gradient painted a black-infused red on every primary
+     button and accent (owner review 2026-10-06); the maroon steps are gone
+     from the palette and GATE L pins their absence. */
+  --brand-gradient: linear-gradient(135deg, #dc2626, #dc2626);
 
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
@@ -209,13 +215,13 @@
   :root:not(.light) {
     --background: 9 9 11;
     --foreground: 250 250 250;
-    --card: 16 16 18;
+    --card: 24 24 27;
     --surface-50: 9 9 11;
     --surface-100: 24 24 27;
-    --surface-200: 39 39 42;
-    --surface-300: 63 63 70;
+    --surface-200:39 39 42;
+    --surface-300: 82 82 91;
     --surface-400: 82 82 91;
-    --surface-500: 113 113 122;
+    --surface-500:82 82 91;
     --surface-600: 161 161 170;
     --surface-700: 212 212 216;
     --surface-800: 228 228 231;
@@ -227,13 +233,13 @@
 html.dark {
   --background: 9 9 11;
   --foreground: 250 250 250;
-  --card: 16 16 18;
+  --card: 24 24 27;
   --surface-50: 9 9 11;
   --surface-100: 24 24 27;
-  --surface-200: 39 39 42;
-  --surface-300: 63 63 70;
+  --surface-200:39 39 42;
+  --surface-300: 82 82 91;
   --surface-400: 82 82 91;
-  --surface-500: 113 113 122;
+  --surface-500:82 82 91;
   --surface-600: 161 161 170;
   --surface-700: 212 212 216;
   --surface-800: 228 228 231;
@@ -257,7 +263,7 @@ html.dark {
 .text-surface-500 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
 .text-brand-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
 .text-red-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
-.text-success-600 { color: rgb(21 128 61 / var(--tw-text-opacity, 1)) !important; }
+.text-success-600 { color: rgb(39 39 42 / var(--tw-text-opacity, 1)) !important; }
 .text-info-600 { color: rgb(14 116 144 / var(--tw-text-opacity, 1)) !important; }
 .text-warning-600 { color: rgb(146 64 14 / var(--tw-text-opacity, 1)) !important; }
 
@@ -335,7 +341,7 @@ textarea::placeholder {
   background-color: rgb(var(--brand-600));
   border-color: rgb(var(--brand-700));
   color: #fff;
-  box-shadow: inset 0 -1px 0 rgb(127 29 29 / 0.45);
+  box-shadow: none;
 }
 
 .apex-brand-mark svg {
@@ -356,24 +362,24 @@ html.dark .apex-brand-mark {
    always-white inverse CTA (!bg-white in pricing/card.html) still rides
    the [class~="!bg-white"] rules further down. */
 html.dark .bg-brand-50 {
-  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
+  background-color: rgb(24 24 27 / var(--tw-bg-opacity, 0.9)) !important;
 }
 html.dark .bg-brand-100 {
-  background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
+  background-color: rgb(24 24 27 / var(--tw-bg-opacity, 0.9)) !important;
 }
 html.dark .bg-brand-50\/50 {
-  background-color: rgb(69 10 10 / 0.52) !important;
+  background-color: rgb(24 24 27 / 0.7) !important;
 }
 html.dark .bg-brand-50\/20 {
-  background-color: rgb(69 10 10 / 0.34) !important;
+  background-color: rgb(24 24 27 / 0.5) !important;
 }
 html.dark .bg-success-50 {
-  background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
+  background-color: rgb(39 39 42 / var(--tw-bg-opacity, 0.85)) !important;
 }
 html.dark .bg-success-100,
 html.dark .bg-success-200,
 html.dark .bg-success-300 {
-  background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.58)) !important;
+  background-color: rgb(9 9 11 / var(--tw-bg-opacity, 0.58)) !important;
 }
 html.dark .bg-warning-50 {
   background-color: rgb(113 63 18 / var(--tw-bg-opacity, 0.35)) !important;
@@ -386,7 +392,7 @@ html.dark .bg-info-50 {
   background-color: rgb(30 64 175 / var(--tw-bg-opacity, 0.35)) !important;
 }
 html.dark .bg-danger-50 {
-  background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
+  background-color: rgb(24 24 27 / 0.9) !important;
 }
 html.dark .from-surface-50,
 html.dark .from-surface-100 {
@@ -395,9 +401,6 @@ html.dark .from-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .from-brand-50 {
-  --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
-  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
 html.dark .via-surface-50,
 html.dark .via-surface-100 {
@@ -405,15 +408,14 @@ html.dark .via-surface-100 {
   --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
 html.dark .via-brand-50 {
-  --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-  --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+
 }
 html.dark .to-surface-50,
 html.dark .to-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
 }
 html.dark .to-brand-50 {
-  --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
+
 }
 
 html.dark .bg-surface-950 {
@@ -530,24 +532,24 @@ html.dark .cookie-consent-banner {
   }
 
   .bg-brand-50 {
-    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
+    background-color: rgb(24 24 27 / 0.9) !important;
   }
   .bg-brand-100 {
-    background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.82)) !important;
+    background-color: rgb(24 24 27 / 0.9) !important;
   }
   .bg-brand-50\/50 {
-    background-color: rgb(69 10 10 / 0.52) !important;
+    background-color: rgb(24 24 27 / 0.7) !important;
   }
   .bg-brand-50\/20 {
-    background-color: rgb(69 10 10 / 0.34) !important;
+    background-color: rgb(24 24 27 / 0.5) !important;
   }
   .bg-success-50 {
-    background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.35)) !important;
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 0.35)) !important;
   }
   .bg-success-100,
   .bg-success-200,
   .bg-success-300 {
-    background-color: rgb(20 83 45 / var(--tw-bg-opacity, 0.58)) !important;
+    background-color: rgb(9 9 11 / var(--tw-bg-opacity, 0.58)) !important;
   }
   .bg-warning-50 {
     background-color: rgb(113 63 18 / var(--tw-bg-opacity, 0.35)) !important;
@@ -560,7 +562,7 @@ html.dark .cookie-consent-banner {
     background-color: rgb(30 64 175 / var(--tw-bg-opacity, 0.35)) !important;
   }
   .bg-danger-50 {
-    background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
+    background-color: rgb(24 24 27 / 0.9) !important;
   }
   .from-surface-50,
   .from-surface-100 {
@@ -569,9 +571,6 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .from-brand-50 {
-    --tw-gradient-from: rgb(69 10 10 / 0.62) var(--tw-gradient-from-position) !important;
-    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-    --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
   .via-surface-50,
   .via-surface-100 {
@@ -579,15 +578,17 @@ html.dark .cookie-consent-banner {
     --tw-gradient-stops: var(--tw-gradient-from), rgb(9 9 11 / 1) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .via-brand-50 {
-    --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
-    --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
+    /* The maroon via-stop is gone with the rest of the black-infused red;
+       the utility now falls through to transparent. */
+    --tw-gradient-to: rgb(185 28 28/ 0) var(--tw-gradient-to-position) !important;
+    --tw-gradient-stops: var(--tw-gradient-from), rgb(185 28 28/ 0.35) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
   .to-surface-50,
   .to-surface-100 {
     --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
   }
   .to-brand-50 {
-    --tw-gradient-to: rgb(69 10 10 / 0.42) var(--tw-gradient-to-position) !important;
+  
   }
 
   .bg-surface-950 {
@@ -812,8 +813,12 @@ html.dark :focus-visible {
   }
 
   ::selection {
-    @apply bg-brand-600/20 text-surface-950;
+    /* Solid classic red + white ink: the previous 20%-alpha tint left the
+       highlight nearly invisible (grey-on-grey during selection). */
+    background-color: rgb(var(--primary));
+    color: #fff;
   }
+
 
   /* Focus visible styles for accessibility */
   :focus-visible {
@@ -1721,7 +1726,7 @@ html.dark .k-arc-label.features-see-all:hover { color: rgb(var(--brand-400)); }
 .term-bar b { font-weight: 600; letter-spacing: 0.1em; font-size: 10px; margin-left: 8px; }
 .term-dot { width: 9px; height: 9px; border-radius: 50%; background: #3f3f46; }
 .term-pre { padding: 18px; overflow-x: auto; margin: 0; white-space: pre; }
-.term-c { color: #8b8b96; } .term-k { color: #f87171; } .term-s { color: #34d399; }
+.term-c { color: #8b8b96; } .term-k { color: #f87171; } .term-s { color: #e4e4e7; }
 
 /* The trace, made real: run row inside the terminal panel. */
 .term-run {

@@ -1,18 +1,25 @@
 {
   "meta": {
     "version": "1.0",
-    "created_at": "2026-05-14T09:56:30Z",
     "created_by": "platform-engineering",
-    "environment": "github-actions-ubuntu-latest-2vcpu",
-    "cpu": "2 vCPU (GitHub Actions)",
-    "notes": "HTTP journey performance baselines for k6 API load tests. Thresholds derived from load-tests/http-journey README expected values. These represent minimum acceptable performance on standard CI runners (2 vCPU, 7 GB RAM) with local PostgreSQL and Redis services."
+    "environment": "illustrative",
+    "cpu": "n/a",
+    "status": "ILLUSTRATIVE TARGETS — NOT MEASUREMENTS",
+    "notes": "These values are engineering targets used by scripts/compare-baseline.sh as the no-regression reference; they were NOT produced by an executed, reproducible run. The previous provenance ('measured_at 2026-05-14', GitHub Actions, 2 vCPU) was unreproducible from this repository AND cited endpoints that do not exist (POST /v1/email/send, GET /v1/health/{liveness,readiness}); those endpoint strings are corrected here to the mounted routes. Re-measure on the target environment and replace this file before treating a comparison as evidence.",
+    "mounted_routes": {
+      "api": "POST /v1/messages; GET /health/live; GET /health/ready",
+      "auth": "POST /v1/auth/login (CSRF + session cookie; returns expires_at/user, no JSON token)",
+      "tracking": "GET /o/:tracking_id; GET /o.gif?t=; GET /c/:tracking_id (services/mail-server/crates/tracking-service)"
+    }
   },
   "api_throughput": {
     "sustained_rps": 300,
     "p95_latency_ms": 500,
     "p99_latency_ms": 1000,
     "error_rate": 0.01,
-    "measured_at": "2026-05-14T09:56:30Z"
+    "endpoint": "POST /v1/messages (plus /health/* probes)",
+    "measured_at": null,
+    "threshold_type": "target"
   },
   "auth_login": {
     "sustained_rps": 500,
@@ -21,42 +28,47 @@
     "error_rate": 0.01,
     "endpoint": "POST /v1/auth/login",
     "test": "auth-load-test.js",
-    "threshold_type": "hard"
+    "measured_at": null,
+    "threshold_type": "target"
   },
   "email_send": {
     "sustained_rps": 200,
     "p95_latency_ms": 500,
     "p99_latency_ms": 1000,
     "error_rate": 0.01,
-    "endpoint": "POST /v1/email/send",
+    "endpoint": "POST /v1/messages",
     "test": "email-send-load-test.js",
-    "threshold_type": "hard"
+    "measured_at": null,
+    "threshold_type": "target"
   },
   "health_liveness": {
     "sustained_rps": 2000,
     "p95_latency_ms": 200,
     "p99_latency_ms": 500,
     "error_rate": 0.001,
-    "endpoint": "GET /v1/health/liveness",
+    "endpoint": "GET /health/live",
     "test": "health-load-test.js",
-    "threshold_type": "hard"
+    "measured_at": null,
+    "threshold_type": "target"
   },
   "health_readiness": {
     "sustained_rps": 2000,
     "p95_latency_ms": 200,
     "p99_latency_ms": 500,
     "error_rate": 0.001,
-    "endpoint": "GET /v1/health/readiness",
+    "endpoint": "GET /health/ready",
     "test": "health-load-test.js",
-    "threshold_type": "hard"
+    "measured_at": null,
+    "threshold_type": "target"
   },
   "combined_journey": {
     "sustained_rps": 300,
     "p95_latency_ms": 500,
     "p99_latency_ms": 1000,
     "error_rate": 0.01,
-    "scenario": "weighted traffic mix (10% liveness, 10% readiness, 30% auth, 50% email)",
+    "scenario": "weighted traffic mix (10% liveness, 10% readiness, 30% authenticated read, 50% email)",
     "test": "combined-journey-test.js",
-    "threshold_type": "hard"
+    "measured_at": null,
+    "threshold_type": "target"
   }
 }

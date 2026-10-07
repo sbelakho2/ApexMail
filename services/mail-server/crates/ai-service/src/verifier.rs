@@ -871,6 +871,13 @@ static ABSOLUTE_QUANTIFIER_RE: Lazy<Regex> = Lazy::new(|| {
 /// lexical-overlap ratio (quantifiers still trigger the factual check via
 /// [`ABSOLUTE_QUANTIFIER_RE`]).
 const CLAIM_STOPWORDS: &[&str] = &[
+    // Dogfood finding: a model writing the canonical price as "EUR 89" had
+    // its TRUE sentence rejected because "eur" was treated as a named entity
+    // absent from the sources (which write "€89"). The canonical currency's
+    // spellings are currency markers, not entities.
+    "eur",
+    "euro",
+    "euros",
     "the",
     "a",
     "an",
@@ -1274,24 +1281,46 @@ fn word_before_is_single_letter(current: &str) -> bool {
 /// Extract euro amounts with cents preserved (€65.50 stays 65.50 instead of
 /// being rounded to 66) together with a ±60 character context snippet.
 fn extract_euro_matches(text: &str) -> Vec<(f64, String)> {
+    // The currency may be a SYMBOL (€, $, £) or a WORD (EUR, USD, GBP, and
+    // the spelled-out euro/euros/dollar/dollars/pounds). Word forms were the
+    // live bypass: a fault-injected answer claiming "Pro costs EUR 5/month,
+    // unlimited emails, 100% inbox placement" shipped with escalated=false
+    // while the identical "€5" claim was refused (dogfood 2026-10-06).
     static EURO_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r###"[€$]\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"###)
-            .expect("valid static price regex")
+        Regex::new(
+            r###"(?i)(?:[€$£]|\b(?:eur|euro|euros|usd|dollar|dollars|gbp|pound|pounds)\b)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)"###,
+        )
+        .expect("valid static price regex")
     });
-    EURO_RE
-        .captures_iter(text)
-        .filter_map(|cap| {
-            let raw = cap[1].replace(",", "");
-            let amount: f64 = raw.parse().ok()?;
-            let amount = (amount * 100.0).round() / 100.0;
-            let m = cap.get(0).expect("capture 0 is the whole match");
-            // Floor/ceil to char boundaries — see is_legitimate_mention.
-            let start = floor_to_char_boundary(text, m.start().saturating_sub(60));
-            let end = ceil_to_char_boundary(text, m.end() + 60);
-            let context = text[start..end].to_string();
-            Some((amount, context))
-        })
-        .collect()
+    // A bare number directly followed by a spelled currency ("5 EUR") is the
+    // same claim in the other word order.
+    static POSTFIX_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r###"(?i)\b([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:eur|euro|euros|usd|dollars?|gbp|pounds?)\b"###,
+        )
+        .expect("valid static price regex")
+    });
+    let pre = EURO_RE.captures_iter(text).filter_map(|cap| {
+        let raw = cap[1].replace(",", "");
+        let amount: f64 = raw.parse().ok()?;
+        let amount = (amount * 100.0).round() / 100.0;
+        let m = cap.get(0).expect("capture 0 is the whole match");
+        // Floor/ceil to char boundaries — see is_legitimate_mention.
+        let start = floor_to_char_boundary(text, m.start().saturating_sub(60));
+        let end = ceil_to_char_boundary(text, m.end() + 60);
+        let context = text[start..end].to_string();
+        Some((amount, context))
+    });
+    let post = POSTFIX_RE.captures_iter(text).filter_map(|cap| {
+        let raw = cap[1].replace(",", "");
+        let amount: f64 = raw.parse().ok()?;
+        let amount = (amount * 100.0).round() / 100.0;
+        let m = cap.get(0).expect("capture 0 is the whole match");
+        let start = floor_to_char_boundary(text, m.start().saturating_sub(60));
+        let end = ceil_to_char_boundary(text, m.end() + 60);
+        Some((amount, text[start..end].to_string()))
+    });
+    pre.chain(post).collect()
 }
 
 /// True when the snippet reads like a plan/period/rate quote (for example
@@ -1648,6 +1677,56 @@ mod tests {
             !verdict.passed,
             "keyword in non-English refusal stays flagged"
         );
+    }
+
+    /// Dogfood regression: the canonical facts spell prices with "€"; a model
+    /// writing "EUR 89" states the SAME canonical value and must pass. The
+    /// claim-support check used to treat "eur" as an unsupported named entity,
+    /// escalating every perfectly grounded answer that spelled the currency
+    /// out (observed live against the mock runtime).
+    #[test]
+    /// The live bypass (dogfood 2026-10-06): a claim spelling the currency as
+    /// a WORD must be checked exactly like the symbol form.
+    #[test]
+    fn a_word_currency_price_cannot_bypass_the_price_check() {
+        let claim = "The Pro plan costs EUR 5 per month and includes unlimited emails with 100% inbox placement.";
+        let matches = extract_euro_matches(claim);
+        assert!(
+            matches
+                .iter()
+                .any(|(amount, _)| (*amount - 5.0).abs() < f64::EPSILON),
+            "the word form EUR 5 must be extracted as a price: {matches:?}"
+        );
+        // Postfix order too.
+        let postfix = extract_euro_matches("Pro costs 5 EUR per month.");
+        assert!(
+            postfix
+                .iter()
+                .any(|(amount, _)| (*amount - 5.0).abs() < f64::EPSILON),
+            "postfix 5 EUR must be extracted: {postfix:?}"
+        );
+    }
+
+    fn euro_spelled_as_a_word_is_the_same_canonical_price() {
+        let v = ResponseVerifier::new();
+        let facts = crate::knowledge::shared_knowledge_markdown();
+        let grounding = Grounding {
+            canonical_facts: &facts,
+            account_context: "",
+            tool_output: "",
+            chunks: &[],
+            retrieval_unavailable: true,
+        };
+        let answer = "The Pro plan costs EUR 89 per month and includes 150,000 emails per month.";
+        let verdict = v.verify_grounded(answer, &[], &grounding);
+        assert!(
+            verdict.passed,
+            "a canonical price spelled with EUR must pass: {:?}",
+            verdict.violations
+        );
+        // And a NON-canonical price still fails, spelled either way.
+        let stale = v.verify_grounded("The Pro plan costs EUR 65 per month.", &[], &grounding);
+        assert!(!stale.passed, "a stale price must still fail");
     }
 
     #[test]

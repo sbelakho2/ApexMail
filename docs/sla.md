@@ -53,11 +53,12 @@ by external monitoring probes.
 
 Throughput tiers are plan-based; the single canonical table lives in
 [`docs/api/rate-limits.md`](api/rate-limits.md) (Free 10 req/s;
-Starter/Pro/PAYG 100 req/s; Growth/Scale 500 req/s; Enterprise 5,000 req/s).
+Developer/Pro/PAYG 100 req/s; Growth/Business 500 req/s; Enterprise Cloud
+5,000 req/s).
 Exceeding sustained throughput triggers rate limiting as described there.
 
 Throughput limits apply to all plans; the *uptime credit* regime in
-§3 is a Scale and Enterprise entitlement.
+§3 is a Business (`scale`) and Enterprise Cloud (`enterprise`) entitlement.
 
 ### 2.4 Authentication
 
@@ -83,9 +84,9 @@ The uncapped credit ladder scales with the size of the breach:
 | ≥ 0.5 percentage points | 25% of monthly fee |
 | ≥ 0.1 percentage points | 10% of monthly fee |
 
-**Plan caps (§3.4) always apply** — for Scale plans the credit is capped at
-10% of the monthly fee and for Enterprise plans at 25%, regardless of the
-ladder value above.
+**Plan caps (§3.4) always apply** — for Business (`scale`) plans the credit is
+capped at 30% of the monthly fee and for Enterprise Cloud (`enterprise`) plans
+at 25%, regardless of the ladder value above.
 
 ### 3.2 Latency and Delivery Credits
 
@@ -107,9 +108,11 @@ ladder value above.
 ### 3.4 Maximum Credit
 
 Total credits issued in any single billing month are capped by plan:
-**10%** of the monthly fee on the Scale plan and **25%** on the Enterprise
-plan. These caps match the billing system's enforced limits
-(`sla_credit_percentage` per plan).
+**30%** of the monthly fee on the Business (`scale`) plan and **25%** on the
+Enterprise Cloud (`enterprise`) plan. These caps are the billing system's
+enforced limits: the maintenance SLA sweep reads `sla_credit_percentage` from
+the plan features (`services/mail-server/crates/billing-service/src/maintenance.rs`)
+and never issues more than the plan's cap.
 
 ---
 
@@ -132,7 +135,7 @@ This SLA does **not** apply to:
 5. **Force majeure** — Natural disasters, war, terrorism, civil unrest, strikes,
    pandemics, or other events outside ApexMail's reasonable control.
 6. **Free-tier / trial accounts** — SLA coverage requires an active paid
-   subscription (Scale or Enterprise plan; other paid plans receive best-effort support without the credit regime).
+   subscription (Business or Enterprise Cloud plan; other paid plans receive best-effort support without the credit regime).
 7. **Beta / preview features** — Features labelled as "Beta", "Preview", or
    "Early Access" are excluded from SLA coverage.
 8. **Webhook delivery** — Webhook delivery is best-effort with at-least-once

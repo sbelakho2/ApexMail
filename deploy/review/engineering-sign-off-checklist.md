@@ -33,14 +33,14 @@
 
 | Test Type | Status | Workflow |
 |-----------|--------|----------|
-| Broken links | [x] Pass | `.github/workflows-archive/broken-link-check.yml` |
-| HTML validation | [x] Pass | `.github/workflows-archive/html-validation.yml` |
-| Accessibility | [x] Pass | `.github/workflows-archive/accessibility-check.yml` |
-| SEO audit | [x] Pass | `.github/workflows-archive/seo-audit.yml` |
-| Performance budget | [x] Pass | `.github/workflows-archive/performance-budget.yml` |
+| Broken links | [x] Pass | `deploy/tests/broken-links.sh` (wired in `ci/stages/validate.sh`) |
+| HTML validation | [x] Pass | `deploy/tests/html-validate.sh` (wired in `ci/stages/validate.sh`) |
+| Accessibility | [x] Pass | `deploy/tests/contrast-check.sh` + `tools/contrast-audit/gate.sh` |
+| SEO audit | [x] Pass | `deploy/tests/seo-validate.sh` (wired in `ci/stages/validate.sh`) |
+| Performance budget | [x] Pass | `deploy/tests/performance-budget.sh` (advisory in `ci/stages/validate.sh`) |
 | Browser console | [x] Pass | `deploy/tests/browser-test.sh` |
 | Cross-browser desktop | [x] Pass | `deploy/tests/desktop-browser-test.sh` |
-| Mobile responsive | [x] Pass | `.github/workflows-archive/mobile-qa.yml` |
+| Mobile responsive | [x] Pass | `deploy/tests/mobile-test.sh` |
 
 ## Known Limitations
 

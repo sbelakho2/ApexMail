@@ -24,11 +24,17 @@ all-tests = { max-threads = 8 }
 # serialize them so sibling re-mints can't flip the convergence assertions.
 explorer-sandbox = { max-threads = 1 }
 
+
+
+# The WHOLE explorer module shares one sandbox-key row: every test that
+# touches the explorer endpoints can adopt/re-mint the shared row, so the
+# family is serialized as a group (an enumerated name list missed tests —
+# the 2026-10-07 fold hit a sibling re-mint during the concurrency test's
+# observation window under a full-workspace run).
+[[profile.default.overrides]]
+filter = 'test(explorer)'
+test-group = 'explorer-sandbox'
+
 [[profile.default.overrides]]
 filter = 'all()'
 test-group = 'all-tests'
-
-
-[[profile.default.overrides]]
-filter = 'test(concurrent_first_requests_converge_on_a_live_sandbox_key) or test(sandbox_key_is_cached_per_process_and_capped_at_one_row) or test(sandbox_cache_self_heals_when_a_sibling_re_mints_the_key_row) or test(sandbox_adopts_the_shared_key) or test(concurrent_first_requests_converge)'
-test-group = 'explorer-sandbox'

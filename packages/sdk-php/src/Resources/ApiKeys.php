@@ -44,14 +44,25 @@ class ApiKeys
     /**
      * List API keys.
      *
+     * The server's ListApiKeysQuery (deny_unknown_fields) accepts
+     * {limit, offset} only — a `cursor` parameter is rejected with HTTP 400,
+     * so it now fails fast client-side. The response is a plain array with
+     * no pagination envelope.
+     *
      * @param array $options { limit, offset }
      */
     public function list(array $options = []): array
     {
+        if (isset($options['cursor'])) {
+            throw new \InvalidArgumentException(
+                'GET /v1/auth/api-keys does not support cursor pagination '
+                . '(the server rejects `cursor` with HTTP 400); use limit/offset'
+            );
+        }
+
         $query = http_build_query(array_filter([
             'limit'  => $options['limit']  ?? 50,
             'offset' => $options['offset'] ?? 0,
-            'cursor' => $options['cursor'] ?? null,
         ], static fn ($value) => $value !== null && $value !== ''));
 
         return $this->client->request('GET', '/v1/auth/api-keys' . ($query ? '?' . $query : ''));

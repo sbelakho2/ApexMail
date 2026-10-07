@@ -33,6 +33,15 @@ export const BASE_URL = __ENV.K6_API_BASE || 'http://localhost:3000';
  */
 export const API_KEY = __ENV.K6_API_KEY || '';
 
+/**
+ * Sender address used by the email-send scenarios. It must belong to a
+ * verified domain of the target tenant or POST /v1/messages answers 422
+ * ("sender domain is not ready for the configured delivery transport").
+ * Override with K6_FROM_EMAIL.
+ * @type {string}
+ */
+export const FROM_EMAIL = __ENV.K6_FROM_EMAIL || 'loadtest@example.com';
+
 // ── HTTP Headers ────────────────────────────────────────────────────────────
 
 /**
@@ -46,7 +55,7 @@ export const DEFAULT_HEADERS = {
 };
 
 /**
- * Headers for authenticated requests (includes Bearer token).
+ * Headers for JWT-bearer authenticated requests.
  * @param {string} token - JWT bearer token
  * @returns {Object<string, string>} Headers object
  */
@@ -58,13 +67,17 @@ export function authHeaders(token) {
 }
 
 /**
- * Headers for API-key-based authentication.
+ * Headers for API-key authenticated requests.
+ *
+ * The api-server reads the API key from `X-API-Key` (see
+ * middleware/auth.rs); an `am_live_…` key sent as `Authorization: Bearer`
+ * is parsed as a JWT and rejected with 401.
  * @returns {Object<string, string>} Headers object
  */
 export function apiKeyHeaders() {
   return {
     ...DEFAULT_HEADERS,
-    'Authorization': `Bearer ${API_KEY}`,
+    'X-API-Key': API_KEY,
   };
 }
 

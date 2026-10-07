@@ -18,13 +18,18 @@
 //!
 //! The interactive fallback (`sqlx migrate run --source
 //! services/mail-server/migrations`) remains documented in
-//! `services/mail-server/migrations/README.md` and `deploy/DEPLOYMENT.md` for
+//! `docs/deployment/migrations.md` and `deploy/DEPLOYMENT.md` for
 //! operators with direct database access.
 //!
 //! Usage:
 //!   migrator            apply all pending migrations (idempotent)
 //!   migrator --dry-run  list the embedded migrations and exit (no DB needed
 //!                       for listing; DATABASE_URL is only required to apply)
+//!   migrator --gc-test-databases
+//!                       drop the per-test `apexmail_*` database clones that
+//!                       accumulate on long-lived hosts (see
+//!                       `docs/deployment/migrations.md`); protect extra
+//!                       names with MIGRATOR_GC_KEEP=name1,name2
 //!
 //! Exit codes: 0 = applied/up-to-date, non-zero = migration failure (the
 //! deploy gate aborts and `up` never runs).
@@ -71,6 +76,7 @@ async fn main() -> ExitCode {
         .init();
 
     let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n"); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
+    let gc_databases = std::env::args().any(|arg| arg == "--gc-test-databases"); // nosemgrep: rust.lang.security.args.args
 
     if dry_run {
         print_migrations();
@@ -85,6 +91,25 @@ async fn main() -> ExitCode {
         }
     };
 
+    if gc_databases {
+        return match gc_test_databases(&database_url).await {
+            Ok((dropped, failed)) => {
+                println!(
+                    "migrator: gc complete ({dropped} test database(s) dropped, {failed} left)"
+                );
+                if failed == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(err) => {
+                eprintln!("migrator: gc failed: {err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match apply_migrations(&database_url).await {
         Ok(()) => {
             println!("migrator: database is up to date");
@@ -95,6 +120,81 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Drop the per-test database clones the test harness accumulates.
+///
+/// Every DB-backed suite provisions `apexmail_*` clones from the canonical
+/// template and, by design, leaves them behind (a one-shot CI runner throws
+/// the whole Postgres away). On a long-lived dev/CI host the clones grow
+/// without bound — the 2026-10-07 fold found 1,096 of them (55 GB) and the
+/// resulting disk pressure was crashing Postgres mid-suite. This mode drops
+/// `apexmail_%` databases other than the protected base name; databases with
+/// live connections are terminated only after a `pg_terminate_backend`, and
+/// every failure is reported rather than hidden.
+///
+/// Keep extra databases: `MIGRATOR_GC_KEEP=name1,name2` (the base `apexmail`
+/// and the system databases are always protected).
+async fn gc_test_databases(database_url: &str) -> anyhow::Result<(usize, usize)> {
+    let (server_part, _) = database_url
+        .rsplit_once('/')
+        .context("DATABASE_URL has no database segment")?;
+    let admin = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&format!("{server_part}/postgres"))
+        .await
+        .context("connect to the maintenance database")?;
+
+    let mut keep: Vec<String> = vec!["apexmail".into()];
+    if let Ok(extra) = std::env::var("MIGRATOR_GC_KEEP") {
+        keep.extend(
+            extra
+                .split(',')
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty()),
+        );
+    }
+
+    let candidates: Vec<String> = sqlx::query_scalar(
+        "SELECT datname FROM pg_database \
+         WHERE datname LIKE 'apexmail\\_%' AND datname <> ALL($1)",
+    )
+    .bind(&keep)
+    .fetch_all(&admin)
+    .await
+    .context("list test databases")?;
+
+    let mut dropped = 0usize;
+    let mut failed = 0usize;
+    for name in &candidates {
+        // Skip databases still in use by a running suite.
+        let in_use: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = $1)")
+                .bind(name)
+                .fetch_one(&admin)
+                .await
+                .unwrap_or(false);
+        if in_use {
+            println!("gc: skipping {name} (live connections)");
+            failed += 1;
+            continue;
+        }
+        match sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\""))
+            .execute(&admin)
+            .await
+        {
+            Ok(_) => {
+                dropped += 1;
+            }
+            Err(error) => {
+                eprintln!("gc: could not drop {name}: {error}");
+                failed += 1;
+            }
+        }
+    }
+    admin.close().await;
+    Ok((dropped, failed))
 }
 
 #[cfg(test)]

@@ -141,7 +141,9 @@ expect("KNOWN_WEBHOOK_EVENTS matches the server list",
          message.deferred message.delivered message.bounced
          message.complained message.suppressed message.opened
          message.clicked message.cancelled
-         recipient.unsubscribed placement_test.completed
+         recipient.unsubscribed
+         campaign.started campaign.ab_winner_selected campaign.completed
+         placement_test.completed
          inbound *
        ])
 
@@ -249,7 +251,7 @@ wrong_order = "sha256=" + OpenSSL::HMAC.hexdigest("sha256", secret, "#{payload}.
 expect("wrong signing order is rejected",
        !ApexMail.verify_signature(payload, wrong_order, secret, timestamp_header: fresh_ms))
 
-# ── F10: X-Idempotency-Key control characters are stripped ─────────────────
+# ── F10: Idempotency-Key control characters are stripped ───────────────────
 
 transport = ApexMail::Transport.new(
   api_key: "am_live_1234567890abcdef",
@@ -259,10 +261,13 @@ transport = ApexMail::Transport.new(
   max_response_bytes: 1024
 )
 
-# Build a request through the real transport and inspect the header.
+# Build a request through the real transport and inspect the header. The
+# server reads `Idempotency-Key` (middleware/idempotency.rs) — NOT the
+# legacy `X-Idempotency-Key`, which it ignores entirely.
 request = transport.send(:build_request, "POST", URI.parse("https://api.apexmail.ee/v1/messages"),
                          { a: 1 }, "key\r\n injected")
-expect("idempotency key control characters stripped", request["X-Idempotency-Key"] == "key injected")
+expect("idempotency key control characters stripped", request["Idempotency-Key"] == "key injected")
+expect("legacy X-Idempotency-Key is not sent", request["X-Idempotency-Key"].nil?)
 
 # ── F48: shared send contract — packages/contract/send-contract.json ───────
 # The SAME fixture file drives the api-server contract tests and every SDK
@@ -355,6 +360,84 @@ else
   end
   expect("invalid addr-spec inside a display form is rejected", rejected)
 end
+
+# ── Live-contract fixes (2026-10-06 dogfood): query shapes + pagination ─────
+
+# Events: server ListEventsQuery field names (deny_unknown_fields).
+t = RecordingTransport.new
+events = ApexMail::EventsAPI.new(t)
+events.list(message_id: "msg_123", type: "message.delivered", limit: 5, offset: 0)
+expect("events.list() maps type -> event_type, message_id stays snake_case",
+       t.calls[0][:path].include?("event_type=message.delivered") &&
+       t.calls[0][:path].include?("message_id=msg_123") &&
+       !t.calls[0][:path].match?(/[?&]type=/) && !t.calls[0][:path].include?("messageId"))
+
+t = RecordingTransport.new
+events = ApexMail::EventsAPI.new(t)
+events.get_by_message("msg_123")
+expect("events.get_by_message() uses message_id", t.calls[0][:path] == "/v1/events?message_id=msg_123&limit=100")
+
+t = RecordingTransport.new
+events = ApexMail::EventsAPI.new(t)
+events.stats(start: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z")
+expect("events.stats() maps start->from and keeps to",
+       t.calls[0][:path].include?("from=2026-01-01T00%3A00%3A00Z") &&
+       t.calls[0][:path].include?("to=2026-01-02T00%3A00%3A00Z"))
+
+%i[templates suppressions api_keys].each do |api|
+  rejected = false
+  resource =
+    case api
+    when :templates then ApexMail::TemplatesAPI.new(RecordingTransport.new)
+    when :suppressions then ApexMail::SuppressionsAPI.new(RecordingTransport.new)
+    when :api_keys then ApexMail::ApiKeysAPI.new(RecordingTransport.new)
+    end
+  begin
+    resource.list(cursor: "abc")
+  rescue ArgumentError
+    rejected = true
+  end
+  expect("#{api}.list rejects unsupported cursor", rejected)
+end
+
+t = RecordingTransport.new
+events = ApexMail::EventsAPI.new(t)
+rejected = false
+begin
+  events.list(cursor: "abc")
+rescue ArgumentError
+  rejected = true
+end
+expect("events.list rejects unsupported cursor", rejected)
+
+rejected = false
+begin
+  ApexMail::EventsAPI.new(RecordingTransport.new).list(status: "delivered")
+rescue ArgumentError
+  rejected = true
+end
+expect("events.list rejects unsupported status filter", rejected)
+
+# Template create requires non-empty html_body server-side.
+rejected = false
+begin
+  ApexMail::TemplatesAPI.new(RecordingTransport.new).create(name: "n", subject: "s", text: "only text")
+rescue ArgumentError
+  rejected = true
+end
+expect("template create rejects a missing/empty html body", rejected)
+
+# Pagination meta: camelCase hasMore/nextCursor is captured from the
+# envelope and exposed via Client#next_cursor / #has_more?.
+transport_double = Class.new do
+  attr_reader :last_response_meta
+  def initialize(meta) = @last_response_meta = meta
+  def request(*) = {}
+end.new({ hasMore: true, nextCursor: "cur_abc123" })
+client = ApexMail::Client.allocate
+client.instance_variable_set(:@transport, transport_double)
+expect("Client#next_cursor reads camelCase nextCursor", client.next_cursor == "cur_abc123")
+expect("Client#has_more? reads camelCase hasMore", client.has_more? == true)
 
 # ── Summary ────────────────────────────────────────────────────────────────
 

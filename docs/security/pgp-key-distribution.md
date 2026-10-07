@@ -1,266 +1,119 @@
 # PGP Key Distribution
 
-> **Last Updated:** 2026-05-11
-> **Status:** PGP key generated and published
-
----
-
-## Table of Contents
-
-- [Key Information](#key-information)
-- [Key Generation Procedure](#key-generation-procedure)
-- [Key Fingerprint](#key-fingerprint)
-- [Where the Key Is Published](#where-the-key-is-published)
-- [Key Signing Policy](#key-signing-policy)
-- [Key Revocation Procedure](#key-revocation-procedure)
-- [Verification Instructions](#verification-instructions)
-
----
+> **Last Updated:** 2026-10-07
+> **Status:** PGP public key shipped; private key held by the security team
 
 ## Key Information
 
-ApexMail uses a PGP key for:
-- Secure communication with security researchers (responsible disclosure)
-- Signing official security advisories
-- Encrypting sensitive bug reports and vulnerability disclosures
-- Signing releases and published artifacts
+The ApexMail security contact key is used for encrypted vulnerability
+reports and for signing security advisories.
 
 | Property | Value |
 |----------|-------|
-| **Key ID** | `0xAE73F8A1B2C3D4E5` |
-| **Algorithm** | Ed25519 (elliptic curve) |
-| **Key Size** | 256 bits |
-| **Created** | 2026-05-11 |
-| **Expires** | 2028-05-11 (2 years) |
-| **UID** | `Security Team <security@apexmail.ee>` |
+| **Fingerprint** | `B30B 9531 6B44 4E38 2803  19A5 5183 FF3B C9A6 9386` |
+| **Key ID** | `0x5183FF3BC9A69386` |
+| **Algorithm** | RSA 4096 (sign, certify, encrypt) |
+| **Created** | 2026-07-29 |
 | **UID** | `ApexMail Security <security@apexmail.ee>` |
+| **Public key** | [`apps/marketing-zola/static/pgp-key.asc`](../../apps/marketing-zola/static/pgp-key.asc) (`https://apexmail.ee/pgp-key.asc`) |
+| **Repository copy** | [`docs/security/pgp-public-key.asc`](pgp-public-key.asc) |
 
----
-
-## Key Generation Procedure
-
-The PGP key was generated using the following procedure:
-
-### 1. Install Prerequisites
+The private key is held by the security team and is not in the repository.
+Verify the shipped public key with:
 
 ```bash
-# macOS
-brew install gnupg
-
-# Ubuntu/Debian
-apt-get install gnupg
-
-# Verify installation
-gpg --version
+gpg --show-keys apps/marketing-zola/static/pgp-key.asc
+# pub   rsa4096 2026-07-29 [SCE]
+#       B30B95316B444E38280319A55183FF3BC9A69386
+# uid           ApexMail Security <security@apexmail.ee>
 ```
-
-### 2. Generate the Key
-
-```bash
-# Generate an Ed25519 key (preferred for modern security)
-gpg --full-generate-key
-
-# Select:
-#   (9) ECC (sign and encrypt) *default*
-#   (1) Curve 25519
-#   (2y) Key validity: 2 years (renewable)
-
-# Real name: ApexMail Security Team
-# Email address: security@apexmail.ee
-# Comment: ApexMail Security Contact
-```
-
-### 3. Export the Public Key
-
-```bash
-gpg --armor --export security@apexmail.ee > docs/security/pgp-public-key.asc
-```
-
-### 4. Generate Revocation Certificate (CRITICAL)
-
-```bash
-gpg --gen-revoke --armor security@apexmail.ee > docs/security/pgp-revocation-certificate.asc
-# Store this offline — in a hardware security module or printed QR code in a safe
-```
-
-### 5. Upload to Keyservers
-
-```bash
-gpg --send-key 0xAE73F8A1B2C3D4E5
-# Also upload to keys.openpgp.org for WKD compliance
-```
-
----
-
-## Key Fingerprint
-
-```
-pub   ed25519 2026-05-11 [SC] [expires: 2028-05-11]
-      AE73 F8A1 B2C3 D4E5 F678  9ABC DEF0 1234 5678 90AB
-uid                      ApexMail Security Team <security@apexmail.ee>
-```
-
-**Important:** Always verify the fingerprint through multiple channels. The fingerprint is published on:
-
-1. **This document** (with SHA-256 hash cross-reference)
-2. **ApexMail website:** `https://apexmail.ee/.well-known/security.txt`
-3. **Social media** (LinkedIn, Twitter/X official accounts)
-4. **Keybase:** `https://keybase.io/apexmail`
-5. **DNS TXT record:** `_pgpkey.apexmail.ee` via WKD (Web Key Directory)
-6. **GitHub:** Repository metadata and release tags
-
-### Fingerprint Verification
-
-The official SHA-256 hash of this document is published separately on the ApexMail security page:
-
-- **URL:** `https://apexmail.ee/.well-known/security.txt`
-- **Hash:** `sha256: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b`
-
----
 
 ## Where the Key Is Published
 
-| Location | URL / Path | Type |
-|----------|-----------|------|
-| WKD (Web Key Directory) | `https://apexmail.ee/.well-known/openpgpkey/` | Automated key discovery |
-| This repository | [`docs/security/pgp-public-key.asc`](pgp-public-key.asc) | Git-tracked public key |
-| keys.openpgp.org | `https://keys.openpgp.org/` | Public keyserver |
-| SKS Keyserver pool | `hkps://keyserver.ubuntu.com` | Public keyserver |
-| GitHub | Repository root + release tags | Release signing |
-| Keybase | `https://keybase.io/apexmail` | Identity verification |
-| Website footer | `https://apexmail.ee/security.txt` | Security contact info |
+| Location | URL / Path |
+|----------|-----------|
+| Marketing origin (served) | `https://apexmail.ee/pgp-key.asc` |
+| Repository | [`apps/marketing-zola/static/pgp-key.asc`](../../apps/marketing-zola/static/pgp-key.asc) |
+| Repository copy | [`docs/security/pgp-public-key.asc`](pgp-public-key.asc) |
+| security.txt | `Encryption:` field points at the served `.asc` |
 
-### Web Key Directory (WKD) Setup
+The fingerprint is published in
+[the vulnerability disclosure program](vulnerability-disclosure-program.md)
+and in `security.txt`'s `Encryption` target. Keyserver, WKD, Keybase and
+social-profile publication are not configured by this repository; treat this
+page and the served `.asc` as the publication record.
 
-WKD allows automatic key discovery from email addresses. Configured via:
+## Key Generation (operator step)
 
-```nginx
-# nginx configuration for WKD
-location /.well-known/openpgpkey/ {
-    alias /var/www/apexmail/.well-known/openpgpkey/;
-    add_header Access-Control-Allow-Origin "*";
-}
+The private key is held only by the security team. To generate a replacement
+(with the same algorithm profile) on a trusted machine:
+
+```bash
+gpg --batch --generate-key <<'EOF'
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Key-Usage: sign,cert,encrypt
+Name-Real: ApexMail Security
+Name-Email: security@apexmail.ee
+Expire-Date: 2y
+%commit
+EOF
+gpg --armor --export security@apexmail.ee > apps/marketing-zola/static/pgp-key.asc
+cp apps/marketing-zola/static/pgp-key.asc docs/security/pgp-public-key.asc
 ```
 
-The WKD directory structure:
+Store the revocation certificate offline:
 
-```
-.well-known/openpgpkey/
-├── policy
-└── hu/
-    └── <base32-encoded-hash-of-security@apexmail.ee>
+```bash
+gpg --gen-revoke --armor security@apexmail.ee > pgp-revocation-certificate.asc
 ```
 
----
+Update the fingerprint in this page and in
+[the vulnerability disclosure program](vulnerability-disclosure-program.md)
+whenever the key changes.
 
-## Key Signing Policy
+## Signing the Contact File
 
-### Whom We Sign
+The served `security.txt` is unsigned; a clear-signed copy is the requested
+form for signed disclosures. Signing requires the private key:
 
-ApexMail will sign keys for:
-
-1. **Security researchers** who have submitted verified vulnerability reports
-2. **Employees** after identity verification (in-person or video call)
-3. **Partner organizations** with whom we have a signed security agreement
-4. **Open source maintainers** of projects we depend on
-
-### Process for Requesting a Key Signing
-
-1. Send your public key to `security@apexmail.ee` with subject "Key Signing Request"
-2. Verify your identity through a video call or in-person meeting
-3. Present government-issued ID matching the key UID
-4. We will sign your key and upload to keyservers
-
-### Key Signing Events
-
-ApexMail participates in key signing parties at:
-
-- FOSDEM (annual, Brussels)
-- PGP Keysigning events (advertised on apexmail.ee/security)
-
----
-
-## Key Revocation Procedure
-
-### When to Revoke
-
-- Private key is suspected compromised
-- Key UID information changes (e.g., team member leaves)
-- Key algorithm is found to have vulnerabilities
-- Scheduled key rotation (every 2 years)
-
-### Revocation Process
-
-1. **Publish revocation certificate:**
-
-   ```bash
-   gpg --import docs/security/pgp-revocation-certificate.asc
-   gpg --send-key 0xAE73F8A1B2C3D4E5
-   ```
-
-2. **Notify stakeholders:**
-   - Update `security.txt` with new key fingerprint
-   - Announce on Twitter/LinkedIn
-   - Update this document
-   - Notify security mailing list subscribers
-
-3. **Generate new key** following the [Key Generation Procedure](#key-generation-procedure) above.
-
-4. **Cross-sign** (optional):
-   - Sign the new key with the old key (if not compromised)
-   - Sign the old key with the new key
-
-### Revocation Certificate Storage
-
-The revocation certificate is stored:
-- **Primary:** In a hardware security module (YubiKey) in a safe
-- **Backup:** Encrypted and stored in a separate geographic location
-- **Emergency:** QR code printout in the company safe
-
-**Never store the revocation certificate online or in the repository.**
-
----
+```bash
+gpg --clear-sign --local-user security@apexmail.ee \
+  --output security.txt.asc \
+  apps/marketing-zola/static/.well-known/security.txt
+```
 
 ## Verification Instructions
 
-### Verify a Signed Message
-
 ```bash
-# Download the public key
-gpg --recv-key 0xAE73F8A1B2C3D4E5
+# Verify the shipped key
+gpg --show-keys docs/security/pgp-public-key.asc
 
-# Verify a signed message
-gpg --verify message.txt.asc
-
-# Decrypt an encrypted message
-gpg --decrypt encrypted-message.asc
-```
-
-### Verify Release Signatures
-
-```bash
-# Download the release archive and its signature
-wget https://github.com/apexmail/apexmail/releases/download/v1.0.0/apexmail-v1.0.0.tar.gz
-wget https://github.com/apexmail/apexmail/releases/download/v1.0.0/apexmail-v1.0.0.tar.gz.asc
-
-# Verify
-gpg --verify apexmail-v1.0.0.tar.gz.asc apexmail-v1.0.0.tar.gz
-```
-
-### Import Key from This Repository
-
-```bash
-# From this repository
+# Import it
 gpg --import docs/security/pgp-public-key.asc
 
-# Verify fingerprint
+# Check the fingerprint matches the published one
 gpg --fingerprint security@apexmail.ee
 ```
 
----
+Compare the printed fingerprint against
+`B30B 9531 6B44 4E38 2803  19A5 5183 FF3B C9A6 9386` through a second
+channel before trusting a message signed with this key.
+
+## Revocation
+
+When a revocation is required (suspected private-key compromise or scheduled
+rotation), import the offline revocation certificate, publish the updated key
+material, and update the fingerprint in both security pages:
+
+```bash
+gpg --import pgp-revocation-certificate.asc
+gpg --armor --export security@apexmail.ee > apps/marketing-zola/static/pgp-key.asc
+```
 
 ## References
 
 - [Security Vulnerability Management](../compliance/vulnerability-management.md)
-- [Security.txt Standard (RFC 9116)](https://datatracker.ietf.org/doc/rfc9116/)
-- [Web Key Directory (WKD) Standard](https://datatracker.ietf.org/doc/draft-koch-openpgp-webkey-service/)
+- [Vulnerability Disclosure Program](vulnerability-disclosure-program.md)
+- [RFC 9116 — security.txt](https://datatracker.ietf.org/doc/rfc9116/)

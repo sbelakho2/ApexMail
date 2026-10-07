@@ -202,7 +202,9 @@ class PayloadContractTest {
                 "message.deferred", "message.delivered", "message.bounced",
                 "message.complained", "message.suppressed", "message.opened",
                 "message.clicked", "message.cancelled",
-                "recipient.unsubscribed", "placement_test.completed",
+                "recipient.unsubscribed",
+                "campaign.started", "campaign.ab_winner_selected", "campaign.completed",
+                "placement_test.completed",
                 "inbound", "*"),
             Webhooks.KNOWN_WEBHOOK_EVENTS);
     }
@@ -294,13 +296,19 @@ class PayloadContractTest {
 
     @Test
     void analyticsTypedMethodsHitRealSubpaths() throws Exception {
-        RecordingHttpClient http = new RecordingHttpClient("{\"total_sent\":10}");
+        RecordingHttpClient http = new RecordingHttpClient(
+            "{\"total_sent\":10}",
+            // GET /v1/analytics/volume returns a BARE ARRAY inside the
+            // envelope's data (live shape) — the method must parse it.
+            Map.of("/v1/analytics/volume",
+                "[{\"date\":\"2026-01-01T00:00:00+00:00\",\"sent\":3,\"delivered\":2,\"bounced\":0}]"));
         try (ApexMailClient client = client(http)) {
             client.analytics().dashboard("2026-01-01", "2026-02-01", null);
             assertEquals("/v1/analytics/dashboard?from=2026-01-01&to=2026-02-01", http.lastPath);
 
-            client.analytics().volume(null, null, "week");
+            List<Map<String, Object>> volume = client.analytics().volume(null, null, "week");
             assertEquals("/v1/analytics/volume?interval=week", http.lastPath);
+            assertEquals(3, ((Number) volume.get(0).get("sent")).intValue());
 
             client.analytics().deliverability(null, null, null);
             assertTrue(http.lastPath.startsWith("/v1/analytics/deliverability"),
@@ -340,7 +348,7 @@ class PayloadContractTest {
                 "url", "https://example.com/hook",
                 "events", List.of("message.delivered")));
 
-            String key = http.lastRequest.headers().firstValue("X-Idempotency-Key").orElse(null);
+            String key = http.lastRequest.headers().firstValue("Idempotency-Key").orElse(null);
             assertNotNull(key, "auto idempotency key expected on webhook create");
             assertFalse(key.isBlank());
         }
@@ -423,12 +431,19 @@ class PayloadContractTest {
     /** Records the last request and replies with a canned 200 body. */
     static final class RecordingHttpClient extends HttpClient {
         private final String responseBody;
+        /** Optional per-path overrides (path without query -> body). */
+        private final Map<String, String> perPathBodies;
         private HttpRequest lastRequest;
         private String lastRequestBody = "";
         private String lastPath;
 
         RecordingHttpClient(String responseBody) {
+            this(responseBody, Map.of());
+        }
+
+        RecordingHttpClient(String responseBody, Map<String, String> perPathBodies) {
             this.responseBody = responseBody;
+            this.perPathBodies = perPathBodies;
         }
 
         Map<String, Object> lastRequestBodyJson() {
@@ -551,7 +566,8 @@ class PayloadContractTest {
                 public void cancel() {
                 }
             });
-            subscriber.onNext(List.of(ByteBuffer.wrap(responseBody.getBytes(StandardCharsets.UTF_8))));
+            String cannedBody = perPathBodies.getOrDefault(request.uri().getPath(), responseBody);
+            subscriber.onNext(List.of(ByteBuffer.wrap(cannedBody.getBytes(StandardCharsets.UTF_8))));
             subscriber.onComplete();
             T body = subscriber.getBody().toCompletableFuture().join();
 

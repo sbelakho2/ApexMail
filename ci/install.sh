@@ -21,7 +21,10 @@
 #      llvm-tools-preview rustup component) when missing (PATH-aware);
 #      gitleaks + trivy as pinned release binaries in /usr/local/bin;
 #      semgrep from pip into /opt/semgrep-venv (symlinked into
-#      /usr/local/bin)
+#      /usr/local/bin); gh from GitHub's apt repository (the fetch stage's
+#      branch-protection gate fails closed without it). The GITHUB_TOKEN
+#      itself is an operator secret — see the ACTION REQUIRED line the
+#      installer prints (ci/README.md §13).
 #   3. /etc/apexmail/pipeline.conf   (host overrides: CI_DEPLOY_DIR, env file)
 #   4. systemd units: apexmail-pipeline.service (oneshot)
 #                     apexmail-pipeline.timer   (every 5 minutes)
@@ -273,6 +276,46 @@ install_trivy() {
     rm -rf "$_tmp"
 }
 
+# gh — REQUIRED by the fetch stage's branch-protection release gate (external
+# audit 2026-10-02 item 13, ci/README.md §13): stage 01 hard-fails on the
+# deploy host when gh is absent. The bootstrap used to install no gh and no
+# token, so the documented fresh-host path could not pass its own gate (audit
+# P2 item 11). The TOKEN is still an operator secret — this function installs
+# the CLI and then verifies/announces the token prerequisite explicitly.
+GITHUB_CLI_KEYRING=/etc/apt/keyrings/githubcli-archive-keyring.gpg
+
+install_gh() {
+    if have gh; then
+        log "gh present: $(gh --version | head -1)"
+    elif [ -f /etc/debian_version ]; then
+        log "installing gh (official GitHub CLI apt repository)"
+        install -d -m 0755 /etc/apt/keyrings
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            -o "$GITHUB_CLI_KEYRING"
+        chmod go+r "$GITHUB_CLI_KEYRING"
+        printf 'deb [arch=%s signed-by=%s] https://cli.github.com/packages stable main\n' \
+            "$(dpkg --print-architecture)" "$GITHUB_CLI_KEYRING" \
+            >/etc/apt/sources.list.d/github-cli.list
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        apt-get install -y gh
+    else
+        log "not Debian/Ubuntu — install gh manually (https://cli.github.com); the fetch stage fails closed without it on the deploy host"
+        return 1
+    fi
+    # Token prerequisite (fetch.sh runs scripts/verify-branch-protection.sh,
+    # which needs a readable token: fine-grained PAT with Administration:read
+    # or a classic PAT with repo). Not installed by this script by design.
+    if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
+        log "GH_TOKEN/GITHUB_TOKEN present in this environment"
+    elif grep -qE '^(export )?(GH_TOKEN|GITHUB_TOKEN)=' "$ETC_DIR/pipeline.conf" 2>/dev/null; then
+        log "github token configured in $ETC_DIR/pipeline.conf"
+    else
+        log "ACTION REQUIRED: set GITHUB_TOKEN=<admin-read PAT> in $ETC_DIR/pipeline.conf (or the service environment) — the fetch stage's branch-protection gate fails closed without it (ci/README.md §13)"
+    fi
+    return 0
+}
+
 # zola — needed on the host by the validate stage (marketing/pricing/legal
 # gates) and the test stage (ui-foundation include_str!s the built site when
 # apps/marketing-zola/public has not been synced yet).
@@ -321,6 +364,12 @@ install_etc_conf() {
 : "\${CI_ENV_FILE:=$DEPLOY_DIR/.env}"
 : "\${CI_REF:=main}"
 : "\${CI_KEEP_RUNS:=30}"
+# REQUIRED for the fetch stage's branch-protection release gate (the stage
+# fails closed on the deploy host without it — ci/README.md §13): a
+# fine-grained PAT with "Administration: read" on this repository (or a
+# classic PAT with repo). Uncomment and set (export: this file is sourced by
+# ci/pipeline.sh and stages run as child processes):
+# export GITHUB_TOKEN=github_pat_xxx
 EOF
     chmod 0644 "$ETC_DIR/pipeline.conf"
     log "wrote $ETC_DIR/pipeline.conf"
@@ -394,6 +443,21 @@ do_check() {
     for c in git curl jq python3 docker openssl; do
         have "$c" && log "ok: $c" || { log "MISSING: $c"; _bad=1; }
     done
+    # gh + token: the fetch stage's branch-protection gate fails closed on the
+    # deploy host without both (audit P2 item 11).
+    if have gh; then
+        log "ok: gh ($(gh --version | head -1))"
+    else
+        log "MISSING: gh — the fetch stage's branch-protection gate fails closed without it (sudo ci/install.sh installs it)"
+        _bad=1
+    fi
+    if [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] \
+        || grep -qE '^(export )?(GH_TOKEN|GITHUB_TOKEN)=' "$ETC_DIR/pipeline.conf" 2>/dev/null; then
+        log "ok: github token configured (fetch stage branch-protection gate)"
+    else
+        log "MISSING: GITHUB_TOKEN — set it in $ETC_DIR/pipeline.conf; the fetch stage fails closed without a readable token (ci/README.md §13)"
+        _bad=1
+    fi
     for c in cargo cargo-audit sqlx cargo-nextest cargo-deny cargo-machete cargo-llvm-cov gitleaks trivy semgrep zola; do
         if have "$c"; then log "ok: $c"; else log "optional-missing: $c (gate degrades, see ci/README.md)"; fi
     done
@@ -429,9 +493,11 @@ case "${1:-all}" in
         install_pre_commit
         install_zola
         install_hadolint
+        install_gh
         install_etc_conf
         install_units
         log "install complete — next: sudo ci/install.sh deploy-key"
+        log "and set GITHUB_TOKEN in /etc/apexmail/pipeline.conf (fetch stage branch-protection gate)"
         ;;
     units)        install_units ;;
     deploy-key)   need_root; install_deploy_key ;;

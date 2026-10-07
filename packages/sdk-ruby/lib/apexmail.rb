@@ -39,6 +39,18 @@ module ApexMail
     "?" + URI.encode_www_form(filtered)
   end
 
+  # Guard for list endpoints whose server query structs use
+  # deny_unknown_fields without a cursor (domains, templates, suppressions,
+  # events, api-keys): sending `cursor` is a hard HTTP 400. Fail fast
+  # client-side with the honest contract instead.
+  def self.reject_unsupported_cursor!(endpoint, cursor)
+    return if cursor.nil?
+
+    raise ArgumentError,
+          "#{endpoint} does not support cursor pagination " \
+          "(the server rejects `cursor` with HTTP 400); use limit/offset"
+  end
+
   # Verify an ApexMail webhook signature in the platform's exact wire
   # format (worker-processors/src/webhook/processor.rs):
   #
@@ -131,6 +143,12 @@ module ApexMail
     # MAX_BACKOFF, silently truncating long rate-limit windows).
     MAX_RETRY_AFTER = 120.0
 
+    # Pagination metadata (meta.hasMore / meta.nextCursor) of the last
+    # response that carried an envelope; nil otherwise. The API returns
+    # camelCase keys (routes/pagination.rs pagination_meta) — the client
+    # exposes both spellings via Client#next_cursor / #has_more.
+    attr_reader :last_response_meta
+
     # @param sleeper     [#call] Test seam: object called with the delay in
     #                            seconds instead of Kernel#sleep.
     # @param http_factory [#call] Test seam: returns an object that quacks like
@@ -160,6 +178,10 @@ module ApexMail
       end
 
       attempt = 0
+
+      # A response without an envelope must not inherit the previous call's
+      # pagination metadata (stale cursors were previously returned).
+      @last_response_meta = nil
 
       loop do
         begin
@@ -228,8 +250,15 @@ module ApexMail
       if idempotency_key
         # Header injection: strip control bytes (CR/LF/NUL and friends) and
         # cap the length, like the PHP SDK does.
+        #
+        # SDK-IDEM: the server reads `Idempotency-Key`
+        # (middleware/idempotency.rs IDEMPOTENCY_HEADER;
+        # docs/api/endpoints/messages.md). The historical
+        # `X-Idempotency-Key` spelling is ignored by the server — every
+        # generated key was silently dropped and a retried POST could
+        # duplicate.
         safe_key = idempotency_key.gsub(/[\x00-\x1F\x7F]/, "")
-        req["X-Idempotency-Key"] = safe_key[0, 128] unless safe_key.empty?
+        req["Idempotency-Key"] = safe_key[0, 128] unless safe_key.empty?
       end
       req.body = JSON.generate(body) if body
       req
@@ -297,7 +326,10 @@ module ApexMail
         end
         message = "HTTP #{resp.code}" if message.to_s.empty?
 
-        # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
+        # SDK-111: Unwrap API envelope {"data": ..., "meta": ...}. The
+        # envelope's pagination meta (camelCase hasMore/nextCursor from
+        # routes/pagination.rs) is retained so cursor pagination is usable.
+        @last_response_meta = parsed[:meta] if parsed.key?(:data) && parsed[:meta].is_a?(Hash)
         parsed = parsed[:data] if parsed.key?(:data)
       else
         message = body_text
@@ -305,9 +337,29 @@ module ApexMail
         details = nil
       end
 
+      return parsed if (200..299).cover?(resp.code.to_i)
+
+      raise_http_error(resp, message, code, details)
+    rescue JSON::ParserError => e
+      # SDK-A (critical): a non-JSON body (e.g. an HTML 502 page from a
+      # proxy, or the plain-text 422 axum emits for a deserialization
+      # failure) must raise — previously it was rescued and returned as a
+      # success hash like {raw:, parse_error:}. Status-based typing is
+      # preserved (a 422 still surfaces as ValidationError) with code
+      # PARSE_ERROR.
+      raise_http_error(
+        resp,
+        "Invalid JSON response from API (HTTP #{resp.code}): #{e.message}",
+        "PARSE_ERROR",
+        { raw_body: body_text[0, 500] }
+      )
+    end
+
+    # Map an HTTP status to the documented typed error
+    # (docs/api/errors.md). Shared by JSON and non-JSON bodies so a
+    # 422/401/... keeps its class even when the body cannot be parsed.
+    def raise_http_error(resp, message, code, details)
       case resp.code.to_i
-      when 200..299
-        parsed
       when 401
         raise AuthenticationError.new(message || "Unauthorized",
                                       status_code: 401, code: code, details: details)
@@ -331,15 +383,6 @@ module ApexMail
         raise Error.new(message,
                         status_code: resp.code.to_i, code: code, details: details)
       end
-    rescue JSON::ParserError => e
-      # SDK-A (critical): a non-JSON body (e.g. an HTML 502 page from a proxy)
-      # must raise — previously it was rescued and returned as a success hash
-      # like {raw:, parse_error:}.
-      raise Error.new(
-        "Invalid JSON response from API (HTTP #{resp.code}): #{e.message}",
-        status_code: resp.code.to_i, code: "PARSE_ERROR",
-        details: { raw_body: body_text[0, 500] }
-      )
     end
   end
 
@@ -347,6 +390,27 @@ module ApexMail
 
   class Client
     attr_reader :emails, :domains, :webhooks, :templates, :suppressions, :events, :analytics, :api_keys
+
+    # Pagination metadata (meta.hasMore / meta.nextCursor) of the last
+    # response that carried an envelope, or nil. The live API uses camelCase
+    # keys; both spellings are read.
+    def last_response_meta
+      @transport.last_response_meta
+    end
+
+    # Opaque next-page cursor of the last list response (messages list), or
+    # nil on the last page.
+    def next_cursor
+      meta = last_response_meta || {}
+      value = meta[:nextCursor] || meta['nextCursor'] || meta[:next_cursor] || meta['next_cursor']
+      value.is_a?(String) && !value.empty? ? value : nil
+    end
+
+    # Whether the last list response reported another page.
+    def has_more?
+      meta = last_response_meta || {}
+      !!(meta[:hasMore] || meta['hasMore'] || meta[:has_more] || meta['has_more'])
+    end
 
     # @param api_key      [String]  Your ApexMail API key (starts with am_live_ or am_test_)
     # @param base_url     [String]  Override the base URL (useful for self-hosted)
@@ -729,7 +793,8 @@ module ApexMail
   # ── Webhooks ────────────────────────────────────────────────────────────────
 
   # Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS,
-  # canonicalized 2026-09-08) — anything else is rejected with 422.
+  # canonicalized 2026-09-08, plus the campaign lifecycle events) — anything
+  # else is rejected with 422.
   KNOWN_WEBHOOK_EVENTS = [
     "message.accepted",
     "message.queued",
@@ -743,6 +808,9 @@ module ApexMail
     "message.clicked",
     "message.cancelled",
     "recipient.unsubscribed",
+    "campaign.started",
+    "campaign.ab_winner_selected",
+    "campaign.completed",
     "placement_test.completed",
     "inbound",
     "*",
@@ -859,18 +927,30 @@ module ApexMail
     # are accepted for backwards compatibility but NOT sent (the API has no
     # such fields).
     #
+    # name, subject and html_body are REQUIRED and non-empty server-side
+    # (templates.rs create_template); omitting html previously turned the
+    # caller mistake into a transport-level 422.
+    #
     # @param name    [String]
     # @param subject [String]
-    # @param html    [String, nil] mapped to html_body
+    # @param html    [String]  mapped to html_body (required)
     # @param text    [String, nil] mapped to text_body
     def create(name:, subject:, html: nil, text: nil, **_ignored)
+      if name.to_s.strip.empty? || subject.to_s.strip.empty? || html.to_s.strip.empty?
+        raise ArgumentError,
+              'TemplatesAPI#create requires non-empty name, subject and html (html_body)'
+      end
       @t.request("POST", "/v1/templates", body: {
         name: name, subject: subject, html_body: html, text_body: text,
       }.compact)
     end
 
+    # List templates. ListTemplatesQuery accepts {limit, offset} only
+    # (deny_unknown_fields) — a `cursor` is a server 400 and now fails fast
+    # client-side.
     def list(limit: 50, offset: 0, cursor: nil)
-      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor)
+      ApexMail.reject_unsupported_cursor!("/v1/templates", cursor)
+      query = ApexMail.build_query(limit: limit, offset: offset)
       @t.request("GET", "/v1/templates#{query}")
     end
 
@@ -941,7 +1021,8 @@ module ApexMail
     end
 
     def list(limit: 50, offset: 0, cursor: nil, reason: nil)
-      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor, reason: reason)
+      ApexMail.reject_unsupported_cursor!("/v1/suppressions", cursor)
+      query = ApexMail.build_query(limit: limit, offset: offset, reason: reason)
       @t.request("GET", "/v1/suppressions#{query}")
     end
 
@@ -965,6 +1046,12 @@ module ApexMail
 
     # List events with optional filters.
     #
+    # The server's ListEventsQuery (events.rs, deny_unknown_fields) accepts
+    # exactly {limit, offset, event_type, message_id}. There is no cursor
+    # pagination and no status/date/domain filter — those were sent
+    # historically and rejected with HTTP 400, so they now fail fast
+    # client-side.
+    #
     # Each event in the response may include an +envelope+ hash with:
     #   from::      [String, nil]  Envelope MAIL FROM address
     #   to::        [Array<String>] Envelope RCPT TO addresses
@@ -972,18 +1059,30 @@ module ApexMail
     #   spf::       [String]  Authentication result: +pass+, +fail+, +neutral+, +none+
     #   dmarc::     [String]  Authentication result: +pass+, +fail+, +neutral+, +none+
     #   timestamp:: [String]  ISO 8601 delivery event timestamp
-    def list(message_id: nil, limit: 50, offset: 0, cursor: nil, type: nil, status: nil,
-             date_from: nil, date_to: nil, domain_id: nil)
+    def list(message_id: nil, limit: 50, offset: 0, cursor: nil, type: nil,
+             status: nil, date_from: nil, date_to: nil, domain_id: nil, event_type: nil)
+      ApexMail.reject_unsupported_cursor!("/v1/events", cursor)
+      unsupported = []
+      unsupported << "status" unless status.nil?
+      unsupported << "date_from" unless date_from.nil?
+      unsupported << "date_to" unless date_to.nil?
+      unsupported << "domain_id" unless domain_id.nil?
+      unless unsupported.empty?
+        raise ArgumentError,
+              "GET /v1/events does not support: #{unsupported.join(', ')} " \
+              "(server ListEventsQuery accepts limit, offset, event_type, message_id only)"
+      end
+
       query = ApexMail.build_query(
-        limit: limit, offset: offset, cursor: cursor, messageId: message_id,
-        type: type, status: status, dateFrom: date_from,
-        dateTo: date_to, domainId: domain_id
+        limit: limit, offset: offset,
+        event_type: event_type || type,
+        message_id: message_id
       )
       @t.request("GET", "/v1/events#{query}")
     end
 
     def get_by_message(message_id)
-      query = ApexMail.build_query(messageId: message_id, limit: 100)
+      query = ApexMail.build_query(message_id: message_id, limit: 100)
       @t.request("GET", "/v1/events#{query}")
     end
 
@@ -993,14 +1092,31 @@ module ApexMail
       @t.request("GET", "/v1/events/#{ApexMail.encode_path(event_id)}")
     end
 
+    # Aggregate event counts. The server's StatsQuery (deny_unknown_fields)
+    # accepts {from, to} only; legacy +start+/+end+ are mapped to them.
     def stats(**filters)
-      query = ApexMail.build_query(filters)
-      @t.request("GET", "/v1/events/stats#{query}")
+      @t.request("GET", "/v1/events/stats#{stats_query(filters)}")
     end
 
+    # Event counts over time. Same filter contract as #stats.
     def timeseries(**filters)
-      query = ApexMail.build_query(filters)
-      @t.request("GET", "/v1/events/timeseries#{query}")
+      @t.request("GET", "/v1/events/timeseries#{stats_query(filters)}")
+    end
+
+    private
+
+    def stats_query(filters)
+      unsupported = filters.keys.map(&:to_sym) - %i[from to start end]
+      unless unsupported.empty?
+        raise ArgumentError,
+              "GET /v1/events/stats and /timeseries do not support: #{unsupported.join(', ')} " \
+              "(server StatsQuery accepts from, to only)"
+      end
+
+      ApexMail.build_query(
+        from: filters[:from] || filters[:start],
+        to: filters[:to] || filters[:end]
+      )
     end
   end
 
@@ -1019,7 +1135,8 @@ module ApexMail
     end
 
     def list(limit: 50, offset: 0, cursor: nil)
-      query = ApexMail.build_query(limit: limit, offset: offset, cursor: cursor)
+      ApexMail.reject_unsupported_cursor!("/v1/auth/api-keys", cursor)
+      query = ApexMail.build_query(limit: limit, offset: offset)
       @t.request("GET", "/v1/auth/api-keys#{query}")
     end
 

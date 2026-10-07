@@ -24,6 +24,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MARKETING = HERE / "pricing.md"
 CANONICAL = HERE.parent / "pricing.md"
+BILLING_PLANS = (
+    HERE.parent.parent
+    / "services" / "mail-server" / "crates" / "billing-service" / "src" / "plans.rs"
+)
+# Since the 2026-10-06 refactor the canonical overage rates live in the
+# platform catalog; `plan_overage_rate_millicents` delegates to it.
+PLATFORM_CATALOG = (
+    HERE.parent.parent
+    / "services" / "mail-server" / "crates" / "platform-catalog" / "src" / "lib.rs"
+)
 
 
 def rows_under(text: str, heading: str, min_cells: int) -> list[list[str]]:
@@ -64,16 +74,18 @@ def emails(text: str) -> int:
 def overage_rates_from_source() -> dict[str, float]:
     """Parse per-plan overage €/1k straight out of the runtime authority.
 
-    billing-service/src/plans.rs encodes the enforced rate as millicents
-    per email (`"starter" => Some(80)` = €0.80 per 1,000 emails). The
-    marketing pricing.json carries the same number as `overage_per_1k`;
-    this keeps the two from drifting independently.
+    Two source shapes are legal, mirroring `tools/validate_pricing_drift.py`:
+    the historical literal arms in `plan_overage_rate_millicents`
+    (`"starter" => Some(80)` = €0.80 per 1,000 emails), and the canonical
+    platform-catalog delegation installed by the 2026-10-06 refactor
+    (`platform_catalog::plan_by_name(...).overage_millicents_per_email`),
+    where the `PlanRow` records in platform-catalog/src/lib.rs are the
+    authority. Either way the marketing pricing.json `overage_per_1k` must
+    equal the enforced rate.
     """
-    plans_rs = (
-        HERE.parent.parent
-        / "services" / "mail-server" / "crates" / "billing-service" / "src" / "plans.rs"
-    )
-    body = plans_rs.read_text()
+    if not BILLING_PLANS.exists():
+        raise ValueError(f"billing plan seeds not found at {BILLING_PLANS}")
+    body = BILLING_PLANS.read_text()
     fn = body.split("fn plan_overage_rate_millicents", 1)[1].split("\n}", 1)[0]
     # plan id -> display name (field order in PlanSeed is name first)
     display = {
@@ -87,6 +99,27 @@ def overage_rates_from_source() -> dict[str, float]:
     ):
         for plan_id in re.findall(r'"([a-z-]+)"', arm):
             rates[plan_id] = int(millicents) / 100.0  # millicents/email -> €/1k
+    if not rates:
+        if not (
+            "platform_catalog::plan_by_name" in fn
+            and "overage_millicents_per_email" in fn
+        ):
+            raise ValueError(
+                "plan_overage_rate_millicents neither has literal arms nor delegates "
+                "to platform_catalog::plan_by_name(...).overage_millicents_per_email"
+            )
+        if not PLATFORM_CATALOG.exists():
+            raise ValueError(f"platform catalog not found at {PLATFORM_CATALOG}")
+        catalog = PLATFORM_CATALOG.read_text()
+        for block in re.findall(r"PlanRow \{(.*?)\n    \}", catalog, re.S):
+            rate = re.search(r"overage_millicents_per_email: Some\((-?[\d_]+)\)", block)
+            if not rate:
+                continue
+            plan_id = re.search(r'name: "([^"]+)"', block)
+            if plan_id:
+                rates[plan_id.group(1)] = int(
+                    rate.group(1).replace("_", "")
+                ) / 100.0
     return {dn: rates[pid] for pid, dn in display.items() if pid in rates}
 
 
@@ -132,7 +165,11 @@ def main() -> int:
     pricing_json = HERE.parent.parent / "apps" / "marketing-zola" / "data" / "pricing.json"
     pdata = json.loads(pricing_json.read_text())
     pplans = pdata["plans"] if isinstance(pdata, dict) else pdata
-    enforced = overage_rates_from_source()
+    try:
+        enforced = overage_rates_from_source()
+    except ValueError as error:
+        print(f"FAIL cannot read the enforced overage rates: {error}", file=sys.stderr)
+        return 1
     for plan in pplans:
         name = plan.get("name", "")
         want = enforced.get(name)

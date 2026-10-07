@@ -106,6 +106,12 @@ services:
   enterprise:
     environment:
       JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-not-for-production-use-change-me-1234567890abcdef}
+      # F6 (dogfood): the SSO callback mints the canonical `am_session`
+      # cookie with the SHARED signing key. Same pair the api-server gets
+      # above; without it every federated login lands with no console
+      # session (a server-side warn the user never sees).
+      JWT_PRIVATE_KEY_PEM: ${JWT_PRIVATE_KEY_PEM:-""}
+      JWT_PUBLIC_KEY_PEM: ${JWT_PUBLIC_KEY_PEM:-""}
       # SSO_ENCRYPTION_KEY pins the at-rest key for tenant OIDC client
       # secrets (config.rs `sso_encryption`). Without it, EVERY
       # POST /sso/configure carrying an oidc_client_secret fails with a raw

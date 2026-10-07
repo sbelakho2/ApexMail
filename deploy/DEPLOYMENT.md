@@ -15,10 +15,11 @@ push to main
   → 08 verify    per-service health, HTTP probes, SMTP banner, TLS
 ```
 
-GitHub Actions is decommissioned (archived under `.github/workflows-archive/`;
-the replacement map lives in `ci/README.md` §2). The pipeline running on the
-deploy host IS the CI and the deployer — there is no runner, no registry, and
-no SSH hop anymore.
+GitHub Actions is decommissioned — the workflow files were removed from the
+tree on 2026-09-13 (the replacement map lives in `ci/README.md` §2). A
+reappearing `.github/workflows/` or `.github/workflows-archive/` fails the
+validate stage. The pipeline running on the deploy host IS the CI and the
+deployer — there is no runner, no registry, and no SSH hop anymore.
 
 ## Deployment methods (when to use which)
 
@@ -41,7 +42,7 @@ There is no GitHub Actions runner and no registry; bootstrap is done over
 SSH once:
 
 1. **Bootstrap the host** — `scp deploy/scripts/hetzner-bootstrap.sh "root@<host>:/root/"` then `ssh root@<host> 'bash /root/hetzner-bootstrap.sh'` (installs Docker + compose plugin, configures UFW, hardens sshd, creates `/opt/apexmail`).
-2. **Clone the repository on the host** — `${DEPLOY_DIR}` (`/opt/apexmail`) IS the repository root: the bootstrap pre-creates the directory (with `secrets/`), so initialize the checkout in place — `ssh root@<host> 'cd /opt/apexmail && git init -q && git remote add origin <repo-url> && git fetch --depth 1 origin main && git checkout -f main'` — and keep `.env`, `secrets/`, `certs/` and `backups/` in that same directory (host-local, gitignored). The fetch stage refuses to deploy unpushed commits.
+2. **Clone the repository on the host** — `${DEPLOY_DIR}` (`/opt/apexmail`) IS the repository root: the bootstrap pre-creates the directory (with `secrets/`), so initialize the checkout in place — `ssh root@<host> 'cd /opt/apexmail && git init -q && git remote add origin <repo-url> && git fetch origin main && git checkout -f main'` — and keep `.env`, `secrets/`, `certs/` and `backups/` in that same directory (host-local, gitignored). The fetch must be FULL, not `--depth 1`: the REQUIRED gitleaks gate scans the full history, and a shallow checkout would silently degrade it to the current tree. (The fetch stage also unshallows defensively, and the security stage fails closed if it cannot.) The fetch stage refuses to deploy unpushed commits.
 3. **Render the production `.env`** at `/opt/apexmail/.env` from `.env.production.example` (generate values with `openssl rand -base64 32`); validate locally with `make verify-env ENV_FILE=.env.production`.
 4. **Write the secret files** — for every `PROD_*_FILE` path in the `.env`
    (30 today; see § "Rendered production secrets"), create the file with the
@@ -57,7 +58,7 @@ SSH once:
    pipeline run (`ls /opt/apexmail/secrets | wc -l` — 32 files including
    `redis_password_map.json` and an empty `ai_model_api_key.txt`, generated per the comment in
    `.env.production.example`).
-5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools, and the fail-closed tool policy).
+5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools — including the `gh` CLI — and the fail-closed tool policy). Then set the token the fetch stage requires: add `export GITHUB_TOKEN=<PAT with Administration:read>` to `/etc/apexmail/pipeline.conf` (the installer prints an ACTION REQUIRED line and `ci/install.sh check` fails without it; `gh` + a readable token are hard prerequisites of the branch-protection release gate, `ci/README.md` §13).
 6. **Run the first deploy** — `ssh root@<host> 'cd /opt/apexmail && ci/pipeline.sh run'`. A red stage stops before `docker compose up`; the verify stage probes health, HTTP, and the SMTP banner.
 7. **Issue a real certificate** — `ssh root@<host> "cd /opt/apexmail && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
 
@@ -149,7 +150,7 @@ defaults its `GHCR_NS` to `ghcr.io/sbelakho2/apexmail` and accepts an
 override (`GHCR_NS=ghcr.io/<ns>/apexmail bash deploy/scripts/deploy.sh`) so a
 fork can hotfix-deploy without editing the script.
 
-| Compose service key   | Canonical image                              | Built by `deploy.yml` target | Dockerfile binary |
+| Compose service key   | Canonical image                              | Dockerfile target (historical `deploy.yml` names) | Dockerfile binary |
 | --------------------- | -------------------------------------------- | ---------------------------- | ----------------- |
 | `api-server`          | `ghcr.io/<ns>/api-server`                    | `api-server`                 | `api-server`      |
 | `mta`                 | `ghcr.io/<ns>/mta`                           | `mta`                        | `mta-server`      |
@@ -163,9 +164,23 @@ fork can hotfix-deploy without editing the script.
 | `status-server`       | `ghcr.io/<ns>/status-server`                 | `auth-server`                | `auth-server`     |
 | `billing-service`     | `ghcr.io/<ns>/billing-service`               | `billing-service`            | `billing-service` |
 | `sales-autopilot`     | `ghcr.io/<ns>/sales-autopilot`               | `sales-autopilot`            | `sales-autopilot` |
+| `compliance`          | `ghcr.io/<ns>/compliance`                    | `compliance`                 | `compliance`      |
+| `analytics-worker`    | `ghcr.io/<ns>/analytics-worker`              | `analytics-worker`           | `analytics-worker`|
+| `pdf-renderer`        | `ghcr.io/<ns>/pdf-renderer`                  | `pdf-renderer`               | `pdf-renderer`    |
+| `ai-service`          | `ghcr.io/<ns>/ai-service`                    | `ai-service`                 | `ai-service`      |
+| `postgres-backup`     | `ghcr.io/<ns>/postgres-backup`               | (deploy/hardening/Dockerfile.postgres-backup) | shell scheduler |
+| `clickhouse-backup`   | `ghcr.io/<ns>/clickhouse-backup`             | (deploy/hardening/Dockerfile.clickhouse-backup) | shell scheduler |
+| `redis-backup`        | `ghcr.io/<ns>/redis-backup`                  | (deploy/hardening/Dockerfile.redis-backup) | shell scheduler |
+| `analytics-backup`    | `ghcr.io/<ns>/analytics-backup`              | (deploy/hardening/Dockerfile.analytics-backup) | shell scheduler |
 | `migrator` *(one-shot)* | `ghcr.io/<ns>/migrator`                    | `migrator`                   | `migrator`        |
 
 Notes:
+
+- The four backup schedulers are default-profile services; the deploy stage's
+  canonical `up` list and the verify stage's probe list both include them
+  (`ci/stages/validate.sh` mechanically fails the run if a `*-backup` service
+  in `docker-compose.prod.yml` is missing from either list — the redis and
+  analytics schedulers were once built+scanned but never started).
 
 - The MTA image is named **`mta`** (matching the CI build target and the
   compose service key). The binary inside that image is still `mta-server`;
@@ -308,8 +323,9 @@ aws sesv2 get-configuration-set-event-destinations \
   --configuration-set-name "$CONFIG_SET" --region "$AWS_REGION"
 ```
 
-Then wire the deployment to it (in the production `.env`, i.e. the
-`APEXMAIL_PROD_ENV` GitHub secret):
+Then wire the deployment to it (in the production `.env` at
+`/opt/apexmail/.env` — the `APEXMAIL_PROD_ENV` GitHub secret that used to
+supply it is retired with the GitHub workflows):
 
 ```
 SES_CONFIGURATION_SET=apexmail-events
@@ -429,8 +445,9 @@ and deployed. The pipeline therefore renders two release artifacts per run
    image store and after any registry push) or, when none exists, the image
    ID — the exact content the deploy stage's tamper guard re-verifies.
    `sbom_digest` points at the Trivy SPDX SBOM the images stage generated
-   for that image (null for images outside the blocking gate, e.g. the
-   backup sidecars). Nothing in this pipeline produces provenance
+   for that image (null only when SBOM generation itself failed or trivy was
+   unavailable — the backup sidecars outside the blocking gate get SBOMs from
+   the advisory scan pass). Nothing in this pipeline produces provenance
    attestations, so `provenance_digest` is always null.
 
 2. **`docker-compose.digest-override.yml`** — a GENERATED compose override
@@ -473,11 +490,13 @@ Enforcement:
 
 ## Drift guard
 
-The CI job `deploy-image-name-guard` (in `deploy.yml`) asserts that every
-`image:` reference in `docker-compose*.yml` matches the canonical service map
-above — including `imap-server`, `mailstore`, `status-server` and `migrator`. If you add
-a service or rename an image, update this map **and** the guard together —
-the build will fail otherwise.
+`ci/stages/validate.sh` (`image_name_guard`, the current port of the retired
+`deploy.yml` `deploy-image-name-guard` job) asserts that every `image:`
+reference in `docker-compose*.yml` matches the canonical service map above —
+including `imap-server`, `mailstore`, `status-server` and `migrator` — and
+that no `:vX.Y.Z` style tag sneaks in. If you add a service or rename an
+image, update this map **and** the guard together — the validate stage fails
+otherwise.
 
 ## Manual fallback (NOT the production path)
 

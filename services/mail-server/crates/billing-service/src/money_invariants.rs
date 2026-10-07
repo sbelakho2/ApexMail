@@ -294,27 +294,28 @@ fn vat_allocation_handles_zero_valued_lines() {
 // 4. Wallet conservation across random operation sequences
 // ---------------------------------------------------------------------------
 
-/// Rust model of the SQL wallet semantics (migrations 022/101/104):
-/// BIGINT `balance`/`reserved`, clamped release, `balance >= 0`,
-/// `reserved >= 0`.
+/// Rust model of the wallet semantics that are LIVE (migrations 022/104):
+/// BIGINT `balance`, `balance >= 0`, debit clamped to the available balance.
+///
+/// F8 (audit): the reserve/release/capture/expire model was REMOVED together
+/// with the dead `wallet_reservations` expiry sweep. No production code path
+/// ever reserved funds (the only writers were test fixtures), so modelling
+/// an isolation guarantee here implied an enforcement the runtime never
+/// performed. The live flow is direct top-up/debit through
+/// `wallet_transactions`.
 struct WalletModel {
     balance: i64,
-    reserved: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum WalletOp {
     Credit(i64),
     Debit(i64),
-    Reserve(i64),
-    Release(i64),
-    Capture(i64),
-    Expire(i64),
 }
 
 impl WalletModel {
     /// Apply one operation, mirroring the SQL constraints. Returns the
-    /// change to `balance + reserved` that the op is allowed to cause.
+    /// change to `balance` that the op is allowed to cause.
     fn apply(&mut self, op: WalletOp) -> i64 {
         match op {
             WalletOp::Credit(amount) => {
@@ -326,61 +327,27 @@ impl WalletModel {
                 self.balance -= taken;
                 -taken
             }
-            WalletOp::Reserve(amount) => {
-                let available = self.balance;
-                let taken = amount.min(available);
-                self.balance -= taken;
-                self.reserved += taken;
-                0 // moved, not spent
-            }
-            WalletOp::Release(amount) => {
-                // release_reserved_cents: GREATEST(0, reserved - total)
-                let released = amount.min(self.reserved);
-                self.reserved -= released;
-                self.balance += released;
-                0
-            }
-            WalletOp::Capture(amount) => {
-                let taken = amount.min(self.reserved);
-                self.reserved -= taken;
-                -taken // reservation leaves the wallet for good
-            }
-            WalletOp::Expire(amount) => {
-                // Expired-reservation sweep: same as release from the
-                // wallet's perspective.
-                let released = amount.min(self.reserved);
-                self.reserved -= released;
-                self.balance += released;
-                0
-            }
         }
     }
 
     fn total(&self) -> i64 {
-        self.balance + self.reserved
+        self.balance
     }
 }
 
 #[test]
-fn wallet_ops_conserve_balance_plus_reserved() {
+fn wallet_ops_conserve_balance() {
     let mut rng = Rng::new(0xDA1E);
     for case in 0..200 {
-        let mut wallet = WalletModel {
-            balance: 0,
-            reserved: 0,
-        };
+        let mut wallet = WalletModel { balance: 0 };
         let mut expected_total = 0_i64;
         let mut history: Vec<WalletOp> = Vec::new();
 
         for _ in 0..150 {
             let amount = 1 + rng.below(10_000) as i64;
-            let op = match rng.below(6) {
+            let op = match rng.below(2) {
                 0 => WalletOp::Credit(amount),
-                1 => WalletOp::Debit(amount),
-                2 => WalletOp::Reserve(amount),
-                3 => WalletOp::Release(amount),
-                4 => WalletOp::Capture(amount),
-                _ => WalletOp::Expire(amount),
+                _ => WalletOp::Debit(amount),
             };
             let delta = wallet.apply(op);
             expected_total += delta;
@@ -389,10 +356,6 @@ fn wallet_ops_conserve_balance_plus_reserved() {
             assert!(
                 wallet.balance >= 0,
                 "case {case}: negative balance after {history:?}"
-            );
-            assert!(
-                wallet.reserved >= 0,
-                "case {case}: negative reserved after {history:?}"
             );
             assert_eq!(
                 wallet.total(),
@@ -403,36 +366,25 @@ fn wallet_ops_conserve_balance_plus_reserved() {
     }
 }
 
+/// F8: the dead reservation machinery must not return without a production
+/// writer. The table survives in migration history (schema is not rewritten),
+/// but no Rust path may select from it or maintain the sweep again.
 #[test]
-fn wallet_bigint_release_clamp_never_wraps() {
-    // Migration 101 computed the clamped subtraction in BIGINT but stored
-    // INTEGER; migration 104 makes the whole path BIGINT. The model must
-    // clamp to zero, never wrap, at ranges far above INT_MAX.
-    let mut wallet = WalletModel {
-        balance: 0,
-        reserved: 0,
-    };
-    wallet.reserved = 3_000_000_000; // > i32::MAX
-    wallet.apply(WalletOp::Release(4_000_000_000));
-    assert_eq!(wallet.reserved, 0, "release above reserved clamps to zero");
-    assert_eq!(
-        wallet.balance, 3_000_000_000,
-        "released funds return to balance"
-    );
-}
-
-#[test]
-fn wallet_capture_cannot_overdraw_reservation() {
-    let mut wallet = WalletModel {
-        balance: 1_000,
-        reserved: 0,
-    };
-    wallet.apply(WalletOp::Reserve(1_000));
-    assert_eq!(wallet.total(), 1_000);
-    // Capturing more than reserved spends only what exists.
-    wallet.apply(WalletOp::Capture(5_000));
-    assert_eq!(wallet.reserved, 0);
-    assert_eq!(wallet.total(), 0, "no cents created from nothing");
+fn dead_wallet_reservation_sweep_stays_removed() {
+    let maintenance = include_str!("maintenance.rs");
+    for banned in [
+        "process_expired_wallet_reservations",
+        "release_reserved_cents_clamp",
+        "FROM wallet_reservations",
+        "INSERT INTO wallet_reservations",
+        "UPDATE wallet_reservations",
+    ] {
+        assert!(
+            !maintenance.contains(banned),
+            "maintenance.rs still references `{banned}` — the reservation flow has no \
+             production writer, so the sweep/model must not be reintroduced without one"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

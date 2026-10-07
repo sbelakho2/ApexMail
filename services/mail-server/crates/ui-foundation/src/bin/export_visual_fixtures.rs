@@ -130,6 +130,19 @@ fn marketing_public_dir() -> PathBuf {
 
 fn normalize_fixture_html(html: &str) -> String {
     let mut normalized = html.to_string();
+    // The live document links the content-hashed sheet
+    // (`assets/globals.css?v=<hash>`); the exported fixture reads the local
+    // copy, so the query is stripped. Prefix-matched because the hash value
+    // changes with the sheet.
+    if let Some(query_at) = normalized.find("assets/globals.css?v=") {
+        let query_at = query_at + "assets/globals.css".len(); // the '?'
+        let version_at = query_at + "?v=".len();
+        let version_len = normalized[version_at..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .count();
+        normalized.replace_range(query_at..version_at + version_len, "");
+    }
     for (from, to) in [
         (
             "href=\"/assets/globals.css\"",

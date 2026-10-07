@@ -30,10 +30,15 @@ log = logging.getLogger("evaluate")
 
 SEP = "=" * 70
 
-# Canonical monthly plan prices (EUR) from
-# services/mail-server/crates/billing-service/src/plans.rs — used for the
-# exact-price-match check on pricing answers.
-CANONICAL_PLAN_PRICES = {0, 25, 65, 150, 350, 3000}
+# Canonical monthly plan prices (EUR) derived from validate_pricing's
+# CANONICAL_PRICING (platform-catalog) — used for the exact-price-match
+# check on pricing answers. Never hardcode a plan price here.
+from validate_pricing import PRICE_BY_PLAN
+
+CANONICAL_PLAN_PRICES = {
+    int(price.replace("€", "").replace(",", ""))
+    for price in PRICE_BY_PLAN.values()
+}
 PRICE_TOKEN_RE = re.compile(r"€\s?(\d[\d,]*)")
 
 
@@ -239,7 +244,7 @@ def main() -> None:
     sample_prompts = [
         "What plans does ApexMail offer and what are the prices?",
         "How do I authenticate with the ApexMail API?",
-        "What is the overage rate for the Scale plan?",
+        "What is the overage rate for the Business plan?",
         "How do I set up DKIM for my domain?",
         "What compliance certifications does ApexMail have?",
     ]

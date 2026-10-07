@@ -564,6 +564,7 @@ final class RealRedisIntegrationTest extends TestCase
         $policy = \KiwiCaptcha\Risk\RiskPolicy::fromConfig([
             'version' => \KiwiCaptcha\Risk\RiskPolicy::CONTRACT_VERSION,
             'weights' => [],
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
             'scopes' => [
                 1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
             ],

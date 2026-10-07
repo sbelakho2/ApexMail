@@ -26,7 +26,7 @@ ApexMail implements Role-Based Access Control (RBAC) through a **scope-based per
 | **viewer** | `messages:read`, `domains:read`, `templates:read`, `events:read`, `analytics:read`, `contacts:read`, `lists:read`, `logs:read`, `campaigns:read`, `suppressions:read`, `dedicated_ips:read`, `support:read` | Read-only access |
 | **member** (default) | `messages:read` | Minimal read access |
 
-**Source:** [auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs#L130-L159)
+**Source:** `scopes_for_role()` in [auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs)
 
 ```rust
 // Fix #24: Assign scopes based on user role instead of blanket wildcard.

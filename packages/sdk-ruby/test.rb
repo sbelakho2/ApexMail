@@ -216,11 +216,8 @@ api = ApexMail::TemplatesAPI.new(t)
 api.get('tpl_1')
 expect('get() GET /v1/templates/tpl_1', t.calls[0][:path] == '/v1/templates/tpl_1')
 
-t = FakeTransport.new
-t.queue_response({ 'template' => { 'id' => 'tpl_1', 'slug' => 'welcome' } })
-api = ApexMail::TemplatesAPI.new(t)
-resp = api.get_by_slug('welcome')
-expect('get_by_slug() GET /v1/templates/slug/welcome', t.calls[0][:path] == '/v1/templates/slug/welcome')
+# get_by_slug() does not exist and the API has no /v1/templates/slug/:slug
+# route (GET /v1/templates/:id is the only lookup) — expectation removed.
 
 t = FakeTransport.new
 t.queue_response({ 'templates' => [], 'pagination' => { 'total' => 0 } })
@@ -259,14 +256,19 @@ t.queue_response({})
 api = ApexMail::SuppressionsAPI.new(t)
 api.add(emails: 'bad@example.com', reason: 'bounce')
 expect('add() POST /v1/suppressions',        t.calls[0][:path] == '/v1/suppressions')
-expect('add() body has emails array',        t.calls[0][:body][:emails] == ['bad@example.com'])
+expect('add() body has email field',         t.calls[0][:body][:email] == 'bad@example.com')
 expect('add() body has reason',              t.calls[0][:body][:reason] == 'bounce')
 
 t = FakeTransport.new
 t.queue_response({})
 api = ApexMail::SuppressionsAPI.new(t)
 api.add(emails: ['a@b.com', 'c@d.com'], reason: 'manual')
-expect('add() bulk sends array of emails',   t.calls[0][:body][:emails] == ['a@b.com', 'c@d.com'])
+# The API accepts one address per request; multiple addresses ride the bulk
+# endpoint with {entries: [{email, reason}]}.
+expect('add() bulk uses /v1/suppressions/bulk', t.calls[0][:path] == '/v1/suppressions/bulk')
+expect('add() bulk sends entries', t.calls[0][:body][:entries] == [
+  { email: 'a@b.com', reason: 'manual' }, { email: 'c@d.com', reason: 'manual' },
+])
 
 t = FakeTransport.new
 t.queue_response({ 'suppressions' => [], 'pagination' => { 'total' => 0 } })
@@ -296,13 +298,13 @@ t.queue_response({ 'events' => [], 'pagination' => { 'total' => 0 } })
 api = ApexMail::EventsAPI.new(t)
 api.list(message_id: 'msg_123')
 expect('list() GET /v1/events',              t.calls[0][:path].start_with?('/v1/events'))
-expect('list() includes messageId param',    t.calls[0][:path].include?('messageId=msg_123'))
+expect('list() includes message_id param',   t.calls[0][:path].include?('message_id=msg_123'))
 
 t = FakeTransport.new
 t.queue_response({ 'events' => [{ 'id' => 'evt_1', 'eventType' => 'delivered' }] })
 api = ApexMail::EventsAPI.new(t)
 resp = api.get_by_message('msg_123')
-expect('get_by_message() GET /v1/events?messageId=msg_123', t.calls[0][:path].include?('messageId=msg_123'))
+expect('get_by_message() GET /v1/events?message_id=msg_123', t.calls[0][:path].include?('message_id=msg_123'))
 expect('get_by_message() returns events',                    resp.key?('events'))
 
 t = FakeTransport.new
@@ -322,7 +324,9 @@ api = ApexMail::ApiKeysAPI.new(t)
 resp = api.create(name: 'Deploy key', expires_at: '2026-12-31T00:00:00Z')
 expect('create() POST /v1/auth/api-keys', t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/auth/api-keys')
 expect('create() body has name',          t.calls[0][:body][:name] == 'Deploy key')
-expect('create() forwards expiresAt',     t.calls[0][:body][:expiresAt] == '2026-12-31T00:00:00Z')
+# The API accepts only relative expires_in_days (1..365); expiresAt is
+# accepted for compatibility but never sent.
+expect('create() does not send unsupported expiresAt', !t.calls[0][:body].key?(:expiresAt))
 expect('create() returns api key',        resp.dig('apiKey', 'id') == 'key_1')
 
 t = FakeTransport.new
@@ -346,8 +350,11 @@ t = FakeTransport.new
 t.queue_response({ 'stats' => { 'sent' => 10 } })
 api = ApexMail::AnalyticsAPI.new(t)
 resp = api.get(from: '2026-01-01', to: '2026-01-31', group_by: 'day', tag: 'welcome')
-expect('get() GET /v1/analytics',       t.calls[0][:method] == 'GET' && t.calls[0][:path].start_with?('/v1/analytics'))
-expect('get() forwards groupBy filter', t.calls[0][:path].include?('groupBy=day'))
+# There is no GET /v1/analytics — the deprecated alias maps to the typed
+# dashboard subpath and group_by becomes the server's `interval` param.
+expect('get() maps to GET /v1/analytics/dashboard',
+       t.calls[0][:method] == 'GET' && t.calls[0][:path].start_with?('/v1/analytics/dashboard'))
+expect('get() forwards group_by as interval', t.calls[0][:path].include?('interval=day'))
 expect('get() returns stats',           resp.key?('stats'))
 
 # ── Error handling ────────────────────────────────────────────────────────
@@ -509,6 +516,20 @@ rescue ApexMail::Error => e
   expect('non-JSON 200 keeps status_code 200',   e.status_code == 200)
 end
 
+# Live contract: axum's plain-text 422 (deserialization failure) still maps
+# to ValidationError — status-based typing survives an unparseable body.
+t, _ = mk_transport([FakeHTTPResponse.new(422, 'Failed to deserialize the JSON body: missing field `html_body`')])
+begin
+  t.request('POST', '/v1/templates', body: { name: 'x' })
+  assert_fail('non-JSON 422 raises ValidationError', 'no exception raised')
+rescue ApexMail::ValidationError => e
+  expect('non-JSON 422 raises ValidationError', true)
+  expect('non-JSON 422 keeps status_code 422', e.status_code == 422)
+  expect('non-JSON 422 code is PARSE_ERROR', e.code == 'PARSE_ERROR')
+rescue ApexMail::Error => e
+  assert_fail('non-JSON 422 raises ValidationError', "got #{e.class}")
+end
+
 # SDK-A: JSON error envelope on a 503 still maps through the normal path.
 t, _ = mk_transport([FakeHTTPResponse.new(503, '{"error":{"code":"SERVICE_UNAVAILABLE","message":"down"}}')] * 10)
 begin
@@ -518,7 +539,9 @@ rescue ApexMail::Error => e
   expect('JSON 503 raises with server message', e.message.include?('down'))
 end
 
-# SDK-B: the same X-Idempotency-Key is replayed across retries of one call.
+# SDK-B: the same Idempotency-Key is replayed across retries of one call.
+# The server reads `Idempotency-Key` (middleware/idempotency.rs) — NOT the
+# legacy `X-Idempotency-Key`, which it ignores.
 fake = FakeHTTP.new([
   FakeHTTPResponse.new(500, '{"error":{"message":"boom"}}'),
   FakeHTTPResponse.new(200, '{"data":{"id":"msg_retry","status":"queued","created_at":"2026-01-01T00:00:00Z"}}'),
@@ -530,8 +553,9 @@ t2 = ApexMail::Transport.new(
 )
 resp = t2.request('POST', '/v1/messages', body: { a: 1 }, idempotency_key: 'sdk-b-key')
 expect('retried send succeeds and unwraps envelope', resp[:id] == 'msg_retry')
-req_keys = fake.requests.map { |r| r['X-Idempotency-Key'] }
-expect('retry replays the same X-Idempotency-Key', req_keys == ['sdk-b-key', 'sdk-b-key'])
+req_keys = fake.requests.map { |r| r['Idempotency-Key'] }
+expect('retry replays the same Idempotency-Key', req_keys == ['sdk-b-key', 'sdk-b-key'])
+expect('legacy X-Idempotency-Key is not sent', fake.requests.all? { |r| r['X-Idempotency-Key'].nil? })
 
 # Retry only on retryable statuses: a 422 must raise immediately (1 request).
 fake = FakeHTTP.new([FakeHTTPResponse.new(422, '{"error":{"code":"VALIDATION_ERROR","message":"nope"}}')] * 10)

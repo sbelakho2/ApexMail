@@ -120,9 +120,8 @@ apexmail/
 │
 ├── tools/
 │   ├── bootstrap.sh         # Development setup
-│   ├── migrate/             # Database migrations
-│   ├── chaos/               # Chaos testing
-│   └── verify-routes.ts     # Route verification
+│   ├── migrations/          # Migration ledger and lint helpers
+│   └── route_audit.sh       # Route verification
 │
 └── docs/                    # Documentation
 ```
@@ -130,7 +129,7 @@ apexmail/
 ## Design Principles
 
 ### 1. Purpose-Built Email Infrastructure
-The core email pipeline uses enterprise-grade infrastructure:
+The core email pipeline uses hardened infrastructure:
 - PostgreSQL for data storage with row-level security
 - Redis for caching and rate limiting
 - Rust for high-performance request handling
@@ -219,7 +218,7 @@ See [Security Systems Reference](../security/Security_Systems.md) for complete i
 
 ### Email Authentication Stack
 
-ApexMail implements comprehensive email authentication:
+ApexMail implements the full email-authentication stack:
 
 | Protocol | RFC | Purpose |
 |----------|-----|---------|
@@ -236,9 +235,10 @@ See [Email Authentication Guide](../security/email-authentication.md) for implem
 ## Scalability
 
 - Horizontal scaling via stateless Rust service
-- PostgreSQL read replicas for queries
-- Redis cluster for high availability
 - Connection pooling via deadpool
+- Read replicas and Redis cluster failover: roadmap
+  ([design](../deployment/postgres-read-replicas.md),
+  [migration plan](./redis-cluster-migration.md))
 
 ## Related Documentation
 

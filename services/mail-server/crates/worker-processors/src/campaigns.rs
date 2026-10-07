@@ -1086,12 +1086,36 @@ impl CampaignExecutor {
                     ..TickReport::default()
                 });
             }
+            Err(SendAdmissionError::ConsentRefused { email, reason }) => {
+                // F4 consent gate: a marketing recipient without an active
+                // consent record is a TERMINAL refusal for this recipient
+                // (retrying cannot create consent). Same terminal shape as
+                // the suppressed arm; the recipient row is never re-claimed.
+                tracing::info!(
+                    campaign_id = %recipient.campaign_id,
+                    email = %email,
+                    reason = %reason,
+                    "campaign recipient refused admission: marketing consent missing (terminal)"
+                );
+                self.mark_recipient(
+                    recipient.id,
+                    "suppressed",
+                    "marketing consent required",
+                    None,
+                )
+                .await?;
+                return Ok(TickReport {
+                    recipients_suppressed: 1,
+                    ..TickReport::default()
+                });
+            }
             // Quota exhaustion and store unavailability are TRANSIENT: put the
             // row back for the next tick instead of failing it.
             Err(
                 error @ (SendAdmissionError::QuotaExceeded
                 | SendAdmissionError::MeteringUnavailable(_)
-                | SendAdmissionError::SuppressionUnavailable(_)),
+                | SendAdmissionError::SuppressionUnavailable(_)
+                | SendAdmissionError::ConsentUnavailable(_)),
             ) => {
                 tracing::warn!(
                     campaign_id = %recipient.campaign_id,

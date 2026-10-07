@@ -31,12 +31,28 @@ class Templates
      */
     public function create(array $params): array
     {
-        $body = array_filter([
-            'name'       => $params['name'] ?? null,
-            'subject'    => $params['subject'] ?? null,
-            'html_body'  => $params['html_body'] ?? $params['html'] ?? null,
-            'text_body'  => $params['text_body'] ?? $params['text'] ?? null,
-        ], static fn ($v) => $v !== null && $v !== '');
+        // CreateTemplateRequest requires non-empty name, subject and
+        // html_body. Dropping an empty html_body (the old array_filter)
+        // omitted the field entirely and turned a caller mistake into a
+        // transport-level 422; fail fast with the real requirement.
+        $name = trim((string) ($params['name'] ?? ''));
+        $subject = trim((string) ($params['subject'] ?? ''));
+        $htmlBody = (string) ($params['html_body'] ?? $params['html'] ?? '');
+        if ($name === '' || $subject === '' || trim($htmlBody) === '') {
+            throw new \InvalidArgumentException(
+                'Templates::create requires non-empty "name", "subject" and "html_body" (alias "html")'
+            );
+        }
+
+        $body = [
+            'name'       => $name,
+            'subject'    => $subject,
+            'html_body'  => $htmlBody,
+        ];
+        $textBody = $params['text_body'] ?? $params['text'] ?? null;
+        if ($textBody !== null && $textBody !== '') {
+            $body['text_body'] = $textBody;
+        }
 
         return $this->client->request('POST', '/v1/templates', $body);
     }
@@ -44,14 +60,24 @@ class Templates
     /**
      * List templates.
      *
-     * @param array $options { limit, offset, cursor }
+     * The server's ListTemplatesQuery (deny_unknown_fields) accepts
+     * {limit, offset} only — a `cursor` parameter is rejected with HTTP 400,
+     * so it now fails fast client-side.
+     *
+     * @param array $options { limit, offset }
      */
     public function list(array $options = []): array
     {
+        if (isset($options['cursor'])) {
+            throw new \InvalidArgumentException(
+                'GET /v1/templates does not support cursor pagination '
+                . '(the server rejects `cursor` with HTTP 400); use limit/offset'
+            );
+        }
+
         $query = http_build_query(array_filter([
             'limit'  => $options['limit']  ?? 20,
             'offset' => $options['offset'] ?? 0,
-            'cursor' => $options['cursor'] ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/templates' . ($query ? '?' . $query : ''));

@@ -29,6 +29,65 @@ pub(crate) fn render_variant_with_secret(surface: &str, path: &str, query: &str)
         .unwrap_or_else(|| panic!("[{surface}] {path}?{query} must render for the gates"))
 }
 
+/// PRG / state variants a bare manifest render cannot reach, as
+/// (surface, path, query). Their markup is user-visible right after a real
+/// flow (verify, reset, MFA challenge), so every markup gate (form hygiene,
+/// link integrity) renders them alongside the manifest routes. Found by
+/// dogfood 2026-10-06: the nested-form P0 lived ONLY on the
+/// `/login?mfa=1` variant, so a manifest-only gate could not see it.
+pub(crate) const STATEFUL_RENDER_VARIANTS: &[(&str, &str, &str)] = &[
+    ("web", "/verify-email", "status=success"),
+    ("web", "/verify-email", "status=error"),
+    (
+        "web",
+        "/reset-password",
+        "token=gate-token&email=owner%40apexmail.ee",
+    ),
+    ("web", "/login", "mfa=1&email=ops%40apexmail.ee"),
+    (
+        "web",
+        "/confirm",
+        "intent=delete-campaign&id=c_spring&return_to=%2Fcampaigns",
+    ),
+    ("control-plane", "/login", "mfa=1&email=ops%40apexmail.ee"),
+];
+
+/// The stateful PRG variants of one surface, as (document name, rendered
+/// html). Tuple order in [`STATEFUL_RENDER_VARIANTS`] is
+/// (surface, path, query) — this helper is the ONE place that reads it, so a
+/// field-order mistake blanks the variant sweep exactly once instead of
+/// silently, per caller. (Dogfood 2026-10-06: the link gate filtered the
+/// PATH field against the surface name, matched nothing, and scanned zero
+/// variants — hiding the nested-form P0 that lived only on `/login?mfa=1`.)
+pub(crate) fn stateful_variant_documents(surface: &str) -> Vec<(String, String)> {
+    STATEFUL_RENDER_VARIANTS
+        .iter()
+        .filter(|(variant_surface, _, _)| *variant_surface == surface)
+        .map(|(_, path, query)| {
+            (
+                format!("{path}?{query}"),
+                render_variant_with_secret(surface, path, query),
+            )
+        })
+        .collect()
+}
+
+/// Every gate document of one surface: the manifest routes plus the stateful
+/// PRG variants.
+pub(crate) fn gate_documents(surface: &str) -> Vec<(String, String)> {
+    let mut documents: Vec<(String, String)> = crate::routing::surface_routes(surface)
+        .into_iter()
+        .map(|route| {
+            (
+                route.path.to_string(),
+                render_with_secret(surface, route.path),
+            )
+        })
+        .collect();
+    documents.extend(stateful_variant_documents(surface));
+    documents
+}
+
 /// Byte spans (start, end-exclusive after the `>`) of every opening tag of
 /// `tag`. Boundary-safe: `<main` never matches `<mainland-…>`.
 pub(crate) fn opening_tag_spans(html: &str, tag: &str) -> Vec<(usize, usize)> {

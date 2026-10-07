@@ -234,6 +234,12 @@ pub enum EventType {
     Opened,
     Clicked,
     Unsubscribed,
+    /// A click whose DESTINATION was refused (foreign/unauthorized host): an
+    /// explicit event so operators can see what was blocked and why, without
+    /// polluting real click analytics (`clicked` counts, message click
+    /// totals, `message.clicked` webhooks).
+    #[serde(rename = "click_refused")]
+    ClickRefused,
 }
 
 impl std::fmt::Display for EventType {
@@ -242,11 +248,23 @@ impl std::fmt::Display for EventType {
             EventType::Opened => f.write_str("opened"),
             EventType::Clicked => f.write_str("clicked"),
             EventType::Unsubscribed => f.write_str("unsubscribed"),
+            EventType::ClickRefused => f.write_str("click_refused"),
         }
     }
 }
 
 // ── Public record helpers ────────────────────────────────────────────────────
+
+/// F10: the tracking event types the analytics worker aggregates
+/// (`opened`/`clicked`/`unsubscribed`). A refused click is an operator
+/// signal, not an analytics count, and the worker's type parse would discard
+/// it — so `click_refused` is never enqueued.
+fn is_analytics_event_type(event_type: &EventType) -> bool {
+    matches!(
+        event_type,
+        EventType::Opened | EventType::Clicked | EventType::Unsubscribed
+    )
+}
 
 pub struct OpenData {
     pub tenant_id: String,
@@ -262,6 +280,20 @@ pub struct ClickData {
     pub recipient: String,
     pub link_id: String,
     pub link_url: String,
+    pub user_agent: Option<String>,
+    pub ip_address: Option<String>,
+}
+
+/// A click whose destination host was refused by the redirect authorization
+/// (foreign/unauthorized link). Recorded as an EXPLICIT `click_refused`
+/// event carrying the refused URL and the named reason.
+pub struct RefusedClickData {
+    pub tenant_id: String,
+    pub message_id: String,
+    pub recipient: String,
+    pub link_id: String,
+    pub link_url: String,
+    pub reason: String,
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
 }
@@ -589,6 +621,74 @@ impl EventProcessor {
         let hour = now.format("%H").to_string();
         self.incr_counters(&event.tenant_id, &date, &hour, "clicks")
             .await;
+
+        Ok(())
+    }
+
+    /// Record a REFUSED click (destination host unauthorized) as an explicit
+    /// `click_refused` event carrying the refused URL and the named reason.
+    ///
+    /// Deduped independently of real clicks (`click_refused` namespace +
+    /// the refused URL), so a repeated refused click cannot flood the WAL,
+    /// and a refusal can NEVER occupy the real click's 24 h dedup key — a
+    /// later legitimate click on another link still records. Deliberately
+    /// does not touch the click counters or `message.clicked` webhooks: the
+    /// recipient never reached anything.
+    pub async fn record_refused_click(&self, data: RefusedClickData) -> Result<()> {
+        let dedup_key = dedup_key(
+            "click_refused",
+            &data.message_id,
+            &data.recipient,
+            Some(&data.link_url),
+        );
+        if !self
+            .try_set_dedup("click_refused", &dedup_key, 86400)
+            .await?
+        {
+            debug!(
+                message_id = %data.message_id,
+                link_url = %data.link_url,
+                "Duplicate refused click within 24h dedup window, skipping"
+            );
+            return Ok(());
+        }
+
+        let RefusedClickData {
+            tenant_id,
+            message_id,
+            recipient,
+            link_id,
+            link_url,
+            reason,
+            user_agent,
+            ip_address,
+        } = data;
+        let event = TrackingEvent {
+            id: new_id("evt"),
+            event_type: EventType::ClickRefused,
+            tenant_id,
+            message_id,
+            recipient,
+            campaign_id: None,
+            link_id: Some(link_id),
+            link_url: Some(link_url.clone()),
+            unsubscribe_reason: None,
+            user_agent,
+            ip_address,
+            timestamp: Utc::now(),
+            metadata: Some(serde_json::json!({
+                "refused": true,
+                "reason": reason,
+                "refusedUrl": link_url,
+            })),
+        };
+
+        if let Err(e) = self.enqueue_event(&event).await {
+            // Same retry contract as record_click: a failed enqueue must not
+            // leave a stale dedup key that swallows the retry.
+            self.clear_dedup(&dedup_key).await;
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -1097,9 +1197,14 @@ impl EventProcessor {
             return Ok(());
         }
 
-        // Max PG params ≈ 65535; 11 columns per event → max chunk 5900
-        const PARAMS_PER_EVENT: usize = 11;
+        // Max PG params ≈ 65535; 12 columns per event → max chunk 5461
+        const PARAMS_PER_EVENT: usize = 12;
         const MAX_PER_CHUNK: usize = 65000 / PARAMS_PER_EVENT;
+        // F10 (audit): analytics_queue rows are 8 columns each; keep the
+        // chunk far below the parameter ceiling so the events insert (the
+        // larger statement) is always the binding constraint.
+        const ANALYTICS_PARAMS_PER_EVENT: usize = 8;
+        const MAX_ANALYTICS_PER_CHUNK: usize = 60000 / ANALYTICS_PARAMS_PER_EVENT;
 
         // Resolve campaign attribution in ONE batch query: the tracking
         // token wire format carries no campaign field, but `email_queue`
@@ -1133,6 +1238,41 @@ impl EventProcessor {
         }
         let mut tx = self.db.begin().await.context("begin transaction")?;
 
+        // F10 (audit): the analytics worker's ONLY producer used to be its
+        // own test helpers, so `analytics_queue` was permanently empty in
+        // production and the real-time aggregation path could never fire
+        // (live-confirmed 2026-10-06: 0 rows while tracking events flowed
+        // straight to `events`/ClickHouse). Tracking opened/clicked/
+        // unsubscribed events are the canonical emitters of those analytics
+        // signals, so the producer lives HERE, in the SAME transaction as
+        // the `events` insert: a queued row exists exactly when its event
+        // does.
+        //
+        // Idempotence: the events insert is `ON CONFLICT (id) DO NOTHING`
+        // because a crash between commit and the Redis WAL ACK replays the
+        // batch. `analytics_queue` has no natural key, so rows are enqueued
+        // only for event ids that were NOT already persisted — a replay
+        // cannot double-count the rollup.
+        //
+        // Column shapes: `tenant_id` is VARCHAR(26) (canonical tenants fit),
+        // `campaign_id` is VARCHAR(64) (UUID fits), but `message_id` and
+        // `domain_id` are VARCHAR(26) while canonical message/domain ids are
+        // 36-char UUIDs. They are stored NULL — never truncated — with the
+        // full ids preserved in `metadata`; the hourly rollup keys on
+        // tenant/domain/CAMPAIGN, so campaign-scoped analytics still resolve.
+        // `click_refused` is deliberately NOT enqueued: it is an operator
+        // signal, not an analytics count (the worker's type parse would
+        // discard it).
+        let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+        let already_persisted: std::collections::HashSet<String> =
+            sqlx::query_scalar("SELECT id FROM events WHERE id = ANY($1)")
+                .bind(&event_ids)
+                .fetch_all(&mut *tx)
+                .await
+                .context("probe already-persisted events")?
+                .into_iter()
+                .collect();
+
         for chunk in events.chunks(MAX_PER_CHUNK) {
             // Use sqlx query_builder for safe parameterization.
             // GDPR:the persisted `ip_address` is the MASKED form (IPv4 → /24,
@@ -1141,7 +1281,7 @@ impl EventProcessor {
             // The full IP lives only in transient paths (Redis WAL between
             // flushes, rate limiting, SSE Pub/Sub).
             let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp, campaign_id) ",
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp, campaign_id, metadata) ",
             );
             builder.push_values(chunk, |mut b, ev| {
                 let campaign_id = ev
@@ -1158,7 +1298,12 @@ impl EventProcessor {
                     .push_bind(ev.user_agent.clone())
                     .push_bind(analytics::ip_mask::mask_ip_opt(ev.ip_address.as_deref()))
                     .push_bind(ev.timestamp)
-                    .push_bind(campaign_id);
+                    .push_bind(campaign_id)
+                    // The refusal reason (and unsubscribe category) must
+                    // survive to the events row operators read; the column
+                    // is canonical (migration 075) and was simply never
+                    // populated before.
+                    .push_bind(ev.metadata.clone());
             });
             builder.push(" ON CONFLICT (id) DO NOTHING");
             builder
@@ -1166,6 +1311,57 @@ impl EventProcessor {
                 .execute(&mut *tx)
                 .await
                 .context("batch insert events")?;
+        }
+
+        // F10: enqueue the analytics rows for the events THIS flush actually
+        // creates (replay duplicates are filtered out — see above).
+        let analytics_events: Vec<&TrackingEvent> = events
+            .iter()
+            .filter(|ev| {
+                !already_persisted.contains(&ev.id) && is_analytics_event_type(&ev.event_type)
+            })
+            .collect();
+        for chunk in analytics_events.chunks(MAX_ANALYTICS_PER_CHUNK) {
+            let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                "INSERT INTO analytics_queue (tenant_id, event_type, message_id, domain_id, campaign_id, recipient, metadata, \"timestamp\") ",
+            );
+            builder.push_values(chunk.iter().copied(), |mut b, ev| {
+                let campaign_id = ev
+                    .campaign_id
+                    .clone()
+                    .or_else(|| campaign_by_message.get(&ev.message_id).cloned());
+                let mut metadata = match ev.metadata.clone() {
+                    Some(serde_json::Value::Object(map)) => map,
+                    Some(other) => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("eventMetadata".into(), other);
+                        map
+                    }
+                    None => serde_json::Map::new(),
+                };
+                metadata.insert("messageId".into(), serde_json::json!(ev.message_id));
+                if let Some(link_id) = &ev.link_id {
+                    metadata.insert("linkId".into(), serde_json::json!(link_id));
+                }
+                if let Some(link_url) = &ev.link_url {
+                    metadata.insert("linkUrl".into(), serde_json::json!(link_url));
+                }
+                b.push_bind(ev.tenant_id.clone())
+                    .push_bind(ev.event_type.to_string())
+                    // VARCHAR(26) cannot hold a canonical UUID id: NULL, with
+                    // the full id in metadata — never a truncated id.
+                    .push_bind(Option::<String>::None)
+                    .push_bind(Option::<String>::None)
+                    .push_bind(campaign_id)
+                    .push_bind(ev.recipient.clone())
+                    .push_bind(serde_json::Value::Object(metadata))
+                    .push_bind(ev.timestamp);
+            });
+            builder
+                .build()
+                .execute(&mut *tx)
+                .await
+                .context("enqueue analytics events")?;
         }
 
         // Batch UPDATE messages stats with unnest (-042)
@@ -1182,6 +1378,9 @@ impl EventProcessor {
                 EventType::Opened => e.0 += 1,
                 EventType::Clicked => e.1 += 1,
                 EventType::Unsubscribed => e.2 += 1,
+                // A refused click never reached a destination: it must not
+                // inflate the message's click total.
+                EventType::ClickRefused => {}
             }
         }
         // messages.id is UUID (runtime + migration chains agree); the update
@@ -2525,7 +2724,7 @@ mod tests {
 
         migrator::test_support::assert_soft_skip_allowed("CLICKHOUSE_TEST_URL");
         let url =
-            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
+            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
         // Soft-skip when no ClickHouse is running (the workspace convention for

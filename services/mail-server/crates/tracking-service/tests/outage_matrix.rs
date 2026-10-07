@@ -155,6 +155,7 @@ fn config(redis_url: &str, ch_url: &str) -> Config {
             trusted_proxies: Vec::new(),
             max_redirect_url_len: 2048,
             token_max_age_days: None,
+            allowed_redirect_domains: Vec::new(),
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -583,7 +584,8 @@ async fn redis_down_recipient_surfaces_stay_bounded_honest_and_durable() {
     assert_eq!(location, landing, "the recipient must reach the target");
 
     // An UNAUTHORIZED domain with no cached verdict: the Postgres authority
-    // answers "absence" → the safe fallback redirect. Bounded, never a hang.
+    // answers "absence" → an honest 400 naming the host (never a silent
+    // bounce to the vendor fallback). Bounded, never a hang.
     let evil = "https://evil.example.test/phish";
     let evil_token = click_token(&tenant, &unique("msgevil"), "clicker@example.com", evil);
     let response = bounded(
@@ -591,15 +593,11 @@ async fn redis_down_recipient_surfaces_stay_bounded_honest_and_durable() {
         srv.get(&format!("/c/{evil_token}")),
     )
     .await;
-    assert_eq!(response.status_code().as_u16(), 302);
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    assert_eq!(
-        location, "https://fallback.test.example/",
-        "unauthorized domains redirect to the safe fallback"
+    assert_eq!(response.status_code().as_u16(), 400);
+    let body = response.text();
+    assert!(
+        body.contains("evil.example.test") && body.contains("not authorized"),
+        "unauthorized domains are refused with the reason: {body}"
     );
 
     // The one-click POST: the dedup check fails OPEN, the suppression write

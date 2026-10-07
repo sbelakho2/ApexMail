@@ -347,9 +347,12 @@ mod sales {
             .acquire_timeout(std::time::Duration::from_millis(100))
             .connect_lazy("postgres://localhost/unused")
             .expect("lazy pool");
-        // Use an unreachable Redis port so the rate limiter deterministically
-        // falls back to its in-memory limiter (no dependency on Redis auth).
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379")
+        // Use the repo's deterministic dead-end port (the same one
+        // api-server's lazy test pools pin) so the rate limiter falls back
+        // to its in-memory limiter. 16379 is the WORKING test Redis
+        // elsewhere since the 2026-10-07 fold: pointing here used to mean
+        // "dead port" and became NOAUTH -> 500 once a live Redis answered.
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         router(AppState {
@@ -438,9 +441,12 @@ mod sales {
             .await
             .unwrap_or_else(|error| panic!("failed to verify CRM schema for {test_name}: {error}"));
 
-        // Use an unreachable Redis port so the rate limiter deterministically
-        // falls back to its in-memory limiter (no dependency on Redis auth).
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:16379")
+        // Use the repo's deterministic dead-end port (the same one
+        // api-server's lazy test pools pin) so the rate limiter falls back
+        // to its in-memory limiter. 16379 is the WORKING test Redis
+        // elsewhere since the 2026-10-07 fold: pointing here used to mean
+        // "dead port" and became NOAUTH -> 500 once a live Redis answered.
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Redis pool");
         Some(router(AppState {

@@ -1,0 +1,9 @@
+# ApexMail vulnerability disclosure contact (RFC 9116).
+# Signed copies are distributed by the security team; this file is the
+# canonical served artifact for https://apexmail.ee/.well-known/security.txt.
+Contact: mailto:security@apexmail.ee
+Expires: 2027-10-06T00:00:00Z
+Preferred-Languages: en, et
+Canonical: https://apexmail.ee/.well-known/security.txt
+Policy: https://apexmail.ee/security/
+Encryption: https://apexmail.ee/pgp-key.asc

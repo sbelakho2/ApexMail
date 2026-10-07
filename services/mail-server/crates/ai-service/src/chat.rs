@@ -93,6 +93,13 @@ pub struct ChatTurn {
     pub content: String,
 }
 
+/// Prompt-registry identity for the assistant's system prompt. Bumped to
+/// `assistant-v2` when the canonical knowledge unification (platform-catalog
+/// as the single fact source) changed the facts block the model answers from.
+/// Recorded on every answer next to `docs_version` so a regression can be
+/// traced to the prompt that produced it.
+pub const CHAT_PROMPT_VERSION: &str = "assistant-v2";
+
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
     pub answer: String,
@@ -100,6 +107,8 @@ pub struct ChatResponse {
     pub escalated: bool,
     pub disclosure: &'static str,
     pub docs_version: String,
+    /// The prompt-registry version that produced this answer.
+    pub prompt_version: &'static str,
     pub model_enabled: bool,
     /// Fix #17: the retrieval degradation state for this answer. `unavailable`
     /// means the docs index could not be consulted — citations are impossible
@@ -451,6 +460,19 @@ passages don't cover it, say so and offer escalation):"
             // markers under Unavailable retrieval (Fix #17/#18): the
             // escalation ladder, not silent sentence-stripping, is the
             // documented disposition.
+            //
+            // Dogfood finding: the escalation used to leave NO trace of why,
+            // so "the assistant refuses everything" was undiagnosable from
+            // the logs. The violations are the operator's evidence.
+            tracing::warn!(
+                violations = ?verdict
+                    .violations
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+                retrieval_state = ?retrieval_state,
+                "assistant answer failed grounded verification — escalating to a human"
+            );
             let answer = "I couldn't produce a verified answer for that. I've flagged it \
 for the support team, who will follow up — you can also reach them at \
 support@apexmail.ee."
@@ -523,6 +545,7 @@ support@apexmail.ee."
             escalated: ctx.escalated,
             disclosure: AI_DISCLOSURE,
             docs_version: audit.docs_version.clone(),
+            prompt_version: CHAT_PROMPT_VERSION,
             model_enabled: self.model_enabled,
             retrieval_state: ctx.retrieval_state,
             passed_policy_verification: ctx.passed_policy_verification,
@@ -621,6 +644,7 @@ mod tests {
             escalated: false,
             disclosure: AI_DISCLOSURE,
             docs_version: "abc".into(),
+            prompt_version: CHAT_PROMPT_VERSION,
             model_enabled: true,
             retrieval_state: RetrievalState::Available,
             passed_policy_verification: true,

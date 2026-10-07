@@ -264,11 +264,13 @@ The inaugural stable release of the ApexMail API. All endpoints are production-r
 
 | Endpoint                        | Method | Description                             |
 | ------------------------------- | ------ | --------------------------------------- |
-| `/v1/analytics/overview`        | GET    | Get high-level analytics summary.       |
-| `/v1/analytics/timeseries`      | GET    | Get time-series data for sends, opens, clicks, etc. |
-| `/v1/analytics/campaigns`       | GET    | Get per-campaign analytics.             |
-| `/v1/analytics/domains`         | GET    | Get per-domain analytics and health.    |
-| `/v1/analytics/export`          | POST   | Export analytics data as CSV.           |
+| `/v1/analytics/dashboard`       | GET    | Get the analytics dashboard summary.    |
+| `/v1/analytics/volume`          | GET    | Get send-volume analytics.              |
+| `/v1/analytics/engagement`      | GET    | Get open/click engagement analytics.    |
+| `/v1/analytics/deliverability`  | GET    | Get deliverability analytics.           |
+| `/v1/analytics/subject-line`    | POST   | Analyze a subject line.                 |
+| `/v1/analytics/export`          | GET    | Create an analytics export job.         |
+| `/v1/analytics/export/:job_id`  | GET    | Poll an export job.                     |
 
 #### Suppressions API
 
@@ -276,11 +278,8 @@ The inaugural stable release of the ApexMail API. All endpoints are production-r
 | ------------------------------- | ------ | --------------------------------------- |
 | `/v1/suppressions`              | POST   | Add an address to the suppression list. |
 | `/v1/suppressions`              | GET    | List suppressed addresses.              |
-| `/v1/suppressions/:id`          | GET    | Get a suppression entry.                |
 | `/v1/suppressions/:id`          | DELETE | Remove an address from the suppression list. |
 | `/v1/suppressions/bulk`         | POST   | Bulk add suppressions (up to 10,000).   |
-| `/v1/suppressions/import`       | POST   | Import suppressions from CSV (up to 100,000). |
-| `/v1/suppressions/export`       | GET    | Export the full suppression list.        |
 | `/v1/suppressions/check/:email` | GET    | Check if an address is suppressed.      |
 
 #### Auth API

@@ -32,8 +32,8 @@ Monitor actual inbox vs spam folder placement rates using seed list testing.
 
 1. **Seed Accounts**: Maintain test accounts across major ISPs
 2. **Test Emails**: Send identical content to all seed accounts
-3. **Mailbox Scanning**: Check where emails landed via IMAP
-4. **Analysis**: Generate placement reports and recommendations
+3. Mailbox Scanning: Check where emails landed via IMAP
+4. Analysis: Generate placement reports and recommendations
 
 ```
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐

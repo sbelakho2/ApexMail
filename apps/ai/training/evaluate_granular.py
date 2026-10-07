@@ -30,30 +30,51 @@ from collections import defaultdict
 from pathlib import Path
 
 from common_paths import GOLDEN_QA_JSONL, DATA_DIR
+from validate_pricing import (
+    OVERAGE_MILLICENTS_BY_PLAN,
+    PAYG_TIERS as CANONICAL_PAYG_TIERS,
+    PLAN_BY_NAME,
+    canonical_key,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Pricing truth table — must match docs/pricing.md exactly
+# Pricing truth table — derived from validate_pricing.CANONICAL_PRICING
+# (a restatement of services/mail-server/crates/platform-catalog)
 # ═══════════════════════════════════════════════════════════════════════════
 
-PRICING_TRUTH = {
-    "free":       {"price": 0,     "emails": 30_000,   "api_calls": 300_000,   "team": 1,   "domains": 1},
-    "starter":    {"price": 25,    "emails": 50_000,   "api_calls": 500_000,   "team": 5,   "domains": 5},
-    "pro":        {"price": 65,    "emails": 150_000,  "api_calls": 2_000_000, "team": 10,  "domains": 25},
-    "growth":     {"price": 150,   "emails": 500_000,  "api_calls": 5_000_000, "team": 25,  "domains": 100},
-    "scale":      {"price": 350,   "emails": 2_000_000,"api_calls": 20_000_000,"team": 50,  "domains": 1_000_000},
-    "enterprise": {"price": 3_000, "emails": 5_000_000,"api_calls": 1_000_000_000,"team": 1_000_000,"domains": 1_000_000},
-}
+
+def _truth_row(key: str) -> dict:
+    row = PLAN_BY_NAME[key]
+    return {
+        "price": int(row["price"].replace("€", "").replace(",", "")),
+        "emails": row["emails"],
+        "api_calls": row["api_calls"],
+        "team": row["team"],
+        "domains": 1_000_000 if row["domains"] < 0 else row["domains"],
+    }
+
+
+PRICING_TRUTH = {key: _truth_row(key) for key in PLAN_BY_NAME}
 
 PAYG_TIERS = [
-    (0, 10_000, 0.001),
-    (10_001, 100_000, 0.0008),
-    (100_001, 1_000_000, 0.0005),
-    (1_000_001, float("inf"), 0.0003),
+    (t["min"], t["max"] if t["max"] is not None else float("inf"), t["rate"])
+    for t in CANONICAL_PAYG_TIERS
 ]
 
-OVERRIDE_RATE = 0.40
+# Overages are per-plan (platform-catalog overage_millicents_per_email).
 ADDON_PRICES = {30}  # dedicated IP add-on (€30/mo) is canonical
-FORBIDDEN_PRICES = [29, 49, 59, 99, 129, 199, 249, 299, 399, 499, 799, 999, 1199, 1299, 1499, 1999, 2499, 3999, 4999]
+FORBIDDEN_PRICES = [19, 25, 35, 39, 45, 49, 55, 59, 65, 75, 79, 99, 125, 129,
+                    149, 150, 199, 249, 299, 349, 350, 399, 449, 499, 599, 649,
+                    650, 749, 799, 899, 999, 1199, 1299, 1499, 1999, 2499, 2999,
+                    3999, 4999, 5999, 9999, 12999]
+
+
+def _overage_cents(plan_key: str, emails_sent: int, email_limit: int) -> int:
+    """billing-service: cents = ceil(overage * millicents / 1000)."""
+    if email_limit < 0 or emails_sent <= email_limit:
+        return 0
+    over = emails_sent - email_limit
+    return math.ceil(over * OVERAGE_MILLICENTS_BY_PLAN[plan_key] / 1000)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Deterministic pricing checker (runs without model loaded)
@@ -81,9 +102,12 @@ def check_pricing_in_response(response: str, expected_plan: str | None = None) -
             violations.append({
                 "price": n,
                 "reason": f"€{n} is a known hallucinated price (not in any plan)",
+                "wrong_number": True,
             })
 
-    if expected_plan and expected_plan in PRICING_TRUTH:
+    plan_key = canonical_key(expected_plan) if expected_plan else None
+    if plan_key and plan_key in PRICING_TRUTH:
+        expected_plan = plan_key
         truth = PRICING_TRUTH[expected_plan]
         plan_price = truth["price"]
         found_correct = plan_price in numbers
@@ -147,16 +171,16 @@ def _payg_cost(emails: int) -> float:
 # ═══════════════════════════════════════════════════════════════════════════
 
 PRICING_TESTS = [
-    ("What does the Pro plan cost?", "pro", 65),
-    ("How much is the Starter plan?", "starter", 25),
-    ("Growth plan price?", "growth", 150),
-    ("What's the Scale plan cost?", "scale", 350),
-    ("Enterprise plan pricing?", "enterprise", 3000),
+    ("What does the Pro plan cost?", "pro", 89),
+    ("How much is the Developer plan?", "developer", 29),
+    ("Growth plan price?", "growth", 229),
+    ("What's the Business plan cost?", "business", 699),
+    ("Enterprise Cloud plan pricing?", "enterprise cloud", 1750),
     ("Free plan cost?", "free", 0),
-    ("What does the Growth plan cost per month?", "growth", 150),
-    ("Tell me the Pro plan price", "pro", 65),
-    ("How much is Scale per month?", "scale", 350),
-    ("Starter plan monthly cost?", "starter", 25),
+    ("What does the Growth plan cost per month?", "growth", 229),
+    ("Tell me the Pro plan price", "pro", 89),
+    ("How much is Business per month?", "business", 699),
+    ("Developer plan monthly cost?", "developer", 29),
 ]
 
 PAYG_TESTS = [
@@ -170,9 +194,10 @@ PAYG_TESTS = [
 ]
 
 OVERRIDE_TESTS = [
-    ("Pro", 150_000, 160_000, math.ceil(10_000/1000) * OVERRIDE_RATE),   # 65 + 4.00 = 69.00
-    ("Growth", 500_000, 520_000, math.ceil(20_000/1000) * OVERRIDE_RATE), # 150 + 8.00 = 158.00
-    ("Scale", 2_000_000, 2_100_000, math.ceil(100_000/1000) * OVERRIDE_RATE), # 350 + 40.00 = 390.00
+    # (plan, sent, limit, expected overage in EUR) — per-plan catalog rates.
+    ("Pro", 150_000, 160_000, _overage_cents("pro", 160_000, 150_000) / 100),          # €6.00
+    ("Growth", 500_000, 520_000, _overage_cents("growth", 520_000, 500_000) / 100),    # €7.00
+    ("Business", 2_000_000, 2_100_000, _overage_cents("business", 2_100_000, 2_000_000) / 100),  # €35.00
 ]
 
 SAFETY_TESTS = [
@@ -201,10 +226,10 @@ FEATURE_TESTS = [
     ("Does Free have webhooks?", "free", "webhooks", False),
     ("Does Pro have A/B testing?", "pro", "A/B testing", False),
     ("Does Growth have dedicated IP?", "growth", "dedicated IP", True),
-    ("Does Scale have SSO?", "scale", "SSO", True),
+    ("Does Business have SSO?", "business", "SSO", True),
     # plans.rs: hipaa_compliance/soc2_compliance are false on every plan.
-    ("Does Enterprise have HIPAA?", "enterprise", "HIPAA", False),
-    ("Does Starter have send-time optimization?", "starter", "send-time", False),
+    ("Does Enterprise Cloud have HIPAA?", "enterprise cloud", "HIPAA", False),
+    ("Does Developer have send-time optimization?", "developer", "send-time", False),
 ]
 
 
@@ -355,7 +380,7 @@ def main() -> None:
             model_responses = {}
             for question, expected_plan, expected_price in PRICING_TESTS:
                 messages = [
-                    {"role": "system", "content": "You are the ApexMail email assistant. Answer concisely with exact pricing from the pricing table. The pricing table is: Free=€0/30K, Starter=€25/50K, Pro=€65/150K, Growth=€150/500K, Scale=€350/2M, Enterprise=€3000/5M."},
+                    {"role": "system", "content": "You are the ApexMail email assistant. Answer concisely with exact pricing from the pricing table. The pricing table is: Free=€0/3K (plus a one-time 30K-email launch allowance in the first 30 days), Developer=€29/50K, Pro=€89/150K, Growth=€229/500K, Business=€699/2M, Enterprise Cloud=€1,750/5M."},
                     {"role": "user", "content": question},
                 ]
                 prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)

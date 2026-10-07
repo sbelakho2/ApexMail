@@ -209,8 +209,10 @@ expect('domains.delete() DELETE /v1/domains/{id}',
 $client = new MockClient();
 $client->queueResponse(['healthy' => true, 'spf' => 'pass', 'dkim' => 'pass', 'dmarc' => 'pass']);
 $resp = $client->domains->health('dom_1');
-expect('domains.health() GET /v1/domains/{id}/health',
-    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/domains/dom_1/health');
+// The API has no GET /:id/health — health() is a thin alias of get()
+// (GET /v1/domains/:id carries the verification state).
+expect('domains.health() GET /v1/domains/{id}',
+    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/domains/dom_1');
 expect('domains.health() returns healthy field', array_key_exists('healthy', $resp));
 
 // ── Webhook resource tests ────────────────────────────────────────────────
@@ -281,12 +283,8 @@ $client->queueResponse(['template' => ['id' => 'tpl_1', 'name' => 'Welcome']]);
 $client->templates->get('tpl_1');
 expect('templates.get() GET /v1/templates/{id}', $client->calls[0]['path'] === '/v1/templates/tpl_1');
 
-$client = new MockClient();
-$client->queueResponse(['template' => ['id' => 'tpl_1', 'slug' => 'welcome']]);
-$resp = $client->templates->getBySlug('welcome');
-expect('templates.getBySlug() GET /v1/templates/slug/{slug}',
-    $client->calls[0]['method'] === 'GET' && $client->calls[0]['path'] === '/v1/templates/slug/welcome');
-expect('templates.getBySlug() returns template', $resp['template']['slug'] === 'welcome');
+// getBySlug() was removed: the API has no /v1/templates/slug/:slug route
+// (GET /v1/templates/:id is the only lookup).
 
 $client = new MockClient();
 $client->queueResponse(['templates' => [['id' => 'tpl_1'], ['id' => 'tpl_2']], 'pagination' => ['total' => 2]]);
@@ -326,13 +324,17 @@ $client->queueResponse([]);
 $client->suppressions->add('bad@example.com', 'bounce');
 expect('suppressions.add() POST /v1/suppressions', 
     $client->calls[0]['method'] === 'POST' && $client->calls[0]['path'] === '/v1/suppressions');
-expect('suppressions.add() sets email in body', $client->calls[0]['body']['emails'][0] === 'bad@example.com');
+expect('suppressions.add() sets email in body', $client->calls[0]['body']['email'] === 'bad@example.com');
 expect('suppressions.add() sets reason in body', $client->calls[0]['body']['reason'] === 'bounce');
 
 $client = new MockClient();
 $client->queueResponse([]);
 $client->suppressions->add(['a@b.com', 'c@d.com'], 'manual');
-expect('suppressions.add() bulk sends array', count($client->calls[0]['body']['emails']) === 2);
+// The API accepts ONE address per request (deny_unknown_fields); the SDK
+// POSTs once per address.
+expect('suppressions.add() bulk sends one request per address', count($client->calls) === 2);
+expect('suppressions.add() bulk sends each email', $client->calls[0]['body']['email'] === 'a@b.com'
+    && $client->calls[1]['body']['email'] === 'c@d.com');
 
 $client = new MockClient();
 $client->queueResponse(['suppressions' => [['email' => 'bad@example.com']], 'pagination' => ['total' => 1]]);
@@ -362,13 +364,13 @@ $client = new MockClient();
 $client->queueResponse(['events' => [], 'pagination' => ['total' => 0]]);
 $client->events->list(['messageId' => 'msg_123']);
 expect('events.list() GET /v1/events', str_starts_with($client->calls[0]['path'], '/v1/events'));
-expect('events.list() includes messageId', str_contains($client->calls[0]['path'], 'messageId=msg_123'));
+expect('events.list() maps messageId to message_id', str_contains($client->calls[0]['path'], 'message_id=msg_123'));
 
 $client = new MockClient();
 $client->queueResponse(['events' => [['type' => 'message.delivered']]]);
 $resp = $client->events->getByMessage('msg_123');
-expect('events.getByMessage() GET /v1/events?messageId=msg_123',
-    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'messageId=msg_123'));
+expect('events.getByMessage() GET /v1/events?message_id=msg_123',
+    $client->calls[0]['method'] === 'GET' && str_contains($client->calls[0]['path'], 'message_id=msg_123'));
 expect('events.getByMessage() has limit=100', str_contains($client->calls[0]['path'], 'limit=100'));
 expect('events.getByMessage() returns events', count($resp['events']) === 1);
 
@@ -505,6 +507,23 @@ if ($stubReady) {
         expect('live send returns flat {id,status,created_at}',
             $resp['id'] === 'msg_live_1' && $resp['status'] === 'queued' && isset($resp['created_at']));
 
+        // PHP-1 regression: the live envelope ALWAYS carries "error": null,
+        // and isset(null) is false — single-object responses must still be
+        // unwrapped to `data` (was: envelope returned raw).
+        $resp = $client->analytics->dashboard();
+        expect('analytics dashboard unwraps {"data":…,"error":null}',
+            $resp === ['total_sent' => 3, 'total_delivered' => 2]);
+
+        // PHP-2: cancel maps to POST /v1/messages/:id/cancel (messages.rs).
+        $resp = $client->emails->cancel('msg_live_1');
+        expect('emails.cancel maps to /:id/cancel and unwraps',
+            $resp['id'] === 'msg_live_1' && $resp['status'] === 'cancelled');
+
+        // PHP-3: rotate-secret maps to POST /v1/webhooks/:id/rotate-secret.
+        $resp = $client->webhooks->rotateSecret('wh_live_1');
+        expect('webhooks.rotateSecret maps to /:id/rotate-secret and unwraps',
+            $resp['secret'] === 'whsec_rotated' && $resp['id'] === 'wh_live_1');
+
         $resp = $client->emails->batch([
             ['from' => 'a@example.com', 'to' => 'b@example.com', 'subject' => 'Hi', 'text' => 'x'],
         ]);
@@ -519,8 +538,33 @@ if ($stubReady) {
         expect('flaky send succeeds after retry', $resp['id'] === 'msg_after_retry');
         $messages = array_values(array_filter(recorded_stub_requests(), static fn ($r) => $r['path'] === '/flaky500'));
         expect('flaky send issued exactly 2 requests', count($messages) === 2);
-        expect('same X-Idempotency-Key across both attempts',
+        expect('same Idempotency-Key across both attempts',
             $messages[0]['idempotency'] === 'stub-fixed-key' && $messages[1]['idempotency'] === 'stub-fixed-key');
+        expect('server-read header is Idempotency-Key, not the legacy X- spelling',
+            $messages[0]['legacy_idempotency'] === null);
+
+        // Live contract: 422 surfaces as ValidationException (docs/api/errors.md).
+        $client = stub_client(0);
+        try {
+            $client->request('POST', '/422', ['a' => 1]);
+            assert_fail('422 throws ValidationException', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\ValidationException $e) {
+            expect('422 throws ValidationException', $e->getStatusCode() === 422);
+            expect('422 keeps the API code', $e->getApiCode() === 'VALIDATION_ERROR');
+        }
+
+        // Live contract: pagination meta carries camelCase nextCursor/hasMore
+        // and the SDK surfaces it (getNextCursor/getHasMore).
+        $client = stub_client(0);
+        $client->request('GET', '/paginated');
+        expect('pagination meta exposes camelCase nextCursor',
+            $client->getNextCursor() === 'cur_abc123');
+        expect('pagination meta exposes hasMore', $client->getHasMore() === true);
+        // A response whose meta carries no cursor must clear the previous
+        // cursor instead of leaking a stale value.
+        $client->request('GET', '/v1/messages');
+        expect('non-cursor meta clears the previous cursor',
+            $client->getNextCursor() === null && $client->getHasMore() === false);
 
         // SDK-B: two logical sends get different auto keys.
         @unlink($recordFile); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
@@ -540,6 +584,15 @@ if ($stubReady) {
             expect('502 HTML throws ApiException', true);
             expect('502 HTML keeps status 502', $e->getStatusCode() === 502);
             expect('502 HTML apiCode is PARSE_ERROR', $e->getApiCode() === 'PARSE_ERROR');
+        }
+
+        // Non-happy-path: a 3xx with a JSON body is an error, not a payload.
+        $client = stub_client(0);
+        try {
+            $client->request('GET', '/json302');
+            assert_fail('302 JSON throws ApiException', 'no exception thrown');
+        } catch (\ApexMail\Exceptions\ApiException $e) {
+            expect('302 JSON throws ApiException', $e->getStatusCode() === 302);
         }
 
         // Non-happy-path: non-JSON 200 is an invalid response.

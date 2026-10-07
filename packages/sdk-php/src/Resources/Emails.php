@@ -125,6 +125,23 @@ class Emails
     }
 
     /**
+     * Cancel a scheduled or queued email.
+     *
+     * `POST /v1/messages/:id/cancel` (messages.rs router; docs/api
+     * sdk-reference "emails.cancel(id)"). Only messages still in
+     * `queued`/`scheduled` state can be cancelled — anything already
+     * dispatched is answered with the server's typed 409/410 and surfaces
+     * as the matching ApexMail exception.
+     *
+     * @return array The flat cancellation payload {id, status, created_at}
+     *   with status "cancelled".
+     */
+    public function cancel(string $id): array
+    {
+        return $this->client->request('POST', '/v1/messages/' . urlencode($id) . '/cancel');
+    }
+
+    /**
      * List emails with optional filters.
      *
      * The server's ListMessagesQuery accepts {limit, offset, cursor,

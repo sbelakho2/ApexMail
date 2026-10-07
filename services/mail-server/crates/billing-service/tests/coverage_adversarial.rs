@@ -26,7 +26,7 @@ use billing_service::usage_ingest::{
     RECON_ABSOLUTE_SLACK, RECON_RELATIVE_SLACK_PERCENT,
 };
 use billing_service::AppState;
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SubsecRound, TimeZone, Utc};
 use deadpool_redis::{Pool as RedisPool, Runtime};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -1256,6 +1256,431 @@ db_test!(
 );
 
 // ---------------------------------------------------------------------------
+// usage.rs — rollback releases the logical-operation claim (F3)
+// ---------------------------------------------------------------------------
+
+// The live defect: a send reserves quota, the enqueue fails and the
+// reservation is rolled back — but the `usage_operations` claim survived,
+// so the client's retry of the same idempotency key was admitted as a
+// REPLAY (quota-free, unmetered). After the fix, the retry re-claims and is
+// metered exactly once.
+db_test!(rollback_releases_the_claim_so_a_retry_is_metered, |h| {
+    async fn claim_count(h: &Harness, tenant: &str, event_id: Uuid) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM usage_operations WHERE tenant_id = $1 AND event_id = $2",
+        )
+        .bind(tenant)
+        .bind(event_id)
+        .fetch_one(&h.pool)
+        .await
+        .expect("count usage operations")
+    }
+
+    let tenant = "cov_usage_rollback_retry";
+    seed_tenant(&h, tenant, "free").await;
+    let event_id = Uuid::new_v4();
+
+    // 1. First attempt: reservation + metering row + usage_operations claim.
+    let first = record_with_quota_check(
+        &h.pool,
+        &h.redis,
+        tenant,
+        MeterEventType::EmailsSent,
+        1,
+        Some(event_id),
+        None,
+    )
+    .await
+    .expect("first reservation");
+    assert!(first.allowed && !first.duplicate);
+    assert_eq!(event_count(&h.pool, tenant, event_id).await, 1);
+    assert_eq!(
+        claim_count(&h, tenant, event_id).await,
+        1,
+        "first attempt owns the claim"
+    );
+
+    // 2. Enqueue failed → SendAdmission::rollback (deletes the meter row,
+    //    releases the quota counter, drops the Redis dedup key).
+    rollback_usage_record(
+        &h.pool,
+        &h.redis,
+        tenant,
+        MeterEventType::EmailsSent,
+        1,
+        event_id,
+        Utc::now(),
+    )
+    .await
+    .expect("rollback");
+    assert_eq!(event_count(&h.pool, tenant, event_id).await, 0);
+    assert_eq!(
+        claim_count(&h, tenant, event_id).await,
+        0,
+        "the rollback must release the logical-operation claim too"
+    );
+
+    // 3. The client retries the SAME logical send (same idempotency key
+    //    derives the same event id). It must be metered again — NOT treated
+    //    as a replay that owns a metering row which no longer exists.
+    let retry = record_with_quota_check(
+        &h.pool,
+        &h.redis,
+        tenant,
+        MeterEventType::EmailsSent,
+        1,
+        Some(event_id),
+        None,
+    )
+    .await
+    .expect("retry reservation");
+    assert!(retry.allowed, "the retry fits the free quota");
+    assert!(
+        !retry.duplicate,
+        "a retried send after rollback is a fresh operation, not an unmetered replay"
+    );
+    assert_eq!(
+        event_count(&h.pool, tenant, event_id).await,
+        1,
+        "the retried send IS metered"
+    );
+    assert_eq!(
+        claim_count(&h, tenant, event_id).await,
+        1,
+        "the retry re-claims the operation"
+    );
+});
+
+// ---------------------------------------------------------------------------
+// send_admission.rs — send-time consent gate on the production backend (F4)
+// ---------------------------------------------------------------------------
+
+// The documented send-time consent enforcer had ZERO callers. This drives
+// the production `PostgresAdmissionBackend` (real `consent_records`) through
+// the shared admission gate: a marketing send without an active consent
+// record is refused with a named reason and consumes no quota; transactional
+// sends keep their existing contract; an active consent record admits the
+// marketing send; a revoked one blocks it again.
+db_test!(
+    consent_gate_refuses_marketing_and_admits_transactional,
+    |h| {
+        use billing_service::send_admission::{
+            AdmissionMeter, PostgresAdmissionBackend, SendAdmissionError, SendAdmissionRequest,
+            SendAdmissionService,
+        };
+
+        let tenant = "cov_send_consent";
+        seed_plan(&h.pool, "free", 3_000, 30_000).await;
+        seed_tenant(&h, tenant, "free").await;
+
+        // The idempotency keys below derive DETERMINISTIC event ids, and the
+        // canonical `meter:dedup:<event-id>` Redis keys live ~40 days while
+        // this test's database clone does not: a repeated run would see a
+        // stale dedup key, replay the reservation (no metering row) and
+        // falsely fail. Clear this test's own keys so each run reserves
+        // afresh.
+        {
+            use billing_service::send_admission::usage_event_id;
+            let mut conn = h.redis.get().await.expect("redis");
+            for key in [
+                "smtp:<consent-1>",
+                "smtp:<consent-tx>",
+                "smtp:<consent-2>",
+                "smtp:<consent-3>",
+            ] {
+                let event_id = usage_event_id(tenant, Some(key), None);
+                let _: Result<i64, _> = redis::cmd("DEL")
+                    .arg(format!("meter:dedup:{event_id}"))
+                    .query_async(&mut conn)
+                    .await;
+            }
+        }
+
+        let service = SendAdmissionService::new(Arc::new(PostgresAdmissionBackend::new(
+            h.pool.clone(),
+            h.redis.clone(),
+        )));
+
+        let recipient = "consent-missing@example.test";
+        let rcpt = vec![recipient.to_string()];
+        let marketing_event = Uuid::new_v4();
+
+        // 1. Marketing without consent → refused with the enforcer's reason.
+        let error = service
+            .admit(SendAdmissionRequest {
+                tenant_id: tenant,
+                meter: AdmissionMeter::FilteredRecipients(&rcpt),
+                idempotency_key: Some("smtp:<consent-1>"),
+                idempotency_item: None,
+                category: Some("marketing"),
+            })
+            .await
+            .expect_err("marketing without consent must be refused");
+        match error {
+            SendAdmissionError::ConsentRefused { email, reason } => {
+                assert_eq!(email, recipient);
+                assert!(
+                    reason.contains("consent"),
+                    "named reason must mention consent: {reason}"
+                );
+            }
+            other => panic!("expected ConsentRefused, got {other:?}"),
+        }
+
+        // 2. Transactional to the SAME recipient: admitted, metered (the
+        //    pre-existing contract).
+        let transactional = service
+            .admit(SendAdmissionRequest {
+                tenant_id: tenant,
+                meter: AdmissionMeter::FilteredRecipients(&rcpt),
+                idempotency_key: Some("smtp:<consent-tx>"),
+                idempotency_item: None,
+                category: Some("transactional"),
+            })
+            .await
+            .expect("transactional sends are consent-exempt");
+        assert_eq!(transactional.category(), "transactional");
+        transactional.commit();
+
+        let metered: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&h.pool)
+                .await
+                .expect("count metering events");
+        assert_eq!(
+            metered, 1,
+            "only the transactional send is metered; the refused marketing send reserved nothing"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM usage_operations WHERE tenant_id = $1 AND event_id = $2",
+            )
+            .bind(tenant)
+            .bind(marketing_event)
+            .fetch_one(&h.pool)
+            .await
+            .expect("count claims"),
+            0,
+            "a refused send never claims a logical operation"
+        );
+
+        // 3. An ACTIVE marketing consent record admits the marketing send.
+        sqlx::query(
+        "INSERT INTO consent_records
+             (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source, metadata)
+         VALUES ($1, $2, 'sub-consent-1', $3, 'marketing', true, NOW(), 'api', '{}'::jsonb)",
+    )
+    .bind("consent-1")
+    .bind(tenant)
+    .bind(recipient)
+    .execute(&h.pool)
+    .await
+    .expect("seed consent record");
+
+        let consented = service
+            .admit(SendAdmissionRequest {
+                tenant_id: tenant,
+                meter: AdmissionMeter::FilteredRecipients(&rcpt),
+                idempotency_key: Some("smtp:<consent-2>"),
+                idempotency_item: None,
+                category: Some("marketing"),
+            })
+            .await
+            .expect("marketing with active consent is admitted");
+        assert_eq!(consented.category(), "marketing");
+        consented.commit();
+
+        // 4. Revocation blocks it again (opt-out honored).
+        sqlx::query(
+            "UPDATE consent_records SET granted = false, revoked_at = NOW()
+         WHERE tenant_id = $1 AND email = $2 AND consent_type = 'marketing'",
+        )
+        .bind(tenant)
+        .bind(recipient)
+        .execute(&h.pool)
+        .await
+        .expect("revoke consent");
+        let revoked = service
+            .admit(SendAdmissionRequest {
+                tenant_id: tenant,
+                meter: AdmissionMeter::FilteredRecipients(&rcpt),
+                idempotency_key: Some("smtp:<consent-3>"),
+                idempotency_item: None,
+                category: Some("marketing"),
+            })
+            .await
+            .expect_err("a revoked consent must block marketing again");
+        assert!(
+            matches!(revoked, SendAdmissionError::ConsentRefused { .. }),
+            "got {revoked:?}"
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// plans.rs — bootstrap reconciliation against the canonical catalog (F1)
+// ---------------------------------------------------------------------------
+
+// The exact live-dogfood drift: Free 30k/mo, Pro €10, Business €50, a
+// missing starter/growth/enterprise/payg, and two active inline test rows
+// (`DF5 Small`/`DF5 Big`). The reconcile must converge the table to
+// `platform-catalog` exactly — and must be idempotent.
+db_test!(reconcile_plans_converges_to_the_canonical_catalog, |h| {
+    use billing_service::plans::{
+        default_plans, plan_overage_rate_millicents, reconcile_plans_with_catalog,
+        PlanReconcileReport,
+    };
+
+    let features = serde_json::to_value(billing_service::types::PlanFeatures::default())
+        .expect("PlanFeatures serializes");
+
+    // Drifted rows a stale seed left behind, plus active foreign test rows.
+    let drift: [(&str, &str, i64, i64, i64, i64, i32); 5] = [
+        ("free", "Free", 0, 0, 30_000, 100_000, 0),
+        ("pro", "Pro", 1_000, 10_000, 150_000, 2_000_000, 2),
+        ("scale", "Business", 5_000, 50_000, 2_000_000, 20_000_000, 4),
+        ("df5small", "DF5 Small", 1_000, 10_000, 10, 100_000, 90),
+        ("df5big", "DF5 Big", 5_000, 50_000, 1_000_000, 1_000_000, 91),
+    ];
+    for (name, display, price_m, price_y, email_limit, api_calls, sort) in drift {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly,
+                                price_yearly, email_limit, api_call_limit, features,
+                                is_active, sort_order, created_at, updated_at)
+             VALUES ($1, $2, $3, 'dogfood seeded catalog row', $4, $5, $6, $7, $8,
+                     true, $9, NOW(), NOW())",
+        )
+        .bind(format!("pln_{name}"))
+        .bind(name)
+        .bind(display)
+        .bind(price_m)
+        .bind(price_y)
+        .bind(email_limit)
+        .bind(api_calls)
+        .bind(&features)
+        .bind(sort)
+        .execute(&h.pool)
+        .await
+        .expect("seed drifted plan row");
+    }
+
+    let report = reconcile_plans_with_catalog(&h.pool)
+        .await
+        .expect("reconcile plans");
+    assert_eq!(
+        report,
+        PlanReconcileReport {
+            inserted: 4,
+            repaired: 3,
+            deactivated: 2,
+        },
+        "missing tiers inserted, drifted rows repaired, foreign test rows deactivated"
+    );
+
+    // The ACTIVE set now equals the canonical catalog exactly: every
+    // catalog row present with the catalog price/limit/retention/team.
+    // (Foreign rows stay in the table as deactivated history — asserted
+    // below — but are never served by `get_active_plans`.)
+    let rows: Vec<(String, String, i64, i64, i64, i64, bool, serde_json::Value)> = sqlx::query_as(
+        "SELECT name, display_name, price_monthly, price_yearly, email_limit,
+                api_call_limit, is_active, features
+         FROM plans
+         WHERE is_active = true
+         ORDER BY sort_order",
+    )
+    .fetch_all(&h.pool)
+    .await
+    .expect("read reconciled plans");
+    assert_eq!(
+        rows.len(),
+        platform_catalog::PLANS.len(),
+        "the active plans must be exactly the catalog rows"
+    );
+    for (index, catalog) in platform_catalog::PLANS.iter().enumerate() {
+        let (name, display, price_m, price_y, email_limit, api_calls, active, features_json) =
+            &rows[index];
+        assert_eq!(name, catalog.name, "row {index}: name");
+        assert_eq!(display, catalog.display_name, "{}: display", catalog.name);
+        assert_eq!(
+            *price_m, catalog.price_monthly_cents,
+            "{}: eur/mo",
+            catalog.name
+        );
+        assert_eq!(
+            *price_y, catalog.price_yearly_cents,
+            "{}: eur/yr",
+            catalog.name
+        );
+        assert_eq!(
+            *email_limit, catalog.email_limit,
+            "{}: email limit",
+            catalog.name
+        );
+        assert_eq!(
+            *api_calls, catalog.api_call_limit,
+            "{}: api limit",
+            catalog.name
+        );
+        assert!(active, "{}: catalog rows must be active", catalog.name);
+        let features: billing_service::types::PlanFeatures =
+            serde_json::from_value(features_json.clone()).expect("features round-trip");
+        assert_eq!(
+            features.max_retention_days as i64, catalog.max_retention_days,
+            "{}: retention",
+            catalog.name
+        );
+        assert_eq!(
+            features.max_team_members as i64, catalog.max_team_members,
+            "{}: team members",
+            catalog.name
+        );
+        assert_eq!(
+            plan_overage_rate_millicents(catalog.name),
+            catalog.overage_millicents_per_email,
+            "{}: overage rate",
+            catalog.name
+        );
+    }
+
+    // No foreign row may be served: test rows deactivated, never deleted
+    // (their stripe/subscription references stay resolvable).
+    let catalog_names: Vec<&str> = platform_catalog::PLANS.iter().map(|p| p.name).collect();
+    let foreign_active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM plans WHERE NOT (name = ANY($1)) AND is_active = true",
+    )
+    .bind(&catalog_names)
+    .fetch_one(&h.pool)
+    .await
+    .expect("count foreign active plans");
+    assert_eq!(foreign_active, 0, "no foreign/test plan may stay active");
+    for test_row in ["df5small", "df5big"] {
+        let active: bool = sqlx::query_scalar("SELECT is_active FROM plans WHERE name = $1")
+            .bind(test_row)
+            .fetch_one(&h.pool)
+            .await
+            .expect("test row still exists");
+        assert!(!active, "{test_row} must be deactivated");
+    }
+    // The public listing is exactly the catalog (active rows only).
+    let listed = billing_service::plans::get_active_plans(&h.pool)
+        .await
+        .expect("active plans");
+    assert_eq!(listed.len(), platform_catalog::PLANS.len());
+
+    // Idempotence: a second reconcile changes nothing.
+    let second = reconcile_plans_with_catalog(&h.pool)
+        .await
+        .expect("reconcile replay");
+    assert_eq!(
+        second,
+        PlanReconcileReport::default(),
+        "reconcile must be a no-op once converged"
+    );
+    assert_eq!(default_plans().len(), platform_catalog::PLANS.len());
+});
+
+// ---------------------------------------------------------------------------
 // usage.rs — pure boundary functions
 // ---------------------------------------------------------------------------
 
@@ -2368,7 +2793,10 @@ db_test!(router_reports_require_dates_and_return_json, |h| {
 db_test!(router_plan_admin_surface, |h| {
     let app = billing_service::routes::router(h.state.clone());
 
-    // Seeding is idempotent and reaches the DB.
+    // Seeding is RECONCILIATION to the canonical catalog now (F1 fix), and
+    // idempotent: the first call reports what it changed, the second is a
+    // clean no-op.
+    let mut first = true;
     for _ in 0..2 {
         let (status, json) = call(
             &app,
@@ -2378,7 +2806,19 @@ db_test!(router_plan_admin_surface, |h| {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json["message"], "Default plans seeded");
+        assert_eq!(
+            json["message"], "Default plans reconciled with the canonical catalog",
+            "{json}"
+        );
+        if !first {
+            assert_eq!(json["inserted"], 0, "second reconcile inserts nothing");
+            assert_eq!(json["repaired"], 0, "second reconcile repairs nothing");
+            assert_eq!(
+                json["deactivated"], 0,
+                "second reconcile deactivates nothing"
+            );
+        }
+        first = false;
     }
 
     // Unknown plan → 404.
@@ -2532,9 +2972,12 @@ db_test!(overage_sweep_bills_only_the_excess_and_never_twice, |h| {
     seed_billing_address(&h, tenant, "EE").await;
     seed_plan(&h.pool, "growth", 100, 1_000).await;
 
+    // TIMESTAMPTZ stores microseconds: derive the period at the precision
+    // the database round-trips, so the asserted `overage_period` is exactly
+    // the persisted value.
     let now = Utc::now();
-    let start = now - chrono::Duration::days(30);
-    let end = now - chrono::Duration::days(1);
+    let start = (now - chrono::Duration::days(30)).trunc_subsecs(6);
+    let end = (now - chrono::Duration::days(1)).trunc_subsecs(6);
 
     // Exactly at the limit: no billable overage.
     let at_limit = seed_billing_period(&h, tenant, start, end, "growth", Some(100), Some(40)).await;

@@ -1,14 +1,13 @@
------BEGIN PGP SIGNED MESSAGE-----
-Hash: SHA256
-
-Contact: mailto:{{SECURITY_EMAIL}}
-Encryption: https://keys.openpgp.org/vks/v1/by-fingerprint/AB12CD34EF5678901234567890ABCDEF12345678
-Acknowledgments: https://apexmail.ee/.well-known/security-policy
+# Template for the served security.txt artifact
+# (apps/marketing-zola/static/.well-known/security.txt, served at
+# https://apexmail.ee/.well-known/security.txt). Values below are the shipped
+# production values. Per RFC 9116, refresh `Expires` (under one year) and
+# clear-sign before publication; signing needs the security key held by the
+# security team (fingerprint B30B 9531 6B44 4E38 2803 19A5 5183 FF3B C9A6 9386):
+#   gpg --clear-sign --local-user security@apexmail.ee --output security.txt.asc security.txt
+Contact: mailto:security@apexmail.ee
+Expires: 2027-10-06T00:00:00Z
 Preferred-Languages: en, et
 Canonical: https://apexmail.ee/.well-known/security.txt
-Policy: https://apexmail.ee/.well-known/security-policy
-Hiring: https://apexmail.ee/careers
-Expires: {{EXPIRES_ISO8601}}
------BEGIN PGP SIGNATURE-----
-(PGP signature placeholder — replace with actual signature)
------END PGP SIGNATURE-----
+Policy: https://apexmail.ee/security/
+Encryption: https://apexmail.ee/pgp-key.asc

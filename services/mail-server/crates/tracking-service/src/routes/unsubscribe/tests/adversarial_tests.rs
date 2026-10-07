@@ -97,6 +97,7 @@ fn state_with_db(db: sqlx::PgPool, redis: deadpool_redis::Pool) -> AppState {
             trusted_proxies: Vec::new(),
             max_redirect_url_len: 2048,
             token_max_age_days: None,
+            allowed_redirect_domains: Vec::new(),
         },
         rate_limit: RateLimitConfig {
             enabled: false,
@@ -288,6 +289,11 @@ async fn one_click_unknown_tenant_is_rejected_not_500_and_poisons_nothing() {
         eprintln!("skipping: set TEST_REDIS_URL + TEST_DATABASE_URL");
         return;
     };
+    // The before/after LLEN assertion reads the SHARED suppression-retry WAL
+    // key; the processor suites that legitimately enqueue to it hold the same
+    // cross-process serial lock, so a concurrently running sibling can no
+    // longer shift the queue between the two reads (2026-10-07 fold flake).
+    let _cross = crate::routes::test_support::redis_wal_serial().await;
     let srv = server(&state).await;
     let tenant = unique("tn_ghost");
     let email = "ghost@example.com";
@@ -299,15 +305,6 @@ async fn one_click_unknown_tenant_is_rejected_not_500_and_poisons_nothing() {
         .await
         .expect("tenant probe");
     assert!(exists.is_none());
-
-    let before_retry_len: i64 = {
-        let mut conn = redis.get().await.expect("redis conn");
-        redis::cmd("LLEN")
-            .arg(crate::processor::REDIS_SUPPRESSION_RETRY_KEY)
-            .query_async(&mut *conn)
-            .await
-            .expect("llen retry queue")
-    };
 
     // RFC 8058 one-click: 400 JSON, never a 500.
     let token = legacy_token(&tenant, email);
@@ -348,14 +345,23 @@ async fn one_click_unknown_tenant_is_rejected_not_500_and_poisons_nothing() {
         .await
         .expect("dedup get");
     assert_eq!(claimed, None, "the dedup slot must stay unclaimed");
-    let after_retry_len: i64 = redis::cmd("LLEN")
+    // The retry WAL is shared with the processor suites, so the assertion is
+    // scoped to THIS token's tenant/email (a sibling legitimately enqueues
+    // its own entries): a nonexistent-tenant token must contribute nothing.
+    let entries: Vec<String> = redis::cmd("LRANGE")
         .arg(crate::processor::REDIS_SUPPRESSION_RETRY_KEY)
+        .arg(0)
+        .arg(-1)
         .query_async(&mut *conn)
         .await
-        .expect("llen retry queue after");
-    assert_eq!(
-        after_retry_len, before_retry_len,
-        "a nonexistent-tenant token must not enqueue a retry entry"
+        .expect("lrange retry queue after");
+    let poisoned: Vec<&String> = entries
+        .iter()
+        .filter(|entry| entry.contains(&tenant) || entry.contains(email))
+        .collect();
+    assert!(
+        poisoned.is_empty(),
+        "a nonexistent-tenant token must not enqueue a retry entry for its own tenant: {poisoned:?}"
     );
 }
 

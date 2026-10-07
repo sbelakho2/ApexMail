@@ -1727,6 +1727,23 @@ impl AutomationExecutor {
                     "suppression_lookup_unavailable: {error}"
                 ));
             }
+            Err(SendAdmissionError::ConsentRefused { email, reason }) => {
+                // F4 consent gate: a marketing recipient without an active
+                // consent record is a TERMINAL skip (retrying cannot create
+                // consent), mirroring the suppressed arm.
+                tracing::info!(
+                    email = %email,
+                    reason = %reason,
+                    "automation action skipped: marketing consent missing"
+                );
+                return ActionRecord::skipped("marketing_consent_required");
+            }
+            Err(SendAdmissionError::ConsentUnavailable(error)) => {
+                // Fail closed but retryable: the consent store may recover.
+                return ActionRecord::failed_retryable(format!(
+                    "consent_lookup_unavailable: {error}"
+                ));
+            }
         };
         let quota_event_id = admission.event_id();
         let admitted_category = admission.category().to_string();

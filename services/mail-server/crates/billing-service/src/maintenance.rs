@@ -28,7 +28,6 @@ const METERING_TASK_INTERVAL: Duration = Duration::from_secs(60);
 const USAGE_ALERT_TASK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const COST_MARGIN_TASK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const DAILY_TASK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-const WALLET_CLEANUP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const METERING_SCAN_COUNT: usize = 200;
 const METERING_RECOVERY_LIMIT: usize = 10_000;
 const METERING_PERIOD_TTL_SECONDS: i64 = 40 * 86_400;
@@ -133,28 +132,16 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
-    let wallet_state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = interval_at(
-            Instant::now() + task_interval(WALLET_CLEANUP_INTERVAL),
-            task_interval(WALLET_CLEANUP_INTERVAL),
-        );
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-
-            match process_expired_wallet_reservations(wallet_state.as_ref()).await {
-                Ok(released_count) if released_count > 0 => {
-                    info!(released_count, "released expired wallet reservations");
-                }
-                Ok(_) => {}
-                Err(error_message) => {
-                    error!(error = %error_message, "failed to release expired wallet reservations");
-                }
-            }
-        }
-    });
+    // F8 (audit): the expired-wallet-reservation sweep was REMOVED here. No
+    // production code path ever wrote a `wallet_reservations` row (only test
+    // fixtures did) and nothing ever incremented `wallets.reserved`, so the
+    // loop could never release anything — it ran every 30 minutes against a
+    // table that is structurally always empty for a claim ("funds are held
+    // until capture") the product does not implement. The live wallet flow
+    // is direct debit/top-up through `wallet_transactions` (see
+    // `expire_stale_wallet_credits` below, which IS live); the reservation
+    // model was removed with the sweep rather than implying an isolation
+    // guarantee no code provides.
 
     let usage_alert_state = state.clone();
     tokio::spawn(async move {
@@ -451,6 +438,32 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
         loop {
             interval.tick().await;
+
+            // F7 (audit): the third-month fallback for cash-accounting
+            // (`cash_special`) VAT. `materialize_due_cash_special` used to
+            // have no caller while stripe_webhooks.rs claimed "the sweep"
+            // handled it — an invoice that stayed unpaid past the third
+            // month never materialized its `cash_special_due` recognition
+            // entry, so the KMD aggregation silently omitted that output
+            // VAT. Run it BEFORE the return generation so the period being
+            // filed includes the entries.
+            match crate::vat_recognition::materialize_due_cash_special(&kmd_state.db, Utc::now())
+                .await
+            {
+                Ok(materialized) if materialized > 0 => {
+                    info!(
+                        materialized,
+                        "materialized third-month cash-accounting VAT recognition entries"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(
+                        error = %error,
+                        "cash-accounting third-month recognition sweep failed"
+                    );
+                }
+            }
 
             match generate_kmd_if_due(kmd_state.as_ref()).await {
                 Ok(results) => {
@@ -3047,74 +3060,6 @@ async fn cache_cost_margin_status(
     }
 }
 
-async fn process_expired_wallet_reservations(state: &AppState) -> Result<i64, String> {
-    let rows = sqlx::query_as::<_, ExpiredWalletReservationRow>(
-        r#"
-        WITH expired_reservations AS (
-            SELECT id, tenant_id, amount
-            FROM wallet_reservations
-            WHERE status IN ('pending', 'active')
-              AND captured_at IS NULL
-              AND released_at IS NULL
-              AND expires_at < NOW()
-            FOR UPDATE SKIP LOCKED
-        ),
-        released_reservations AS (
-            UPDATE wallet_reservations wr
-            SET status = 'released', released_at = NOW()
-            FROM expired_reservations er
-            WHERE wr.id = er.id
-            RETURNING er.tenant_id, er.amount
-        ),
-        released_totals AS (
-            SELECT tenant_id, COALESCE(SUM(amount), 0)::bigint AS total_amount
-            FROM released_reservations
-            GROUP BY tenant_id
-        ),
-        wallet_updates AS (
-            UPDATE wallets w
-            SET reserved = release_reserved_cents(w.reserved, rt.total_amount),
-                updated_at = NOW()
-            FROM released_totals rt
-            WHERE w.tenant_id = rt.tenant_id
-            RETURNING w.tenant_id
-        )
-        SELECT wu.tenant_id,
-               COALESCE((SELECT COUNT(*)::bigint FROM released_reservations), 0) AS released_count
-        FROM wallet_updates wu
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|error| format!("Failed to release expired wallet reservations: {error}"))?;
-
-    let released_count = rows.first().map(|row| row.released_count).unwrap_or(0);
-    if released_count == 0 {
-        return Ok(0);
-    }
-
-    if let Ok(mut conn) = state.redis.get().await {
-        let tenant_ids: Vec<String> = rows.into_iter().map(|row| row.tenant_id).collect();
-        if !tenant_ids.is_empty() {
-            let keys: Vec<String> = tenant_ids
-                .into_iter()
-                .map(|tenant_id| format!("wallet:balance:{tenant_id}"))
-                .collect();
-            if let Err(error) = delete_redis_keys(&mut conn, &keys).await {
-                warn!(error = %error, "failed to clear wallet balance cache after releasing reservations");
-            }
-        }
-    }
-
-    Ok(released_count)
-}
-
-#[derive(Debug, FromRow)]
-struct ExpiredWalletReservationRow {
-    tenant_id: String,
-    released_count: i64,
-}
-
 /// ToS 6.4 — "Credits expire after 12 months unless otherwise stated."
 /// The published policy previously had NO enforcement mechanism, so wallet
 /// balances sat forever. This sweep expires UNCONSUMED credits older than
@@ -3239,18 +3184,6 @@ async fn expire_stale_wallet_credits(state: &AppState) -> Result<u64, String> {
     }
 
     Ok(expired_count)
-}
-
-/// Fix I12 — release a wallet reservation in BIGINT arithmetic.
-/// The previous SQL cast the summed reservations to INTEGER before
-/// subtracting, so a released total above 2^31-1 cents (~21.5M EUR) would
-/// overflow/wrap instead of clamping the reservation to zero.
-///
-/// SQL helper: `release_reserved_cents(reserved, total)` = bigint-clamped
-/// subtraction (see the migration-created function).
-#[cfg_attr(not(test), allow(dead_code))]
-fn release_reserved_cents_clamp(reserved: i64, released_total: i64) -> i64 {
-    reserved.saturating_sub(released_total).max(0)
 }
 
 /// Fix F4/F09 — record a payment recovery and restore access according to
@@ -3956,25 +3889,33 @@ mod tests {
         assert_eq!(kmd_backfill_periods(&[(2024, 1)], (2026, 12), 5).len(), 5);
     }
 
-    // ------------------------------------------------------------------
-    // Fix I12 — wallet reservation release must not overflow.
-    // ------------------------------------------------------------------
-
+    /// F7: the third-month cash-accounting fallback is SCHEDULED in the
+    /// periodic KMD job (it previously had no caller while stripe_webhooks
+    /// claimed "the sweep" handled it) and it runs BEFORE the return
+    /// generation, so the `cash_special_due` output VAT is included in the
+    /// period being filed. This pins the production source (test code is
+    /// excluded from the scanned slice).
     #[test]
-    fn release_reserved_clamps_to_zero_on_large_totals() {
-        // Released total above INT range (~2.1B cents) previously wrapped
-        // through the ::integer cast and could leave phantom reservations.
-        assert_eq!(release_reserved_cents_clamp(500, 3_000_000_000), 0);
-        assert_eq!(release_reserved_cents_clamp(i64::MAX, i64::MAX), 0);
-    }
-
-    #[test]
-    fn release_reserved_subtracts_within_bounds() {
-        assert_eq!(release_reserved_cents_clamp(1_000, 400), 600);
-        assert_eq!(release_reserved_cents_clamp(1_000, 1_000), 0);
-        // Releasing more than reserved cannot go negative.
-        assert_eq!(release_reserved_cents_clamp(100, 200), 0);
-        assert_eq!(release_reserved_cents_clamp(0, 0), 0);
+    fn cash_accounting_third_month_sweep_is_scheduled_before_kmd_generation() {
+        let source = include_str!("maintenance.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section present");
+        let scheduled = production
+            .split("pub fn start_periodic_jobs")
+            .nth(1)
+            .expect("start_periodic_jobs present");
+        let sweep = scheduled
+            .find("materialize_due_cash_special")
+            .expect("the periodic job registry must schedule the cash-accounting fallback sweep");
+        let generation = scheduled
+            .find("generate_kmd_if_due")
+            .expect("the periodic job registry calls the KMD generation");
+        assert!(
+            sweep < generation,
+            "the third-month fallback must materialize BEFORE the KMD aggregation"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -4660,62 +4601,7 @@ mod coverage_adversarial {
         }
     );
 
-    // ---------------- wallet reservations / credit expiry ----------------
-
-    env_test!(expired_wallet_reservations_release_and_clamp, |env| {
-        let tenant = "mtcov_wallet_res";
-        seed_tenant(env, tenant, "free", "active").await;
-        let wallet_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO wallets (id, tenant_id, balance, currency, reserved)
-             VALUES ($1, $2, 0, 'EUR', 100)",
-        )
-        .bind(wallet_id)
-        .bind(tenant)
-        .execute(&env.pool)
-        .await
-        .expect("seed wallet");
-        sqlx::query(
-            "INSERT INTO wallet_reservations (tenant_id, wallet_id, amount, status, expires_at)
-             VALUES ($1, $2, 60, 'active', NOW() - INTERVAL '1 minute'),
-                    ($1, $2, 40, 'active', NOW() + INTERVAL '1 hour')",
-        )
-        .bind(tenant)
-        .bind(wallet_id)
-        .execute(&env.pool)
-        .await
-        .expect("seed reservations");
-
-        assert_eq!(
-            process_expired_wallet_reservations(&env.state)
-                .await
-                .expect("release"),
-            1
-        );
-        assert_eq!(
-            process_expired_wallet_reservations(&env.state)
-                .await
-                .expect("replay"),
-            0
-        );
-        let reserved: i64 = sqlx::query_scalar("SELECT reserved FROM wallets WHERE tenant_id = $1")
-            .bind(tenant)
-            .fetch_one(&env.pool)
-            .await
-            .expect("reserved");
-        assert_eq!(reserved, 40, "only the expired reservation was released");
-        let released_statuses: Vec<String> = sqlx::query_scalar(
-            "SELECT status FROM wallet_reservations WHERE tenant_id = $1 ORDER BY amount DESC",
-        )
-        .bind(tenant)
-        .fetch_all(&env.pool)
-        .await
-        .expect("statuses");
-        assert_eq!(
-            released_statuses,
-            vec!["released".to_string(), "active".to_string()]
-        );
-    });
+    // ---------------- wallet credit expiry ----------------
 
     env_test!(
         wallet_credit_expiry_respects_fifo_and_never_goes_negative,
@@ -6956,52 +6842,6 @@ mod coverage_adversarial {
         id
     }
 
-    env_test!(
-        expired_reservations_release_exactly_the_reserved_amount,
-        |env| {
-            let tenant = "mtcov_wallet";
-            let wallet = seed_wallet(env, tenant, 5000, 1200).await;
-            sqlx::query(
-                // The canonical wallet_reservations shape: UUID id, the
-                // owning wallet row (NOT NULL FK target), positive amount.
-                "INSERT INTO wallet_reservations (id, wallet_id, tenant_id, amount, status, expires_at)
-             VALUES ($1, $2, $3, 700, 'active', NOW() - INTERVAL '1 hour')",
-            )
-            .bind(uuid::Uuid::new_v4())
-            .bind(wallet)
-            .bind(tenant)
-            .execute(&env.pool)
-            .await
-            .expect("reservation");
-
-            let released = process_expired_wallet_reservations(&env.state)
-                .await
-                .expect("release");
-            assert_eq!(released, 1);
-            let (balance, reserved): (i64, i64) =
-                sqlx::query_as("SELECT balance, reserved FROM wallets WHERE tenant_id = $1")
-                    .bind(tenant)
-                    .fetch_one(&env.pool)
-                    .await
-                    .expect("wallet");
-            assert_eq!(balance, 5000, "the balance itself never moves on release");
-            assert_eq!(reserved, 500, "exactly the reservation amount is released");
-
-            // Idempotent.
-            let released = process_expired_wallet_reservations(&env.state)
-                .await
-                .expect("release");
-            assert_eq!(released, 0);
-            let released_again: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM wallet_reservations WHERE released_at IS NOT NULL",
-            )
-            .fetch_one(&env.pool)
-            .await
-            .expect("count");
-            assert_eq!(released_again, 1);
-        }
-    );
-
     env_test!(stale_credits_expire_once_under_the_fifo_cap, |env| {
         let tenant = "mtcov_expiry";
         // A 13-month-old credit of 3000, a fresh credit of 2000: only the
@@ -7048,17 +6888,6 @@ mod coverage_adversarial {
             .expect("expiry");
         assert_eq!(expired, 0, "the sweep never expires the same credit twice");
     });
-
-    #[test]
-    fn release_reserved_clamp_never_wraps() {
-        assert_eq!(release_reserved_cents_clamp(1000, 400), 600);
-        assert_eq!(release_reserved_cents_clamp(1000, 1000), 0);
-        assert_eq!(
-            release_reserved_cents_clamp(100, 9_000_000_000),
-            0,
-            "no wrap on huge totals"
-        );
-    }
 
     // ---------------- restriction-aware recovery ----------------
 
@@ -7613,25 +7442,6 @@ mod coverage_adversarial {
             eprintln!("skipping: TEST_DATABASE_URL unset");
             return;
         };
-        // Give one task real work to report so its activity arm fires
-        // alongside the empty-success arms: an expired wallet reservation.
-        let wallet: Option<(Uuid, String)> =
-            sqlx::query_as("SELECT id, tenant_id FROM wallets WHERE tenant_id = 'mtcov_periodic'")
-                .fetch_optional(&owned.pool)
-                .await
-                .expect("wallet probe");
-        if let Some((wallet_id, _)) = wallet {
-            sqlx::query(
-                "INSERT INTO wallet_reservations (id, wallet_id, tenant_id, amount, status, created_at, updated_at) \
-                 VALUES (gen_random_uuid(), $1, 'mtcov_periodic', 100, 'pending', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours') \
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(wallet_id)
-            .execute(&owned.pool)
-            .await
-            .expect("seed expired reservation");
-        }
-
         std::env::set_var("PERIODIC_TASK_INTERVAL_MS", "15");
         start_periodic_jobs(owned.state.clone());
 
@@ -7728,25 +7538,6 @@ mod coverage_adversarial {
             .await
             .expect("pending charge ip");
         }
-
-        // ── wallet reservation cleanup: an expired, uncaptured reservation.
-        seed_tenant_plan(env, "w6cdrv_resv", "growth", "active").await;
-        sqlx::query(
-            "INSERT INTO wallets (tenant_id, balance, currency) VALUES ('w6cdrv_resv', 0, 'EUR')",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("wallet");
-        sqlx::query(
-            "INSERT INTO wallet_reservations
-                 (id, wallet_id, tenant_id, amount, status, expires_at, created_at)
-             SELECT gen_random_uuid(), w.id, w.tenant_id, 2500, 'pending',
-                    NOW() - INTERVAL '1 hour', NOW()
-             FROM wallets w WHERE w.tenant_id = 'w6cdrv_resv'",
-        )
-        .execute(&env.pool)
-        .await
-        .expect("expired reservation");
 
         // ── usage alerts: one enabled config makes tenants_checked > 0.
         seed_tenant_plan(env, "w6cdrv_alert", "growth", "active").await;
@@ -7936,15 +7727,6 @@ mod coverage_adversarial {
                AND billing_status = 'active'",
             |count| count == 3,
             "all dedicated IPs charged (startup + tick)"
-        );
-
-        // Wallet reservations: the expired one was released.
-        poll_until!(
-            deadline,
-            "SELECT COUNT(*) FROM wallet_reservations
-             WHERE status = 'released' AND released_at IS NOT NULL",
-            |count| count >= 1,
-            "expired wallet reservation released"
         );
 
         // Dunning grace: queued messages purged and the grace window cleared.

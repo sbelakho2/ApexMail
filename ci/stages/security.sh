@@ -32,7 +32,26 @@ WS=$REPO_ROOT/services/mail-server
 # (README §9 F11) — the gate stays REQUIRED (fail closed: a silently-passing
 # secret scanner is worthless); triage via .gitleaks.toml or temporarily set
 # CI_GITLEAKS_CHECK=advisory.
+# gitleaks_history_guard — the lane's contract is a FULL-history scan; on a
+# shallow checkout (`git fetch --depth 1`, the old bootstrap) gitleaks sees
+# only the current tree while the stage still reports the same green gate
+# (audit P2). Fail closed for the REQUIRED gate; the advisory override keeps
+# the bounded triage window. ci/stages/fetch.sh unshallows the host checkout
+# automatically, so this guard should only fire on a hand-made shallow tree.
+gitleaks_history_guard() {
+    if [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository 2>/dev/null || printf 'false')" != true ]; then
+        return "$CI_EXIT_OK"
+    fi
+    if [ "${CI_GITLEAKS_CHECK:-required}" = advisory ]; then
+        ci_warn "shallow checkout ($REPO_ROOT) — gitleaks will scan only the current tree (CI_GITLEAKS_CHECK=advisory, continuing)"
+        return "$CI_EXIT_OK"
+    fi
+    ci_err "shallow checkout ($REPO_ROOT) — the REQUIRED gitleaks full-history scan would silently degrade to the current tree; run 'git fetch --unshallow' (ci/stages/fetch.sh does this on the deploy host)"
+    return "$CI_EXIT_FAIL"
+}
+
 gitleaks_scan() {
+    gitleaks_history_guard || return "$CI_EXIT_FAIL"
     ci_have_tool gitleaks || return "$CI_EXIT_OK"
     if ci_dry; then
         ci_info "check (dry-run): gitleaks detect"
@@ -71,7 +90,7 @@ cargo_audit() {
         _ign="$_ign --ignore $_id"
         _ign_n=$((_ign_n + 1))
     done
-    ci_info "cargo audit --deny warnings (${_ign_n} reviewed RUSTSEC ignores — mirror of security-audit.yml)"
+    ci_info "cargo audit (${_ign_n} reviewed RUSTSEC ignores) — vulnerability-class advisories fail the run; unmaintained/unsound/yanked WARNING-class notices are logged but do not gate"
     _ca_rc=0
     # shellcheck disable=SC2086  # _ign is an intentional flag word list
     (cd "$WS" && # --deny vulnerabilities: real advisories fail the run (after the

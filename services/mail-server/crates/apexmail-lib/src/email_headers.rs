@@ -35,6 +35,24 @@ pub const HEADER_ALIASES_MESSAGE_ID: &[&str] = &["X-ApexMail-MessageId"];
 pub const HEADER_ALIASES_TENANT_ID: &[&str] = &["X-ApexMail-TenantId"];
 pub const HEADER_ALIASES_CAMPAIGN_ID: &[&str] = &["X-ApexMail-CampaignId"];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// F26: queue MIME-header map keys (server-written `email_queue.headers`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonical `email_queue.headers` JSONB key carrying the structured Reply-To
+/// mailbox for one send. The API's `mime_headers_for` writes it in the server
+/// shape; the worker's `split_mime_headers` reads it into
+/// `PreparedEmail.reply_to`; the MTA's SMTP-submission parser normalizes the
+/// RFC 5322 `Reply-To` spelling onto THIS key.
+pub const QUEUE_HEADER_REPLY_TO: &str = "reply_to";
+
+/// The RFC 5322 wire spelling (`Reply-To`, lowercased) the SMTP-submission
+/// parser sees. It is a PARSE-ONLY alias: the canonical queue key is
+/// [`QUEUE_HEADER_REPLY_TO`], and a hyphenated key is never stored as a custom
+/// header (the worker drops it as protected — which used to silently lose the
+/// header, dogfood finding 2026-10-06 P2).
+pub const MIME_HEADER_REPLY_TO: &str = "reply-to";
+
 /// The reserved internal header namespace prefix (lowercased comparison).
 const RESERVED_NAMESPACE_PREFIX: &str = "x-apexmail-";
 

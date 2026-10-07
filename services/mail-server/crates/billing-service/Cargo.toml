@@ -16,6 +16,10 @@ moka.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
 billing-common = { path = "../billing-common" }
 billing-entitlements = { path = "../billing-entitlements" }
+# Send-time consent enforcement (F4): the shared send-admission gate calls the
+# canonical ConsentEnforcer so marketing sends require an active consent
+# record. `compliance` depends on no billing crate — no cycle.
+compliance = { path = "../compliance" }
 # Statutory accounting ledger (migration 220) — posting hooks only.
 accounting-core.workspace = true
 
