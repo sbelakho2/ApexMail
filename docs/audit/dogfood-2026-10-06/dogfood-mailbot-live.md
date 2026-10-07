@@ -7,6 +7,14 @@ appendices). Owned paths: `crates/worker-processors/src/reply_handler/**`,
 read/approve/reject surface, `routes/web*` only where a drafts defect required
 it. `ai_chat` untouched (chatbot agent).
 
+Durable evidence for every claim below lives in
+`docs/audit/dogfood-2026-10-06/evidence-mailbot-live/`:
+`live-evidence.json` (per-probe/per-case records, draft texts, DB states),
+`taxonomy-fixed.log`, `taxonomy-prefix-P0.log` (pre-fix stolen-jobs tally),
+`mutations-run1.log` / `mutations-run2.log`, `concurrency.log`,
+`perf-disclosure.log`, `hostile.log`, `suites-worker-ai.log`,
+`contrast-gate-after.log`.
+
 ## 0. Revision evidence
 
 | Item | Value |
