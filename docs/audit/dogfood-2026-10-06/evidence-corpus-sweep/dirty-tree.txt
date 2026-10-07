@@ -1,0 +1,202 @@
+ M ci/README.md
+ M deploy/monitoring/dashboards/api-server-overview.json
+ M docs/eval/README.md
+ M docs/eval/chat-qa-goldens.json
+ M docs/eval/objection-rebuttal-goldens.json
+ M docs/eval/reply-classification-goldens.json
+ M docs/evaluation/load-testing.md
+ M services/mail-server/crates/api-server/src/routes/admin/ai_drafts.rs
+ M services/mail-server/crates/api-server/src/routes/ai_chat.rs
+ M services/mail-server/crates/api-server/src/routes/web.rs
+ M services/mail-server/crates/api-server/src/routes/web/data.rs
+ M services/mail-server/crates/ui-foundation/assets/globals.css
+ M services/mail-server/crates/ui-foundation/assets/globals.input.css
+ M services/mail-server/crates/ui-foundation/src/bin/export_visual_fixtures.rs
+ M services/mail-server/crates/ui-foundation/src/gate_support.rs
+ M services/mail-server/crates/ui-foundation/src/leptos_views.rs
+ M services/mail-server/crates/ui-foundation/src/lib.rs
+ M services/mail-server/crates/ui-foundation/src/view_data.rs
+ M services/mail-server/scripts/coverage.sh
+ M services/mail-server/scripts/run-load-tests.sh
+ M services/mail-server/scripts/security-audit.sh
+ M services/mail-server/scripts/test-mail-server.sh
+ M services/mail-server/supply-chain/config.toml
+ M services/mail-server/supply-chain/imports.lock
+ M tools/README.md
+ M tools/check_eval_corpora.py
+ M tools/contrast-audit/fixtures/assets/globals.css
+ M tools/contrast-audit/fixtures/control-plane-alerts-rules.html
+ M tools/contrast-audit/fixtures/control-plane-alerts.html
+ M tools/contrast-audit/fixtures/control-plane-analytics.html
+ M tools/contrast-audit/fixtures/control-plane-audit.html
+ M tools/contrast-audit/fixtures/control-plane-billing-plans.html
+ M tools/contrast-audit/fixtures/control-plane-billing.html
+ M tools/contrast-audit/fixtures/control-plane-compliance-gdpr.html
+ M tools/contrast-audit/fixtures/control-plane-compliance.html
+ M tools/contrast-audit/fixtures/control-plane-cp-audit.html
+ M tools/contrast-audit/fixtures/control-plane-cp-demos.html
+ M tools/contrast-audit/fixtures/control-plane-cp-infrastructure.html
+ M tools/contrast-audit/fixtures/control-plane-cp-sales.html
+ M tools/contrast-audit/fixtures/control-plane-cp-security.html
+ M tools/contrast-audit/fixtures/control-plane-cp-tenants.html
+ M tools/contrast-audit/fixtures/control-plane-cp.html
+ M tools/contrast-audit/fixtures/control-plane-dashboard.html
+ M tools/contrast-audit/fixtures/control-plane-discovery.html
+ M tools/contrast-audit/fixtures/control-plane-domains.html
+ M tools/contrast-audit/fixtures/control-plane-home.html
+ M tools/contrast-audit/fixtures/control-plane-infrastructure-nodes.html
+ M tools/contrast-audit/fixtures/control-plane-infrastructure-queues.html
+ M tools/contrast-audit/fixtures/control-plane-infrastructure.html
+ M tools/contrast-audit/fixtures/control-plane-jobs.html
+ M tools/contrast-audit/fixtures/control-plane-login.html
+ M tools/contrast-audit/fixtures/control-plane-operators-new.html
+ M tools/contrast-audit/fixtures/control-plane-operators.html
+ M tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts.html
+ M tools/contrast-audit/fixtures/control-plane-sales.html
+ M tools/contrast-audit/fixtures/control-plane-settings-security.html
+ M tools/contrast-audit/fixtures/control-plane-settings.html
+ M tools/contrast-audit/fixtures/control-plane-tenants-new.html
+ M tools/contrast-audit/fixtures/control-plane-tenants.html
+ M tools/contrast-audit/fixtures/manifest.json
+ M tools/contrast-audit/fixtures/marketing-acceptable-use.html
+ M tools/contrast-audit/fixtures/marketing-api-console.html
+ M tools/contrast-audit/fixtures/marketing-compare-postmark.html
+ M tools/contrast-audit/fixtures/marketing-compare-resend.html
+ M tools/contrast-audit/fixtures/marketing-compare-sendgrid.html
+ M tools/contrast-audit/fixtures/marketing-compliance.html
+ M tools/contrast-audit/fixtures/marketing-cookies.html
+ M tools/contrast-audit/fixtures/marketing-dpa.html
+ M tools/contrast-audit/fixtures/marketing-email-logs.html
+ M tools/contrast-audit/fixtures/marketing-features.html
+ M tools/contrast-audit/fixtures/marketing-home.html
+ M tools/contrast-audit/fixtures/marketing-pricing-calculator.html
+ M tools/contrast-audit/fixtures/marketing-pricing.html
+ M tools/contrast-audit/fixtures/marketing-privacy.html
+ M tools/contrast-audit/fixtures/marketing-private-cloud.html
+ M tools/contrast-audit/fixtures/marketing-sla.html
+ M tools/contrast-audit/fixtures/marketing-status.html
+ M tools/contrast-audit/fixtures/marketing-terms.html
+ M tools/contrast-audit/fixtures/marketing-zola-acceptable-use.html
+ M tools/contrast-audit/fixtures/marketing-zola-api-console.html
+ M tools/contrast-audit/fixtures/marketing-zola-compare-postmark.html
+ M tools/contrast-audit/fixtures/marketing-zola-compare-resend.html
+ M tools/contrast-audit/fixtures/marketing-zola-compare-sendgrid.html
+ M tools/contrast-audit/fixtures/marketing-zola-compare.html
+ M tools/contrast-audit/fixtures/marketing-zola-compliance.html
+ M tools/contrast-audit/fixtures/marketing-zola-contact-sales.html
+ M tools/contrast-audit/fixtures/marketing-zola-contact.html
+ M tools/contrast-audit/fixtures/marketing-zola-cookies.html
+ M tools/contrast-audit/fixtures/marketing-zola-data-locations.html
+ M tools/contrast-audit/fixtures/marketing-zola-de-cookies.html
+ M tools/contrast-audit/fixtures/marketing-zola-de.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-alerts.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-analytics.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-api-grader.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-api.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-sdks.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs-webhooks.html
+ M tools/contrast-audit/fixtures/marketing-zola-docs.html
+ M tools/contrast-audit/fixtures/marketing-zola-dpa.html
+ M tools/contrast-audit/fixtures/marketing-zola-email-logs.html
+ M tools/contrast-audit/fixtures/marketing-zola-es-cookies.html
+ M tools/contrast-audit/fixtures/marketing-zola-es.html
+ M tools/contrast-audit/fixtures/marketing-zola-features.html
+ M tools/contrast-audit/fixtures/marketing-zola-fr-cookies.html
+ M tools/contrast-audit/fixtures/marketing-zola-fr.html
+ M tools/contrast-audit/fixtures/marketing-zola-home.html
+ M tools/contrast-audit/fixtures/marketing-zola-inbox-placement.html
+ M tools/contrast-audit/fixtures/marketing-zola-pricing-calculator.html
+ M tools/contrast-audit/fixtures/marketing-zola-pricing.html
+ M tools/contrast-audit/fixtures/marketing-zola-privacy.html
+ M tools/contrast-audit/fixtures/marketing-zola-private-cloud.html
+ M tools/contrast-audit/fixtures/marketing-zola-secure-email-for-regulated-saas.html
+ M tools/contrast-audit/fixtures/marketing-zola-sla.html
+ M tools/contrast-audit/fixtures/marketing-zola-status.html
+ M tools/contrast-audit/fixtures/marketing-zola-terms.html
+ M tools/contrast-audit/fixtures/web-analytics.html
+ M tools/contrast-audit/fixtures/web-assistant.html
+ M tools/contrast-audit/fixtures/web-campaigns-c_1-edit.html
+ M tools/contrast-audit/fixtures/web-campaigns-c_1.html
+ M tools/contrast-audit/fixtures/web-campaigns-new.html
+ M tools/contrast-audit/fixtures/web-campaigns.html
+ M tools/contrast-audit/fixtures/web-contacts-new.html
+ M tools/contrast-audit/fixtures/web-contacts.html
+ M tools/contrast-audit/fixtures/web-dashboard.html
+ M tools/contrast-audit/fixtures/web-domains-new.html
+ M tools/contrast-audit/fixtures/web-domains.html
+ M tools/contrast-audit/fixtures/web-events.html
+ M tools/contrast-audit/fixtures/web-forgot-password.html
+ M tools/contrast-audit/fixtures/web-inbox-placement-new.html
+ M tools/contrast-audit/fixtures/web-inbox-placement-t_1.html
+ M tools/contrast-audit/fixtures/web-inbox-placement.html
+ M tools/contrast-audit/fixtures/web-lists-l_1-edit.html
+ M tools/contrast-audit/fixtures/web-lists-l_1.html
+ M tools/contrast-audit/fixtures/web-lists-new.html
+ M tools/contrast-audit/fixtures/web-lists.html
+ M tools/contrast-audit/fixtures/web-login.html
+ M tools/contrast-audit/fixtures/web-reports-deliverability.html
+ M tools/contrast-audit/fixtures/web-reports.html
+ M tools/contrast-audit/fixtures/web-reset-password.html
+ M tools/contrast-audit/fixtures/web-settings-api-keys.html
+ M tools/contrast-audit/fixtures/web-settings-billing.html
+ M tools/contrast-audit/fixtures/web-settings-dedicated-ips.html
+ M tools/contrast-audit/fixtures/web-settings-profile.html
+ M tools/contrast-audit/fixtures/web-settings-suppressions.html
+ M tools/contrast-audit/fixtures/web-settings-team.html
+ M tools/contrast-audit/fixtures/web-settings-webhooks.html
+ M tools/contrast-audit/fixtures/web-settings.html
+ M tools/contrast-audit/fixtures/web-signup.html
+ M tools/contrast-audit/fixtures/web-templates-new.html
+ M tools/contrast-audit/fixtures/web-templates.html
+ M tools/definitive_audit.py
+ M tools/fix_all_errors.py
+ M tools/fix_all_training_limits.py
+ M tools/fix_payg_calculations.py
+ M tools/fix_payg_errors.py
+ M tools/lib/fix_utils.py
+ M tools/lib/pricing.py
+ M tools/migrations/README.md
+ M tools/remediation-tracker.json
+ M tools/ui_routes.py
+ M tools/validate_pricing_drift.py
+?? docs/audit/dogfood-2026-10-06/brief-bots-perf-compliance.md
+?? docs/audit/dogfood-2026-10-06/brief-bots-ui-visual.md
+?? docs/audit/dogfood-2026-10-06/brief-corpus-sweep.md
+?? docs/audit/dogfood-2026-10-06/brief-coverage-audit.md
+?? docs/audit/dogfood-2026-10-06/brief-fix-coverage-gaps.md
+?? docs/audit/dogfood-2026-10-06/brief-live-chatbot.md
+?? docs/audit/dogfood-2026-10-06/brief-live-mailbot.md
+?? docs/audit/dogfood-2026-10-06/dogfood-bots-perf-compliance.md
+?? docs/audit/dogfood-2026-10-06/dogfood-bots-ui.md
+?? docs/audit/dogfood-2026-10-06/dogfood-chatbot-live.md
+?? docs/audit/dogfood-2026-10-06/dogfood-corpus-sweep.md
+?? docs/audit/dogfood-2026-10-06/dogfood-mailbot-live.md
+?? docs/audit/dogfood-2026-10-06/fix-report-coverage-gaps.md
+?? docs/audit/dogfood-2026-10-06/review-coverage-ledger.md
+?? docs/eval/chat-technical-goldens.json
+?? docs/eval/mailbot-draft-constraints.json
+?? docs/eval/mailbot-live-matrix.json
+?? services/mail-server/crates/ai-service/tests/
+?? services/mail-server/crates/ui-foundation/src/fixture_states.rs
+?? services/mail-server/scripts/security-audit-selftest.sh
+?? services/mail-server/supply-chain/README.md
+?? tools/bots_disclosure_suite.py
+?? tools/bots_perf_budget.py
+?? tools/contrast-audit/bots-ui-dogfood.mjs
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-already-handled-flash.html
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-approved-flash.html
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-many.html
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-populated.html
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-rejected-flash.html
+?? tools/contrast-audit/fixtures/control-plane-reviews-ai-drafts-unavailable.html
+?? tools/contrast-audit/fixtures/web-assistant-disabled.html
+?? tools/contrast-audit/fixtures/web-assistant-error-flash.html
+?? tools/contrast-audit/fixtures/web-assistant-populated.html
+?? tools/contrast-audit/fixtures/web-assistant-rate-limited-flash.html
+?? tools/contrast-audit/fixtures/web-assistant-unavailable.html
+?? tools/dogfood-chatbot-live.py
+?? tools/dogfood-mailbot-live.py
+?? tools/dogfood-mailbot-mock-llm.py
+?? tools/migrations/check_archived.py
+?? tools/mock-llm/
+?? tools/run-eval-live.py

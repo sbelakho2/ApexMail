@@ -707,6 +707,38 @@ async fn load_assistant(
 ) -> ui_foundation::view_data::AssistantPageData {
     use ui_foundation::view_data::{AssistantPageData, AssistantTurnData};
 
+    // Dogfood P1: the per-tenant capability flag is the FIRST piece of page
+    // state. The JSON route has always refused a disabled workspace; the
+    // console page rendered a working-looking conversation whose every
+    // message was refused — contradicting docs/user-guide/assistant.md
+    // ("the page reports that the capability is not enabled"). A flag lookup
+    // FAILURE is the unavailable state: never a silent empty conversation,
+    // and never a rendered form for a capability whose state is unknown.
+    match state
+        .feature_flags
+        .enabled(
+            tenant,
+            crate::routes::ai_chat::AI_CHAT_FEATURE_FLAG,
+            true,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return AssistantPageData {
+                capability_disabled: true,
+                ..Default::default()
+            };
+        }
+        Err(error) => {
+            tracing::error!(error = %error, tenant = %tenant, "assistant capability flag lookup failed");
+            return AssistantPageData {
+                unavailable: true,
+                ..Default::default()
+            };
+        }
+    }
+
     let user_key = user.user_id.clone().unwrap_or_else(|| tenant.to_string());
 
     let session: Result<Option<(String, chrono::DateTime<chrono::Utc>)>, sqlx::Error> =
@@ -782,6 +814,7 @@ async fn load_assistant(
         session_id: Some(session_id),
         turns,
         unavailable: false,
+        capability_disabled: false,
     }
 }
 

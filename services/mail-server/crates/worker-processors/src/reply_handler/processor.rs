@@ -61,13 +61,23 @@ pub const CLAIM_STALENESS: &str = "10 minutes";
 /// `processing = true` forever (the previous bare boolean had no expiry).
 /// The `{claim_staleness}` placeholder is substituted with the interval
 /// built from [`CLAIM_STALENESS`] at fetch time.
+///
+/// ELIGIBILITY IS "NOT CLASSIFIED YET" (`classification IS NULL`), never
+/// `processed_at IS NULL`: the ai-service email agent writes drafts into the
+/// SAME rows and stamps `processed_at` when it does (STORE_DRAFT_SQL). With
+/// the old `processed_at IS NULL` predicate the two consumers stole each
+/// other's rows — whichever finished first made the other skip its job — so
+/// a row ended up with EITHER a classification OR a draft, never both (live
+/// mailbot dogfood 2026-10-06). Each consumer now keys on its OWN output:
+/// the worker classifies until `classification` is set, the agent drafts
+/// until `ai_response` is set; `suggested_action` is merged by both.
 const FETCH_MESSAGES_SQL: &str = r#"
             UPDATE inbound_messages
             SET processing = true, processing_at = NOW()
             WHERE id IN (
                 SELECT id
                 FROM inbound_messages
-                WHERE processed_at IS NULL
+                WHERE classification IS NULL
                   -- inbound_messages is SHARED with the MTA delivery ledger
                   -- (inbound.rs writes mail_from/rcpt_to/raw_message rows with
                   -- NULL from_email). Those rows are not reply-pipeline work:
@@ -87,7 +97,15 @@ const FETCH_MESSAGES_SQL: &str = r#"
             )
             RETURNING
                 id, tenant_id as "tenantId", lead_id as "leadId",
-                from_email as "fromEmail", to_email as "toEmail",
+                from_email as "fromEmail",
+                -- to_email is NULLABLE in the shared MTA ledger (a row can be
+                -- reply-shaped with from_email set and no parsed To: mirror —
+                -- live 2026-10-07: inb_uivisualapprove01). Decoding a NULL
+                -- into the non-Option `toEmail` made the WHOLE claim batch
+                -- fail ("database error: ... unexpected null"), so one such
+                -- row stalled every reply at every tick until its claim went
+                -- stale, then stalled it again. COALESCE, like `subject`.
+                COALESCE(to_email, '') as "toEmail",
                 COALESCE(subject, '') as subject,
                 -- O-16.5: Truncate body fields at the SQL level to enforce max_reply_size
                 LEFT(body_text, $2::int) as "bodyText",
@@ -106,6 +124,14 @@ fn claim_staleness_interval() -> String {
 /// Completion write (F2): clears the claim fully — `processing_at = NULL`
 /// next to `processing = false`, mirroring the analytics processor's
 /// `reset_processing`.
+///
+/// `suggested_action` is MERGED, never overwritten: the ai-service email
+/// agent writes its own markers into the same JSONB object
+/// (`first_response` / `first_response_request_id` / `draft_prompt_version`,
+/// `objection_class`). A wholesale `= $3` erased them whenever the worker
+/// finished after the agent had drafted, which silently demoted a
+/// first-response approval off the priority-100 lane and left the SLO's
+/// `queued_at` unstamped (live mailbot dogfood 2026-10-06).
 const MARK_PROCESSED_SQL: &str = r#"
             UPDATE inbound_messages
             SET processed_at = NOW(),
@@ -113,7 +139,7 @@ const MARK_PROCESSED_SQL: &str = r#"
                 processing_at = NULL,
                 classification = $1,
                 classification_confidence = $2,
-                suggested_action = $3,
+                suggested_action = COALESCE(suggested_action, '{}'::jsonb) || $3::jsonb,
                 action_taken = $4
             WHERE id = $5
         "#;
@@ -1366,8 +1392,17 @@ mod tests {
     fn unclaimed_rows_are_still_eligible() {
         // New rows (never claimed) must remain fetchable: the OR arm covers
         // processing = false rows regardless of processing_at.
-        assert!(FETCH_MESSAGES_SQL.contains("WHERE processed_at IS NULL"));
+        assert!(FETCH_MESSAGES_SQL.contains("WHERE classification IS NULL"));
         assert!(FETCH_MESSAGES_SQL.contains("FOR UPDATE SKIP LOCKED"));
+        // The worker must NOT key on processed_at: the ai-service agent
+        // stamps it when it drafts, and a reply that the agent answered
+        // first still owes its canonical classification (live dogfood
+        // 2026-10-06: rows ended up with either a draft or a classification,
+        // never both).
+        assert!(
+            !FETCH_MESSAGES_SQL.contains("processed_at IS NULL"),
+            "processed_at is shared with the draft agent; key on classification"
+        );
     }
 
     #[test]
@@ -2404,6 +2439,64 @@ mod tests {
         Ok(())
     }
 
+    /// Live dogfood 2026-10-07: a reply-shaped row with `from_email` set but
+    /// `to_email` NULL (the shared MTA ledger writes empty To: mirrors for
+    /// some accepted mail — live row `inb_uivisualapprove01`) made the WHOLE
+    /// claim batch fail to decode (`toEmail: unexpected null`). The claim
+    /// statement had already applied its UPDATE, so every claimed peer was
+    /// left `processing = true` and unprocessed until the staleness window,
+    /// and the poll loop logged an ERROR every tick. `toEmail` is now
+    /// COALESCEd like `subject`; such a row is claimable and decodes to "".
+    #[tokio::test]
+    async fn live_claim_decodes_a_reply_row_with_null_to_email(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_null_to_email").await else { return Ok(()) };
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+
+        // The poison row: reply-shaped, NULL to_email.
+        let poison_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, from_email, to_email, subject, body_text, received_at) \
+             VALUES ($1, $2, 'visual-audit@apexmail.local', NULL, \
+                     'Re: null to_email', 'A reply without a To: mirror.', \
+                     NOW() - INTERVAL '2 minutes')",
+        )
+        .bind(&poison_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // A well-formed peer that must be claimed in the same batch.
+        let peer_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &peer_id,
+            &tenant,
+            "replier@example.com",
+            "Re: proposal",
+            "A genuine reply.",
+            serde_json::json!({}),
+        )
+        .await;
+
+        let handler = scripted_handler(pool.clone(), ReplyDisposition::Positive, 0.9);
+        let claimed = handler.fetch_messages(10).await?;
+        let poison = claimed
+            .iter()
+            .find(|message| message.id == poison_id)
+            .expect("the NULL-to_email row must still be claimable");
+        assert_eq!(poison.to_email, "", "NULL decodes as the empty mirror");
+        assert!(
+            claimed.iter().any(|message| message.id == peer_id),
+            "the peer in the same batch must not be starved by the NULL row"
+        );
+
+        Ok(())
+    }
+
     /// §21 RELEASE GATE: a reply racing a queued send cancels the action, and
     /// the committed `has_human_reply` flag is set, so the next scheduled
     /// touch cannot race out.
@@ -2904,6 +2997,91 @@ mod tests {
 
     /// §8/§6/§4 live: deterministic DSN and OOO paths through the real
     /// processor (headers win, OOO does not cancel, hard bounce invalidates).
+    /// Live: a row the AI draft agent already answered still owes its
+    /// canonical classification. The agent stamps `processed_at` when it
+    /// drafts, so a worker claim keyed on `processed_at IS NULL` skipped
+    /// every agent-won row — live dogfood 2026-10-06 showed rows with EITHER
+    /// a draft OR a classification, never both, and the review page rendered
+    /// "not classified" for half its queue. The worker must claim by
+    /// `classification IS NULL` and MERGE its suggested_action so the
+    /// agent's first_response / draft_prompt_version markers survive.
+    #[tokio::test]
+    async fn live_agent_drafted_rows_still_get_classified() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_agent_drafted").await else { return Ok(()) };
+
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+        let fixture = seed_live_fixture(&pool, &tenant).await;
+        let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &msg_id,
+            &tenant,
+            &fixture.email,
+            "Re: intro",
+            "We are interested and would like to move ahead.",
+            serde_json::json!({}),
+        )
+        .await;
+        // The agent won the race: the draft and its markers are already
+        // there, processed_at is stamped, and the worker has not classified.
+        sqlx::query(
+            "UPDATE inbound_messages SET processed_at = NOW(), processed = true, \
+             pending_approval = true, ai_response = 'the grounded draft', \
+             suggested_action = '{\"first_response\": true, \
+                 \"first_response_request_id\": \"frr_agent_won\", \
+                 \"draft_prompt_version\": \"email-reply-v1\"}'::jsonb \
+             WHERE id = $1",
+        )
+        .bind(&msg_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+        process_message_by_id(&handler, &msg_id).await.unwrap();
+
+        let (classification, action): (Option<String>, serde_json::Value) = sqlx::query_as(
+            "SELECT classification, suggested_action FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&msg_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            classification.is_some(),
+            "an agent-drafted reply must still receive its canonical classification"
+        );
+        assert_eq!(
+            action["first_response"],
+            serde_json::json!(true),
+            "the agent's first_response marker survives the worker's merge: {action}"
+        );
+        assert_eq!(
+            action["draft_prompt_version"],
+            serde_json::json!("email-reply-v1"),
+            "the agent's prompt version survives the worker's merge: {action}"
+        );
+        assert!(
+            action["action"].is_string(),
+            "the worker's own action lands in the same object: {action}"
+        );
+        let disposition: String = sqlx::query_scalar(
+            "SELECT disposition FROM sales_reply_classifications \
+             WHERE inbound_message_id = $1 AND classifier != 'operator' \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&msg_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!disposition.is_empty());
+
+        pool.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn live_deterministic_dsn_and_ooo_paths() -> Result<(), Box<dyn std::error::Error>> {
         #[rustfmt::skip]

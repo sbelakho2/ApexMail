@@ -8,7 +8,7 @@ Use `python3 tools/fix_payg_calculations.py` directly for all PAYG fixes.
 The two scripts were consolidated because they both fixed the same class of
 PAYG calculation errors in training data. fix_payg_calculations.py was chosen
 as the canonical implementation because it uses lib/pricing.py as the single
-source of truth for pricing data.
+source of truth for pricing data (and honors the U-2b backup/dry-run guard).
 """
 
 import subprocess
@@ -17,7 +17,7 @@ import warnings
 from pathlib import Path
 
 
-def main():
+def main() -> int:
     warnings.warn(
         "fix_payg_errors.py is deprecated. "
         "Use `python3 tools/fix_payg_calculations.py` instead.",
@@ -26,16 +26,17 @@ def main():
     )
 
     script = Path(__file__).resolve().parent / "fix_payg_calculations.py"
+    # Forward flags (--dry-run) so the wrapper cannot bypass the guard.
     result = subprocess.run(
-        [sys.executable, str(script)],
+        [sys.executable, str(script), *sys.argv[1:]],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=60,
     )
     sys.stdout.write(result.stdout)
     sys.stderr.write(result.stderr)
-    sys.exit(result.returncode)
+    return result.returncode
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

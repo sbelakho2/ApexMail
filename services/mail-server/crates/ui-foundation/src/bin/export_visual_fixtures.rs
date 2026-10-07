@@ -352,6 +352,67 @@ fn export_full_route_fixtures(
         }
     }
 
+    // Bot-surface states the route-level (no-data) render cannot show —
+    // see the STATE fixture section below.
+    export_state_fixtures(out_dir, manifest)?;
+
+    Ok(())
+}
+
+// ── bot-surface STATE fixtures (dogfood 2026-10-06 ui-visual) ───────────
+//
+// `export_full_route_fixtures` renders every route's no-data fallback. On
+// the two bot surfaces that fallback is the EMPTY state, so the states the
+// owner directive calls out — the populated / long / escalated transcript,
+// a long single message, the assistant's unavailable state, its PRG flash
+// errors (rate limit / service error), the drafts queue with many rows and
+// long subjects/replies, its unavailable state and its action feedback —
+// were never inventoried by the contrast or layout gates: an unrepresented
+// state cannot fail a gate. The state DATA and renders live in
+// `ui_foundation::fixture_states` (shared with the in-crate markup gates);
+// this exporter writes one html file per state so the browser gates, which
+// walk the manifest, audit them like any page. The empty states stay
+// covered by the route-level fixtures.
+const STATE_FIXTURE_VIEWPORTS: [(&str, Viewport); 2] = [
+    (
+        "desktop",
+        Viewport {
+            width: 1440,
+            height: 900,
+        },
+    ),
+    (
+        "mobile",
+        Viewport {
+            width: 390,
+            height: 844,
+        },
+    ),
+];
+
+/// Render every bot-surface state fixture and register it in the manifest.
+fn export_state_fixtures(
+    out_dir: &Path,
+    manifest: &mut FixtureManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for fixture in &ui_foundation::fixture_states::BOT_STATE_FIXTURES {
+        let html_file = format!("{}.html", fixture.id);
+        let html = ui_foundation::fixture_states::render_bot_state(fixture.id)
+            .unwrap_or_else(|| panic!("missing renderer for state fixture {}", fixture.id));
+        write_fixture_html(out_dir, &html_file, &html)?;
+
+        for (viewport_name, viewport) in STATE_FIXTURE_VIEWPORTS {
+            manifest.fixtures.push(FixtureManifestEntry {
+                id: format!("{}-{}", fixture.id, viewport_name),
+                surface: fixture.surface,
+                route: fixture.route,
+                html_file: html_file.clone(),
+                snapshot_file: format!("{}-{}.png", fixture.id, viewport_name),
+                viewport,
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -737,5 +798,53 @@ mod tests {
         std::fs::remove_dir_all(&public).ok();
         std::fs::remove_dir_all(&out).ok();
         std::fs::remove_dir_all(&full_out).ok();
+    }
+
+    /// The bot-surface state fixtures join the full-route export: one html
+    /// file per state (distinct from the route-level empty fallback), two
+    /// viewport entries each, and no id collisions anywhere in the manifest.
+    #[test]
+    fn full_route_export_includes_every_bot_state_fixture() {
+        let out = temp_dir("bot_state_out");
+        let mut manifest = FixtureManifest {
+            fixtures: Vec::new(),
+        };
+        export_full_route_fixtures(&out, &mut manifest).expect("full export");
+
+        let ids: std::collections::HashSet<String> =
+            manifest.fixtures.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            ids.len(),
+            manifest.fixtures.len(),
+            "manifest ids must stay unique with the state fixtures added"
+        );
+
+        for fixture in &ui_foundation::fixture_states::BOT_STATE_FIXTURES {
+            for viewport in ["desktop", "mobile"] {
+                let id = format!("{}-{}", fixture.id, viewport);
+                assert!(ids.contains(&id), "{id} must be registered in the manifest");
+            }
+            let html_file = format!("{}.html", fixture.id);
+            let html = std::fs::read_to_string(out.join(&html_file))
+                .unwrap_or_else(|_| panic!("{html_file} must be written"));
+            assert!(
+                html.contains("id=\"app-main\""),
+                "{html_file} must render through the surface shell"
+            );
+        }
+
+        // The populated assistant state is materially different from the
+        // route-level empty fallback it complements.
+        let empty = std::fs::read_to_string(out.join("web-assistant.html")).expect("empty state");
+        let populated =
+            std::fs::read_to_string(out.join("web-assistant-populated.html")).expect("populated");
+        assert_ne!(
+            empty, populated,
+            "the populated state must not equal the empty fallback"
+        );
+        assert!(populated.contains("Sources"));
+        assert!(!empty.contains("Sources"));
+
+        std::fs::remove_dir_all(&out).ok();
     }
 }

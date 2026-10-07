@@ -3,7 +3,11 @@
     "tracker_name": "ApexMail Master Remediation Tracker",
     "source_document": "fixes.md",
     "created": "2026-07-29",
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "historical": true,
+    "status": "HISTORICAL — NOT ACTIVE (2026-07-29 snapshot; no task reflects current repo state)",
+    "banner": "HISTORICAL — DO NOT USE. This tracker is a 2026-07-29 snapshot whose source document (fixes.md) already carries a HISTORICAL — DO NOT USE banner. All nine tasks are frozen at status 'In development' and none reflect current repo state. Kept for archaeology only (coverage audit U-12, 2026-10-07).",
+    "superseded_by": "docs/audit/dogfood-2026-10-06/** (current audit wave) and git history"
   },
   "tasks": [
     {

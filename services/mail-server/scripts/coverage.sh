@@ -3,6 +3,7 @@
 # Rust Coverage Enforcement Script
 # ==============================================================================
 # Uses cargo-llvm-cov to generate coverage reports and enforce thresholds
+# for LINE, BRANCH and FUNCTION coverage.
 #
 # Usage:
 #   ./coverage.sh             # Run coverage for all crates
@@ -15,7 +16,12 @@
 # Exit codes:
 #   0 - All coverage thresholds met
 #   1 - Coverage below threshold
-#   2 - Tool error
+#   2 - Tool error / bad usage / no coverage data
+#
+# Security note (coverage audit U-7): the coverage command is built as an
+# argv array and executed directly — never through `eval`. Package names are
+# validated against ^[A-Za-z0-9_-]+$ so `-p 'x; rm -rf …'` cannot inject
+# shell metacharacters.
 # ==============================================================================
 
 set -euo pipefail
@@ -40,6 +46,7 @@ FAIL_UNDER_THRESHOLD=true
 while [[ $# -gt 0 ]]; do
     case $1 in
         -p|--package)
+            [ $# -ge 2 ] || { echo "ERROR: $1 requires a value" >&2; exit 2; }
             PACKAGE="$2"
             shift 2
             ;;
@@ -62,68 +69,112 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Reject shell metacharacters before they can reach any command line.
+if [ -n "$PACKAGE" ] && [[ ! "$PACKAGE" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "ERROR: invalid package name '$PACKAGE' (allowed: letters, digits, '_', '-')" >&2
+    exit 2
+fi
+
 # Check for cargo-llvm-cov
 if ! command -v cargo-llvm-cov &> /dev/null; then
     echo -e "${YELLOW}Installing cargo-llvm-cov...${NC}"
     cargo install cargo-llvm-cov
 fi
 
-# Build coverage command
-COVERAGE_CMD="cargo llvm-cov --manifest-path Cargo.toml"
+# Build coverage command as an argv array (no eval — see header).
+COVERAGE_ARGS=(llvm-cov --manifest-path Cargo.toml)
 
 if [ -n "$PACKAGE" ]; then
-    COVERAGE_CMD="$COVERAGE_CMD -p $PACKAGE"
+    COVERAGE_ARGS+=(-p "$PACKAGE")
 fi
 
 # Add output format
 OUTPUT_FILE="coverage-report"
 if $HTML_REPORT; then
-    COVERAGE_CMD="$COVERAGE_CMD --html --output-dir coverage-html"
+    COVERAGE_ARGS+=(--html --output-dir coverage-html)
     echo -e "${GREEN}Generating HTML coverage report...${NC}"
 fi
 
 if $JSON_OUTPUT; then
-    COVERAGE_CMD="$COVERAGE_CMD --json --output-path ${OUTPUT_FILE}.json"
+    COVERAGE_ARGS+=(--json --output-path "${OUTPUT_FILE}.json")
 fi
 
 # Always generate lcov for CI integration
-COVERAGE_CMD="$COVERAGE_CMD --lcov --output-path ${OUTPUT_FILE}.lcov"
+COVERAGE_ARGS+=(--lcov --output-path "${OUTPUT_FILE}.lcov")
 
 # Run coverage
 echo -e "${GREEN}Running coverage analysis...${NC}"
-echo "Command: $COVERAGE_CMD"
-eval $COVERAGE_CMD
+echo "Command: cargo ${COVERAGE_ARGS[*]}"
+cargo "${COVERAGE_ARGS[@]}"
 
-# Parse coverage from lcov file
-if [ -f "${OUTPUT_FILE}.lcov" ]; then
-    echo ""
-    echo -e "${GREEN}=== Coverage Summary ===${NC}"
-    
-    # Calculate line coverage from lcov
-    TOTAL_LINES=$(grep -E "^LF:" "${OUTPUT_FILE}.lcov" | cut -d: -f2 | paste -sd+ | bc)
-    COVERED_LINES=$(grep -E "^LH:" "${OUTPUT_FILE}.lcov" | cut -d: -f2 | paste -sd+ | bc)
-    
-    if [ "$TOTAL_LINES" -gt 0 ]; then
-        LINE_COVERAGE=$(echo "scale=2; $COVERED_LINES * 100 / $TOTAL_LINES" | bc)
+# ── Parse coverage from lcov file ────────────────────────────────────────────
+if [ ! -f "${OUTPUT_FILE}.lcov" ]; then
+    echo -e "${RED}✗ cargo-llvm-cov produced no ${OUTPUT_FILE}.lcov — coverage was not measured.${NC}" >&2
+    exit 2
+fi
+if [ ! -s "${OUTPUT_FILE}.lcov" ]; then
+    echo -e "${RED}✗ ${OUTPUT_FILE}.lcov is empty — coverage was not measured.${NC}" >&2
+    exit 2
+fi
+
+echo ""
+echo -e "${GREEN}=== Coverage Summary ===${NC}"
+
+# Portable lcov totals (awk — no GNU paste/bc dependency).
+read -r TOTAL_LINES COVERED_LINES TOTAL_BRANCHES COVERED_BRANCHES TOTAL_FUNCTIONS COVERED_FUNCTIONS <<< "$(
+    awk -F: '
+        /^LF:/  { lf += $2 }
+        /^LH:/  { lh += $2 }
+        /^BRF:/ { brf += $2 }
+        /^BRH:/ { brh += $2 }
+        /^FNF:/ { fnf += $2 }
+        /^FNH:/ { fnh += $2 }
+        END { printf "%d %d %d %d %d %d\n", lf, lh, brf, brh, fnf, fnh }
+    ' "${OUTPUT_FILE}.lcov"
+)"
+
+pct() {
+    awk -v covered="$1" -v total="$2" 'BEGIN { if (total > 0) printf "%.2f", covered * 100 / total; else printf "0" }'
+}
+ge() {
+    # true when $1 >= $2 (numeric, tolerant of decimals)
+    awk -v value="$1" -v threshold="$2" 'BEGIN { exit !(value + 0 >= threshold + 0) }'
+}
+lcov_int() {
+    local value="$1"
+    echo "${value%.*}"
+}
+
+LINE_COVERAGE="$(pct "$COVERED_LINES" "$TOTAL_LINES")"
+BRANCH_COVERAGE="$(pct "$COVERED_BRANCHES" "$TOTAL_BRANCHES")"
+FUNCTION_COVERAGE="$(pct "$COVERED_FUNCTIONS" "$TOTAL_FUNCTIONS")"
+
+echo "Lines:     $COVERED_LINES / $TOTAL_LINES ($LINE_COVERAGE%)"
+echo "Branches:  $COVERED_BRANCHES / $TOTAL_BRANCHES ($BRANCH_COVERAGE%)"
+echo "Functions: $COVERED_FUNCTIONS / $TOTAL_FUNCTIONS ($FUNCTION_COVERAGE%)"
+
+FAILED=false
+
+enforce() {
+    local label="$1" value="$2" threshold="$3"
+    if ge "$value" "$threshold"; then
+        echo -e "${GREEN}✓ ${label} coverage ${value}% meets threshold ${threshold}%${NC}"
     else
-        LINE_COVERAGE=0
-    fi
-    
-    echo "Lines:    $COVERED_LINES / $TOTAL_LINES ($LINE_COVERAGE%)"
-    
-    # Check against threshold
-    LINE_COV_INT=${LINE_COVERAGE%.*}
-    if [ "$LINE_COV_INT" -lt "$MIN_LINE_COVERAGE" ]; then
-        echo -e "${RED}✗ Line coverage ${LINE_COVERAGE}% is below threshold ${MIN_LINE_COVERAGE}%${NC}"
+        echo -e "${RED}✗ ${label} coverage ${value}% is below threshold ${threshold}%${NC}"
         if $FAIL_UNDER_THRESHOLD; then
             FAILED=true
         fi
-    else
-        echo -e "${GREEN}✓ Line coverage ${LINE_COVERAGE}% meets threshold ${MIN_LINE_COVERAGE}%${NC}"
     fi
-    
-    # Generate summary JSON
-    cat > "${OUTPUT_FILE}-summary.json" << EOF
+}
+
+# All three dimensions are enforced; lcov without branch/function records
+# reports 0% and fails rather than passing vacuously.
+enforce "Line" "$LINE_COVERAGE" "$MIN_LINE_COVERAGE"
+enforce "Branch" "$BRANCH_COVERAGE" "$MIN_BRANCH_COVERAGE"
+enforce "Function" "$FUNCTION_COVERAGE" "$MIN_FUNCTION_COVERAGE"
+
+# Generate summary JSON
+cat > "${OUTPUT_FILE}-summary.json" << EOF
 {
   "generated_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
   "thresholds": {
@@ -136,14 +187,23 @@ if [ -f "${OUTPUT_FILE}.lcov" ]; then
       "total": $TOTAL_LINES,
       "covered": $COVERED_LINES,
       "percentage": $LINE_COVERAGE
+    },
+    "branches": {
+      "total": $TOTAL_BRANCHES,
+      "covered": $COVERED_BRANCHES,
+      "percentage": $BRANCH_COVERAGE
+    },
+    "functions": {
+      "total": $TOTAL_FUNCTIONS,
+      "covered": $COVERED_FUNCTIONS,
+      "percentage": $FUNCTION_COVERAGE
     }
   },
-  "passed": $(if [ "${LINE_COV_INT:-0}" -ge "$MIN_LINE_COVERAGE" ]; then echo "true"; else echo "false"; fi)
+  "passed": $([ "$FAILED" = true ] && echo "false" || echo "true")
 }
 EOF
-    echo ""
-    echo "Summary written to ${OUTPUT_FILE}-summary.json"
-fi
+echo ""
+echo "Summary written to ${OUTPUT_FILE}-summary.json"
 
 # Report HTML location
 if $HTML_REPORT && [ -d "coverage-html" ]; then

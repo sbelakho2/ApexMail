@@ -6,6 +6,13 @@
 //! platform's verified system sender — `queue_system_email`, attributed to
 //! the system tenant that owns the sending domain) or reject them.
 //!
+//! Consent guarantee (F4, live-mailbot dogfood): an AI-composed reply is a
+//! MARKETING-class send (`email_queue.message_category` defaults to
+//! 'marketing'), so approval runs the SAME shared send-admission consent gate
+//! as the REST send path. A recipient without an ACTIVE marketing consent
+//! record is refused with the enforcer's named reason; the claim rolls back,
+//! nothing is queued, and the draft stays pending and recoverable.
+//!
 //! Audit guarantee (external-audit P1): every decision's evidence is written
 //! INSIDE the transaction that applies the decision, and its failure aborts
 //! the decision — approve (claim + queued reply + audit row) and reject
@@ -245,6 +252,74 @@ pub(crate) async fn approve_draft_core(
         return Err(ApiError::Validation(vec![
             "draft is missing tenant or sender; reject it instead".into(),
         ]));
+    }
+
+    // F4 (live-mailbot dogfood): an approved AI reply is a MARKETING-class
+    // send — `email_queue.message_category` is NOT NULL DEFAULT 'marketing',
+    // and this path never asked for a narrower category. The REST send path
+    // runs the shared send-admission consent gate ([`SendAdmissionService::
+    // enforce_consent`]) before it queues; this approval is the same kind of
+    // recipient-carrying admission, so it must run the same gate, or an
+    // approved reply could mail a recipient with NO marketing consent on
+    // file. The check runs INSIDE the claim's transaction and a refusal (or
+    // an unavailable consent store — fail closed) rolls the claim back:
+    // nothing is consumed, nothing is queued, and the draft stays pending for
+    // review. The refusal is still durable decision evidence via the
+    // committed best-effort write below, exactly like the unroutable-draft
+    // refusal.
+    let admission = billing_service::send_admission::SendAdmissionService::new(
+        std::sync::Arc::new(
+            billing_service::send_admission::PostgresAdmissionBackend::new(
+                state.db.clone(),
+                state.redis.clone(),
+            ),
+        ),
+    );
+    let category = apexmail_lib::email_headers::message_category::MARKETING;
+    {
+        match admission
+            .enforce_consent(&tenant_id, std::slice::from_ref(&from_email), category)
+            .await
+        {
+            Ok(()) => {}
+            Err(billing_service::send_admission::SendAdmissionError::ConsentRefused {
+                email,
+                reason,
+            }) => {
+                let _ = tx.rollback().await;
+                let refusal = format!("marketing consent required for {email}: {reason}");
+                crate::audit_log::insert_audit_log_best_effort_with_env(
+                    &state.db,
+                    state.config.environment.is_production(),
+                    Some(auth.tenant_id.as_str()),
+                    auth.user_id.as_deref(),
+                    "control_plane.ai_draft.approval_refused",
+                    "ai_draft",
+                    Some(&id),
+                    serde_json::json!({
+                        "note": note,
+                        "reason": refusal,
+                        "routedTenantId": tenant_id,
+                        "recipient": email,
+                    }),
+                    None,
+                    None,
+                )
+                .await;
+                return Err(ApiError::Validation(vec![refusal]));
+            }
+            Err(error) => {
+                // FAIL CLOSED: a consent store we cannot read is never
+                // permission to send. The claim rolls back and the draft
+                // stays pending and approvable once the store recovers.
+                let _ = tx.rollback().await;
+                tracing::error!(error = %error, draft_id = %id, "approve: consent lookup failed");
+                return Err(ApiError::Internal(
+                    "could not verify the recipient's marketing consent; draft still pending"
+                        .into(),
+                ));
+            }
+        }
     }
 
     // P1-4: route through the platform's verified system sender. The
@@ -763,6 +838,26 @@ mod approval_http_tests {
         .expect("seed system sender");
     }
 
+    /// Grant an ACTIVE marketing consent record for `recipient` under
+    /// `tenant`. The shared send admission refuses a marketing-class send for
+    /// a recipient without one (`ConsentEnforcer` reads exactly this row).
+    async fn grant_marketing_consent(pool: &sqlx::PgPool, tenant: &str, recipient: &str) {
+        sqlx::query(
+            "INSERT INTO consent_records \
+                 (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source) \
+             VALUES ($1, $2, $3, $4, 'marketing', true, NOW(), 'dogfood-test') \
+             ON CONFLICT (tenant_id, subscriber_id, consent_type) DO UPDATE SET \
+                 granted = true, granted_at = NOW(), revoked_at = NULL, email = EXCLUDED.email",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .bind(format!("sub-{tenant}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]))
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("grant marketing consent");
+    }
+
     async fn seed_pending_draft(db: &sqlx::PgPool, id: &str, tenant: &str, from_email: &str) {
         sqlx::query(
             "INSERT INTO inbound_messages
@@ -811,6 +906,8 @@ mod approval_http_tests {
                 "lead-{}@corp.example",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             );
+            // F4: the shared send-admission consent gate runs on approval.
+            grant_marketing_consent(&pool, tenant, &from_email).await;
 
             // The request this draft answers. It is seeded in the state the
             // MAILBOT leaves it in ('drafted' — the AI wrote the reply and
@@ -946,6 +1043,10 @@ mod approval_http_tests {
                 "buyer@corp.example",
             )
             .await;
+            // F4: approvals run the shared send-admission consent gate; the
+            // fixture recipient needs an active marketing consent record.
+            grant_marketing_consent(&pool, "ten_probe_0000000000000000", "buyer@corp.example")
+                .await;
             let broken = draft_id();
             seed_pending_draft(&pool, &broken, "", "").await;
 
@@ -1050,6 +1151,81 @@ mod approval_http_tests {
         });
     }
 
+    /// The shared send-admission consent gate (F4) applies to AI-draft
+    /// approvals: an AI-composed reply is a MARKETING-class send, so a
+    /// recipient with no active marketing consent record must be REFUSED with
+    /// the enforcer's named reason — the draft stays pending (nothing
+    /// consumed), nothing is queued and nothing can reach Mailpit. The same
+    /// draft then approves cleanly once an active consent record exists.
+    #[test]
+    fn approve_refuses_without_marketing_consent_and_stays_recoverable() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_consent").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let tenant = "ten_consent_gate_000000";
+            let recipient = format!(
+                "no-consent-{}@corp.example",
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            let id = draft_id();
+            seed_pending_draft(&pool, &id, tenant, &recipient).await;
+
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.to_string().contains("marketing consent"),
+                "the refusal must carry the enforcer's named reason: {body}"
+            );
+
+            // Nothing was consumed and nothing was queued.
+            let pending: bool = sqlx::query_scalar(
+                "SELECT pending_approval FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("draft row");
+            assert!(
+                pending,
+                "a consent-refused approval must not consume the draft"
+            );
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM email_queue WHERE lower(\"to\") = lower($1)",
+            )
+            .bind(&recipient)
+            .fetch_one(&pool)
+            .await
+            .expect("queue count");
+            assert_eq!(queued, 0, "a consent-refused approval must not queue a reply");
+
+            // An active marketing consent record makes the same draft approvable.
+            grant_marketing_consent(&pool, tenant, &recipient).await;
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["approved"], true, "{body}");
+
+            pool.close().await;
+        });
+    }
+
     /// When the system sender cannot be proven ready the enqueue fails and
     /// the approval rolls back: the draft stays pending and recoverable,
     /// and the route answers 500 (an operator-visible failure), not 200.
@@ -1068,6 +1244,9 @@ mod approval_http_tests {
             "buyer@corp.example",
         )
         .await;
+        // F4: consent is granted so the armed failure really is the sender
+        // readiness arm, not the consent gate.
+        grant_marketing_consent(&pool, "ten_probe_0000000000000000", "buyer@corp.example").await;
 
         let (status, body) = env
             .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
@@ -1126,6 +1305,10 @@ mod approval_http_tests {
                 "buyer@corp.example",
             )
             .await;
+            // F4: approvals run the shared send-admission consent gate; the
+            // fixture recipient needs an active marketing consent record.
+            grant_marketing_consent(&pool, "ten_probe_0000000000000000", "buyer@corp.example")
+                .await;
 
             // The first write to `audit_logs` — the decision-evidence INSERT
             // inside the approval transaction — fails.
@@ -1222,6 +1405,10 @@ mod approval_http_tests {
                 "buyer@corp.example",
             )
             .await;
+            // F4: approvals run the shared send-admission consent gate; the
+            // fixture recipient needs an active marketing consent record.
+            grant_marketing_consent(&pool, "ten_probe_0000000000000000", "buyer@corp.example")
+                .await;
 
             let (status, body) = env
                 .post(

@@ -1,0 +1,194 @@
+{
+  "_comment": "Console-assistant technical-knowledge goldens. Checked by tools/check_eval_corpora.py: every required entry must appear in the PUBLISHED docs tree (docs/api, docs/sending, docs/user-guide, docs/sla.md, docs/pricing.md) — the assistant may not assert an endpoint, limit, event name or error code the docs do not carry; every forbidden numeric token must not be a canonical catalog value. Replayed live by tools/run-eval-live.py. These questions are retrieval-dependent: when the docs index is unavailable an honest escalation is reported as DEGRADED (live.allow_escalation), never as a pass.",
+  "cases": [
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I send a transactional email with the API?",
+      "must_contain": ["POST /v1/messages"],
+      "must_not_contain": ["POST /v2/messages", "/v1/send"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I list the messages I have sent?",
+      "must_contain": ["GET /v1/messages"],
+      "must_not_contain": ["/v1/messages/all"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I cancel a scheduled message?",
+      "must_contain": ["/v1/messages/:id/cancel"],
+      "must_not_contain": ["/v1/messages/cancel"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "Is there a batch send endpoint?",
+      "must_contain": ["/v1/messages/batch"],
+      "must_not_contain": ["/v1/batch/send"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I manage my sending domains through the API?",
+      "must_contain": ["/v1/domains"],
+      "must_not_contain": ["/v1/sender-domains"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I register a webhook endpoint?",
+      "must_contain": ["POST /v1/webhooks"],
+      "must_not_contain": ["/v1/hooks"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "How do I manage the suppression list through the API?",
+      "must_contain": ["/v1/suppressions"],
+      "must_not_contain": ["/v1/blocklist"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-api-endpoints",
+      "question": "Which API base path do analytics queries use?",
+      "must_contain": ["/v1/analytics"],
+      "must_not_contain": ["/v2/analytics"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-params",
+      "question": "How do I authenticate my API requests?",
+      "must_contain": ["X-API-Key"],
+      "must_not_contain": ["query string password", "?api_key="],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-params",
+      "question": "How does idempotent sending work?",
+      "must_contain": ["Idempotency-Key", "24 hours"],
+      "must_not_contain": ["never expires"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-params",
+      "question": "How do I paginate a list endpoint?",
+      "must_contain": ["limit"],
+      "must_not_contain": ["offset-only"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-params",
+      "question": "How do I attach a file to a message?",
+      "must_contain": ["attachments"],
+      "must_not_contain": ["link only"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-limits",
+      "question": "What are the API rate limits per plan tier?",
+      "must_contain": ["10", "100", "500", "5,000"],
+      "must_not_contain": ["unlimited requests"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-limits",
+      "question": "What happens when I hit the API rate limit?",
+      "must_contain": ["429", "RATE_LIMIT_EXCEEDED"],
+      "must_not_contain": ["connection closed", "account suspended"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-limits",
+      "question": "Which response headers tell me my rate limit status?",
+      "must_contain": ["X-RateLimit-Limit", "Retry-After"],
+      "must_not_contain": ["X-Rate-Limit-Budget"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-limits",
+      "question": "How long is assistant chat history retained?",
+      "must_contain": ["90 days"],
+      "must_not_contain": ["forever"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-sdks",
+      "question": "Which SDK languages are available?",
+      "must_contain": ["Python", "Go", "PHP", "Ruby", "Java"],
+      "must_not_contain": ["Node.js"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-sdks",
+      "question": "How do I install the Python SDK from PyPI?",
+      "must_contain": ["not yet published"],
+      "must_not_contain": ["pip install works today"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-webhooks",
+      "question": "Which webhook event types can I subscribe to?",
+      "must_contain": ["message.accepted", "message.delivered", "message.bounced", "message.opened", "message.clicked", "message.complained", "recipient.unsubscribed", "message.inbound"],
+      "must_not_contain": ["message.queued"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-webhooks",
+      "question": "How are failed webhook deliveries retried?",
+      "must_contain": ["exponential backoff", "Retry-After"],
+      "must_not_contain": ["no retries"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-webhooks",
+      "question": "How do I verify that a webhook came from ApexMail?",
+      "must_contain": ["signature"],
+      "must_not_contain": ["trust the payload"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-errors",
+      "question": "What does the 422 DOMAIN_NOT_VERIFIED error mean?",
+      "must_contain": ["DOMAIN_NOT_VERIFIED"],
+      "must_not_contain": ["500 error"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-errors",
+      "question": "What error code means a resource does not exist?",
+      "must_contain": ["NOT_FOUND", "404"],
+      "must_not_contain": ["MISSING_RESOURCE"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-errors",
+      "question": "What error do I get when I exceed my quota?",
+      "must_contain": ["QUOTA_EXCEEDED"],
+      "must_not_contain": ["QUOTA_OVER"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-errors",
+      "question": "What shape does an API error response have?",
+      "must_contain": ["error", "code", "message"],
+      "must_not_contain": ["plain text stack trace"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-smtp",
+      "question": "What SMTP ports does ApexMail support?",
+      "must_contain": ["587", "465"],
+      "must_not_contain": ["port 110"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    },
+    {
+      "category": "tech-smtp",
+      "question": "What is the ApexMail SMTP host?",
+      "must_contain": ["smtp.apexmail.ee"],
+      "must_not_contain": ["mail.example.com"],
+      "live": {"mode": "facts", "allow_escalation": true}
+    }
+  ]
+}

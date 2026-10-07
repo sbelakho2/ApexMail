@@ -11,8 +11,10 @@ rule as authoritative.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -881,37 +883,362 @@ def validate_built_output(errors: list[str]) -> None:
 
 
 
+# ── tools/lib/pricing.py mirror: STRUCTURAL per-field comparison ──────────
+# The old check was a token scan over the whole file ("3000"/"3,000"/"3_000"
+# anywhere), so DEDICATED_IP_PRICE_CENTS = 3_000 satisfied it while the Free
+# row said 30_000, and no other plan field was pinned at all. This compares
+# the REAL parsed numbers, per plan, per field.
+
+MIRROR_PRICING = ROOT / "tools/lib/pricing.py"
+
+MIRROR_FIELD_MAP: tuple[tuple[str, str], ...] = (
+    ("price_cents", "monthly_cents"),
+    ("price_yearly_cents", "yearly_cents"),
+    ("emails", "email_limit"),
+    ("api_calls", "api_call_limit"),
+    ("domains", "domains"),
+    ("team", "team_members"),
+    ("retention_days", "retention_days"),
+)
+
+
+def exec_mirror(source: str, label: str) -> Any | None:
+    """Execute tools/lib/pricing.py source in a throwaway module namespace."""
+    module = types.ModuleType(label)
+    module.__dict__["__file__"] = label
+    try:
+        exec(compile(source, label, "exec"), module.__dict__)
+    except Exception as error:  # noqa: BLE001 - any failure is a gate failure
+        return None
+    return module
+
+
+def extract_catalog_payg_tiers(source: str) -> list[tuple[int, int]]:
+    """[(upper_inclusive, millicents per email)] from the canonical catalog."""
+    match = re.search(
+        r"PAYG_TIERS_EUR_PER_EMAIL[^=]*=\s*&\[(.*?)\];", source, re.S
+    )
+    if match is None:
+        raise ValueError("PAYG_TIERS_EUR_PER_EMAIL not found in platform-catalog")
+    tiers: list[tuple[int, int]] = []
+    for upper, rate in re.findall(r"\((i64::MAX|\d[\d_]*),\s*([\d.]+)\)", match.group(1)):
+        bound = math.inf if upper == "i64::MAX" else int(upper.replace("_", ""))
+        tiers.append((bound, int(round(float(rate) * 100_000))))
+    if not tiers:
+        raise ValueError("no PAYG tiers parsed from platform-catalog")
+    return tiers
+
+
+def validate_mirror_rows(
+    catalog: dict[str, ParsedPlan],
+    rows: Any,
+    overage_millicents: dict[str, int | None],
+    errors: list[str],
+    label: str = "tools/lib/pricing.py",
+) -> None:
+    """Per-plan, per-field comparison of a mirror PLANS mapping."""
+    if not isinstance(rows, dict):
+        errors.append(f"{label} PLANS must be a dict, got {type(rows).__name__}")
+        return
+    if set(rows) != set(catalog):
+        errors.append(
+            f"{label} plan ids drift: expected {sorted(catalog)}, got {sorted(rows)}"
+        )
+    for plan_id, runtime in catalog.items():
+        row = rows.get(plan_id)
+        if not isinstance(row, dict):
+            errors.append(f"{label} has no row for plan {plan_id!r}")
+            continue
+        for mirror_field, runtime_field in MIRROR_FIELD_MAP:
+            expected = getattr(runtime, runtime_field)
+            value = row.get(mirror_field)
+            check(
+                value == expected,
+                f"{label} {plan_id}.{mirror_field} drift: expected {expected!r}, got {value!r}",
+                errors,
+            )
+        expected_overage = overage_millicents.get(plan_id)
+        value = row.get("overage_millicents_per_email")
+        check(
+            value == expected_overage,
+            f"{label} {plan_id}.overage_millicents_per_email drift: "
+            f"expected {expected_overage!r}, got {value!r}",
+            errors,
+        )
+
+
+def validate_pricing_mirror(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    """The Python mirror must equal the canonical catalog, field by field."""
+    if not MIRROR_PRICING.exists():
+        errors.append("tools/lib/pricing.py (declared tools mirror) is missing")
+        return
+    source = read(MIRROR_PRICING)
+    module = exec_mirror(source, "tools/lib/pricing.py")
+    if module is None:
+        errors.append("tools/lib/pricing.py cannot be executed (syntax/import error)")
+        return
+
+    try:
+        overage_rates = extract_catalog_overage_rates(read(PLATFORM_CATALOG))
+    except (ValueError, RuntimeError) as error:
+        errors.append(f"cannot parse canonical overage rates: {error}")
+        overage_rates = {}
+    overage_millicents = {
+        plan_id: (None if rate is None else int(round(rate * 100)))
+        for plan_id, rate in overage_rates.items()
+    }
+
+    validate_mirror_rows(catalog, getattr(module, "PLANS", None), overage_millicents, errors)
+
+    # PAYG tiers: mirror must carry the canonical ladder (millicents/email).
+    try:
+        expected_tiers = extract_catalog_payg_tiers(read(PLATFORM_CATALOG))
+    except (ValueError, RuntimeError) as error:
+        errors.append(f"cannot parse canonical PAYG tiers: {error}")
+    else:
+        mirror_tiers = getattr(module, "PAYG_TIERS_MILLICENTS", None)
+        normalized = None
+        if isinstance(mirror_tiers, (tuple, list)):
+            normalized = [
+                (math.inf if bound == float("inf") else int(bound), int(rate))
+                for bound, rate in mirror_tiers
+            ]
+        check(
+            normalized == expected_tiers,
+            f"tools/lib/pricing.py PAYG_TIERS_MILLICENTS drift: "
+            f"expected {expected_tiers}, got {normalized}",
+            errors,
+        )
+
+    # Dedicated-IP ladder (EUR 49 first / 69 additional from explorer.rs).
+    addon = extract_dedicated_ip_addon(errors)
+    if addon is not None:
+        first_cents = int(round(addon[0] * 100))
+        additional_cents = int(round(addon[1] * 100))
+        check(
+            getattr(module, "DEDICATED_IP_FIRST_CENTS", None) == first_cents,
+            f"tools/lib/pricing.py DEDICATED_IP_FIRST_CENTS drift: expected {first_cents}",
+            errors,
+        )
+        check(
+            getattr(module, "DEDICATED_IP_ADDITIONAL_CENTS", None) == additional_cents,
+            f"tools/lib/pricing.py DEDICATED_IP_ADDITIONAL_CENTS drift: expected {additional_cents}",
+            errors,
+        )
+
+    # Currency discipline: EUR only, never USD.
+    check("$" not in source, "tools/lib/pricing.py must not carry USD prices", errors)
+    check("€" in source or "EUR" in source,
+          "tools/lib/pricing.py must state EUR as the currency", errors)
+
+
+# Historical (pre-2026-09-08) mirror values — the mutation fixture for the
+# self-test. The comparison MUST reject this table (it is what the gate
+# silently accepted before U-3).
+STALE_MIRROR_ROWS: dict[str, dict] = {
+    "free": {"price_cents": 0, "price_yearly_cents": 0, "emails": 30_000, "api_calls": 300_000,
+             "domains": 1, "team": 1, "retention_days": 7, "overage_millicents_per_email": 40},
+    "starter": {"price_cents": 2_500, "price_yearly_cents": 25_000, "emails": 50_000, "api_calls": 500_000,
+                "domains": 5, "team": 5, "retention_days": 30, "overage_millicents_per_email": 40},
+    "pro": {"price_cents": 6_500, "price_yearly_cents": 65_000, "emails": 150_000, "api_calls": 2_000_000,
+            "domains": 25, "team": 10, "retention_days": 60, "overage_millicents_per_email": 40},
+    "growth": {"price_cents": 15_000, "price_yearly_cents": 150_000, "emails": 500_000, "api_calls": 5_000_000,
+               "domains": 100, "team": 25, "retention_days": 90, "overage_millicents_per_email": 40},
+    "scale": {"price_cents": 35_000, "price_yearly_cents": 350_000, "emails": 2_000_000, "api_calls": 20_000_000,
+              "domains": -1, "team": 50, "retention_days": 365, "overage_millicents_per_email": 40},
+    "enterprise": {"price_cents": 300_000, "price_yearly_cents": 3_000_000, "emails": 5_000_000,
+                   "api_calls": -1, "domains": -1, "team": -1, "retention_days": 730,
+                   "overage_millicents_per_email": 40},
+    "payg": {"price_cents": 0, "price_yearly_cents": 0, "emails": -1, "api_calls": -1,
+             "domains": 5, "team": 5, "retention_days": 30, "overage_millicents_per_email": None},
+}
+
+
+def mirror_self_test(catalog: dict[str, ParsedPlan], verbose: bool = False) -> list[str]:
+    """Mutation proof: the structural comparison rejects stale/mutated rows.
+
+    Returns the list of checks that failed to detect drift (empty = healthy).
+    """
+    failures: list[str] = []
+
+    def rate_map() -> dict[str, int | None]:
+        try:
+            rates = extract_catalog_overage_rates(read(PLATFORM_CATALOG))
+        except (ValueError, RuntimeError):
+            return {}
+        return {p: (None if r is None else int(round(r * 100))) for p, r in rates.items()}
+
+    # 1. A single-field mutation (the ledger's reproduction: Free emails
+    #    30_000 while the catalog says 3_000) must produce an error.
+    single_field_errors: list[str] = []
+    module = exec_mirror(read(MIRROR_PRICING), "tools/lib/pricing.py")
+    if module is not None and isinstance(getattr(module, "PLANS", None), dict):
+        rows = {
+            plan: dict(row) if isinstance(row, dict) else row
+            for plan, row in module.PLANS.items()
+        }
+        if "free" in rows and isinstance(rows["free"], dict):
+            rows["free"]["emails"] = 30_000
+            validate_mirror_rows(catalog, rows, rate_map(), single_field_errors)
+            if not any("free.emails" in error for error in single_field_errors):
+                failures.append("single-field Free emails=30_000 mutation was not detected")
+        else:
+            failures.append("mirror has no 'free' row to mutate")
+
+    # 2. The whole historical (pre-2026-09-08) stale table must be rejected.
+    stale_errors: list[str] = []
+    validate_mirror_rows(catalog, STALE_MIRROR_ROWS, rate_map(), stale_errors)
+    if len(stale_errors) < 6:
+        failures.append(
+            f"historical stale mirror produced only {len(stale_errors)} errors (expected >= 6)"
+        )
+    if verbose:
+        print(
+            "mirror self-test: Free emails=30_000 mutation detected by "
+            f"{len(single_field_errors)} error(s); historical stale table detected by "
+            f"{len(stale_errors)} per-field error(s)"
+        )
+    return failures
+
+
+def _load_training_profiles() -> tuple[dict[str, Any] | None, list[str]]:
+    """Parse EXTENDED_PROFILES out of the AI-training profile file."""
+    errors: list[str] = []
+    profiles = ROOT / "apps/ai/training/new_customer_profiles.py"
+    if not profiles.exists():
+        return None, ["apps/ai/training/new_customer_profiles.py is missing"]
+    import ast
+
+    source = read(profiles)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        return None, [f"apps/ai/training/new_customer_profiles.py is not valid Python: {error}"]
+    profiles_data = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "EXTENDED_PROFILES" for target in node.targets
+        ):
+            try:
+                profiles_data = ast.literal_eval(node.value)
+            except ValueError as error:
+                return None, [f"EXTENDED_PROFILES is not a literal: {error}"]
+    if not isinstance(profiles_data, dict):
+        return None, ["EXTENDED_PROFILES dict not found in the training profiles"]
+    return profiles_data, errors
+
+
+def _runtime_plan_for_profile(profile: dict[str, Any], catalog: dict[str, ParsedPlan]) -> ParsedPlan | None:
+    plan_name = str(profile.get("plan_name", "")).lower()
+    for plan_id, plan in catalog.items():
+        if plan_name in (plan_id, plan.display_name.lower()):
+            return plan
+    return None
+
+
+def _profile_expectations(runtime: ParsedPlan) -> dict[str, str]:
+    """Canonical string form of every plan fact the profiles restate."""
+    expected_price = str(runtime.monthly_cents // 100) if runtime.monthly_cents % 100 == 0 \
+        else f"{runtime.monthly_cents / 100:.2f}"
+    return {
+        "email_limit": f"{runtime.email_limit:,}",
+        "plan_price": expected_price,
+        "api_call_limit": "Unlimited" if runtime.api_call_limit == -1 else f"{runtime.api_call_limit:,}",
+        "team_limit": "Unlimited" if runtime.team_members == -1 else str(runtime.team_members),
+    }
+
+
+def training_profile_errors(
+    profile_name: str, profile: dict[str, Any], runtime: ParsedPlan
+) -> list[str]:
+    """Per-field comparison of one profile against the parsed catalog row.
+
+    Only fields the profile actually carries are compared, so a profile is
+    free to omit a fact; a field it states must be canonical.
+    """
+    errors: list[str] = []
+    for field, expected in _profile_expectations(runtime).items():
+        if field not in profile:
+            continue
+        check(
+            profile.get(field) == expected,
+            f"training profile {profile_name} ({runtime.display_name}) {field} drift: "
+            f"expected {expected!r}, got {profile.get(field)!r}",
+            errors,
+        )
+    return errors
+
+
+def validate_training_profiles(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    """Every pricing/limit fact restated in the AI-training profiles vs the catalog.
+
+    Runs in the DEFAULT gate (wired 2026-10-07 by the residual-fix wave): the
+    file previously carried pre-2026-09-08 prices/limits (19 drifts) while an
+    earlier validator *asserted* those stale values as canonical. The profiles
+    are now canonical, and any future drift fails `validate_pricing_drift.py`
+    — the same gate run by ci/stages/validate.sh and scripts/consistency-test.sh.
+    `--check-training-profiles` is retained as a no-op compatibility flag.
+    """
+    profiles_data, load_errors = _load_training_profiles()
+    errors.extend(load_errors)
+    if profiles_data is None:
+        return
+    for profile_name, profile in profiles_data.items():
+        if not isinstance(profile, dict):
+            continue
+        runtime = _runtime_plan_for_profile(profile, catalog)
+        if runtime is None:
+            continue
+        errors.extend(training_profile_errors(profile_name, profile, runtime))
+
+
+def training_profiles_self_test(catalog: dict[str, ParsedPlan], verbose: bool = False) -> list[str]:
+    """Mutation proof for `validate_training_profiles`.
+
+    For every profile and every canonical field it states, replace the value
+    with a sentinel and require the comparison to report exactly that field.
+    Run on every invocation so the profile gate is self-proving: if the
+    comparison ever goes vacuous, the main gate turns red.
+    """
+    failures: list[str] = []
+    profiles_data, load_errors = _load_training_profiles()
+    if profiles_data is None:
+        return [f"cannot load training profiles: {error}" for error in load_errors]
+    checked = 0
+    mutation_proofs = 0
+    for profile_name, profile in profiles_data.items():
+        if not isinstance(profile, dict):
+            continue
+        runtime = _runtime_plan_for_profile(profile, catalog)
+        if runtime is None:
+            continue
+        checked += 1
+        for field in _profile_expectations(runtime):
+            mutated = dict(profile)
+            mutated[field] = "\x00drift\x00"
+            detected = training_profile_errors(profile_name, mutated, runtime)
+            if not any(field in error for error in detected):
+                failures.append(
+                    f"training profile {profile_name}: mutated {field} was not detected"
+                )
+            else:
+                mutation_proofs += 1
+    if checked == 0:
+        failures.append("no training profile matched a parsed catalog plan")
+    if verbose and not failures:
+        print(
+            f"training-profile self-test: {mutation_proofs} field mutations across "
+            f"{checked} profiles detected"
+        )
+    return failures
+
+
 def validate_extended_artifacts(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
     """Cover the artifacts that historically drifted while this validator
     passed: the tools/ pricing mirror, the training corpus fixtures, and the
     marketing feature bullets (retention, limits) that the card checks never
     read."""
-    mirror = ROOT / "tools/lib/pricing.py"
-    if not mirror.exists():
-        check(False, "tools/lib/pricing.py (declared single source of truth) is missing", errors)
-    else:
-        source = read(mirror)
-        free = catalog.get("free")
-        enterprise = catalog.get("enterprise")
-        if free is not None:
-            plain = str(free.email_limit)
-            grouped = f"{free.email_limit:,}"
-            underscore = f"{free.email_limit:_}"
-            check(
-                f'"Free":' in source and (plain in source or grouped in source or underscore in source),
-                f"tools/lib/pricing.py Free email limit must be {free.email_limit} (was drifted to 3,000)",
-                errors,
-            )
-        if enterprise is not None:
-            check(
-                '"api_calls": -1' in source or '"api_calls": -1,' in source,
-                "tools/lib/pricing.py Enterprise API calls must be unlimited (-1), not a finite number",
-                errors,
-            )
-        check("$" not in source.replace("$0.001", "").replace("$", ""),
-              "tools/lib/pricing.py must not carry USD prices", errors)
-        check("€" in source or "EUR" in source,
-              "tools/lib/pricing.py must state EUR as the currency", errors)
+    validate_pricing_mirror(catalog, errors)
 
     payg_fix = ROOT / "tools/fix_payg_calculations.py"
     if payg_fix.exists():
@@ -919,15 +1246,14 @@ def validate_extended_artifacts(catalog: dict[str, ParsedPlan], errors: list[str
         check("€" in source, "tools/fix_payg_calculations.py must quote EUR amounts", errors)
         check("$" not in source, "tools/fix_payg_calculations.py must not write USD amounts", errors)
 
-    profiles = ROOT / "apps/ai/training/new_customer_profiles.py"
-    if profiles.exists():
-        source = read(profiles)
-        check('"email_limit": "30,000"' in source,
-              "training profiles must carry the canonical Free limit 30,000", errors)
-        check('"api_call_limit": "300,000"' in source,
-              "training profiles must carry the canonical Free API limit 300,000", errors)
-        check("$" not in source,
-              "training profiles must not quote USD prices (platform is EUR-only)", errors)
+    # NOTE 2026-10-07 (coverage audit U-2b adjacent, fixed by the residual
+    # wave): the old block here ASSERTED the stale values in
+    # apps/ai/training/new_customer_profiles.py ("email_limit": "30,000") as
+    # canonical. That file had 19 pre-2026-09-08 prices/limits; it now carries
+    # the canonical catalog facts and `validate_training_profiles` (run in the
+    # DEFAULT gate, below) compares every field it states — plan_price,
+    # email_limit, api_call_limit, team_limit — against the parsed catalog.
+    # The `--check-training-profiles` flag is a retained no-op for callers.
 
     # Marketing feature bullets: retention is a runtime plan feature
     # (max_retention_days) and was published as 365 against 730.
@@ -957,8 +1283,24 @@ def validate_extended_artifacts(catalog: dict[str, ParsedPlan], errors: list[str
                     )
 
 def main() -> int:
+    self_test_only = "--self-test" in sys.argv[1:]
     errors: list[str] = []
     catalog = validate_runtime_catalog(errors)
+
+    if self_test_only:
+        if not catalog:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        failures = mirror_self_test(catalog, verbose=True)
+        failures += training_profiles_self_test(catalog, verbose=True)
+        for failure in failures:
+            print(f"pricing-drift self-test FAIL: {failure}", file=sys.stderr)
+        if failures:
+            return 1
+        print("pricing-drift self-test passed (mirror and training-profile mutations are detected)")
+        return 0
+
     if catalog:
         validate_pricing_reference(catalog, errors)
         validate_marketing_data(catalog, errors)
@@ -966,10 +1308,23 @@ def main() -> int:
     validate_canonical_artifacts(errors)
     if catalog:
         validate_extended_artifacts(catalog, errors)
+        # The mirror comparison must be able to fail. Running the mutation
+        # proof on every invocation keeps this gate self-proving: if the
+        # structural check ever becomes vacuous, this gate turns red.
+        for failure in mirror_self_test(catalog):
+            errors.append(f"pricing-drift self-test failed: {failure}")
+        # The AI-training profiles are canonical data, not prose: check them by
+        # default (the residual-fix wave wired this; `--check-training-profiles`
+        # is retained as a compatibility no-op) and prove the check can fail.
+        validate_training_profiles(catalog, errors)
+        for failure in training_profiles_self_test(catalog):
+            errors.append(f"pricing-drift self-test failed: {failure}")
     validate_entitlement_boundaries(errors)
     validate_lifecycle_docs(errors)
     validate_sla_credit_docs(errors)
     validate_built_output(errors)
+    if catalog and "--check-training-profiles" in sys.argv[1:]:
+        validate_training_profiles(catalog, errors)
 
     if errors:
         for error in errors:

@@ -435,11 +435,17 @@ pub struct AssistantTurnData {
 /// (posting creates the session), so the empty state and the popuated state
 /// share one page. `unavailable` is the honest failure state — the loader
 /// could not reach the session store, which is NOT an empty conversation.
+///
+/// `capability_disabled` is the per-tenant `ai_chat` feature flag saying the
+/// assistant is switched off for this workspace: the page then NAMES that and
+/// renders no message form, exactly as `docs/user-guide/assistant.md`
+/// promises, instead of rendering a shell whose every message is refused.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AssistantPageData {
     pub session_id: Option<String>,
     pub turns: Vec<AssistantTurnData>,
     pub unavailable: bool,
+    pub capability_disabled: bool,
 }
 
 /// One demo script as the presenter page shows it.

@@ -5615,6 +5615,18 @@ async fn form_ai_draft_approve(
             "/reviews/ai-drafts",
             &state.config,
         ),
+        // The send-admission consent refusal names exactly what is missing
+        // (F4, live-mailbot dogfood): the page must show the enforcer's named
+        // reason, not a generic failure — the operator cannot fix consent
+        // they cannot see.
+        Err(crate::error::ApiError::Validation(reasons)) => {
+            let message = if reasons.is_empty() {
+                "The draft could not be approved. It is still pending.".to_string()
+            } else {
+                reasons.join("; ")
+            };
+            redirect_error(&message, "/reviews/ai-drafts", &state.config)
+        }
         Err(error) => {
             tracing::warn!(error = %error, draft = %id, "draft approval failed");
             redirect_error(
@@ -5815,6 +5827,32 @@ async fn form_assistant_message(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/assistant", &state.config);
     }
+    // Dogfood P1: the console entry point lacked the JSON route's scope gate,
+    // so a role without `ai:read` could chat from the page while the same
+    // identity was refused on POST /v1/ai/chat. The documented scope governs
+    // the capability, not one wire format. (The capability flag and the
+    // per-user rate limit are enforced inside `session_turn_inner`, which the
+    // JSON route and this handler now share.)
+    if crate::middleware::auth::require_scopes(&user, &["ai:read"]).is_err() {
+        tracing::info!(scopes = ?user.scopes, "console assistant refused: caller lacks ai:read");
+        return redirect_error(
+            "Your role does not include the AI assistant. Ask a workspace owner for access.",
+            "/assistant",
+            &state.config,
+        );
+    }
+    // The capability flag is checked BEFORE the session is resolved/created:
+    // a switched-off workspace must not accumulate empty conversation rows
+    // (the turn flow re-checks it as defense in depth).
+    if let Err(error) =
+        crate::routes::ai_chat::require_ai_chat_enabled(&state, &user.tenant_id).await
+    {
+        let reason = match error {
+            crate::error::ApiError::Forbidden(reason) => reason,
+            _ => "The AI assistant is not enabled for this workspace.".to_string(),
+        };
+        return redirect_error(&reason, "/assistant", &state.config);
+    }
     let message = field(&form, "message").trim().to_string();
     if message.is_empty() {
         return redirect_error(
@@ -5890,6 +5928,13 @@ async fn form_assistant_message(
             "/assistant",
             &state.config,
         ),
+        // Dogfood P1: a workspace with `ai_chat` switched off must hear the
+        // NAMED refusal (the same 403 reason the JSON route returns), not the
+        // generic "temporarily unavailable" outage copy — the capability is
+        // disabled, nothing is broken.
+        Err(crate::error::ApiError::Forbidden(reason)) => {
+            redirect_error(&reason, "/assistant", &state.config)
+        }
         Err(crate::error::ApiError::Validation(_)) => redirect_error(
             "Enter a question up to 4,000 characters.",
             "/assistant",
@@ -10480,6 +10525,100 @@ mod tests {
             assert_eq!(turns[0].0, "user");
             assert_eq!(turns[1].0, "assistant");
             assert!(turns[1].1.contains("150,000 emails"));
+        }
+
+        /// Regression (dogfood P1): the console PRG handler called
+        /// `session_turn_inner` directly, skipping the capability flag — a
+        /// workspace with `ai_chat` disabled could still chat from the page
+        /// (docs/user-guide/assistant.md promises the page reports the
+        /// capability as not enabled) and the refused turn was still stored.
+        /// The shared flow now refuses BEFORE writing, with the NAMED reason.
+        #[tokio::test]
+        async fn assistant_message_refuses_a_disabled_capability() {
+            let Some(state) = web_test_state("assistant_disabled_flag").await else {
+                return;
+            };
+            let tenant = apexmail_lib::id::generate_id("asst", 20);
+            seed_tenant(&state, &tenant).await;
+            sqlx::query(
+                "INSERT INTO feature_flag_overrides (id, flag_key, tenant_id, value, created_at)
+                 VALUES ($1, 'ai_chat', $2, 'false'::jsonb, NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .execute(&state.db)
+            .await
+            .expect("disable the capability");
+            let user = session_user(&tenant);
+            let user_id = user.user_id.clone().expect("session user id");
+
+            let app = web_handlers(state.clone(), user);
+            let body = csrf_body(&state, &[("message", "What does the Pro plan include?")]);
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/assistant/message", &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).to_lowercase().contains("not enabled"),
+                "the refusal names the capability: {flash:?}"
+            );
+
+            // Nothing landed: no session, no turn, no model call.
+            let sessions: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM ai_chat_sessions WHERE tenant_id = $1 AND user_id = $2",
+            )
+            .bind(&tenant)
+            .bind(&user_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("count sessions");
+            assert_eq!(sessions, 0, "a disabled capability creates no session");
+            let turns: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM ai_chat_session_turns WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&state.db)
+            .await
+            .expect("count turns");
+            assert_eq!(turns, 0, "a disabled capability stores no turn");
+        }
+
+        /// Regression (dogfood P1): the console entry point skipped the JSON
+        /// route's `ai:read` scope gate, so a role without it could chat from
+        /// the page while the same identity was refused on POST /v1/ai/chat.
+        #[tokio::test]
+        async fn assistant_message_refuses_a_role_without_ai_read() {
+            let Some(state) = web_test_state("assistant_scope_gate").await else {
+                return;
+            };
+            let tenant = apexmail_lib::id::generate_id("asst", 20);
+            seed_tenant(&state, &tenant).await;
+
+            let mut user = session_user(&tenant);
+            user.scopes = vec!["messages:read".to_string()]; // the member grant
+            let app = web_handlers(state.clone(), user);
+            let body = csrf_body(&state, &[("message", "What does the Pro plan cost?")]);
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/assistant/message", &body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash_text(&flash).contains("does not include the AI assistant"),
+                "the refusal is honest human copy: {flash:?}"
+            );
+            let sessions: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM ai_chat_sessions WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .expect("count sessions");
+            assert_eq!(sessions, 0, "an unauthorized role creates no session");
         }
 
         /// The AI-drafts review page's approve/reject forms drive the SAME

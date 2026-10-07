@@ -16,6 +16,7 @@ call-site shape that leaks raw error Display text into the browser.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,87 +53,11 @@ _CHAR_LIT_RE = re.compile(r"'(\\.|[^\\'])'")
 _RAW_STR_OPEN_RE = re.compile(r"(?:\b[bc]?r)(#+)\"")
 
 
-def _depth_prefix(text: str) -> list[int]:
-    """depths[i] = brace depth immediately BEFORE text[i]."""
-    depths = [0] * (len(text) + 1)
-    depth = 0
-    i = 0
-    n = len(text)
-    while i < n:
-        depths[i] = depth
-        ch = text[i]
-        two = text[i:i + 2]
-        if two == "//":
-            end = text.find("\n", i)
-            skip = n if end < 0 else end + 1
-            for j in range(i, min(skip, n)):
-                depths[j] = depth
-            i = skip
-            continue
-        if two == "/*":
-            nest = 1
-            j = i + 2
-            while j < n and nest:
-                if text[j:j + 2] == "/*":
-                    nest += 1
-                    j += 2
-                elif text[j:j + 2] == "*/":
-                    nest -= 1
-                    j += 2
-                else:
-                    j += 1
-            for k in range(i, min(j, n)):
-                depths[k] = depth
-            i = j
-            continue
-        if ch == '"':
-            j = i + 1
-            while j < n:
-                if text[j] == "\\":
-                    j += 2
-                    continue
-                if text[j] == '"':
-                    j += 1
-                    break
-                j += 1
-            for k in range(i, min(j, n)):
-                depths[k] = depth
-            i = j
-            continue
-        if ch == "r" and (m := _RAW_STR_OPEN_RE.match(text, i)) and \
-                (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
-            hashes = m.group(1)
-            close = text.find(f'"{hashes}', m.end())
-            j = n if close < 0 else close + 1 + len(hashes)
-            for k in range(i, min(j, n)):
-                depths[k] = depth
-            i = j
-            continue
-        if ch == "'" and (m := _CHAR_LIT_RE.match(text, i)):
-            for k in range(i, min(m.end(), n)):
-                depths[k] = depth
-            i = m.end()
-            continue
-        if ch == "'":
-            if m := _CHAR_LIT_RE.match(text, i):
-                i = m.end()
-            else:
-                i += 1
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth = max(0, depth - 1)
-        i += 1
-    depths[n] = depth
-    return depths
-
-
 def _matching_brace(text: str, open_idx: int) -> int:
     """Index of the `}` closing the `{` at `open_idx`, or -1.
 
     Single pass with early exit — string / raw-string / char-literal /
-    comment aware, mirroring _depth_prefix's token rules.
+    comment aware (the same token rules as `_mask_comments_and_strings`).
     """
     depth = 0
     i = open_idx
@@ -187,6 +112,57 @@ def _matching_brace(text: str, open_idx: int) -> int:
     return -1
 
 
+def _mask_comments_and_strings(text: str) -> str:
+    """`text` with comments and string/raw-string literals blanked to spaces.
+
+    Newlines are preserved so offsets and line numbers match the original.
+    Uses this module's own tokenizers (comment_spans is string-aware,
+    rust_string_literals skips comments).
+    """
+    masked = list(text)
+    spans = comment_spans(text)
+    spans += [(start, end) for start, end, _ in rust_string_literals(text)]
+    for start, end in spans:
+        for index in range(start, min(end, len(masked))):
+            if masked[index] != "\n":
+                masked[index] = " "
+    return "".join(masked)
+
+
+def _item_end(masked: str, start: int) -> int:
+    """End offset of the item whose `#[cfg(test)]` attribute starts at `start`.
+
+    Operates on MASKED text (comments/strings blanked), so brace matching
+    cannot be fooled by a brace inside a literal.
+    """
+    n = len(masked)
+    i = masked.find("]", start) + 1
+    while i < n and masked[i] in " \t\r\n":
+        i += 1
+    while masked.startswith("#[", i) or masked.startswith("#![", i):
+        close = masked.find("]", i)
+        if close < 0:
+            return n
+        i = close + 1
+        while i < n and masked[i] in " \t\r\n":
+            i += 1
+    brace = masked.find("{", i)
+    semi = masked.find(";", i)
+    if brace != -1 and (semi == -1 or brace < semi):
+        depth = 0
+        j = brace
+        while j < n:
+            if masked[j] == "{":
+                depth += 1
+            elif masked[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return n
+    return semi + 1 if semi != -1 else n
+
+
 def production_split(text: str) -> str:
     """Remove every top-level `#[cfg(test)]` item from `text`.
 
@@ -194,54 +170,34 @@ def production_split(text: str) -> str:
     top-level braced block, or to the terminating `;` for brace-less items
     (`use`, `extern crate`, …). Nested (depth > 0) `#[cfg(test)]` attributes
     are left alone — they vanish with their enclosing test module.
+
+    Detection runs on MASKED text (comments and string/raw-string literals
+    blanked), so an attribute-shaped token inside a doc comment or a string
+    literal can never trigger a cut (the U-5 class: the old depth scan treated
+    comment/string interiors as code and cut the file at the first such
+    token, dropping everything after it). Comments are NOT blanked in the
+    returned text — the callers' line numbers and prose stay intact.
     """
-    depths = _depth_prefix(text)
-    top_level = [
-        m.start()
-        for m in re.finditer(r"#\[cfg\(test\)\]", text)
-        if depths[m.start()] == 0
-    ]
-    if not top_level:
-        return text
-
-    # Cut from the END so earlier offsets stay valid.
-    cuts: list[tuple[int, int]] = []
-    for start in top_level:
-        i = text.find("]", start) + 1
-        n = len(text)
-        # skip whitespace, comments and any further attributes, then cut the
-        # item: to its matching top-level close brace, or its `;`
-        while i < n:
-            while i < n and text[i] in " \t\r\n":
-                i += 1
-            if text.startswith("//", i):
-                end = text.find("\n", i)
-                i = n if end < 0 else end + 1
-                continue
-            if text.startswith("/*", i):
-                end = text.find("*/", i + 2)
-                i = n if end < 0 else end + 2
-                continue
-            if text.startswith("#![", i) or text.startswith("#[", i):
-                end = text.find("]", i)
-                i = (n if end < 0 else end + 1)
-                continue
-            break
-        brace = text.find("{", i)
-        semi = text.find(";", i)
-        if brace != -1 and (semi == -1 or brace < semi):
-            close = _matching_brace(text, brace)
-            end = close + 1 if close >= 0 else n
-        elif semi != -1:
-            end = semi + 1
-        else:
-            end = n
-        cuts.append((start, min(end, n)))
-
-    out = text
-    for start, end in reversed(cuts):
-        out = out[:start] + out[end:]
-    return out
+    masked = _mask_comments_and_strings(text)
+    out = list(text)
+    depth = 0
+    i = 0
+    n = len(masked)
+    while i < n:
+        char = masked[i]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and masked.startswith("#[cfg(test)]", i):
+            end = _item_end(masked, i)
+            for index in range(i, min(end, n)):
+                if out[index] != "\n":
+                    out[index] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(out)
 
 
 def decode_rust_literal(literal: str) -> str:
@@ -455,3 +411,98 @@ def all_flash_sites(
         sites.extend(s)
         leaked.extend(l)
     return sites, leaked
+
+
+# ── self-test ──────────────────────────────────────────────────────────────
+#
+# The fixture is shaped like the F-4 / U-5 over-cut repro: a `#[cfg(test)]`
+# token appears inside a line comment and inside a string literal, and a real
+# top-level `#[cfg(test)]` alias item sits between production code. A split
+# that treats comment/string interiors as code cuts at the comment token and
+# swallows the production `use` import behind it; the extractor must keep the
+# whole production region and drop exactly the cfg(test) items.
+_SELF_TEST_FIXTURE = '''\
+// A doc comment may mention #[cfg(test)] in prose without being an item.
+use crate::middleware::rejection;
+
+const TOKEN_IN_STRING: &str = "a string carrying #[cfg(test)] text";
+
+pub async fn production_before_alias() {
+    redirect_error("Post-token flash copy.");
+}
+
+#[cfg(test)]
+pub(crate) use crate::middleware::rejection as alias_for_tests;
+
+pub async fn production_after_alias() {
+    redirect_error("Post-alias flash copy.");
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(test)]
+    fn nested_attribute_vanishes_with_the_module() {}
+}
+
+pub async fn production_after_module() {
+    redirect_success("After-module flash copy.");
+}
+'''
+
+
+def self_test() -> int:
+    """Prove `production_split` cannot over-cut (F-4 class). Exit 0 = pass."""
+    failures: list[str] = []
+
+    # Can-fail by construction: a naive first-token split must lose the
+    # production region, or the fixture proves nothing.
+    naive = _SELF_TEST_FIXTURE.split("#[cfg(test)]")[0]
+    if "use crate::middleware::rejection;" in naive or "flash copy" in naive:
+        failures.append("fixture does not exercise the over-cut (production precedes a token)")
+
+    production = production_split(_SELF_TEST_FIXTURE)
+
+    if "use crate::middleware::rejection;" not in production:
+        failures.append("production import after the commented token was cut")
+    if 'const TOKEN_IN_STRING: &str = "a string carrying #[cfg(test)] text";' not in production:
+        failures.append("string literal containing the token was corrupted or cut")
+    if "Post-token flash copy." not in production:
+        failures.append("production call site before the alias item was cut")
+    if "Post-alias flash copy." not in production:
+        failures.append("post-alias production call site was cut (over-cut regression)")
+    if "After-module flash copy." not in production:
+        failures.append("post-module production call site was cut")
+    if "alias_for_tests" in production:
+        failures.append("top-level #[cfg(test)] use-item survived the split")
+    if "nested_attribute_vanishes_with_the_module" in production:
+        failures.append("top-level #[cfg(test)] mod tests survived the split")
+
+    sites = [
+        m for m in FLASH_CALL_RE.finditer(production) if "flash copy." in m.group(2)
+    ]
+    if len(sites) != 3:
+        failures.append(f"expected 3 production flash call sites, found {len(sites)}")
+
+    # A nested cfg(test) attribute inside a production item is left alone (it
+    # is the item's concern, not the split's), but a top-level one is removed.
+    nested = "fn f() {\n    #[cfg(test)]\n    fn inner() {}\n}\n"
+    if production_split(nested) != nested:
+        failures.append("nested (depth > 0) cfg(test) attribute was removed by the split")
+
+    if failures:
+        for failure in failures:
+            print(f"ui_flash_extract self-test FAIL: {failure}", file=sys.stderr)
+        return 1
+    print(
+        "ui_flash_extract self-test passed: post-alias and post-module flash copy "
+        "survive the cfg(test) split; tokens in comments/strings do not cut"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    if "--self-test" in sys.argv[1:]:
+        raise SystemExit(self_test())
+    print("usage: python3 tools/ui_flash_extract.py --self-test", file=sys.stderr)
+    raise SystemExit(2)
+

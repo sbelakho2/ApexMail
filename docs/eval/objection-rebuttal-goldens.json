@@ -1,27 +1,62 @@
 {
+  "_comment": "Objection-rebuttal goldens: for each of the six canonical objection classes, the claims a rebuttal may NEVER rest on. The banned vocabulary is validated by tools/check_eval_corpora.py against the canonical facts (a ban may never forbid a truth) and against docs/eval/mailbot-draft-constraints.json (the two corpora share the banned-claims vocabulary). One case per class is mandatory: the checker fails if any class has no case.",
   "cases": [
     {
+      "category": "objection-rebuttal",
       "objection_class": "price",
       "required_evidence_kind": "library_or_canonical_facts",
       "forbidden_claims": [
-        "discount",
         "custom pricing below catalog",
+        "discount applied",
         "free forever"
       ]
     },
     {
+      "category": "objection-rebuttal",
       "objection_class": "timing",
       "required_evidence_kind": "library_or_canonical_facts",
       "forbidden_claims": [
-        "guaranteed onboarding date"
+        "guaranteed onboarding date",
+        "we will refund"
       ]
     },
     {
+      "category": "objection-rebuttal",
       "objection_class": "competitor",
       "required_evidence_kind": "library_or_canonical_facts",
       "forbidden_claims": [
         "competitor is shutting down",
-        "we are cheaper than"
+        "we are cheaper than",
+        "our competitor"
+      ]
+    },
+    {
+      "category": "objection-rebuttal",
+      "objection_class": "authority",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "guaranteed onboarding date",
+        "custom pricing below catalog"
+      ]
+    },
+    {
+      "category": "objection-rebuttal",
+      "objection_class": "trust",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "HIPAA compliant",
+        "SOC 2 Type II certified",
+        "guaranteed inbox placement"
+      ]
+    },
+    {
+      "category": "objection-rebuttal",
+      "objection_class": "need",
+      "required_evidence_kind": "library_or_canonical_facts",
+      "forbidden_claims": [
+        "free forever",
+        "unlimited free",
+        "guaranteed onboarding date"
       ]
     }
   ]

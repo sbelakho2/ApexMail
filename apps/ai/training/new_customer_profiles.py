@@ -1,8 +1,11 @@
 """
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
-Canonical pricing (EUR; runtime source: billing-service/src/plans.rs):
-  Free: €0 30K emails, 300K API
+Canonical facts (EUR; runtime source of truth:
+services/mail-server/crates/platform-catalog/src/lib.rs `PLANS`, which
+billing-service/src/plans.rs seeds and delegates to since the 2026-09-08
+pricing review). Pinned by tools/validate_pricing_drift.py:
+  Free: €0 3,000 emails/month (+ a one-time 30,000-email launch allowance), 30,000 API
   Developer: €29 50K emails, 500K API
   Pro: €89 150K emails, 2M API
   Growth: €229 500K emails, 5M API
@@ -16,25 +19,25 @@ EXTENDED_PROFILES = {
         "plan_name": "Free",
         "plan_price": "0",
         "emails_sent": "2,850",
-        "email_limit": "30,000",
-        "api_calls": "45,000",
-        "api_call_limit": "300,000",
+        "email_limit": "3,000",
+        "api_calls": "28,500",
+        "api_call_limit": "30,000",
         "team_count": "1",
         "team_limit": "1",
         "created_at": "2026-01-28",
         "domain_count": "1",
         "domain_details": "- myshop.com: Verified (SPF: pass, DKIM: pass, DMARC: none)",
         "recent_events": "- 2,850 sent, 2,793 delivered (98.0%), 23 bounced (0.8%), 0 complaints",
-        "open_issues": "- Approaching email limit: 285/30,000 (95% used)"
+        "open_issues": "- Approaching email limit: 2,850/3,000 (95% used)\n- Approaching API call limit: 28,500/30,000 (95% used)"
     },
     "free_spf_broken_v2": {
         "account_id": "acct_sp2f8z",
         "plan_name": "Free",
         "plan_price": "0",
         "emails_sent": "1,350",
-        "email_limit": "30,000",
+        "email_limit": "3,000",
         "api_calls": "12,000",
-        "api_call_limit": "300,000",
+        "api_call_limit": "30,000",
         "created_at": "2025-12-01",
         "domain_count": "1",
         "domain_details": "- petgrooming.co: Verified (SPF: fail \u2014 multiple SPF records, DKIM: pass, DMARC: none)",
@@ -44,7 +47,7 @@ EXTENDED_PROFILES = {
     "starter_healthy_v2": {
         "account_id": "acct_8f3k2j",
         "plan_name": "Developer",
-        "plan_price": "25",
+        "plan_price": "29",
         "emails_sent": "36,240",
         "email_limit": "50,000",
         "api_calls": "285,000",
@@ -60,7 +63,7 @@ EXTENDED_PROFILES = {
     "starter_webhook_dead_v2": {
         "account_id": "acct_wh7d3k",
         "plan_name": "Developer",
-        "plan_price": "25",
+        "plan_price": "29",
         "emails_sent": "24,800",
         "email_limit": "50,000",
         "api_calls": "178,000",
@@ -74,7 +77,7 @@ EXTENDED_PROFILES = {
     "starter_dmarc_quarantine": {
         "account_id": "acct_dmq2k3",
         "plan_name": "Developer",
-        "plan_price": "25",
+        "plan_price": "29",
         "emails_sent": "18,500",
         "email_limit": "50,000",
         "api_calls": "95,000",
@@ -88,13 +91,13 @@ EXTENDED_PROFILES = {
     "pro_healthy_v2": {
         "account_id": "acct_pr65k8",
         "plan_name": "Pro",
-        "plan_price": "65",
+        "plan_price": "89",
         "emails_sent": "87,500",
         "email_limit": "150,000",
         "api_calls": "1,250,000",
         "api_call_limit": "2,000,000",
         "team_count": "4",
-        "team_limit": "5",
+        "team_limit": "10",
         "domain_count": "3",
         "domain_details": "- techstartup.io: Verified (SPF: pass, DKIM: pass, DMARC: reject)\n- notifications.techstartup.io: Verified\n- marketing.techstartup.io: Verified",
         "recent_events": "- 87,500 sent, 86,625 delivered (99.0%), 175 bounced (0.2%)",
@@ -103,20 +106,20 @@ EXTENDED_PROFILES = {
     "pro_template_issue": {
         "account_id": "acct_tpl3j9",
         "plan_name": "Pro",
-        "plan_price": "65",
+        "plan_price": "89",
         "emails_sent": "45,000",
         "email_limit": "150,000",
         "api_calls": "890,000",
         "api_call_limit": "2,000,000",
         "team_count": "3",
-        "team_limit": "5",
+        "team_limit": "10",
         "domain_details": "- ecommerce-shop.com: Verified (SPF: pass, DKIM: pass, DMARC: pass)",
         "open_issues": "- Template 'order-confirmation' rendering errors: {{customer.name}} variable undefined in 3% of sends"
     },
     "pro_ip_warmup": {
         "account_id": "acct_ipw5m2",
         "plan_name": "Pro",
-        "plan_price": "65",
+        "plan_price": "89",
         "emails_sent": "12,000",
         "email_limit": "150,000",
         "api_calls": "350,000",
@@ -128,13 +131,13 @@ EXTENDED_PROFILES = {
     "growth_bounce_spike_v2": {
         "account_id": "acct_gw150k",
         "plan_name": "Growth",
-        "plan_price": "150",
+        "plan_price": "229",
         "emails_sent": "320,000",
         "email_limit": "500,000",
         "api_calls": "3,200,000",
         "api_call_limit": "5,000,000",
         "team_count": "8",
-        "team_limit": "10",
+        "team_limit": "25",
         "domain_details": "- saas-platform.io: Verified\n- notifications.saas-platform.io: Verified",
         "recent_events": "- 320,000 sent, 304,000 delivered (95.0%), 9,600 bounced (3.0%), 640 complaints (0.2%)",
         "open_issues": "- Bounce rate 3.0% exceeds 2% threshold\n- Complaint rate 0.2% exceeds 0.1% threshold"
@@ -142,13 +145,13 @@ EXTENDED_PROFILES = {
     "growth_dkim_fail_v2": {
         "account_id": "acct_dkf8n3",
         "plan_name": "Growth",
-        "plan_price": "150",
+        "plan_price": "229",
         "emails_sent": "267,500",
         "email_limit": "500,000",
         "api_calls": "2,450,000",
         "api_call_limit": "5,000,000",
         "team_count": "6",
-        "team_limit": "10",
+        "team_limit": "25",
         "domain_details": "- techflow.io: Verified (SPF: pass, DKIM: pass)\n- marketing.techflow.io: Verified (SPF: pass, DKIM: FAIL)\n- notifications.techflow.io: Verified (all pass)",
         "recent_events": "- 267,500 sent, 247,413 delivered (92.5%), 6,688 bounced (2.5%)",
         "open_issues": "- DKIM failing on marketing.techflow.io since DNS change 3 days ago\n- Domain bounce rate: 26.2%"
@@ -156,13 +159,13 @@ EXTENDED_PROFILES = {
     "growth_subaccount_mgmt": {
         "account_id": "acct_sub7p4",
         "plan_name": "Growth",
-        "plan_price": "150",
+        "plan_price": "229",
         "emails_sent": "185,000",
         "email_limit": "500,000",
         "api_calls": "1,850,000",
         "api_call_limit": "5,000,000",
         "team_count": "10",
-        "team_limit": "10",
+        "team_limit": "25",
         "subaccounts": "5 active subaccounts",
         "domain_details": "- agency.co: Primary\n- client1.agency.co, client2.agency.co, client3.agency.co: Subaccount domains",
         "open_issues": "- Subaccount 'client3' approaching 90% of allocated quota"
@@ -170,13 +173,13 @@ EXTENDED_PROFILES = {
     "scale_deliverability_v2": {
         "account_id": "acct_sc350k",
         "plan_name": "Business",
-        "plan_price": "350",
+        "plan_price": "699",
         "emails_sent": "1,450,000",
         "email_limit": "2,000,000",
         "api_calls": "14,500,000",
         "api_call_limit": "20,000,000",
         "team_count": "20",
-        "team_limit": "25",
+        "team_limit": "50",
         "dedicated_ips": "3 IPs: 198.51.100.10, 198.51.100.11, 198.51.100.12",
         "domain_details": "- bigretailer.com: Verified\n- mail.bigretailer.com: Verified\n- promo.bigretailer.com: Verified",
         "recent_events": "- 1,450,000 sent, 1,160,000 delivered (80.0%), 43,500 bounced (3.0%), 2,900 complaints (0.2%)",
@@ -185,13 +188,13 @@ EXTENDED_PROFILES = {
     "scale_api_rate_limit": {
         "account_id": "acct_arl9k2",
         "plan_name": "Business",
-        "plan_price": "350",
+        "plan_price": "699",
         "emails_sent": "1,200,000",
         "email_limit": "2,000,000",
         "api_calls": "18,500,000",
         "api_call_limit": "20,000,000",
         "team_count": "15",
-        "team_limit": "25",
+        "team_limit": "50",
         "domain_details": "- highvolume.io: Verified",
         "recent_events": "- Several API rate limit errors (429s) during peak hours 2-4pm UTC",
         "open_issues": "- API usage at 92.5% of limit\n- Rate limiting triggered 47 times this month"
@@ -199,13 +202,13 @@ EXTENDED_PROFILES = {
     "scale_greylist_delays": {
         "account_id": "acct_gry6m8",
         "plan_name": "Business",
-        "plan_price": "350",
+        "plan_price": "699",
         "emails_sent": "980,000",
         "email_limit": "2,000,000",
         "api_calls": "8,200,000",
         "api_call_limit": "20,000,000",
         "team_count": "12",
-        "team_limit": "25",
+        "team_limit": "50",
         "domain_details": "- enterprise-saas.com: Verified",
         "recent_events": "- 980,000 sent, 931,000 delivered (95.0%), 19,600 deferred (2.0%), 9,800 bounced (1.0%)",
         "open_issues": "- Greylisting causing 15-30 minute delays on ~8% of sends to Microsoft 365 recipients"
@@ -213,7 +216,7 @@ EXTENDED_PROFILES = {
     "enterprise_compliance_v2": {
         "account_id": "acct_ent800k",
         "plan_name": "Enterprise Cloud",
-        "plan_price": "3000",
+        "plan_price": "1750",
         "emails_sent": "3,625,000",
         "email_limit": "5,000,000",
         "api_calls": "45,000,000",
@@ -229,7 +232,7 @@ EXTENDED_PROFILES = {
     "enterprise_sso_issue": {
         "account_id": "acct_sso4j7",
         "plan_name": "Enterprise Cloud",
-        "plan_price": "3000",
+        "plan_price": "1750",
         "emails_sent": "2,150,000",
         "email_limit": "5,000,000",
         "api_calls": "28,000,000",
@@ -243,7 +246,7 @@ EXTENDED_PROFILES = {
     "enterprise_multi_region": {
         "account_id": "acct_mrg2l5",
         "plan_name": "Enterprise Cloud",
-        "plan_price": "3000",
+        "plan_price": "1750",
         "emails_sent": "4,200,000",
         "email_limit": "5,000,000",
         "api_calls": "52,000,000",

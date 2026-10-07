@@ -72,8 +72,33 @@ pub(crate) fn stateful_variant_documents(surface: &str) -> Vec<(String, String)>
         .collect()
 }
 
-/// Every gate document of one surface: the manifest routes plus the stateful
-/// PRG variants.
+/// The bot-surface STATE renders of one surface (populated transcript,
+/// unavailable states, PRG flash states, populated/many-row drafts queue).
+///
+/// The manifest render is the no-data fallback, which on these two surfaces
+/// is the EMPTY state: gates J and K would never see the markup that only
+/// exists with data (citations, escalation notices, long messages, draft
+/// rows with their action forms). Found by dogfood 2026-10-06 ui-visual:
+/// `render_route` alone cannot reach a state, so an unrepresented state
+/// cannot fail a gate. The renders come from `fixture_states` — the same
+/// code the exported browser fixtures use, so the in-crate and browser
+/// gates audit the same markup.
+pub(crate) fn bot_state_documents(surface: &str) -> Vec<(String, String)> {
+    crate::fixture_states::BOT_STATE_FIXTURES
+        .iter()
+        .filter(|fixture| fixture.surface == surface)
+        .map(|fixture| {
+            (
+                fixture.id.to_string(),
+                crate::fixture_states::render_bot_state(fixture.id)
+                    .unwrap_or_else(|| panic!("state fixture {} must render", fixture.id)),
+            )
+        })
+        .collect()
+}
+
+/// Every gate document of one surface: the manifest routes, the stateful
+/// PRG variants, and the bot-surface state renders.
 pub(crate) fn gate_documents(surface: &str) -> Vec<(String, String)> {
     let mut documents: Vec<(String, String)> = crate::routing::surface_routes(surface)
         .into_iter()
@@ -85,6 +110,7 @@ pub(crate) fn gate_documents(surface: &str) -> Vec<(String, String)> {
         })
         .collect();
     documents.extend(stateful_variant_documents(surface));
+    documents.extend(bot_state_documents(surface));
     documents
 }
 

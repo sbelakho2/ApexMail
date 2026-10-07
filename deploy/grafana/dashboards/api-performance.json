@@ -1144,7 +1144,7 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[5m])) by (endpoint))",
+          "expr": "topk(10, sum(rate(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[5m])) by (path_pattern))",
           "legendFormat": "__auto",
           "refId": "A"
         }
@@ -1155,7 +1155,7 @@
           "id": "groupBy",
           "options": {
             "fields": {
-              "endpoint": {
+              "path_pattern": {
                 "aggregations": [
                   "groupBy"
                 ]

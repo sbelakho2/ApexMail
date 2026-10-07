@@ -2302,7 +2302,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class=\"apex-btn apex-btn--sm\">Replay</button><p class="text-xs leading-5 text-surface-500">Read-only: replay is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
+        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class=\"apex-btn apex-btn--sm\">Replay</button><p class="text-xs leading-5 text-surface-500">Read-only: replay is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2465,7 +2465,7 @@ fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
         .map(|label| html_escape(&label))
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Current mode: <span class="font-mono font-bold text-foreground">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-600">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-foreground">{brain}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-foreground">{execute}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-foreground">{last_action}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-foreground">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-500">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/pause</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/resume</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
+        r#"<p class="mt-4 text-sm leading-6 text-surface-600">Current mode: <span class="font-mono font-bold text-foreground">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-600">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-foreground">{brain}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-foreground">{execute}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-foreground">{last_action}</dd></div><div class="apex-panel apex-panel--flush p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-foreground">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-500">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/pause</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/resume</code>, <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
         mode = mode,
         meaning = meaning,
         kill_switch = kill_switch,
@@ -2562,7 +2562,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
         }
     }
-    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
+    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
     match data.dead_letters.as_ref() {
         None => parts.push(sales_note(
             "The dead-letter feed is unavailable: the control API did not answer.",
@@ -4406,16 +4406,16 @@ pub fn web_ai_drafts_page(data: Option<&AiDraftsPageData>) -> String {
                  <h2 class=\"apex-panel-title\">{subject}</h2>\
                  <span class=\"text-xs text-surface-500\">{received_at}</span>\
                  </div>\
-                 <p class=\"mt-1 text-xs text-surface-500\">From {from} · Workspace {tenant} · {classification}{first_response}</p>\
+                 <p class=\"mt-1 text-xs text-surface-500 break-words\">From {from} · Workspace {tenant} · {classification}{first_response}</p>\
                  <details class=\"mt-3 text-sm text-surface-800\"><summary class=\"cursor-pointer font-bold\">Draft reply</summary>\
-                 <pre class=\"mt-2 whitespace-pre-wrap rounded-[9px_9px_7px_7px] bg-surface-100 p-3 text-xs\">{reply}</pre></details>\
+                 <pre class=\"mt-2 whitespace-pre-wrap break-words rounded-[9px_9px_7px_7px] bg-surface-100 p-3 text-xs\">{reply}</pre></details>\
                  <div class=\"mt-4 grid gap-4 md:grid-cols-2\">\
-                 <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/approve\">\
+                 <form class=\"flex flex-col gap-2 lg:flex-row lg:items-end\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/approve\">\
                  <div class=\"apex-field flex-1\"><label for=\"note-approve-{id}\">Approval note</label>\
                  <input id=\"note-approve-{id}\" name=\"note\" type=\"text\" /></div>\
                  <button type=\"submit\" class=\"apex-btn\">Approve and queue</button>\
                  </form>\
-                 <form class=\"flex items-end gap-2\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/reject\">\
+                 <form class=\"flex flex-col gap-2 lg:flex-row lg:items-end\" method=\"post\" action=\"/web/admin/ai/drafts/{id}/reject\">\
                  <div class=\"apex-field flex-1\"><label for=\"note-reject-{id}\">Rejection reason</label>\
                  <input id=\"note-reject-{id}\" name=\"note\" type=\"text\" /></div>\
                  <button type=\"submit\" class=\"apex-btn apex-btn--secondary\">Reject</button>\
@@ -4596,7 +4596,7 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
                 String::new()
             } else {
                 format!(
-                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"apex-mono mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-[9px_9px_7px_7px] bg-surface-100 p-3\">{}</pre></details>",
+                    "<details class=\"mt-3 text-xs text-surface-600\"><summary class=\"cursor-pointer font-bold\">Result detail</summary><pre class=\"apex-mono mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[9px_9px_7px_7px] bg-surface-100 p-3\">{}</pre></details>",
                     html_escape(&step.detail)
                 )
             };
@@ -4653,21 +4653,41 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
 /// the handler stores both turns and redirects back here (PRG).
 ///
 /// States: empty (`data.turns` empty, session optional), populated,
-/// escalated answers (the human-handoff notice), and unavailable (the
-/// session store could not be read — never an empty-conversation illusion).
+/// escalated answers (the human-handoff notice), disabled (the per-tenant
+/// `ai_chat` feature flag is off for this workspace — the named refusal, and
+/// no form to post into a capability that is switched off), and unavailable
+/// (the session store could not be read — never an empty-conversation
+/// illusion).
 pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
     // No server data means the SSR skeleton (an empty conversation with the
     // prompt starters); `Some(data.unavailable)` is the loader's explicit
     // failure state and renders the honest copy instead.
     let unavailable = data.is_some_and(|d| d.unavailable);
+    let disabled = data.is_some_and(|d| d.capability_disabled);
     let turns = data.map(|d| d.turns.as_slice()).unwrap_or(&[]);
 
     let mut transcript = String::new();
-    if unavailable {
+    if disabled {
+        // The capability is switched off for this workspace. The page NAMES
+        // that (docs/user-guide/assistant.md: "the page reports that the
+        // capability is not enabled") and renders no message form: a form
+        // that every submission refuses is not an honest disabled state.
         transcript.push_str(
-            "<div class=\"rounded-sm border border-amber-500/40 bg-amber-500/10 p-6\">\
-             <h2 class=\"text-sm font-bold text-surface-900\">Conversation unavailable</h2>\
-             <p class=\"mt-2 text-sm text-surface-600\">The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again.</p></div>",
+            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+             <strong>The assistant is not enabled for this workspace</strong>\
+             <span>An administrator switched the AI assistant off for this workspace. It is not broken — the capability is disabled, and nothing was sent to the model. Contact support@apexmail.ee if you believe it should be on.</span></div>",
+        );
+    } else if unavailable {
+        // The canonical warning recipe (dogfood 2026-10-06 ui-visual): the
+        // hand-rolled `border-amber-500/40 bg-amber-500/10` classes had no
+        // definition in globals.css (the palette has no `amber` scale), so
+        // the notice rendered as an unstyled grey box. `.apex-callout
+        // --warning` is the shared, theme-safe recipe the drafts queue's
+        // unavailable state already uses.
+        transcript.push_str(
+            "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
+             <strong>Conversation unavailable</strong>\
+             <span>The assistant could not read your conversation history just now. This is a temporary service problem, not an empty conversation — reload to try again.</span></div>",
         );
     } else if turns.is_empty() {
         transcript.push_str(
@@ -4683,13 +4703,11 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
         transcript.push_str("</div>");
     }
 
-    let citations_script = "";
-    format!(
-        "<div class=\"max-w-3xl space-y-6\">
-<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Assistant</h1>\
-<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. The assistant never guesses: unverifiable questions are escalated to a human.</p>\
-{transcript}\
-<h2 class=\"text-lg font-bold text-surface-950\" id=\"ask\">Ask a question</h2>\
+    // The disabled state renders no form: there is no capability to post to.
+    let ask = if disabled {
+        String::new()
+    } else {
+        "<h2 class=\"text-lg font-bold text-surface-950\" id=\"ask\">Ask a question</h2>\
 <form class=\"space-y-4\" method=\"post\" action=\"/web/assistant/message\">\
 <div class=\"space-y-2\">\
 <label class=\"block text-sm font-bold text-surface-900\" for=\"assistant-message\">Message <span class=\"text-surface-500 font-normal\">(up to 4,000 characters)</span></label>\
@@ -4699,10 +4717,19 @@ pub fn web_assistant_page(data: Option<&AssistantPageData>) -> String {
 <button type=\"submit\" class=\"apex-btn apex-btn--sm\">Send</button>\
 <span class=\"text-xs text-surface-500\">AI-generated answers; cited when grounded.</span>\
 </div>\
-</form>\
-{citations_script}\
+</form>"
+            .to_string()
+    };
+
+    format!(
+        "<div class=\"max-w-3xl space-y-6\">
+<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Assistant</h1>\
+<p class=\"text-sm text-surface-600\">Grounded in the published ApexMail documentation. The assistant never guesses: unverifiable questions are escalated to a human.</p>\
+{transcript}\
+{ask}\
 </div>",
         transcript = transcript,
+        ask = ask,
     )
 }
 
@@ -4731,7 +4758,11 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
                 .unwrap_or("ApexMail documentation");
             match citation.get("url").and_then(|v| v.as_str()) {
                 Some(url) => citations.push_str(&format!(
-                    "<li><a class=\"underline\" href=\"{}\" rel=\"noopener\">{}</a></li>",
+                    // `inline-block leading-6`: a standalone citation link is
+                    // a 15px-tall hit target without it; the 1.5rem line box
+                    // lifts it to the 24px minimum without changing the
+                    // underlined-text look (dogfood 2026-10-06 ui-visual).
+                    "<li><a class=\"underline inline-block leading-6\" href=\"{}\" rel=\"noopener\">{}</a></li>",
                     html_escape(url),
                     html_escape(title)
                 )),
@@ -4741,14 +4772,17 @@ fn assistant_turn_html(turn: &AssistantTurnData) -> String {
         citations.push_str("</ul></details>");
     }
     let escalation = if turn.role != "user" && turn.escalated {
-        "<p class=\"mt-3 rounded-sm border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-surface-800\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</p>"
+        // Same canonical warning recipe as the unavailable state above: the
+        // amber classes were undefined (no `amber` scale in this palette)
+        // and rendered nothing.
+        "<div class=\"apex-callout apex-callout--warning mt-3\" role=\"status\"><span class=\"text-xs font-medium\">A human will follow up on this question — contact support@apexmail.ee for anything urgent.</span></div>"
     } else {
         ""
     };
     format!(
         "<article class=\"{frame}\">\
 <h2 class=\"text-xs font-bold uppercase tracking-[0.16em] text-surface-500\">{role}</h2>\
-<p class=\"mt-3 whitespace-pre-wrap text-sm text-surface-900\">{content}</p>\
+<p class=\"mt-3 whitespace-pre-wrap break-words text-sm text-surface-900\">{content}</p>\
 {citations}{escalation}\
 <p class=\"mt-3 text-xs text-surface-400\">{created_at}</p>\
 </article>",
@@ -8757,6 +8791,50 @@ mod deferred_feature_view_tests {
         assert!(with_values.contains("the campaign waits for you to press Start"));
         let new_page = web_campaigns_new_page();
         assert!(new_page.contains("still waits for you to press Start"));
+    }
+
+    // ── Dogfood P1: the assistant's disabled capability state ──────
+
+    /// A workspace with `ai_chat` switched off must get the NAMED refusal
+    /// (docs/user-guide/assistant.md: "the page reports that the capability
+    /// is not enabled") and no message form — a form whose every submission
+    /// is refused is not an honest disabled state. The unavailable state
+    /// stays distinct (that one IS a service problem).
+    #[test]
+    fn assistant_disabled_state_names_the_capability_and_hides_the_form() {
+        let disabled = crate::view_data::AssistantPageData {
+            session_id: Some("chat_1".into()),
+            turns: vec![crate::view_data::AssistantTurnData {
+                role: "user".into(),
+                content: "an earlier question".into(),
+                ..Default::default()
+            }],
+            unavailable: false,
+            capability_disabled: true,
+        };
+        let html = web_assistant_page(Some(&disabled));
+        assert!(
+            html.contains("not enabled for this workspace"),
+            "the refusal names the capability: {html}"
+        );
+        assert!(
+            !html.contains("action=\"/web/assistant/message\""),
+            "the disabled state renders no message form: {html}"
+        );
+        assert!(
+            !html.contains("an earlier question"),
+            "the disabled state does not echo a conversation the capability cannot use: {html}"
+        );
+        assert!(!html.contains("panic"), "{html}");
+
+        // The unavailable state keeps its own honest copy and the form.
+        let unavailable = crate::view_data::AssistantPageData {
+            unavailable: true,
+            ..Default::default()
+        };
+        let html = web_assistant_page(Some(&unavailable));
+        assert!(html.contains("Conversation unavailable"), "{html}");
+        assert!(html.contains("action=\"/web/assistant/message\""), "{html}");
     }
 
     // ── Feature 8: favicon ─────────────────────────────────────────

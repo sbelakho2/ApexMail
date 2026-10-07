@@ -27,9 +27,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath decodes percent-escapes in the checkout path (spaces,
+// non-ASCII); `new URL(import.meta.url).pathname` leaves them encoded and
+// every root derived from it misses the tree (R-1, 2026-10-07).
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(ROOT, '../..');
 const FIXTURES = path.join(ROOT, 'fixtures');
 const MARKETING = path.resolve(REPO, 'apps/marketing-zola/public');

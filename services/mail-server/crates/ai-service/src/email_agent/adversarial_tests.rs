@@ -400,6 +400,96 @@ async fn processed_message_becomes_a_pending_approval_draft_exactly_once() {
     cleanup_inbound(&db, &id).await;
 }
 
+/// The worker reply handler and this agent claim the same rows with
+/// independent markers. The worker marks `processed_at` on EVERY row it
+/// classifies — including the reply-shaped ones the mailbot must draft — so a
+/// claim predicate keyed on `processed_at IS NULL` loses the race (the worker
+/// polls every second, the agent every 30) and the review queue stays empty
+/// (live mailbot dogfood 2026-10-06: a canary row classified
+/// `meeting_request` was never claimed by the agent). A row the worker
+/// already classified and marked processed MUST still receive its draft; the
+/// draft write merges into `suggested_action`, so the worker's own fields
+/// survive.
+#[tokio::test]
+async fn worker_classified_rows_still_receive_their_draft() {
+    let _serial = ENV_SERIAL.lock().await;
+    let db_url = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+    let Some(db) = shared_pool().await else {
+        eprintln!("skipping: set TEST_DATABASE_URL");
+        return;
+    };
+    let _serial_db = serial_lock(&db_url).await;
+    let port = spawn_mock_llm(GOOD_REPLY).await;
+    let _env = EnvGuard::with_mock_llm(port);
+    let cfg = agent_config(&std::env::var("TEST_DATABASE_URL").unwrap());
+    let answerer = Arc::new(EmailAnswerer::new(cfg).expect("agent"));
+
+    let id = unique("em_worker_classified");
+    let tenant = unique("tn_em");
+    let sender = unique_sender("worker.classified");
+    insert_inbound(
+        &db,
+        &id,
+        Some(&tenant),
+        &mime(&sender, "Re: proposal", "Can we schedule a call Thursday at 10?", &[]),
+    )
+    .await;
+    // The worker wins the race and finishes first: processed_at set,
+    // processed stays false, no draft, worker-side suggested_action present.
+    sqlx::query(
+        "UPDATE inbound_messages SET processed_at = NOW(), classification = 'meeting_request', \
+         classification_confidence = 0.85, \
+         suggested_action = '{\"action\": \"schedule_demo\", \"first_response\": true}'::jsonb \
+         WHERE id = $1",
+    )
+    .bind(&id)
+    .execute(&db)
+    .await
+    .expect("worker-finished row");
+
+    // The agent must now claim it, draft it, and leave the worker's fields in
+    // place (the draft write merges, it does not overwrite).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (done, pending, response, _) = row_state(&db, &id).await;
+        if done && pending && response.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a worker-classified reply never received its draft"
+        );
+        let _ = answerer.process_batch().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (done, pending, response, tokens) = row_state(&db, &id).await;
+    assert!(done && pending, "the row became a pending draft");
+    let response = response.expect("draft stored");
+    assert!(
+        response.contains("SPF record should include our servers"),
+        "draft comes from the grounded reply: {response}"
+    );
+    assert!(tokens.unwrap_or(0) > 0);
+    let action: serde_json::Value =
+        sqlx::query_scalar("SELECT suggested_action FROM inbound_messages WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .expect("suggested_action");
+    assert_eq!(
+        action["first_response"], serde_json::json!(true),
+        "the worker's first_response marker survives the draft merge: {action}"
+    );
+    assert_eq!(action["action"], serde_json::json!("schedule_demo"));
+    assert_eq!(
+        action["draft_prompt_version"],
+        serde_json::json!("email-reply-v1"),
+        "the draft records its prompt version: {action}"
+    );
+
+    cleanup_inbound(&db, &id).await;
+}
+
 // ── Loop guards decline without drafting ────────────────────────────────────
 
 async fn assert_declined(

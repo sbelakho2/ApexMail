@@ -386,24 +386,25 @@
           "hide": false
         },
         {
-          "expr": "sum(rate(apexmail_smtp_bounces_total[5m]))",
-          "legendFormat": "Bounces",
+          "expr": "sum(rate(apexmail_outbound_mta_permanently_failed_total{job=\"apexmail-outbound-mta\"}[5m]))",
+          "legendFormat": "Permanent failures (DSN'd)",
           "refId": "B",
           "hide": true
         },
         {
-          "expr": "sum(rate(apexmail_smtp_deferrals_total[5m]))",
-          "legendFormat": "Deferrals",
+          "expr": "sum(rate(apexmail_outbound_mta_retry_scheduled_total{job=\"apexmail-outbound-mta\"}[5m]))",
+          "legendFormat": "Retries scheduled (transient)",
           "refId": "C",
           "hide": true
         },
         {
-          "expr": "sum(rate(apexmail_smtp_rejections_total[5m]))",
-          "legendFormat": "Rejections",
+          "expr": "sum(rate(mta_smtp_reject{job=\"apexmail-mta\"}[5m]))",
+          "legendFormat": "SMTP rejects (MTA replies)",
           "refId": "D",
           "hide": true
         }
       ],
+      "description": "SMTP reachability plus (hidden, opt-in) delivery-outcome targets. The outcome targets were retargeted by the 2026-10-07 residual-fix wave: apexmail_smtp_{bounces,deferrals,rejections}_total exist nowhere in the codebase, so they could never render. Bounces ~ the outbound relay's permanently-failed counter (DSN'd), deferrals ~ retry-scheduled (transient failures), rejects ~ the MTA's mta.smtp.reject counter (dots export as underscores).",
       "title": "SMTP Port Probe Success",
       "type": "timeseries"
     },
@@ -495,18 +496,19 @@
           "hide": false
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(apexmail_smtp_delivery_duration_seconds_bucket[5m])) by (le)) * 1000",
-          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum(rate(mta_smtp_session_duration_bucket{job=\"apexmail-mta\"}[5m])) by (le))",
+          "legendFormat": "session p95 (ms)",
           "refId": "B",
           "hide": true
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(apexmail_smtp_delivery_duration_seconds_bucket[5m])) by (le)) * 1000",
-          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum(rate(mta_smtp_session_duration_bucket{job=\"apexmail-mta\"}[5m])) by (le))",
+          "legendFormat": "session p99 (ms)",
           "refId": "C",
           "hide": true
         }
       ],
+      "description": "SMTP connect duration from the blackbox probe, plus (hidden, opt-in) SMTP session duration quantiles. The session targets were retargeted by the 2026-10-07 residual-fix wave: apexmail_smtp_delivery_duration_seconds does not exist; the MTA's closest shipped histogram is mta.smtp.session.duration (recorded in milliseconds — no *1000 scaling), which measures the whole SMTP session, not per-message delivery.",
       "title": "SMTP Connect Duration by Port",
       "type": "timeseries"
     },

@@ -640,17 +640,15 @@ impl ResponseVerifier {
             violations.push(Violation::TooLong { length: len });
         }
 
-        // Detect repetition (same phrase 3+ times)
-        let words: Vec<&str> = text.split_whitespace().collect();
-        for window in words.windows(4) {
-            let trigram = window[..3].join(" ");
-            let count = text.match_indices(&trigram).count();
-            if count >= 3 && trigram.len() > 10 {
-                violations.push(Violation::Repetition {
-                    phrase: trigram.chars().take(60).collect(),
-                });
-                break; // One is enough
-            }
+        // Detect repetition: the SAME sentence (or a long verbatim clause)
+        // three or more times. The rule must not reject PARALLEL LISTS: a
+        // multi-plan comparison ("The X plan is €Y per month, with N emails
+        // per month…") repeats one structural frame while every salient
+        // token — plan name, price, limits — differs, and the previous
+        // trigram rule flagged shared function-word frames such as
+        // "per month, with" and escalated every legitimate comparison.
+        if let Some(phrase) = repetition_phrase(text) {
+            violations.push(Violation::Repetition { phrase });
         }
 
         violations
@@ -1221,6 +1219,105 @@ fn supported_by_chunk(claim: &ClaimTokens, chunk: &RetrievedChunk) -> bool {
 /// end a sentence; `.` ends one only when followed by whitespace or end of
 /// text — except decimals ("65.50") and single-letter abbreviations
 /// ("e.g.", "support@apexmail.ee.").
+/// Verbatim-clause width for the intra-sentence repetition arm. Eight words
+/// (and the content-word floor below) is long enough that a parallel list's
+/// shared frame — "emails per month", "per month, with" — never qualifies,
+/// while a padded answer that restates one real clause three times still does.
+const REPETITION_WINDOW_WORDS: usize = 8;
+/// How many verbatim occurrences decide "repetition".
+const REPETITION_MIN_OCCURRENCES: usize = 3;
+/// A repeated sentence shorter than this is a fragment, not evidence (the
+/// corpus's true-positive arm repeats a four-word sentence).
+const REPETITION_MIN_SENTENCE_WORDS: usize = 4;
+/// A repeated window must carry at least this many content words: function
+/// words alone ("per month, with") are a shared frame, not padding.
+const REPETITION_MIN_CONTENT_WORDS: usize = 2;
+
+/// Lowercase, punctuation-stripped, whitespace-collapsed unit for comparison.
+/// Digits keep their grouping separators ("3,000", "€1,750") so numbers stay
+/// one token — a parallel list's numbers are the salient tokens the windows
+/// must remain distinct on.
+fn repetition_normalize(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        let digit_grouping = (c == ',' || c == '.')
+            && current.chars().next().is_some_and(|first| first.is_ascii_digit());
+        if c.is_alphanumeric() || c == '€' || digit_grouping {
+            current.push(c.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn repetition_content_words(words: &[String]) -> usize {
+    words
+        .iter()
+        .filter(|word| !CLAIM_STOPWORDS.contains(&word.as_str()))
+        .count()
+}
+
+/// The repeated phrase that makes an answer repetitive, if any.
+///
+/// Two arms, both keyed on SALIENT content:
+///
+/// * a whole sentence (≥ 4 words) appearing three or more times verbatim;
+/// * a ≥ 8-word verbatim window inside one sentence, appearing three or more
+///   times, carrying at least two content words.
+///
+/// Parallel lists (plan comparisons, per-tier rate tables) differ in names
+/// and numbers at least every few tokens, so no window survives; a genuinely
+/// padded answer repeats a full clause and does.
+fn repetition_phrase(text: &str) -> Option<String> {
+    let sentences = split_sentences(text);
+    let mut sentence_counts: Vec<(String, usize)> = Vec::new();
+    for sentence in &sentences {
+        let words = repetition_normalize(sentence);
+        if words.len() < REPETITION_MIN_SENTENCE_WORDS {
+            continue;
+        }
+        let key = words.join(" ");
+        match sentence_counts.iter_mut().find(|(seen, _)| *seen == key) {
+            Some((_, count)) => {
+                *count += 1;
+                if *count >= REPETITION_MIN_OCCURRENCES {
+                    return Some(key.chars().take(60).collect());
+                }
+            }
+            None => sentence_counts.push((key, 1)),
+        }
+    }
+
+    let mut window_counts: Vec<(String, usize)> = Vec::new();
+    for sentence in &sentences {
+        let words = repetition_normalize(sentence);
+        if words.len() < REPETITION_WINDOW_WORDS {
+            continue;
+        }
+        for window in words.windows(REPETITION_WINDOW_WORDS) {
+            if repetition_content_words(window) < REPETITION_MIN_CONTENT_WORDS {
+                continue;
+            }
+            let key = window.join(" ");
+            match window_counts.iter_mut().find(|(seen, _)| *seen == key) {
+                Some((_, count)) => {
+                    *count += 1;
+                    if *count >= REPETITION_MIN_OCCURRENCES {
+                        return Some(key.chars().take(60).collect());
+                    }
+                }
+                None => window_counts.push((key, 1)),
+            }
+        }
+    }
+    None
+}
+
 fn split_sentences(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut sentences = Vec::new();
@@ -1925,7 +2022,7 @@ mod tests {
         );
     }
 
-    /// The same trigram three times is a Repetition violation, and the retry
+    /// The same sentence three times is a Repetition violation, and the retry
     /// hint tells the model to rephrase.
     #[test]
     fn repeated_phrases_are_flagged_with_a_rephrase_hint() {
@@ -1948,6 +2045,72 @@ mod tests {
                 .is_some_and(|hint| hint.contains("repeating")),
             "{:?}",
             verdict.correction_hint
+        );
+    }
+
+    /// Regression (dogfood P1, corpus agent): a PARALLEL LIST is not
+    /// repetition. A multi-plan comparison repeats one structural frame while
+    /// plan names and numbers differ — the old trigram rule flagged the
+    /// shared "per month, with" frame and escalated the whole answer. Both
+    /// phrasings a real model (and the mock) produce must pass.
+    #[test]
+    fn parallel_plan_lists_are_not_repetition() {
+        let v = ResponseVerifier::new();
+        let long_form = "The Free plan is \u{20ac}0 per month, with 3,000 emails per month, \
+             30,000 API calls per month, 1 team member and 7 days event retention.\n\
+             The Developer plan is \u{20ac}29 per month, with 50,000 emails per month, \
+             500,000 API calls per month, 5 team members and 30 days event retention.\n\
+             The Pro plan is \u{20ac}89 per month, with 150,000 emails per month, \
+             2,000,000 API calls per month, 10 team members and 60 days event retention.\n\
+             The Growth plan is \u{20ac}229 per month, with 500,000 emails per month, \
+             5,000,000 API calls per month, 25 team members and 90 days event retention.\n\
+             The Business plan is \u{20ac}699 per month, with 2,000,000 emails per month, \
+             20,000,000 API calls per month, 50 team members and 365 days event retention.\n\
+             The Enterprise Cloud plan is \u{20ac}1,750 per month, with 5,000,000 emails \
+             per month, unlimited API calls and 730 days event retention.";
+        let verdict = v.verify(long_form);
+        assert!(
+            !verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::Repetition { .. })),
+            "a six-plan comparison is a parallel list, not repetition: {:?}",
+            verdict.violations
+        );
+
+        let compact = "The published plans are: Free is \u{20ac}0 per month with 3,000 \
+             emails per month; Developer is \u{20ac}29 per month with 50,000 emails per \
+             month; Pro is \u{20ac}89 per month with 150,000 emails per month; Growth is \
+             \u{20ac}229 per month with 500,000 emails per month; Business is \u{20ac}699 \
+             per month with 2,000,000 emails per month; Enterprise Cloud is \u{20ac}1750 \
+             per month with 5,000,000 emails per month.";
+        let verdict = v.verify(compact);
+        assert!(
+            !verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::Repetition { .. })),
+            "the compact plan list is not repetition: {:?}",
+            verdict.violations
+        );
+    }
+
+    /// The intra-sentence arm keeps working: the same real clause padded
+    /// three times inside one sentence is still repetition.
+    #[test]
+    fn padded_clause_repetition_is_still_rejected() {
+        let v = ResponseVerifier::new();
+        let clause = "ApexMail warms dedicated sending IPs gradually before campaigns";
+        let verdict = v.verify(&format!(
+            "Delivery guidance: {clause}, and {clause}, and {clause}."
+        ));
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|viol| matches!(viol, Violation::Repetition { .. })),
+            "{:?}",
+            verdict.violations
         );
     }
 

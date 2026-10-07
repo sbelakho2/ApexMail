@@ -66,6 +66,14 @@ Throughput limits apply to all plans; the *uptime credit* regime in
 |--------|--------|-------------------|
 | Auth success rate | ≥ 99.9% of valid credential attempts | Rolling 7-day window |
 
+The published auth success rate is the 2xx share of API requests under
+`/v1/auth/`, read from `apexmail_http_requests_total` on the `apexmail-api`
+job (`path_pattern=~"/v1/auth/.*"`). Rejected credentials count as failures
+in that share, so it is a lower bound on the commitment rather than the
+commitment itself; no counter scoped to valid credential attempts exists
+today. SMTP submission auth failures are observable as `mta.auth.failure` on
+the `apexmail-mta` job.
+
 ---
 
 ## 3. Service Credits
@@ -174,8 +182,18 @@ Customers can monitor their own SLA compliance using:
 
 - **Grafana dashboards:** SLO compliance panel at
   [`deploy/monitoring/dashboards/slo-compliance.json`](../deploy/monitoring/dashboards/slo-compliance.json)
-- **Prometheus metrics:** All SLA-relevant metrics are exposed via the
-  `/metrics` endpoint with a `slo` label
+- **Prometheus metrics:** each service exposes its own series on the scrape
+  jobs declared in [`deploy/prometheus.yml`](../deploy/prometheus.yml).
+  Uptime, error-rate and latency signals are `apexmail_http_requests_total`
+  and `apexmail_http_request_duration_seconds` on the `apexmail-api` job.
+  Email-delivery signals are the relay counters
+  `apexmail_outbound_mta_accepted_total`,
+  `apexmail_outbound_mta_permanently_failed_total` and
+  `apexmail_outbound_mta_retry_scheduled_total` on the
+  `apexmail-outbound-mta` job. There is no global `slo` label; the recorded
+  `apexmail:api_availability:ratio_30d` and
+  `apexmail:api_latency_slo:ratio_30d` series live in
+  [`deploy/alerting-rules.yml`](../deploy/alerting-rules.yml).
 - **Alert rules:** Pre-configured PrometheusRule alerts for SLO burn-rate
   violation at [`deploy/prometheus/alerts/`](../deploy/prometheus/alerts/)
 

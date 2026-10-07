@@ -369,3 +369,50 @@ Both crates intentionally avoid linking `api-server`:
 | [`scripts/compare-baseline.sh`](../../scripts/compare-baseline.sh) | Baseline comparison tool |
 | [`deploy/grafana/dashboards/load-testing-overview.json`](../../deploy/grafana/dashboards/load-testing-overview.json) | Grafana dashboard definition |
 | [`docs/deployment/HETZNER_SIMULATION_CHECKLIST.md`](../deployment/HETZNER_SIMULATION_CHECKLIST.md) | Production-scale infrastructure guide |
+
+---
+
+## AI Bots — Mass-Concurrency Budgets (live compose harness)
+
+The chat assistant and the mailbot reply pipeline have their own
+mass-concurrency budgets, exercised by two scripts that drive the compose
+stack black-box. Each script exits non-zero on any breach, so it can be
+wired into a gate as-is:
+
+| Harness | What it drives |
+|---|---|
+| [`tools/bots_perf_budget.py`](../../tools/bots_perf_budget.py) | 16 concurrent chat conversations across 3 tenants (one session user per conversation, `>=100 s` sustained at an 8 s cadence), 8 parallel session creations, 8 parallel turns into one session, per-tenant rate-limit isolation, Postgres connection-peak and container-memory sampling, server-log scans; then 20 simultaneous inbound SMTP messages and the first-response (priority 100) send lane. |
+| [`tools/bots_disclosure_suite.py`](../../tools/bots_disclosure_suite.py) | The adversarial disclosure matrix against both bots: system-prompt/internal-instruction extraction (print/repeat/roleplay/nested quotes/base64/unicode/2 MB body), internal identifiers, secrets, other tenants' data, suppressed/legal-hold content, tool inventory; live RBAC probes (member, narrow-scope key, admin, owner), cross-tenant session/history/draft isolation, and a hostile inbound message per tenant for the drafted-reply lane. |
+
+```bash
+# Full budgets run (provisions 3 tenants through the product's own
+# signup -> Mailpit verify -> login -> MFA flow, then 16 fixture users)
+python3 tools/bots_perf_budget.py --fresh
+# Re-run later against the same provisioned state
+python3 tools/bots_perf_budget.py
+# Lanes only
+python3 tools/bots_perf_budget.py --chat-only
+python3 tools/bots_perf_budget.py --mailbot-only
+
+# Disclosure + RBAC/isolation suite (reuses the perf run's tenants/users)
+python3 tools/bots_disclosure_suite.py
+```
+
+Budgets enforced by `bots_perf_budget.py` (rationale in the code header).
+Chat turn p95 <= 10 s, p99 <= 15 s, p50 target <= 3 s, 0 x 5xx, 0
+cross-tenant content. At most 10% 429 may appear at the sustained cadence:
+the ai-service per-tenant governor defaults to 60/60 s. Session-create p95
+<= 3 s, 8/8 parallel creates unique, 0 lost or duplicated parallel turns.
+Tenant-A saturation must not starve tenant-B, so the 429 stays scoped.
+`pg_stat_activity` peak <= 45 of `DB_MAX_CONNECTIONS`=50, with 0 pool-timeout
+or panic logs. Api-server memory growth <= 25% (limit 512 MiB) and worker
+under 1 GiB. Mailbot: 20/20 accepted, 0 loss or duplication, per-message
+drain <= 90 s (the draft agent polls every 30 s and claims 10 rows per tick),
+SMTP accept p95 <= 10 s, 0 reply-handler error-level logs.
+First-response lane: claim <= 15 s in the first claim batch and send <= 30 s,
+observed in Mailpit. The raw JSON report lands in
+`/tmp/apexmail-bots-perf-report.json`; disclosure evidence lands in
+`/tmp/apexmail-bots-disclosure-report.json`. The live run and its numbers are
+recorded in
+[`docs/audit/dogfood-2026-10-06/dogfood-bots-perf-compliance.md`](../audit/dogfood-2026-10-06/dogfood-bots-perf-compliance.md).
+

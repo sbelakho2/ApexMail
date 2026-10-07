@@ -388,14 +388,9 @@
           "expr": "sum(rate(pg_stat_database_xact_rollback{job=\"postgres\"}[5m]))",
           "legendFormat": "rollbacks/s",
           "refId": "B"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(apexmail_db_query_duration_seconds_bucket[5m])) by (le)) * 1000",
-          "legendFormat": "p99",
-          "refId": "C",
-          "hide": true
         }
       ],
+      "description": "Postgres transaction rate from the postgres-exporter (job=postgres). A per-query p99 latency panel was removed by the 2026-10-07 residual-fix wave: it queried apexmail_db_query_duration_seconds, which no service exports (the apexmail-db crate registers db_query_duration_seconds in the `prometheus` crate's default registry, and no process serves that registry on its /metrics endpoint).",
       "title": "Transaction Rate (commit vs rollback)",
       "type": "timeseries"
     },

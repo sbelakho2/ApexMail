@@ -1,0 +1,8 @@
+/apexmail-api-server-1 image=sha256:9fc3894c054ccdf16c149a8f30e696823c4af6adb28eab74110b1b2f19e7c22a created=2026-10-07T21:34:56.278428643Z
+/apexmail-ai-service-1 image=sha256:6fec8fcaeab6a0e2cd59c59df3ca400f029af267e013348b901070e20b179a95 created=2026-10-07T21:34:56.271552388Z
+/apexmail-worker-1 image=sha256:8c5c40a008bd9fe4b9efaaf256f9f1ab5ccde669913dbdd42c9c45e2e9948a42 created=2026-10-07T21:34:56.271030835Z
+AI_EMAIL_AGENT_ENABLED=true
+AI_MODEL_ENDPOINT=http://mock-llm:8099/v1
+AI_MODEL_NAME=apexmail-assistant
+AI_MODEL_ENABLED=true
+0557e55df8163be9a90f6ec7c3e03620f3254b20

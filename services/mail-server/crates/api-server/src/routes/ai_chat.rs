@@ -40,7 +40,14 @@ pub(crate) const AI_CHAT_FEATURE_FLAG: &str = "ai_chat";
 /// Evaluate the assistant capability for the authenticated tenant. Returns
 /// 403 (not 404) so a disabled tenant knows the capability exists but is
 /// switched off for them.
-async fn require_ai_chat_enabled(state: &AppState, tenant_id: &str) -> Result<(), ApiError> {
+///
+/// Shared with the console PRG handler (which calls it before creating a
+/// session, so a switched-off workspace does not accumulate empty
+/// conversations) and with the session-turn flow itself.
+pub(crate) async fn require_ai_chat_enabled(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
     if state
         .feature_flags
         .enabled(tenant_id, AI_CHAT_FEATURE_FLAG, true)
@@ -462,6 +469,12 @@ pub(crate) async fn read_session_turns(
     ensure_session_owned(&state, &auth.tenant_id, &user_key, &session_id).await?;
 
     let limit = query.limit.unwrap_or(SESSION_WINDOW_TURNS).clamp(1, 50);
+    // THE NEWEST `limit` turns, returned oldest-first. `ORDER BY created_at
+    // ASC LIMIT n` returned the OLDEST n turns: past the window the API (and
+    // every consumer) could never see the latest exchange at all — a live
+    // concurrency probe read 12 of 16 turns, hiding the four newest. The page
+    // loader already reads the newest window (DESC LIMIT then reverse); this
+    // is the same contract on the JSON surface.
     let rows: Vec<(
         String,
         String,
@@ -472,8 +485,11 @@ pub(crate) async fn read_session_turns(
         chrono::DateTime<chrono::Utc>,
     )> = sqlx::query_as(
         "SELECT role, content, escalated, citations, disclosure, docs_version, created_at \
-         FROM ai_chat_session_turns WHERE session_id = $1 AND tenant_id = $2 \
-         ORDER BY created_at ASC LIMIT $3",
+         FROM ( \
+             SELECT role, content, escalated, citations, disclosure, docs_version, created_at \
+             FROM ai_chat_session_turns WHERE session_id = $1 AND tenant_id = $2 \
+             ORDER BY created_at DESC LIMIT $3 \
+         ) AS newest ORDER BY created_at ASC",
     )
     .bind(&session_id)
     .bind(&auth.tenant_id)
@@ -618,9 +634,9 @@ pub(crate) async fn ensure_session_owned(
     Ok(())
 }
 
-/// Post one user turn: persist it FIRST (a failed answer never loses the
-/// question), ask the assistant with the session's own history, persist the
-/// assistant turn, and return both.
+/// Post one user turn: the ownership check runs first (a foreign session id
+/// is a 404 before anything else can be learned), then the shared turn flow
+/// applies the capability flag, the per-user rate limit and persistence.
 pub(crate) async fn post_session_turn(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -628,9 +644,7 @@ pub(crate) async fn post_session_turn(
     Json(body): Json<TurnBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
-    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
     let user_key = user_key_of(&auth);
-    chat_rate_limit(&state, &auth.tenant_id, &user_key).await?;
     ensure_session_owned(&state, &auth.tenant_id, &user_key, &session_id).await?;
 
     Ok(Json(
@@ -647,6 +661,14 @@ pub(crate) async fn post_session_turn(
 
 /// The session-turn flow, reusable by the console's PRG handler (which
 /// renders the outcome instead of returning JSON).
+///
+/// The capability flag and the per-user rate limit are enforced HERE, not in
+/// the JSON wrapper: the console's PRG handler calls this function directly,
+/// and while the gates lived in `post_session_turn` a tenant with `ai_chat`
+/// disabled could still chat from the console page (the docs promise the
+/// page reports the capability as not enabled), and the documented per-user
+/// throttle never applied to console messages at all. Every entry point now
+/// shares the same gates, so no caller can bypass them.
 pub(crate) async fn session_turn_inner(
     state: &AppState,
     tenant_id: &str,
@@ -654,6 +676,9 @@ pub(crate) async fn session_turn_inner(
     session_id: &str,
     message: &str,
 ) -> Result<serde_json::Value, ApiError> {
+    require_ai_chat_enabled(state, tenant_id).await?;
+    chat_rate_limit(state, tenant_id, user_key).await?;
+
     let message = message.trim().to_string();
     if message.is_empty() {
         return Err(ApiError::Validation(vec![
@@ -1064,6 +1089,7 @@ mod adversarial_tests {
 mod session_tests {
     use axum::http::StatusCode;
 
+    use super::{session_turn_inner, ApiError};
     use crate::app::test_support::adv::AdvEnv;
 
     /// Minimal ai-service twin for the session flow: echoes the history it
@@ -1190,6 +1216,187 @@ mod session_tests {
         .await
         .expect("owner check");
         assert_eq!(owners, 1, "the session belongs to its creator");
+    }
+
+    /// Regression (dogfood P1, live concurrency probe): the session window
+    /// must be the NEWEST `limit` turns. `ORDER BY created_at ASC LIMIT 12`
+    /// returned the OLDEST twelve, so a conversation longer than the window
+    /// could never show its latest exchange on the JSON surface (the live
+    /// probe read 12 of 16 turns and lost the four newest).
+    #[tokio::test]
+    async fn session_window_returns_the_newest_turns_not_the_oldest() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_window").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let Some((env, tenant, user)) =
+            AdvEnv::session_with_config(pool.clone(), "owner", ai_config(&ai_url)).await
+        else {
+            return;
+        };
+        let (status, created) = env.post("/v1/ai/chat/sessions", "{}").await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = session_id(&created);
+
+        // Eight exchanges, oldest first; each earlier pair is 10s older.
+        for index in 0..8i64 {
+            for (role, offset, label) in [
+                ("user", 100 - index * 10, format!("oldest-user-{index}")),
+                (
+                    "assistant",
+                    95 - index * 10,
+                    format!("newest-assistant-{index}"),
+                ),
+            ] {
+                sqlx::query(
+                    "INSERT INTO ai_chat_session_turns \
+                         (id, session_id, tenant_id, role, content, created_at) \
+                     VALUES ($1, $2, $3, $4, $5, NOW() - make_interval(secs => $6::int))",
+                )
+                .bind(apexmail_lib::id::generate_id("turn", 21))
+                .bind(&id)
+                .bind(&tenant)
+                .bind(role)
+                .bind(&label)
+                .bind(offset)
+                .execute(&pool)
+                .await
+                .expect("seed turn");
+            }
+        }
+
+        let (status, window) = env.get(&format!("/v1/ai/chat/sessions/{id}/turns")).await;
+        assert_eq!(status, StatusCode::OK, "{window}");
+        let turns = window["turns"].as_array().cloned().unwrap_or_default();
+        assert_eq!(turns.len(), 12, "the default window is 12 turns: {window}");
+        let contents: Vec<String> = turns
+            .iter()
+            .map(|turn| turn["content"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            contents.iter().any(|c| c == "newest-assistant-7"),
+            "the newest exchange must be inside the window: {contents:?}"
+        );
+        assert!(
+            !contents.iter().any(|c| c == "oldest-user-0"),
+            "the window must not be the oldest turns: {contents:?}"
+        );
+        assert_eq!(
+            contents.first().map(String::as_str),
+            Some("oldest-user-2"),
+            "the window starts at the 13th-newest turn: {contents:?}"
+        );
+        let _ = user;
+    }
+
+    /// Regression (dogfood P1): the console's PRG handler calls
+    /// `session_turn_inner` directly, and while the capability flag lived in
+    /// the JSON wrapper that path ignored it — a tenant with `ai_chat`
+    /// disabled could still chat from the console, and the refused turn was
+    /// still persisted. The shared flow now refuses BEFORE writing anything.
+    #[tokio::test]
+    async fn session_turn_inner_refuses_a_disabled_capability_without_writing() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_flag").await else {
+            return;
+        };
+        let (_env, tenant) = AdvEnv::tenant(pool.clone(), &["ai:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // The console resolves the newest session for (tenant, user) and
+        // calls the shared flow with it; model the same row.
+        let session_id = apexmail_lib::id::generate_id("chat", 21);
+        sqlx::query(
+            "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&session_id)
+        .bind(&tenant)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed session");
+
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (id, flag_key, tenant_id, value, created_at)
+             VALUES ($1, 'ai_chat', $2, 'false'::jsonb, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("disable the capability");
+
+        let outcome = session_turn_inner(&state, &tenant, &tenant, &session_id, "hello").await;
+        match outcome {
+            Err(ApiError::Forbidden(message)) => {
+                assert!(
+                    message.contains("not enabled"),
+                    "the refusal names the capability: {message}"
+                );
+            }
+            other => panic!("disabled capability must refuse before any work: {other:?}"),
+        }
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM ai_chat_session_turns WHERE session_id = $1")
+                .bind(&session_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count turns");
+        assert_eq!(turns, 0, "a refused turn is never persisted");
+
+        let _ = sqlx::query("DELETE FROM feature_flag_overrides WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+    }
+
+    /// Regression (dogfood P1): the per-user chat rate limit also lived in
+    /// the JSON wrapper, so console messages were never throttled. The shared
+    /// flow now caps them at 20/minute per user.
+    #[tokio::test]
+    async fn session_turn_inner_applies_the_per_user_rate_limit() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            crate::test_db::assert_soft_skip_allowed("TEST_REDIS_URL");
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("ai_session_ratelimit").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let (_env, tenant) = AdvEnv::tenant(pool.clone(), &["ai:read"]).await;
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), ai_config(&ai_url))
+                .await;
+        let user_key = tenant.clone();
+        let session_id = apexmail_lib::id::generate_id("chat", 21);
+        sqlx::query(
+            "INSERT INTO ai_chat_sessions (id, tenant_id, user_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&session_id)
+        .bind(&tenant)
+        .bind(&user_key)
+        .execute(&pool)
+        .await
+        .expect("seed session");
+
+        let mut limited = false;
+        for i in 0..21 {
+            match session_turn_inner(&state, &tenant, &user_key, &session_id, &format!("q{i}")).await
+            {
+                Ok(_) => {}
+                Err(ApiError::RateLimitedMessage(message)) => {
+                    assert!(message.contains("rate limit"), "{message}");
+                    limited = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected error on turn {i}: {other:?}"),
+            }
+        }
+        assert!(limited, "the 21st console turn in a minute must be refused");
     }
 
     #[test]

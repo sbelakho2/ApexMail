@@ -428,6 +428,18 @@ summary {
   display: list-item;
 }
 
+/* Disclosure summaries are interactive controls — the zero-JS console's
+   only expand/collapse affordance — so they carry the same minimum hit
+   target bar as buttons (24px CSS, WCAG 2.5.8). The 16px `text-xs`
+   (assistant "Sources") and 20px `text-sm` ("Draft reply") summary lines
+   sat below it; one block-padding step lifts every summary to >= 24px
+   without touching the type size or the disclosure marker (dogfood
+   2026-10-06 ui-visual). */
+summary {
+  min-height: 1.5rem;
+  padding-block: 0.25rem;
+}
+
 /*
 Removes the default spacing and border for appropriate elements.
 */
@@ -1309,6 +1321,7 @@ a {
 
 /* Table: the console's one table recipe (headings, hairlines, hover). */
 .apex-table-wrap {
+  position: relative;
   border: 1px solid rgb(var(--border)) !important;
   border-radius: var(--radius-arch);
   background: rgb(var(--card)) !important;
@@ -3255,6 +3268,10 @@ input:user-invalid:focus-visible,
   white-space: nowrap;
 }
 
+.whitespace-pre-wrap {
+  white-space: pre-wrap;
+}
+
 .break-words {
   overflow-wrap: break-word;
 }
@@ -5054,6 +5071,25 @@ input::placeholder,
   color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
 }
 
+/* Brand pills carry their own `--primary` color rule, so the
+     `.text-primary` remap above never reached them: 185 28 28 on the dark
+     card is 2.7:1. Step the pill's text AND border to brand-400 in dark
+     (dogfood 2026-10-06 ui-visual — the drafts "first response" pill). */
+
+.dark .apex-pill--brand {
+  color: rgb(var(--brand-400));
+  border-color: rgb(var(--brand-400));
+}
+
+/* Success notices: the light pairing is the success-50 wash with the
+     near-black success-900 ink; in dark the wash remaps to 39 39 42 while
+     success-900 stays near-black (1.27:1 — near-invisible). Step the ink
+     to the near-white success-100 step. */
+
+.dark .text-success-900 {
+  color: rgb(var(--success-100)) !important;
+}
+
 /* Eyebrows paint brand-600 text on near-black in dark (4.1:1) — step the
      whole eyebrow (text + marker) to brand-400. */
 
@@ -5385,6 +5421,17 @@ input::placeholder,
 
   :root:not(.light) .text-primary {
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
+  }
+
+  /* Brand pills + success ink: media-query twin of the .dark block above. */
+
+  :root:not(.light) .apex-pill--brand {
+    color: rgb(var(--brand-400));
+    border-color: rgb(var(--brand-400));
+  }
+
+  :root:not(.light) .text-success-900 {
+    color: rgb(var(--success-100)) !important;
   }
 
   /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */

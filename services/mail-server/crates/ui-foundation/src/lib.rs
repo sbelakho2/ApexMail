@@ -4,6 +4,7 @@ pub mod charts;
 pub mod csrf;
 pub mod data;
 pub mod explorer;
+pub mod fixture_states;
 pub mod flash;
 pub mod icons;
 pub mod leptos_views;
@@ -311,6 +312,156 @@ mod tests {
                 .contains("--brand-gradient: linear-gradient(135deg, #dc2626, #dc2626);"),
             "the marketing brand fill must be the flat classic red",
         );
+    }
+
+    /// Bot-surface wrap + hit-target recipes (dogfood 2026-10-06 ui-visual),
+    /// pinned at the source of BOTH stylesheets so the authored sheet and
+    /// the built sheet cannot drift apart:
+    ///
+    /// 1. `.whitespace-pre-wrap` — the assistant transcript turns, the
+    ///    AI-draft reply bodies and the demo result blocks are pre-rendered
+    ///    multi-line text; without the utility a `<p>` collapses the
+    ///    newlines and a `<pre>` keeps `white-space: pre` and scrolls
+    ///    sideways. The class was composed in Rust string literals and the
+    ///    committed build had dropped it.
+    /// 2. the browser `summary` base rule — disclosure summaries are the
+    ///    zero-JS console's only expand/collapse control, so they carry the
+    ///    24px minimum hit target (WCAG 2.5.8) via block padding; the 16px
+    ///    `text-xs` and 20px `text-sm` summary lines sat below it.
+    #[test]
+    fn bot_surface_wrap_and_hit_target_rules_are_in_both_sheets() {
+        for (name, sheet) in [
+            ("console globals.css", GLOBALS_CSS),
+            ("console globals.input.css", GLOBALS_INPUT_CSS),
+        ] {
+            assert!(
+                sheet.contains(".whitespace-pre-wrap"),
+                "{name} must define .whitespace-pre-wrap — the bot surfaces' multi-line content wraps with it",
+            );
+            assert!(
+                sheet.contains("min-height: 1.5rem;") && sheet.contains("padding-block: 0.25rem;"),
+                "{name} must carry the 24px summary hit-target rule (min-height + block padding)",
+            );
+        }
+    }
+
+    /// Dark-mode AA pairings for the bot surfaces (dogfood 2026-10-06
+    /// ui-visual, relayed from the mailbot live gate): two recipes carry
+    /// their own color rules that the generic `.text-primary` / token
+    /// remaps never reach —
+    ///
+    /// 1. `.apex-pill--brand` paints `--primary` (the light-mode brand-700
+    ///    red, 185 28 28) which is 2.7:1 on the dark card; dark must step
+    ///    the pill to brand-400 (248 113 113).
+    /// 2. the success flash/notice ink is the near-black success-900; in
+    ///    dark the success-50 wash remaps to 39 39 42, leaving 1.27:1 —
+    ///    dark must step the ink to the near-white success-100.
+    ///
+    /// The zero-JS console takes the `:root:not(.light)` media path, so
+    /// each override must exist in BOTH forms in BOTH sheets.
+    #[test]
+    fn bot_surface_dark_aa_overrides_are_in_both_sheets() {
+        for (name, sheet) in [
+            ("console globals.css", GLOBALS_CSS),
+            ("console globals.input.css", GLOBALS_INPUT_CSS),
+        ] {
+            for selector in [
+                ".dark .apex-pill--brand",
+                ":root:not(.light) .apex-pill--brand",
+                ".dark .text-success-900",
+                ":root:not(.light) .text-success-900",
+            ] {
+                assert!(
+                    sheet.contains(selector),
+                    "{name} must carry {selector} — without it the recipe keeps its light pairing in dark",
+                );
+            }
+        }
+
+        // The pairing itself clears AA on the dark card (computed from the
+        // shipped token values, both themes' card fills).
+        fn luminance(rgb: &str) -> f64 {
+            let parts: Vec<f64> = rgb
+                .split_whitespace()
+                .map(|v| v.parse::<f64>().expect("token channel"))
+                .collect();
+            let lin = |v: f64| {
+                let v = v / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(parts[0]) + 0.7152 * lin(parts[1]) + 0.0722 * lin(parts[2])
+        }
+        fn ratio(a: &str, b: &str) -> f64 {
+            let (la, lb) = (luminance(a), luminance(b));
+            let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+        let brand_400 = "248 113 113"; // --brand-400
+        let dark_card = "24 24 27"; // --card, dark
+        let light_card = "255 255 255";
+        let light_primary = "185 28 28"; // --primary, light
+        assert!(
+            ratio(light_primary, light_card) >= 4.5,
+            "the light brand pill must clear AA on the light card",
+        );
+        assert!(
+            ratio(brand_400, dark_card) >= 4.5,
+            "the dark brand pill must clear AA on the dark card (brand-400 vs 24 24 27)",
+        );
+        assert!(
+            ratio("244 244 245", "39 39 42") >= 4.5,
+            "the dark success ink (success-100) must clear AA on the remapped success wash (39 39 42)",
+        );
+    }
+
+    /// The last two layout-gate pages (dogfood 2026-10-06 ui-visual,
+    /// residual sweep), pinned at their source:
+    ///
+    /// 1. every sales JSON-mutation `<code>` chip wraps its long endpoint —
+    ///    `POST /v1/admin/autopilot/decisions/:id/review` is one unbreakable
+    ///    token and spilled 72 px out of its card at mobile width;
+    /// 2. `.apex-table-wrap` is a positioned scroll container — without
+    ///    `position: relative` the sr-only labels inside a table header are
+    ///    absolutely positioned against the document and their static
+    ///    position widened `/cp/demos` by 23 px at mobile.
+    #[test]
+    fn sales_code_chips_and_table_wrapper_layout_pins() {
+        let sales = crate::axum_router::render_route("control-plane", "/sales")
+            .expect("the sales route must render");
+        assert!(
+            sales.contains("text-primary break-words"),
+            "sales code chips must carry break-words — the long endpoint tokens spill their card otherwise",
+        );
+        let demos = crate::axum_router::render_route("control-plane", "/cp/demos")
+            .expect("the demos route must render");
+        assert!(
+            demos.contains("apex-table-wrap") && demos.contains("apex-table"),
+            "the demos sessions table must render inside the shared wrapper",
+        );
+        for (name, sheet) in [
+            ("console globals.css", GLOBALS_CSS),
+            ("console globals.input.css", GLOBALS_INPUT_CSS),
+        ] {
+            // The sheets carry a legacy `.apex-table-wrap` rule (white card,
+            // no scroll) ahead of the canonical one; the canonical rule is
+            // the one carrying the scroll container. At least one must be
+            // positioned too.
+            let positioned = sheet
+                .match_indices(".apex-table-wrap")
+                .any(|(at, _)| sheet[at..(at + 400).min(sheet.len())].contains("position: relative"));
+            assert!(
+                positioned,
+                "{name}: a .apex-table-wrap rule must be position: relative so abspos descendants stay inside the scroll container",
+            );
+            let scrolls = sheet
+                .match_indices(".apex-table-wrap")
+                .any(|(at, _)| sheet[at..(at + 400).min(sheet.len())].contains("overflow-x: auto"));
+            assert!(scrolls, "{name}: .apex-table-wrap must keep its horizontal scroll");
+        }
     }
 
     /// Console/CP brand tokens: deep red #dc2626 on near-black zinc #09090b.

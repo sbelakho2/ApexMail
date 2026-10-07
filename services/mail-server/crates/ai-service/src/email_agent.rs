@@ -118,8 +118,8 @@ pub(crate) const TENANT_DRAFT_COUNT_SQL: &str = r#"SELECT COUNT(*) FROM inbound_
 /// The quarantine write: gives up on a message after
 /// [`MAX_PROCESS_ATTEMPTS`] failures, marking it processed with an error
 /// note (and no pending approval) so it cannot poison the queue forever.
-/// The terminal `processed_at` also makes the row ineligible for re-claim
-/// regardless of the claim marker.
+/// The terminal `processed = true` (with a non-NULL `ai_response`) makes the
+/// row ineligible for re-claim regardless of the claim marker.
 pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
             UPDATE inbound_messages
             SET processed_at = NOW(), processing = false, processed = true,
@@ -139,6 +139,21 @@ pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
 // semantics — a race. The MTA only populates raw_message (the mirror
 // columns are NULL), so from/subject/body are parsed from the raw MIME.
 //
+// ELIGIBILITY IS "NO TERMINAL WRITE YET", never "processed_at IS NULL":
+// the worker reply handler classifies the same reply-shaped rows and stamps
+// `processed_at` on each one when it finishes (MARK_PROCESSED_SQL). Since the
+// worker polls every second and this agent every 30, a predicate keyed on
+// `processed_at IS NULL` loses essentially every race and the mailbot stops
+// drafting entirely — the live 2026-10-06 dogfood caught a canary row
+// classified `meeting_request` that the agent never claimed (and 25 more
+// classified-without-draft rows). The durable discriminators are the agent's
+// OWN terminal writes: STORE_DRAFT / DECLINE / QUARANTINE all set
+// `processed = true` AND an `ai_response`, so a row with `processed = false
+// AND ai_response IS NULL AND pending_approval = false` is exactly "no draft
+// and no review note yet" — whether or not the worker already classified it.
+// A worker-classified row therefore keeps its classification as the draft
+// prompt hint and still receives its draft.
+//
 // The claim marker itself carries a staleness window: a worker that dies
 // (crash, SIGKILL, deployment) between claiming and finishing leaves
 // `ai_claimed_at` set and the message would otherwise be stranded forever —
@@ -146,12 +161,14 @@ pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
 // is re-claimable; the bound far exceeds the worst-case per-batch processing
 // time (10 messages × bounded LLM timeout), so a live worker never sees its
 // fresh claim stolen. Terminal states are still never resurrected:
-// `processed_at IS NULL` remains a hard filter.
+// `ai_response IS NULL AND processed = false` is a hard filter.
 const CLAIM_UNPROCESSED_SQL: &str = r#"
                         WITH candidates AS (
                                 SELECT id
                                 FROM inbound_messages
-                                WHERE processed_at IS NULL
+                                WHERE ai_response IS NULL
+                                    AND processed = false
+                                    AND pending_approval = false
                                     AND (ai_claimed_at IS NULL
                                          OR ai_claimed_at < NOW() - INTERVAL '15 minutes')
                                     AND raw_message IS NOT NULL
@@ -1814,10 +1831,24 @@ mod tests {
     }
 
     #[test]
-    fn claim_query_has_no_age_window_and_targets_unprocessed_rows() {
+    fn claim_query_has_no_age_window_and_targets_rows_without_a_terminal_write() {
         // Regression: the "received_at > NOW() - INTERVAL '5 minutes'" filter
         // stranded interrupted messages forever.
-        assert!(CLAIM_UNPROCESSED_SQL.contains("processed_at IS NULL"));
+        //
+        // And the eligibility predicate must NOT key on `processed_at IS
+        // NULL`: the worker reply handler stamps processed_at on every
+        // reply-shaped row it classifies first (1s poll vs this agent's 30s),
+        // so that predicate starved the draft queue entirely (live dogfood
+        // 2026-10-06 — 25 classified rows, 0 drafts). Eligibility is "no
+        // terminal write yet": no ai_response, processed=false,
+        // pending_approval=false.
+        assert!(
+            !CLAIM_UNPROCESSED_SQL.contains("processed_at IS NULL"),
+            "processed_at is the WORKER's marker; the agent must not key on it"
+        );
+        assert!(CLAIM_UNPROCESSED_SQL.contains("ai_response IS NULL"));
+        assert!(CLAIM_UNPROCESSED_SQL.contains("processed = false"));
+        assert!(CLAIM_UNPROCESSED_SQL.contains("pending_approval = false"));
         // The AI agent claims via its own marker (migration 123): the worker
         // reply-handler owns the 'processing' column — sharing it raced both
         // consumers on the same eligibility predicate.

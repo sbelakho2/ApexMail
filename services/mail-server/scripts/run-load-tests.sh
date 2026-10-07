@@ -8,9 +8,13 @@
 # Usage:
 #   ./scripts/run-load-tests.sh                # Run all tests against localhost
 #   ./scripts/run-load-tests.sh staging        # Run all tests against staging
-#   ./scripts/run-load-tests.sh api            # Run only API load tests
-#   ./scripts/run-load-tests.sh smtp           # Run only SMTP load tests
-#   ENV=staging ./scripts/run-load-tests.sh    # Run using ENV variable
+#   ./scripts/run-load-tests.sh api            # Run only API load tests (env stays local)
+#   ./scripts/run-load-tests.sh smtp           # Run only SMTP load tests (env stays local)
+#   ENV=staging ./scripts/run-load-tests.sh api   # API tests against staging
+#
+# The first positional is EITHER an environment (local|staging|prod) OR a
+# test selector (all|api|smtp); anything else exits 2. A run that executes
+# zero tests is an error, never a pass.
 #
 # Environment:
 #   ENV             - Target environment (local|staging|prod). Default: local
@@ -31,6 +35,25 @@ K6_DIR="$PROJECT_ROOT/crates/load-tests/tests/k6"
 REPORT_DIR="${REPORT_DIR:-$PROJECT_ROOT/reports/load-tests}"
 
 TARGET_ENV="${ENV:-local}"
+
+# ── Parse the first positional (coverage audit U-6) ──────────────────────────
+# The README documents `run-load-tests.sh staging` as "run all tests against
+# staging". It previously fell through every branch, ran zero k6 tests and
+# still printed "ALL TESTS PASSED" with exit 0. The positional is now either
+# an environment or a test selector; everything else is rejected.
+TARGET="all"
+POSITIONAL="${1:-}"
+if [ -n "$POSITIONAL" ]; then
+  case "$POSITIONAL" in
+    local|staging|prod|production) TARGET_ENV="$POSITIONAL" ;;
+    all|api|smtp)                  TARGET="$POSITIONAL" ;;
+    *)
+      echo "ERROR: unknown argument '$POSITIONAL'." >&2
+      echo "       Use an environment (local|staging|prod) or a test selector (all|api|smtp)." >&2
+      exit 2
+      ;;
+  esac
+fi
 
 case "$TARGET_ENV" in
   local)
@@ -109,8 +132,7 @@ run_test() {
   return "$exit_code"
 }
 
-# ── Parse target ─────────────────────────────────────────────────────────────
-TARGET="${1:-all}"
+# ── Derived k6 flags ─────────────────────────────────────────────────────────
 K6_EXTRA="${K6_DURATION:+--duration $K6_DURATION} ${K6_VUS:+--vus $K6_VUS}"
 
 # ── Run tests ─────────────────────────────────────────────────────────────────
@@ -124,13 +146,24 @@ echo "║       Started:     $(date)"
 echo "╚══════════════════════════════════════════════════════════════╝"
 
 EXIT_CODE=0
+RUN_COUNT=0
 
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "api" ]; then
+  RUN_COUNT=$((RUN_COUNT + 1))
   run_test "api-load-test" "$K6_DIR/api-load-test.js" "$K6_EXTRA" || EXIT_CODE=$?
 fi
 
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "smtp" ]; then
+  RUN_COUNT=$((RUN_COUNT + 1))
   run_test "smtp-load-test" "$K6_DIR/smtp-load-test.js" "$K6_EXTRA" || EXIT_CODE=$?
+fi
+
+# ── Refuse to report success when nothing ran (coverage audit U-6) ───────────
+if [ "$RUN_COUNT" -eq 0 ]; then
+  echo ""
+  echo "❌ No load tests were executed (target '$TARGET', environment '$TARGET_ENV')."
+  echo "   A run with zero executed tests is an error, not a pass."
+  exit 2
 fi
 
 # ── Generate summary ──────────────────────────────────────────────────────────
@@ -145,7 +178,9 @@ fi
   echo ""
   echo "| Test | Status |"
   echo "|------|--------|"
-  for f in "$REPORT_DIR"/*-summary.json; do
+  # Only THIS run's summaries: stale files from earlier invocations must not
+  # be reported as this run's results.
+  for f in "$REPORT_DIR"/*-"${TIMESTAMP}"-summary.json; do
     if [ -f "$f" ]; then
       name=$(basename "$f" | sed "s/-${TIMESTAMP}-summary.json//")
       status="❌ FAILED"

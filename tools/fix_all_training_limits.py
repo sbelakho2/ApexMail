@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Fix all pricing inconsistencies in AI training data.
-Corrects plan limits to match canonical pricing from lib/pricing.py
+Fix plan-limit inconsistencies in AI training data.
+
+Corrects plan limits to the canonical values from lib/pricing.py (which is
+pinned field-by-field against the Rust platform catalog by
+tools/validate_pricing_drift.py).
+
+Safety (coverage audit U-2b): the corpus is written through
+lib.fix_utils.write_jsonl, which refuses to overwrite an existing file
+without first creating a `<file>.bak`; `--dry-run` reports the fixes and
+writes nothing. This script previously wrote the tracked corpus in place
+with no backup.
 """
 
 import json
@@ -11,21 +20,34 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common_paths import DATA_DIR
-from lib.pricing import PLANS, UNLIMITED
+from lib.fix_utils import write_jsonl
+from lib.pricing import UNLIMITED, plan_for
+
+CORPUS = DATA_DIR / "train_agent.jsonl"
 
 
 def _plan_limits(plan_name: str) -> dict:
-    """Get email/api/team limits for a plan, compatible with fix logic."""
-    p = PLANS.get(plan_name, {})
+    """Canonical email/api/team limits for a plan id or display name."""
+    plan = plan_for(plan_name) or {}
     return {
-        'email': p.get('emails', 0),
-        'api': p.get('api_calls', 0),
-        'team': p.get('team', 0),
+        'email': plan.get('emails', 0),
+        'api': plan.get('api_calls', 0),
+        'team': plan.get('team', 0),
     }
 
 
-def fix_training_data():
-    filepath = str(DATA_DIR / "train_agent.jsonl")
+class CorpusMissing(RuntimeError):
+    """The historical corpus this one-off rewriter targets is absent."""
+
+
+def fix_training_data(dry_run: bool = False) -> int:
+    filepath = CORPUS
+    if not filepath.exists():
+        raise CorpusMissing(
+            f"corpus not found: {filepath}\n"
+            "The historical train_agent.jsonl corpus no longer exists "
+            "(apps/ai/training/data/ holds only augmented_*.jsonl); nothing to rewrite."
+        )
 
     with open(filepath, 'r') as f:
         lines = f.readlines()
@@ -44,9 +66,10 @@ def fix_training_data():
             # Find which plan this line is about
             plan_match = re.search(r'Plan: (\w+) \(\$\d+/mo\)', text)
             if plan_match:
-                plan = plan_match.group(1)
-                if plan in PLANS:
-                    canon = _plan_limits(plan)
+                plan_name = plan_match.group(1)
+                plan = plan_for(plan_name)
+                if plan is not None:
+                    canon = _plan_limits(plan_name)
 
                     # Fix email limits in customer context
                     if canon['email'] != UNLIMITED:
@@ -83,7 +106,7 @@ def fix_training_data():
 
                     # Also fix assistant responses that reference limits
                     if canon['email'] != UNLIMITED:
-                        if 'Plan: ' + plan in modified and '|' not in modified[-500:]:
+                        if 'Plan: ' + plan_name in modified and '|' not in modified[-500:]:
                             modified = re.sub(
                                 r'Emails: ([\d,]+)\s*/\s*[\d,]+',
                                 lambda m: f"Emails: {m.group(1)} / {canon['email']:,}",
@@ -91,7 +114,7 @@ def fix_training_data():
                             )
 
                     if canon['api'] != UNLIMITED:
-                        if 'Plan: ' + plan in modified and '|' not in modified[-500:]:
+                        if 'Plan: ' + plan_name in modified and '|' not in modified[-500:]:
                             modified = re.sub(
                                 r'API calls: ([\d,]+)\s*/\s*[\d,]+',
                                 lambda m: f"API calls: {m.group(1)} / {canon['api']:,}",
@@ -105,13 +128,22 @@ def fix_training_data():
             fixed_count += 1
         fixed_lines.append(modified)
 
-    # Write back
-    with open(filepath, 'w') as f:
-        f.writelines(fixed_lines)
+    if dry_run:
+        print(f"[dry-run] would fix {fixed_count} lines with incorrect plan limits; no file written")
+        return fixed_count
 
-    print(f"Fixed {fixed_count} lines with incorrect plan limits")
+    # Backed-up write (write_jsonl creates <file>.bak before overwriting).
+    records = [json.loads(line) for line in fixed_lines if line.strip()]
+    write_jsonl(filepath, records, backup=True)
+    print(f"Fixed {fixed_count} lines with incorrect plan limits (backup: {filepath}.bak)")
     return fixed_count
 
 
 if __name__ == '__main__':
-    fix_training_data()
+    dry = "--dry-run" in sys.argv[1:]
+    try:
+        fix_training_data(dry_run=dry)
+    except CorpusMissing as error:
+        print(error, file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)

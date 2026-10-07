@@ -13,6 +13,19 @@
   background-color: rgb(var(--primary));
   color: #fff;
 }
+
+/* Disclosure summaries are interactive controls — the zero-JS console's
+   only expand/collapse affordance — so they carry the same minimum hit
+   target bar as buttons (24px CSS, WCAG 2.5.8). The 16px `text-xs`
+   (assistant "Sources") and 20px `text-sm` ("Draft reply") summary lines
+   sat below it; one block-padding step lifts every summary to >= 24px
+   without touching the type size or the disclosure marker (dogfood
+   2026-10-06 ui-visual). */
+summary {
+  min-height: 1.5rem;
+  padding-block: 0.25rem;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -170,21 +183,21 @@
   .dark {
     --background: 9 9 11;
     --foreground: 250 250 250;
-    --card: 18 18 21;
+    --card: 24 24 27;
     --card-foreground: 250 250 250;
     --popover: 9 9 11;
     --popover-foreground: 250 250 250;
-    --secondary: 24 24 27;
+    --secondary: 39 39 42;
     --secondary-foreground: 250 250 250;
-    --muted: 24 24 27;
+    --muted: 39 39 42;
     --muted-foreground: 161 161 170;
     --accent: 24 24 27;
     --accent-foreground: 250 250 250;
-    --border: 39 39 42;
-    --input: 39 39 42;
+    --border: 82 82 91;
+    --input: 82 82 91;
     --surface-50: 9 9 11;
-    --surface-100: 24 24 27;
-    --surface-200: 39 39 42;
+    --surface-100: 39 39 42;
+    --surface-200: 63 63 70;
     --surface-300: 63 63 70;
     --surface-400: 82 82 91;
     --surface-500: 113 113 122;
@@ -199,21 +212,21 @@
     :root:not(.light) {
       --background: 9 9 11;
       --foreground: 250 250 250;
-      --card: 18 18 21;
+      --card: 24 24 27;
       --card-foreground: 250 250 250;
       --popover: 9 9 11;
       --popover-foreground: 250 250 250;
-      --secondary: 24 24 27;
+      --secondary: 39 39 42;
       --secondary-foreground: 250 250 250;
-      --muted: 24 24 27;
+      --muted: 39 39 42;
       --muted-foreground: 161 161 170;
       --accent: 24 24 27;
       --accent-foreground: 250 250 250;
-      --border: 39 39 42;
-      --input: 39 39 42;
+      --border: 82 82 91;
+      --input: 82 82 91;
       --surface-50: 9 9 11;
-      --surface-100: 24 24 27;
-      --surface-200: 39 39 42;
+      --surface-100: 39 39 42;
+      --surface-200: 63 63 70;
       --surface-300: 63 63 70;
       --surface-400: 82 82 91;
       --surface-500: 113 113 122;
@@ -764,10 +777,17 @@
     letter-spacing: -0.01em;
   }
 
-  /* Inventory panel — table chassis stays a white card with a hairline border */
+  /* Inventory panel — table chassis stays a white card with a hairline border.
+     `position: relative` keeps absolutely-positioned descendants (the sr-only
+     labels in table headers) inside this scroll container: with no positioned
+     ancestor their static position extended the document past the viewport on
+     the /cp/demos mobile table (dogfood 2026-10-06 ui-visual). */
   .apex-table-wrap {
-    border: 1px solid rgb(var(--border));
-    background: #fff;
+    position: relative;
+    border: 1px solid rgb(var(--border)) !important;
+    border-radius: var(--radius-arch);
+    background: rgb(var(--card)) !important;
+    overflow-x: auto;
   }
 
   .apex-table thead,
@@ -1392,6 +1412,23 @@
     color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
   }
 
+  /* Brand pills carry their own `--primary` color rule, so the
+     `.text-primary` remap above never reached them: 185 28 28 on the dark
+     card is 2.7:1. Step the pill's text AND border to brand-400 in dark
+     (dogfood 2026-10-06 ui-visual — the drafts "first response" pill). */
+  .dark .apex-pill--brand {
+    color: rgb(var(--brand-400));
+    border-color: rgb(var(--brand-400));
+  }
+
+  /* Success notices: the light pairing is the success-50 wash with the
+     near-black success-900 ink; in dark the wash remaps to 39 39 42 while
+     success-900 stays near-black (1.27:1 — near-invisible). Step the ink
+     to the near-white success-100 step. */
+  .dark .text-success-900 {
+    color: rgb(var(--success-100)) !important;
+  }
+
   /* Eyebrows paint brand-600 text on near-black in dark (4.1:1) — step the
      whole eyebrow (text + marker) to brand-400. */
   .dark .apex-eyebrow,
@@ -1763,6 +1800,17 @@
       color: rgb(var(--brand-400) / var(--tw-text-opacity, 1)) !important;
     }
 
+    /* Brand pills + success ink: media-query twin of the .dark block above
+       (the zero-JS console takes THIS path, not the .dark class). */
+    :root:not(.light) .apex-pill--brand {
+      color: rgb(var(--brand-400));
+      border-color: rgb(var(--brand-400));
+    }
+
+    :root:not(.light) .text-success-900 {
+      color: rgb(var(--success-100)) !important;
+    }
+
     /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
     :root:not(.light) .apex-eyebrow,
     :root:not(.light) .apex-page-heading .apex-eyebrow {
@@ -2056,6 +2104,19 @@
 
   .safe-area-inset-top {
     padding-top: env(safe-area-inset-top);
+  }
+
+  /* Whitespace wrapping for pre-rendered multi-line content (assistant
+     transcript turns, AI-draft reply bodies, demo result blocks). Declared
+     here — rather than relying on the content scanner — because the class
+     is composed in Rust string literals and the committed build dropped
+     it: `<p class="whitespace-pre-wrap">` collapsed newlines and
+     `<pre class="whitespace-pre-wrap">` kept `pre`, so long draft URLs
+     forced horizontal scroll (dogfood 2026-10-06 ui-visual, surfaced by
+     gate K once the populated bot-surface states joined the gate
+     documents). */
+  .whitespace-pre-wrap {
+    white-space: pre-wrap;
   }
 
   .space-y-1 > :not([hidden]):not(.hidden):not(.sr-only) ~ :not([hidden]):not(.hidden):not(.sr-only) {

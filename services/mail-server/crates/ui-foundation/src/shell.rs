@@ -151,20 +151,28 @@ impl<'a> ShellHeader<'a> {
         // plan comes from the session, and a fabricated "Free Plan — 30K / mo"
         // on every authenticated page was the defect (dogfood 2026-10-06).
         let plan_label = user.map(|u| html_escape(u.plan_label)).unwrap_or_default();
+        // The plan label is secondary: below `lg` the header keeps the
+        // identity instead of squeezing both (live dogfood 2026-10-06
+        // ui-visual: at 768 px a real plan label + email overflowed the
+        // viewport by 19 px).
         let plan_label_block = if plan_label.is_empty() {
             String::new()
         } else {
             format!(
-                "<div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
+                "<div class=\"hidden lg:flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
                     <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
                 </div>"
             )
         };
+        // The identity texts truncate instead of pushing the header wider: a
+        // real session email is longer than any fixture placeholder, and the
+        // flex chain needs `min-w-0` at every level for the ellipsis to
+        // engage (live dogfood 2026-10-06 ui-visual, 768 px).
         let identity_block = if user.is_some() {
             format!(
-                "<div class=\"text-right hidden sm:block\">\
-                    <p class=\"text-xs font-semibold text-surface-950\">{display_name}</p>\
-                    <p class=\"text-[10px] font-medium text-surface-500\">{email}</p>\
+                "<div class=\"text-right hidden sm:block min-w-0\">\
+                    <p class=\"text-xs font-semibold text-surface-950 truncate\">{display_name}</p>\
+                    <p class=\"text-[10px] font-medium text-surface-500 truncate\">{email}</p>\
                 </div>"
             )
         } else {
@@ -184,9 +192,9 @@ impl<'a> ShellHeader<'a> {
                         </div>\
                     </form>\
                 </div>\
-                <div class=\"flex items-center gap-4\">\
+                <div class=\"flex items-center gap-4 min-w-0\">\
                     {plan_label_block}\
-                    <div class=\"flex items-center gap-3 pl-2\">\
+                    <div class=\"flex items-center gap-3 pl-2 min-w-0\">\
                         {identity_block}\
                         <div class=\"apex-avatar relative flex shrink-0 h-9 w-9 rounded-full bg-primary/10 border border-primary/20 items-center justify-center\" aria-label=\"Signed in as {avatar}\">\
                             <span class=\"text-brand-700 font-semibold text-xs tracking-tighter\">{avatar}</span>\

@@ -450,7 +450,7 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
       "id": 10,
       "panels": [],
-      "title": "Email Delivery within 5min — Target: 99.9%",
+      "title": "Email Relay Acceptance Ratio — Target: 99.9%",
       "type": "row"
     },
     {
@@ -498,12 +498,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_emails_delivered_within_5m_total[7d])) / sum(rate(apexmail_emails_sent_total[7d]))) * 100",
-          "legendFormat": "Delivery SLO (7d)",
+          "expr": "(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[7d])) / clamp_min(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[7d])) + sum(rate(apexmail_outbound_mta_permanently_failed_total{job=\"apexmail-outbound-mta\"}[7d])), 1e-9)) * 100",
+          "legendFormat": "Relay acceptance (7d)",
           "refId": "A"
         }
       ],
-      "title": "Email Delivery within 5min (7d rolling)",
+      "description": "Proxy for the email-delivery SLO, retargeted by the 2026-10-07 residual-fix wave: apexmail_emails_delivered_within_5m_total / apexmail_emails_sent_total are emitted by no service, so this stat could never render. This measures the closest shipped signal — the outbound relay's accepted (post-DATA 250) share of accepted + permanently failed deliveries (job apexmail-outbound-mta). Pending retries are not in the denominator, so a delivery backlog is not yet reflected.",
+      "title": "Email Relay Acceptance Ratio (7d rolling)",
       "type": "stat"
     },
     {
@@ -562,15 +563,15 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_emails_delivered_within_5m_total[1h])) / sum(rate(apexmail_emails_sent_total[1h]))) * 100",
-          "legendFormat": "Delivery SLO (1h)",
+          "expr": "(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[1h])) / clamp_min(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[1h])) + sum(rate(apexmail_outbound_mta_permanently_failed_total{job=\"apexmail-outbound-mta\"}[1h])), 1e-9)) * 100",
+          "legendFormat": "Relay acceptance (1h)",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_emails_delivered_within_5m_total[1d])) / sum(rate(apexmail_emails_sent_total[1d]))) * 100",
-          "legendFormat": "Delivery SLO (1d)",
+          "expr": "(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[1d])) / clamp_min(sum(rate(apexmail_outbound_mta_accepted_total{job=\"apexmail-outbound-mta\"}[1d])) + sum(rate(apexmail_outbound_mta_permanently_failed_total{job=\"apexmail-outbound-mta\"}[1d])), 1e-9)) * 100",
+          "legendFormat": "Relay acceptance (1d)",
           "refId": "B"
         },
         {
@@ -581,7 +582,8 @@
           "refId": "C"
         }
       ],
-      "title": "Email Delivery within 5min — Multi-Window SLO",
+      "description": "Same proxy as the 7d stat (see its description): outbound-relay acceptance ratio from apexmail_outbound_mta_{accepted,permanently_failed}_total, because the apexmail_emails_delivered_within_5m series does not exist.",
+      "title": "Email Relay Acceptance Ratio — Multi-Window SLO",
       "type": "timeseries"
     },
     {
@@ -590,7 +592,7 @@
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
       "id": 13,
       "panels": [],
-      "title": "Auth Success Rate — Target: 99.9%",
+      "title": "API Auth Request Success Share — Target: 99.9%",
       "type": "row"
     },
     {
@@ -638,12 +640,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_auth_success_total[7d])) / sum(rate(apexmail_auth_attempts_total[7d]))) * 100",
-          "legendFormat": "Auth SLO (7d)",
+          "expr": "(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\",status=~\"2..\"}[7d])) / clamp_min(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\"}[7d])), 1e-9)) * 100",
+          "legendFormat": "API auth 2xx share (7d)",
           "refId": "A"
         }
       ],
-      "title": "Auth Success Rate (7d rolling)",
+      "description": "Proxy, retargeted by the 2026-10-07 residual-fix wave: apexmail_auth_success_total / apexmail_auth_attempts_total are emitted by no service (only the MTA exposes mta.auth.failure for SMTP AUTH), so the panel could never render. This measures the closest shipped signal — the 2xx share of API requests under /v1/auth/ from the api-server job. It counts rejected credentials as failures, so it is NOT the SLA's \"valid credential attempts\" metric; instrumenting that needs a real counter.",
+      "title": "API Auth Request Success Share (7d rolling)",
       "type": "stat"
     },
     {
@@ -702,15 +705,15 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_auth_success_total[1h])) / sum(rate(apexmail_auth_attempts_total[1h]))) * 100",
-          "legendFormat": "Auth SLO (1h)",
+          "expr": "(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\",status=~\"2..\"}[1h])) / clamp_min(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\"}[1h])), 1e-9)) * 100",
+          "legendFormat": "API auth 2xx share (1h)",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "(sum(rate(apexmail_auth_success_total[1d])) / sum(rate(apexmail_auth_attempts_total[1d]))) * 100",
-          "legendFormat": "Auth SLO (1d)",
+          "expr": "(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\",status=~\"2..\"}[1d])) / clamp_min(sum(rate(apexmail_http_requests_total{path_pattern=~\"/v1/auth/.*\"}[1d])), 1e-9)) * 100",
+          "legendFormat": "API auth 2xx share (1d)",
           "refId": "B"
         },
         {
@@ -721,7 +724,8 @@
           "refId": "C"
         }
       ],
-      "title": "Auth Success Rate — Multi-Window SLO",
+      "description": "Same proxy as the 7d stat (see its description): 2xx share of /v1/auth/* API requests, because no service emits apexmail_auth_{success,attempts}_total.",
+      "title": "API Auth Request Success Share — Multi-Window SLO",
       "type": "timeseries"
     }
   ],

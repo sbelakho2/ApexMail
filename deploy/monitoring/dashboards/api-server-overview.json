@@ -405,7 +405,7 @@
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
           "expr": "rate(apexmail_http_requests_total{status=~\"5..\"}[5m])",
-          "legendFormat": "{{status}} {{method}} {{endpoint}}",
+          "legendFormat": "{{status}} {{method}} {{path_pattern}}",
           "refId": "A"
         }
       ],
@@ -466,8 +466,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(apexmail_http_request_duration_seconds_bucket{endpoint!=\"\"}[5m])) by (le, endpoint, method))",
-          "legendFormat": "{{method}} {{endpoint}}",
+          "expr": "histogram_quantile(0.95, sum(rate(apexmail_http_request_duration_seconds_bucket{path_pattern!=\"\"}[5m])) by (le, path_pattern, method))",
+          "legendFormat": "{{method}} {{path_pattern}}",
           "refId": "A"
         }
       ],
@@ -537,12 +537,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"api-server\"}[5m])) * 100)",
-          "legendFormat": "CPU Usage {{instance}}",
+          "expr": "100 - (avg by (instance)(rate(node_cpu_seconds_total{mode=\"idle\",job=\"node\"}[5m])) * 100)",
+          "legendFormat": "Host CPU Usage {{instance}}",
           "refId": "A"
         }
       ],
-      "title": "CPU Usage",
+      "title": "Host CPU Usage (node-exporter)",
+      "description": "Host CPU of the node running the api-server, from the node-exporter scrape job (`node` in deploy/prometheus.yml). The api-server's own exporter (metrics-exporter-prometheus 0.16.2) does not emit process_* metrics, so a per-process panel would be permanently empty here (coverage audit U-14).",
       "type": "timeseries"
     },
     {
@@ -599,19 +600,20 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "process_resident_memory_bytes{job=\"api-server\"}",
-          "legendFormat": "RSS {{instance}}",
+          "expr": "node_memory_MemTotal_bytes{job=\"node\"} - node_memory_MemAvailable_bytes{job=\"node\"}",
+          "legendFormat": "Host memory used {{instance}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "process_virtual_memory_bytes{job=\"api-server\"}",
-          "legendFormat": "VSZ {{instance}}",
+          "expr": "node_memory_MemAvailable_bytes{job=\"node\"}",
+          "legendFormat": "Host memory available {{instance}}",
           "refId": "B"
         }
       ],
-      "title": "Memory Usage",
+      "title": "Host Memory Usage (node-exporter)",
+      "description": "Host memory on the node running the api-server, from the node-exporter scrape job (`node` in deploy/prometheus.yml). The api-server exporter does not emit process_resident_memory_bytes/process_virtual_memory_bytes (no process collector in metrics-exporter-prometheus 0.16.2), so per-process RSS/VSZ panels would be permanently empty (coverage audit U-14).",
       "type": "timeseries"
     },
     {
@@ -668,12 +670,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "Prometheus" },
           "editorMode": "code",
-          "expr": "rate(process_open_fds{job=\"api-server\"}[5m])",
-          "legendFormat": "Open FDs {{instance}}",
+          "expr": "node_filefd_allocated{job=\"node\"}",
+          "legendFormat": "Host allocated FDs {{instance}}",
           "refId": "A"
         }
       ],
-      "title": "Open File Descriptors",
+      "title": "Host Open File Descriptors (node-exporter)",
+      "description": "Host-level allocated file descriptors on the api-server node, from the node-exporter scrape job (`node` in deploy/prometheus.yml). The api-server exporter does not emit process_open_fds, so a per-process FD panel would be permanently empty (coverage audit U-14).",
       "type": "timeseries"
     }
   ],

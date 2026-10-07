@@ -2,8 +2,14 @@
 """
 Fix incorrect PAYG calculations in training data.
 
-Uses shared pricing from lib/pricing.py as the single source of truth.
+Uses shared pricing from lib/pricing.py as the single source of truth
+(pinned against the Rust platform catalog by validate_pricing_drift.py).
 The platform bills exclusively in EUR.
+
+Safety (coverage audit U-2b): the corpus is written through
+lib.fix_utils.write_lines, which refuses to overwrite an existing file
+without a `.bak` backup; `--dry-run` reports the fixes and writes nothing.
+This script previously wrote the tracked corpus in place with no backup.
 """
 
 import json
@@ -13,11 +19,24 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common_paths import DATA_DIR
+from lib.fix_utils import write_lines
 from lib.pricing import calculate_payg_cents
 
+CORPUS = DATA_DIR / "train_agent.jsonl"
 
-def fix_payg_calculations():
-    filepath = str(DATA_DIR / "train_agent.jsonl")
+
+class CorpusMissing(RuntimeError):
+    """The historical corpus this one-off rewriter targets is absent."""
+
+
+def fix_payg_calculations(dry_run: bool = False) -> int:
+    filepath = CORPUS
+    if not filepath.exists():
+        raise CorpusMissing(
+            f"corpus not found: {filepath}\n"
+            "The historical train_agent.jsonl corpus no longer exists "
+            "(apps/ai/training/data/ holds only augmented_*.jsonl); nothing to rewrite."
+        )
 
     with open(filepath, 'r') as f:
         lines = f.readlines()
@@ -68,13 +87,21 @@ def fix_payg_calculations():
 
         fixed_lines.append(modified)
 
-    # Write back
-    with open(filepath, 'w') as f:
-        f.writelines(fixed_lines)
+    if dry_run:
+        print(f"[dry-run] would fix {fixed_count} lines with incorrect PAYG calculations; no file written")
+        return fixed_count
 
-    print(f"\nTotal fixed: {fixed_count} lines with incorrect PAYG calculations")
+    # Guarded write: existing corpus is backed up to train_agent.jsonl.bak.
+    write_lines(filepath, fixed_lines, backup=True)
+    print(f"\nTotal fixed: {fixed_count} lines with incorrect PAYG calculations (backup: {filepath}.bak)")
     return fixed_count
 
 
 if __name__ == '__main__':
-    fix_payg_calculations()
+    dry = "--dry-run" in sys.argv[1:]
+    try:
+        fix_payg_calculations(dry_run=dry)
+    except CorpusMissing as error:
+        print(error, file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)

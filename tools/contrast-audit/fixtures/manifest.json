@@ -2771,6 +2771,248 @@
         "width": 390,
         "height": 844
       }
+    },
+    {
+      "id": "web-assistant-populated-desktop",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-populated.html",
+      "snapshotFile": "web-assistant-populated-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-assistant-populated-mobile",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-populated.html",
+      "snapshotFile": "web-assistant-populated-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-assistant-unavailable-desktop",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-unavailable.html",
+      "snapshotFile": "web-assistant-unavailable-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-assistant-unavailable-mobile",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-unavailable.html",
+      "snapshotFile": "web-assistant-unavailable-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-assistant-disabled-desktop",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-disabled.html",
+      "snapshotFile": "web-assistant-disabled-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-assistant-disabled-mobile",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-disabled.html",
+      "snapshotFile": "web-assistant-disabled-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-assistant-rate-limited-flash-desktop",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-rate-limited-flash.html",
+      "snapshotFile": "web-assistant-rate-limited-flash-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-assistant-rate-limited-flash-mobile",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-rate-limited-flash.html",
+      "snapshotFile": "web-assistant-rate-limited-flash-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "web-assistant-error-flash-desktop",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-error-flash.html",
+      "snapshotFile": "web-assistant-error-flash-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "web-assistant-error-flash-mobile",
+      "surface": "web",
+      "route": "/assistant",
+      "htmlFile": "web-assistant-error-flash.html",
+      "snapshotFile": "web-assistant-error-flash-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-populated-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-populated.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-populated-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-populated-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-populated.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-populated-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-many-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-many.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-many-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-many-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-many.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-many-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-unavailable-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-unavailable.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-unavailable-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-unavailable-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-unavailable.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-unavailable-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-approved-flash-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-approved-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-approved-flash-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-approved-flash-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-approved-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-approved-flash-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-rejected-flash-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-rejected-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-rejected-flash-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-rejected-flash-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-rejected-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-rejected-flash-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-already-handled-flash-desktop",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-already-handled-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-already-handled-flash-desktop.png",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
+    },
+    {
+      "id": "control-plane-reviews-ai-drafts-already-handled-flash-mobile",
+      "surface": "control-plane",
+      "route": "/reviews/ai-drafts",
+      "htmlFile": "control-plane-reviews-ai-drafts-already-handled-flash.html",
+      "snapshotFile": "control-plane-reviews-ai-drafts-already-handled-flash-mobile.png",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
     }
   ]
 }
