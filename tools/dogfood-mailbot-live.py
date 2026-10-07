@@ -105,7 +105,13 @@ def _psql(query: str) -> subprocess.CompletedProcess:
         )
         if out.returncode == 0:
             return out
-        recovering = "recovery mode" in out.stderr or "starting up" in out.stderr
+        stderr = out.stderr.lower()
+        recovering = any(
+            marker in stderr
+            for marker in ("recovery mode", "starting up", "not yet accepting",
+                           "consistent recovery state", "shutting down",
+                           "the database system is")
+        )
         if not recovering or time.time() > deadline:
             raise RuntimeError(f"psql failed: {out.stderr.strip()[:300]}")
         time.sleep(3)
@@ -542,12 +548,19 @@ def draft_constraint_violations(draft: str, case: dict) -> list[str]:
 
 def run_taxonomy_category(base: str, tenant: dict, category: str, prefix: str) -> list[dict]:
     cases = matrix_cases(category)
+    run_tag = uuid.uuid4().hex[:8]
     sent = []
     for case in cases:
         inbound = case["inbound"]
         message_id = new_message_id()
+        # Senders are PER-RUN unique: the AI agent's loop guard caps drafts at
+        # 3 per sender per 7 days (MAX_REPLIES_PER_SENDER_WINDOW), so reusing a
+        # sender across runs turns the cap into a false "no draft" (observed
+        # live: identical senders from an earlier pass got the reply-cap
+        # decline on the next pass).
         sender = inbound.get(
-            "mail_from", f"lead-{prefix}-{case['id'].replace('_', '-')}@example.test"
+            "mail_from",
+            f"lead-{prefix}-{run_tag}-{case['id'].replace('_', '-')}@example.test",
         )
         send_inbound(
             tenant["mailbox"], inbound["subject"], inbound["body"],
@@ -725,6 +738,14 @@ def run_mutation_probes(base: str, state: dict, taxonomy_results: list[dict]) ->
     # 3. approve an ordinary draft -> priority 5; reject -> nothing sent.
     ordinary = draft_of("tax-question")
     if ordinary:
+        # F4: the shared send-admission consent gate runs on every approval,
+        # so the fixture recipient needs an active marketing consent record
+        # for the lane/priority assertion to be reachable at all.
+        ordinary_recipient = sql_json(
+            "SELECT from_email FROM inbound_messages "
+            f"WHERE id = {sql_literal(ordinary['inbound_id'])}"
+        )[0]["from_email"]
+        grant_consent(alpha["tenant_id"], ordinary_recipient)
         status, text = approve(key, base, ordinary["inbound_id"])
         rows = sql_json(
             "SELECT \"to\", priority, status FROM email_queue "
