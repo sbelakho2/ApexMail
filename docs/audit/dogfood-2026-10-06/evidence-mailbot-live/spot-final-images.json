@@ -1,0 +1,58 @@
+{
+  "probes": [
+    {
+      "detail": "mirror list-unsubscribe='mailto:unsubscribe@apexmail.ee?subject=unsub' classification=unsubscribe",
+      "ok": true,
+      "probe": "F-4-mirror-mailto-list-unsubscribe"
+    },
+    {
+      "detail": "pending=True id=inb_abd4dbd8fae04103b72f73",
+      "ok": true,
+      "probe": "F-3-first-delivery-drafts"
+    },
+    {
+      "detail": "rows=2 drafts=1 duplicate_named=True",
+      "ok": true,
+      "probe": "F-3-replay-one-draft",
+      "rows": [
+        {
+          "ai_response": "Hello,\n\nThanks for reaching out. The Pro plan is \u20ac89 per month, with 150000 emails per month, 2000000 API calls per month, 10 team members and 60 days event retention.\n\nBest regards,\nApexMail AI Assistant\n\n---\nOn 2026-10-08 01:59 UTC, spot-f3-1a756f45@example.test wrote:\n> Subject: Re: mb-spot-f3-9c4ce0\n> Can we schedule a call Thursday at 10?\n",
+          "id": "inb_abd4dbd8fae04103b72f73",
+          "pending_approval": true
+        },
+        {
+          "ai_response": "[NO DRAFT \u2014 duplicate delivery: this message (same Message-ID) was already answered or reviewed; the earlier copy is the one to review]",
+          "id": "inb_65746eb0103e43d98b3962",
+          "pending_approval": false
+        }
+      ]
+    },
+    {
+      "detail": "request=194f1aee-0f78-493d-b2eb-a5c6cfc69c7d type=erasure status=pending_verification due=2026-11-08T02:00:25.056828+00:00 outbox=pending verify_url=https://gdpr.apexmail.ee/gdpr/verify/194f1aee-0f78-493d-b2eb-a5c6cfc69c7d row_marker={'source': 'inbound_email', 'status': 'pending_verification', 'requested': True, 'request_id': '194f1aee-0f78-493d-b2eb-a5c6cfc69c7d', 'request_type': 'erasure', 'statutory_due_at': '2026-11-08T02:00:25.056828+00:00'}",
+      "ok": true,
+      "outbox": [
+        {
+          "status": "pending",
+          "verify_url": "https://gdpr.apexmail.ee/gdpr/verify/194f1aee-0f78-493d-b2eb-a5c6cfc69c7d"
+        }
+      ],
+      "probe": "F-5-inbound-dsr-intake",
+      "request": {
+        "id": "194f1aee-0f78-493d-b2eb-a5c6cfc69c7d",
+        "request_type": "erasure",
+        "status": "pending_verification",
+        "statutory_due_at": "2026-11-08T02:00:25.056828+00:00"
+      }
+    },
+    {
+      "detail": "claimable_before=1 claimable_after=0 (drained)",
+      "ok": true,
+      "probe": "CS-7-drain-healthy"
+    },
+    {
+      "detail": "status=400 named=True still_pending=True body='{\"error\":{\"code\":\"VALIDATION_ERROR\",\"details\":[\"marketing consent required for spot-f3-1a756f45@example.test: no marketing consent on file \u2014 recipient must opt '",
+      "ok": true,
+      "probe": "consent-refusal-named-reason"
+    }
+  ]
+}

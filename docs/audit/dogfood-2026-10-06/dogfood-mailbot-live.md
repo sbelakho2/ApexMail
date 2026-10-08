@@ -457,3 +457,31 @@ was the stolen-jobs predicate (F-2, fixed).
 
 Logs: `evidence-mailbot-live/suites-worker-ai-after-fixes.log`,
 `evidence-mailbot-live/suites-api-after-fixes.log`.
+
+
+## 10. Final-image spot verification (revision `94022471`)
+
+The stack was re-imaged one last time from `94022471` (which carries all four
+fixes plus the capability waves); the spot probes were re-run against those
+containers, not the earlier ones:
+
+| image | id | started |
+| --- | --- | --- |
+| api-server | `sha256:fc35113eb887c452544259b52c3fa5d42b6c25536d2cb0660b0b637fc6ce14f8` | 2026-10-08T01:56:07Z |
+| worker | `sha256:87c7a488181daa048fa0f2d71b98bc00cc799b75d8979f8164002b2d8589b25a` | 2026-10-08T01:56:07Z |
+| ai-service | `sha256:24d34aefc087041037815da07d3b9c3df5fd0005f4fea6e6384747da2e359446` | 2026-10-08T01:56:07Z |
+| mta | `sha256:a1af42364a089c3939cc1798e67927dae8a7f734599a8f253b7d68fcdc847864` | 2026-10-08T01:56:07Z |
+| mock-llm | `tools/dogfood-mailbot-mock-llm.py` md5 `42cbc4d4dd3708b1b824415edb755e5a` (v5) | running |
+
+| spot probe | result | evidence |
+| --- | --- | --- |
+| F-4 mailto List-Unsubscribe reachable | **PASS** | live send → `inbound_messages.headers.list-unsubscribe = "mailto:unsubscribe@apexmail.ee?subject=unsub"` and the classification is now **`unsubscribe`/deterministic** (before the fix: header vanished, `unknown`/ai) |
+| F-3 replay dedup | **PASS** | first delivery drafted (`inb_abd4dbd8fae04103b72f73`); identical Message-ID replay → rows=2, **drafts=1**, duplicate carries the "duplicate delivery" note |
+| F-5 inbound DSR intake | **PASS** | live Article-17 mail → `data_subject_requests` `194f1aee-0f78-493d-b2eb-a5c6cfc69c7d` (erasure, `pending_verification`, statutory due 2026-11-08 = +1 calendar month) + `dsr_verification_outbox` pending with `https://gdpr.apexmail.ee/gdpr/verify/<id>`; the inbound row's `suggested_action.dsr` names the same request |
+| CS-7 drain | **PASS** | claimable backlog 1 → 0 under the spot traffic (agent draining; stall not reproduced on any fixed revision) |
+| consent gate | **PASS** | approval without consent → **400** `marketing consent required for spot-f3-1a756f45@example.test: no marketing consent on file — recipient must opt in`; draft still pending, nothing queued |
+
+Raw spot record:
+`evidence-mailbot-live/spot-final-images.json`. Suites were re-run on the
+fold revision before this image batch: api-server 2083/2083, worker+ai
+1210/1211 (sole failure the chatbot agent's routes test), see §9.6.
