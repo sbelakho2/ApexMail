@@ -15,6 +15,21 @@
 
 {% block content %}
 {% include "partials/features/hero.html" %}
+
+{# Category jump navigation ahead of the long card inventory: the page lists
+   38 capability cards in six categories, so the reader can go straight to
+   the category that matters instead of scrolling the whole inventory. #}
+<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['feature_categories'] %}{{ i18n_data[l]['a11y']['feature_categories'] }}{% else %}Feature categories{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 -mt-8 lg:-mt-10 relative z-10">
+  <div class="flex flex-wrap gap-2 justify-center">
+    {% set feature_anchors = ["#cat-email-delivery", "#cat-deliverability", "#cat-compliance-security", "#cat-insights-intelligence", "#cat-analytics-tracking", "#cat-enterprise"] %}
+    {% set feature_keys = ["cat_email_delivery", "cat_deliverability", "cat_compliance", "cat_insights", "cat_analytics", "cat_enterprise"] %}
+    {% set feature_fallbacks = ["Email Delivery", "Deliverability", "Compliance & Security", "Insights & Intelligence", "Analytics & Tracking", "Enterprise"] %}
+    {% for anchor in feature_anchors %}
+    <a href="{{ anchor }}" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"][feature_keys[loop.index0]] %}{{ i18n_data[l]["features"][feature_keys[loop.index0]] }}{% else %}{{ feature_fallbacks[loop.index0] }}{% endif %}</a>
+    {% endfor %}
+  </div>
+</nav>
+
 {% include "partials/features/grid.html" %}
 {% include "partials/features/details.html" %}
 {% include "partials/features/cta.html" %}

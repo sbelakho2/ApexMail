@@ -26,23 +26,31 @@
 {# their own parameters (no global-variable access needed), so the Tera  #}
 {# macro scoping limitation does not affect them.                        #}
 
-{# winner_badge(winner, competitor_name): the 4th-column indicator.
-   Handles the 6 distinct variants that existed across the 5 files:
+{# winner_badge(winner, competitor_name, tie_label, unavailable_label): the
+   4th-column indicator. Handles the 6 distinct variants that existed across
+   the 5 files:
      apexmail   → <span class="text-brand-600 font-semibold">ApexMail</span>
      competitor → <span class="text-brand-600 font-semibold">{competitor_name}</span>
-     tie        → <span class="text-surface-500">Tie</span>
+     tie        → <span class="text-surface-500">{tie_label}</span>
      none       → <span class="text-surface-500">—</span>
    (The bare "—" with no span from amazon-ses/mailgun normalizes to the
-   spanned "—" variant — semantically identical, now structurally consistent.) #}
-{%- macro winner_badge(winner, competitor_name) -%}
+   spanned "—" variant — semantically identical, now structurally consistent.)
+
+   Localization contract: Tera macros cannot read i18n_data, so callers pass
+   the localized `tie_label` / `unavailable_label` (compare/table.html does).
+   The unavailable em dash is aria-hidden with its meaning exposed through an
+   accessible label — a bare "—" said nothing to a screen reader. #}
+{%- macro winner_badge(winner, competitor_name, tie_label, unavailable_label) -%}
+{%- set tie_text = tie_label | default(value="Tie") -%}
+{%- set none_text = unavailable_label | default(value="Not available") -%}
 {%- if winner == "apexmail" -%}
 <span class="text-brand-600 font-semibold">ApexMail</span>
 {%- elif winner == "competitor" -%}
 <span class="text-brand-600 font-semibold">{{ competitor_name }}</span>
 {%- elif winner == "tie" -%}
-<span class="text-surface-500">Tie</span>
+<span class="text-surface-500">{{ tie_text }}</span>
 {%- else -%}
-<span class="text-surface-500">&mdash;</span>
+<span class="text-surface-500" role="img" aria-label="{{ none_text }}"><span aria-hidden="true">&mdash;</span></span>
 {%- endif -%}
 {%- endmacro winner_badge -%}
 

@@ -15,7 +15,11 @@
 <div class="max-w-3xl mx-auto px-6 py-20 lg:py-32">
   <h1 class="mb-4 text-surface-950 [overflow-wrap:anywhere]">{{ section.title }}</h1>
   {% if section.extra.last_updated %}
-  <p class="text-surface-400 mb-12 text-xs font-bold tracking-widest">Last updated: {{ section.extra.last_updated }}</p>
+  {# Machine-readable, localized date — same contract as prose.html. #}
+  <p class="text-surface-400 mb-12 text-xs font-bold tracking-widest">
+    {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['last_updated'] %}{{ i18n_data[l]['a11y']['last_updated'] }}{% else %}Last updated:{% endif %}
+    <time datetime="{{ section.extra.last_updated }}">{{ section.extra.last_updated }}</time>
+  </p>
   {% endif %}
   <div class="prose max-w-none">
     {# Content is rendered from trusted Markdown source files only (legal/policy pages). #}
@@ -24,7 +28,7 @@
   </div>
   {% if section.pages %}
   <div class="mt-12 border-t border-surface-200 pt-8">
-    <h2 class="text-lg font-semibold text-surface-950 mb-4">Related</h2>
+    <h2 class="text-lg font-semibold text-surface-950 mb-4">{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['related'] %}{{ i18n_data[l]['a11y']['related'] }}{% else %}Related{% endif %}</h2>
     <ul class="space-y-2">
       {% for page in section.pages %}
       <li><a href="{{ page.permalink }}" class="text-brand-700 hover:underline">{{ page.title }}</a></li>

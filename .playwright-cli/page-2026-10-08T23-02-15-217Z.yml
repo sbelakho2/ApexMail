@@ -1,0 +1,172 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#app-main"
+  - generic [ref=e3]:
+    - complementary "Primary sidebar navigation" [ref=e4]:
+      - generic [ref=e5]:
+        - generic [ref=e6]: ApexMail
+        - navigation "Primary sidebar navigation" [ref=e9]:
+          - generic [ref=e10]:
+            - heading "Overview" [level=3] [ref=e11]
+            - link [ref=e13] [cursor=pointer]:
+              - /url: /dashboard
+          - generic [ref=e18]:
+            - heading "Send" [level=3] [ref=e19]
+            - generic [ref=e20]:
+              - link [ref=e21] [cursor=pointer]:
+                - /url: /campaigns
+              - link [ref=e26] [cursor=pointer]:
+                - /url: /templates
+              - link [ref=e32] [cursor=pointer]:
+                - /url: /contacts
+              - link [ref=e39] [cursor=pointer]:
+                - /url: /lists
+          - generic [ref=e42]:
+            - heading "Measure" [level=3] [ref=e43]
+            - generic [ref=e44]:
+              - link [ref=e45] [cursor=pointer]:
+                - /url: /analytics
+              - link [ref=e49] [cursor=pointer]:
+                - /url: /reports
+              - link [ref=e54] [cursor=pointer]:
+                - /url: /inbox-placement
+              - link [ref=e59] [cursor=pointer]:
+                - /url: /events
+          - generic [ref=e63]:
+            - heading "Configure" [level=3] [ref=e64]
+            - generic [ref=e65]:
+              - link [ref=e66] [cursor=pointer]:
+                - /url: /domains
+              - link [ref=e71] [cursor=pointer]:
+                - /url: /settings/api-keys
+              - link [ref=e77] [cursor=pointer]:
+                - /url: /settings/webhooks
+              - link [ref=e81] [cursor=pointer]:
+                - /url: /settings/dedicated-ips
+              - link [ref=e86] [cursor=pointer]:
+                - /url: /settings/suppressions
+          - generic [ref=e91]:
+            - heading "Account" [level=3] [ref=e92]
+            - generic [ref=e93]:
+              - link [ref=e94] [cursor=pointer]:
+                - /url: /assistant
+              - link [ref=e98] [cursor=pointer]:
+                - /url: /settings/billing
+              - link [ref=e102] [cursor=pointer]:
+                - /url: /settings
+        - button "Sign Out" [ref=e109] [cursor=pointer]
+    - generic [ref=e111]:
+      - banner [ref=e112]:
+        - search [ref=e115]:
+          - generic [ref=e116]: Search campaigns
+          - generic [ref=e117]:
+            - searchbox "Search campaigns" [ref=e121]
+            - button "Search" [ref=e122] [cursor=pointer]
+        - generic "Signed in as AM" [ref=e125]: AM
+      - main [ref=e127]:
+        - generic [ref=e129]:
+          - generic [ref=e130]:
+            - heading "API Keys" [level=1] [ref=e131]
+            - paragraph [ref=e132]: Machine credentials for this workspace. Secrets are shown once at creation.
+          - generic [ref=e133]:
+            - generic [ref=e134]:
+              - heading "Create an API key" [level=2] [ref=e135]
+              - paragraph [ref=e136]: Pick only the scopes this integration needs. The secret appears once after creation.
+            - generic [ref=e137]:
+              - generic [ref=e138]:
+                - text: Key name
+                - textbox "Key name" [ref=e139]:
+                  - /placeholder: Production sender
+              - generic [ref=e140]:
+                - text: Expires in
+                - combobox "Expires in" [ref=e141]:
+                  - option "90 days (recommended)" [selected]
+                  - option "30 days"
+                  - option "180 days"
+                  - option "365 days"
+            - generic [ref=e142]:
+              - generic [ref=e143]:
+                - paragraph [ref=e144]: Scopes
+                - paragraph [ref=e145]: Only scopes your account already holds can be issued. Prefer read-only keys when write access is not required.
+              - group "Sending" [ref=e146]:
+                - paragraph [ref=e148]: Required to deliver mail through the API or SMTP.
+                - generic [ref=e150] [cursor=pointer]:
+                  - checkbox "messages:send" [ref=e151]
+                  - generic [ref=e152]: messages:send
+              - group "Reading" [ref=e153]:
+                - paragraph [ref=e155]: Inspect messages, events, and logs.
+                - generic [ref=e156]:
+                  - generic [ref=e157] [cursor=pointer]:
+                    - checkbox "messages:read" [ref=e158]
+                    - generic [ref=e159]: messages:read
+                  - generic [ref=e160] [cursor=pointer]:
+                    - checkbox "events:read" [ref=e161]
+                    - generic [ref=e162]: events:read
+                  - generic [ref=e163] [cursor=pointer]:
+                    - checkbox "logs:read" [ref=e164]
+                    - generic [ref=e165]: logs:read
+              - group "Contacts & lists" [ref=e166]:
+                - paragraph [ref=e168]: Manage the addressable audience.
+                - generic [ref=e169]:
+                  - generic [ref=e170] [cursor=pointer]:
+                    - checkbox "contacts:read" [ref=e171]
+                    - generic [ref=e172]: contacts:read
+                  - generic [ref=e173] [cursor=pointer]:
+                    - checkbox "contacts:write" [ref=e174]
+                    - generic [ref=e175]: contacts:write
+              - group "Templates & campaigns" [ref=e176]:
+                - paragraph [ref=e178]: Create and update reusable content and campaigns.
+                - generic [ref=e179]:
+                  - generic [ref=e180] [cursor=pointer]:
+                    - checkbox "templates:read" [ref=e181]
+                    - generic [ref=e182]: templates:read
+                  - generic [ref=e183] [cursor=pointer]:
+                    - checkbox "templates:write" [ref=e184]
+                    - generic [ref=e185]: templates:write
+                  - generic [ref=e186] [cursor=pointer]:
+                    - checkbox "campaigns:read" [ref=e187]
+                    - generic [ref=e188]: campaigns:read
+                  - generic [ref=e189] [cursor=pointer]:
+                    - checkbox "campaigns:write" [ref=e190]
+                    - generic [ref=e191]: campaigns:write
+              - group "Domains & webhooks" [ref=e192]:
+                - paragraph [ref=e194]: Read sending domains; register webhook endpoints.
+                - generic [ref=e195]:
+                  - generic [ref=e196] [cursor=pointer]:
+                    - checkbox "domains:read" [ref=e197]
+                    - generic [ref=e198]: domains:read
+                  - generic [ref=e199] [cursor=pointer]:
+                    - checkbox "webhooks:read" [ref=e200]
+                    - generic [ref=e201]: webhooks:read
+                  - generic [ref=e202] [cursor=pointer]:
+                    - checkbox "webhooks:write" [ref=e203]
+                    - generic [ref=e204]: webhooks:write
+              - group "Analytics & suppressions" [ref=e205]:
+                - paragraph [ref=e207]: Read engagement metrics; manage suppression lists.
+                - generic [ref=e208]:
+                  - generic [ref=e209] [cursor=pointer]:
+                    - checkbox "analytics:read" [ref=e210]
+                    - generic [ref=e211]: analytics:read
+                  - generic [ref=e212] [cursor=pointer]:
+                    - checkbox "suppressions:read" [ref=e213]
+                    - generic [ref=e214]: suppressions:read
+                  - generic [ref=e215] [cursor=pointer]:
+                    - checkbox "suppressions:write" [ref=e216]
+                    - generic [ref=e217]: suppressions:write
+            - generic [ref=e218]:
+              - button "Create API Key" [ref=e219] [cursor=pointer]
+              - paragraph [ref=e220]: No scopes selected still creates a key with no API access.
+          - table [ref=e222]:
+            - rowgroup [ref=e223]:
+              - row [ref=e224]:
+                - columnheader "Name" [ref=e225]
+                - columnheader "Key Prefix" [ref=e226]
+                - columnheader "Created" [ref=e227]
+                - columnheader "Last Used" [ref=e228]
+            - rowgroup [ref=e229]:
+              - row [ref=e230]:
+                - cell [ref=e231]:
+                  - generic [ref=e232]:
+                    - heading "Nothing here yet" [level=3] [ref=e233]
+                    - paragraph [ref=e234]: Entries appear here as soon as one is created. Use the page's create action to add the first one.
+            - caption [ref=e235]: API keys

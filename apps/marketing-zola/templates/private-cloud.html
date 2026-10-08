@@ -16,6 +16,18 @@
 {% block content %}
 {% include "partials/private-cloud/hero.html" %}
 
+{# Short anchors for the deployment decision journey: deployment models →
+   isolation → dedicated IPs → architecture review. Each target carries
+   scroll-mt so the sticky header never covers it. #}
+<nav aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['private_cloud_jump'] %}{{ i18n_data[l]['a11y']['private_cloud_jump'] }}{% else %}Private cloud sections{% endif %}" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-4">
+  <div class="flex flex-wrap gap-2 justify-center">
+    <a href="#deployment-options" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["hero_badge"] %}{{ i18n_data[l]["private_cloud"]["hero_badge"] }}{% else %}Deployment models{% endif %}</a>
+    <a href="#security-isolation" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["security_title"] %}{{ i18n_data[l]["private_cloud"]["security_title"] }}{% else %}Isolation{% endif %}</a>
+    <a href="#dedicated-ips" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["dedicated_title"] %}{{ i18n_data[l]["private_cloud"]["dedicated_title"] }}{% else %}Dedicated IPs{% endif %}</a>
+    <a href="#architecture-review" class="text-xs font-bold tracking-widest uppercase text-surface-500 hover:text-brand-600 px-3 py-1.5 border border-surface-200 rounded-sm transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["private_cloud"] and i18n_data[l]["private_cloud"]["cta_button"] %}{{ i18n_data[l]["private_cloud"]["cta_button"] }}{% else %}Architecture review{% endif %}</a>
+  </div>
+</nav>
+
 {% include "partials/private-cloud/latency-comparison.html" %}
 
 {# Deployment Options (CSS radio tabs, zero JS) #}

@@ -7,6 +7,14 @@
 
 {% block title %}Delivery Diagnostics — see exactly what happened to every message | {{ config.extra.site_name }}{% endblock title %}
 
+{# Diagnostic-specific description and social metadata (the page previously
+   inherited the generic site title/description in every og:/twitter: tag). #}
+{% block description %}Per-message delivery diagnostics for ApexMail: request acceptance, DKIM signing, pool selection, every SMTP attempt with the provider's own response codes, deferrals, retries, recipient-MX acceptance, event emission and webhook delivery.{% endblock description %}
+{% block og_title %}ApexMail Delivery Diagnostics — one causal timeline per message{% endblock og_title %}
+{% block og_description %}See every SMTP attempt, the provider's own response codes, deferrals and retries, DKIM signing, and webhook delivery for each message — the reason each thing happened, not just an event feed.{% endblock og_description %}
+{% block twitter_title %}ApexMail Delivery Diagnostics — every message, end to end{% endblock twitter_title %}
+{% block twitter_description %}One causal timeline per message: request acceptance through SMTP attempts, deferrals, MX acceptance and webhook delivery.{% endblock twitter_description %}
+
 {% block content %}
 {% include "partials/email-logs/hero.html" %}
 {% include "partials/email-logs/timeline.html" %}

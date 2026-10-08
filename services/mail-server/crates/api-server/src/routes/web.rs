@@ -498,6 +498,12 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
         // one. Both call the SAME core the /v1/admin/jobs endpoints use.
         .route("/web/admin/jobs/:id/retry", post(form_admin_job_retry))
         .route("/web/admin/jobs/:id/cancel", post(form_admin_job_cancel))
+        // Review §7 (Sales review/replay): the dead-letter Replay control is
+        // a native SSR form, not a disabled button explaining a JSON path.
+        .route(
+            "/web/admin/autopilot/actions/:id/replay",
+            post(form_autopilot_action_replay),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             web_form_rejection_middleware,
@@ -5615,10 +5621,19 @@ async fn form_campaign_update(
     // refused HERE — the old shape let Postgres's `::timestamptz` cast
     // failure land in the storage arm, so bad input flashed the same copy
     // an outage gets.
-    let scheduled: Option<String> = match validate_scheduled_at(&scheduled_at) {
-        Ok(parsed) => parsed,
-        Err(message) => {
-            return redirect_error(message, &back, &state.config);
+    //
+    // Review §4.11: "Save as draft" is a distinct, named submit that
+    // authorizes nothing — it clears any stored schedule instead of arming
+    // an automatic send, so a stale date in the picker cannot schedule.
+    let as_draft = form.field("as_draft") == "1";
+    let scheduled: Option<String> = if as_draft {
+        None
+    } else {
+        match validate_scheduled_at(&scheduled_at) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return redirect_error(message, &back, &state.config);
+            }
         }
     };
     // campaigns.id is a UUID column: cast the String form bind.
@@ -5636,8 +5651,18 @@ async fn form_campaign_update(
     let segment_uuid: Option<Uuid> = uuid::Uuid::parse_str(form.field("segment_id").trim()).ok();
     let track_opens = form.field("track_opens") == "true";
     let track_clicks = form.field("track_clicks") == "true";
+    // P1-2: the editor's copy promises scheduled campaigns start
+    // automatically. The worker only claims `status = 'scheduled'` rows, so
+    // saving a schedule MUST promote a draft (and clearing it MUST return a
+    // scheduled campaign to draft) — otherwise the promise and the queue
+    // disagree. Mirrors the JSON update's `CASE WHEN $9 AND status = 'draft'
+    // THEN 'scheduled'` plus the demotion the console needs to stay honest.
     let result = sqlx::query(
         "UPDATE campaigns SET name = $1, subject = $2, scheduled_at = $3::timestamptz, \
+             status = CASE \
+                 WHEN $3::timestamptz IS NOT NULL AND status = 'draft' THEN 'scheduled' \
+                 WHEN $3::timestamptz IS NULL AND status = 'scheduled' THEN 'draft' \
+                 ELSE status END, \
              from_email = NULLIF($4, ''), from_name = NULLIF($5, ''), reply_to = NULLIF($6, ''), \
              preview_text = NULLIF($7, ''), html_body = NULLIF($8, ''), variables = $9, \
              utm_params = $10, settings = $11, list_ids = $12, segment_id = $13, \
@@ -5679,6 +5704,86 @@ async fn form_campaign_update(
         Err(error) => {
             tracing::error!(error = %error, "web campaign update failed");
             temporary_storage_failure(&WebActionError::Database(error), &back, &state.config)
+        }
+    }
+}
+
+/// POST /web/admin/autopilot/actions/:id/replay — the control-plane sales
+/// page's native replay control (review §7: the read-only limitation was
+/// never an architectural necessity). Requeues a failed/dead-lettered
+/// action through the service-owned queue (`sales_autopilot::actions`,
+/// the same model the JSON proxy reaches), scoped to the sales-autopilot
+/// tenant the page reads, with the same audit action as the JSON twin.
+async fn form_autopilot_action_replay(
+    State(state): State<AppState>,
+    axum::Extension(user): axum::Extension<AuthUser>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let return_to = safe_return_to(&form, "/sales");
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+        return redirect_error(message, &return_to, &state.config);
+    }
+    let system_tenant = match is_system_tenant(&state, &user.tenant_id).await {
+        Ok(system_tenant) => system_tenant,
+        Err(error) => {
+            // Audit #16: storage down is not "you are not an operator".
+            return temporary_storage_failure(
+                &WebActionError::Database(error),
+                &return_to,
+                &state.config,
+            );
+        }
+    };
+    if !system_tenant {
+        return redirect_error("Operator access required.", &return_to, &state.config);
+    }
+    let action_id = match uuid::Uuid::parse_str(id.trim()) {
+        Ok(action_id) => action_id,
+        Err(_) => {
+            return redirect_error(
+                "That action could not be found.",
+                &return_to,
+                &state.config,
+            );
+        }
+    };
+    let queue = sales_autopilot::actions::ActionQueue::new(state.db.clone(), "cp-web-replay");
+    match queue
+        .replay(data::SALES_AUTOPILOT_TENANT, action_id)
+        .await
+    {
+        Ok(true) => {
+            crate::audit_log::insert_audit_log_best_effort(
+                &state.db,
+                Some(user.tenant_id.as_str()),
+                user.user_id.as_deref(),
+                "control_plane.autopilot.action_replayed",
+                "sales_autopilot",
+                Some(&action_id.to_string()),
+                serde_json::json!({ "source": "web_console" }),
+                None,
+                None,
+            )
+            .await;
+            redirect_success(
+                "Action requeued — it runs when the engine next polls.",
+                &return_to,
+                &state.config,
+            )
+        }
+        Ok(false) => redirect_error(
+            "That action is no longer replayable — it may already have been requeued or handled.",
+            &return_to,
+            &state.config,
+        ),
+        Err(error) => {
+            // The queue's failure is not an `sqlx::Error` at this boundary:
+            // log the rich cause, then ride the SAME shared neutral exit
+            // (outage counter + temporary-unavailable flash).
+            tracing::error!(error = %error, "autopilot action replay failed");
+            temporary_storage_response(&return_to, &state.config)
         }
     }
 }

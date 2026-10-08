@@ -10,52 +10,52 @@
 
     <div class="space-y-16">
       {# ── Email Delivery ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-email-delivery">
         <div class="flex items-center gap-3 mb-8">
-          <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-info/10">
-            <svg class="w-5 h-5 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-info-500/10">
+            <svg class="w-5 h-5 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
           </div>
           <h3 class="text-xl font-bold text-surface-950 tracking-tight uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cat_email_delivery"] %}{{ i18n_data[l]["features"]["cat_email_delivery"] }}{% else %}Email Delivery{% endif %}</h3>
         </div>
         <div class="features-grid grid md:grid-cols-2 lg:grid-cols-3 gap-6">
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_transactional_title"] %}{{ i18n_data[l]["features"]["f_transactional_title"] }}{% else %}Transactional &amp; Marketing{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_transactional_desc"] %}{{ i18n_data[l]["features"]["f_transactional_desc"] }}{% else %}Single API for all email types with smart categorization{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_multi_recipient_title"] %}{{ i18n_data[l]["features"]["f_multi_recipient_title"] }}{% else %}Multi-Recipient Support{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_multi_recipient_desc"] %}{{ i18n_data[l]["features"]["f_multi_recipient_desc"] }}{% else %}Send to up to 1,000 recipients per message with to/cc/bcc{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_templates_title"] %}{{ i18n_data[l]["features"]["f_templates_title"] }}{% else %}Stored Templates{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_templates_desc"] %}{{ i18n_data[l]["features"]["f_templates_desc"] }}{% else %}Reusable templates with simple variables, previews, and versioning{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_scheduled_title"] %}{{ i18n_data[l]["features"]["f_scheduled_title"] }}{% else %}Scheduled Sending{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_scheduled_desc"] %}{{ i18n_data[l]["features"]["f_scheduled_desc"] }}{% else %}Schedule sends from 60 seconds in advance{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_batch_title"] %}{{ i18n_data[l]["features"]["f_batch_title"] }}{% else %}Batch API{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_batch_desc"] %}{{ i18n_data[l]["features"]["f_batch_desc"] }}{% else %}Submit up to 100 message requests per batch with per-message validation{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_inbound_title"] %}{{ i18n_data[l]["features"]["f_inbound_title"] }}{% else %}Inbound Processing{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_inbound_desc"] %}{{ i18n_data[l]["features"]["f_inbound_desc"] }}{% else %}Receive and parse incoming emails via webhooks (from Business plans){% endif %}</p>
@@ -64,7 +64,7 @@
       </div>
 
       {# ── Deliverability ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-deliverability">
         <div class="flex items-center gap-3 mb-8">
           <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-success-500/10">
             <svg class="w-5 h-5 text-success-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
@@ -137,7 +137,7 @@
       </div>
 
       {# ── Compliance & Security ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-compliance-security">
         <div class="flex items-center gap-3 mb-8">
           <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-brand/10">
             <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -184,7 +184,7 @@
       </div>
 
       {# ── Insights & Intelligence ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-insights-intelligence">
         <div class="flex items-center gap-3 mb-8">
           <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-warning-500/10">
             <svg class="w-5 h-5 text-warning-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93L12 22"/><path d="M12 2a4 4 0 0 0-4 4c0 1.95 1.4 3.58 3.25 3.93"/></svg>
@@ -238,52 +238,52 @@
       </div>
 
       {# ── Analytics & Tracking ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-analytics-tracking">
         <div class="flex items-center gap-3 mb-8">
-          <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-info/10">
-            <svg class="w-5 h-5 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-info-500/10">
+            <svg class="w-5 h-5 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
           </div>
           <h3 class="text-xl font-bold text-surface-950 tracking-tight uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["cat_analytics"] %}{{ i18n_data[l]["features"]["cat_analytics"] }}{% else %}Analytics &amp; Tracking{% endif %}</h3>
         </div>
         <div class="features-grid grid md:grid-cols-2 lg:grid-cols-3 gap-6">
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_delivery_events_title"] %}{{ i18n_data[l]["features"]["f_delivery_events_title"] }}{% else %}Delivery Events{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_delivery_events_desc"] %}{{ i18n_data[l]["features"]["f_delivery_events_desc"] }}{% else %}Track opens, clicks, bounces, and complaints through event history{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_engagement_title"] %}{{ i18n_data[l]["features"]["f_engagement_title"] }}{% else %}Engagement Analytics{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_engagement_desc"] %}{{ i18n_data[l]["features"]["f_engagement_desc"] }}{% else %}Visualize recipient engagement patterns across your emails{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_webhook_title"] %}{{ i18n_data[l]["features"]["f_webhook_title"] }}{% else %}Webhook Delivery{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_webhook_desc"] %}{{ i18n_data[l]["features"]["f_webhook_desc"] }}{% else %}Webhook event delivery with retry and signatures{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_clickhouse_title"] %}{{ i18n_data[l]["features"]["f_clickhouse_title"] }}{% else %}ClickHouse Analytics{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_clickhouse_desc"] %}{{ i18n_data[l]["features"]["f_clickhouse_desc"] }}{% else %}Columnar analytics for high-volume event history{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_dashboards_title"] %}{{ i18n_data[l]["features"]["f_dashboards_title"] }}{% else %}Custom Dashboards{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_dashboards_desc"] %}{{ i18n_data[l]["features"]["f_dashboards_desc"] }}{% else %}Build your own views with our query API{% endif %}</p>
           </div>
           <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info/10">
-              <svg class="w-4 h-4 text-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-info-500/10">
+              <svg class="w-4 h-4 text-info-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_export_title"] %}{{ i18n_data[l]["features"]["f_export_title"] }}{% else %}Export &amp; Reporting{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_export_desc"] %}{{ i18n_data[l]["features"]["f_export_desc"] }}{% else %}CSV, JSON, and scheduled report delivery{% endif %}</p>
@@ -292,7 +292,7 @@
       </div>
 
       {# ── Enterprise ── #}
-      <div class="animate-in">
+      <div class="animate-in" id="cat-enterprise">
         <div class="flex items-center gap-3 mb-8">
           <div class="w-10 h-10 rounded-sm flex items-center justify-center bg-brand/10">
             <svg class="w-5 h-5 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="0" ry="0"/><rect x="2" y="14" width="20" height="8" rx="0" ry="0"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>

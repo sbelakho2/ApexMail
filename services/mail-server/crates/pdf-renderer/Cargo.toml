@@ -11,6 +11,13 @@ name = "pdf-renderer"
 path = "src/bin/server.rs"
 
 [dependencies]
+# Typst compiler + PDF backend (the designed layouts in src/templates/*.typ
+# are compiled by this stack; typst-layout names PagedDocument for the
+# compile::<PagedDocument> call and typst-pdf exports it)
+typst = "0.15"
+typst-layout = "0.15"
+typst-pdf = "0.15"
+
 # Async runtime
 tokio.workspace = true
 
@@ -39,3 +46,9 @@ once_cell.workspace = true
 # CLI / config
 clap.workspace = true
 dotenvy.workspace = true
+
+[dev-dependencies]
+# Independent PDF text extractor used by the layout tests to prove the
+# delivered document's reading order and content (never the producer's own
+# byte-level internals).
+pdf-extract = "0.8"

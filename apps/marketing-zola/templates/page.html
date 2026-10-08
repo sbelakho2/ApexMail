@@ -1,6 +1,14 @@
 {% extends "base.html" %}
-{# Generic Page Template #}
-{# Extends base.html, renders page content from Markdown #}
+{# Generic Page Template
+   Contract for plain markdown pages:
+     1. One heading — the page title renders as the page h1 unless the
+        authored body already carries its own <h1>.
+     2. Prose — the body renders inside .prose so authored tables, code and
+        reading width follow the site contract.
+     3. Empty content — a page with no body renders its description and a
+        contact destination instead of a bare title.
+     4. Opt-out — a fully authored layout sets `extra.raw_layout = true` and
+        receives the rendered body verbatim on top of base.html. #}
 
 {% block title %}
   {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
@@ -31,5 +39,27 @@
   {# Content is rendered from trusted Markdown source files only. #}
   {# |safe is acceptable because content authors are site owners, not end users. #}
   {# All user-generated content is sanitized before being stored. #}
-  {{ page.content | safe }}
+  {% if page.extra.raw_layout %}
+    {{ page.content | safe }}
+  {% else %}
+  <div class="mx-auto max-w-3xl px-6 py-20 lg:py-32">
+    {% if "<h1" not in page.content %}
+    <h1 class="mb-4 text-surface-950 [overflow-wrap:anywhere]">{{ page.title }}</h1>
+    {% endif %}
+    {% if page.content %}
+    <div class="prose max-w-none">
+      {{ page.content | safe }}
+    </div>
+    {% else %}
+    <p class="mt-4 text-lg leading-8 text-surface-600">
+      {% if page.description %}{{ page.description }}{% else %}{% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['empty_page'] %}{{ i18n_data[l]['a11y']['empty_page'] }}{% else %}This page has no published body yet.{% endif %}{% endif %}
+    </p>
+    <p class="mt-6 text-sm">
+      <a href="mailto:{{ config.extra.support_email }}" class="font-bold text-brand-600 hover:underline">{{ config.extra.support_email }}</a>
+      &middot;
+      <a href="/docs/" class="font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
 {% endblock content %}

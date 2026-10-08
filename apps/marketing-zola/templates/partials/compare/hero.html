@@ -2,33 +2,36 @@
 {# Converted from compare/CompareHero.tsx                        #}
 {# Uses Tera page variables: page.extra.competitor_name,         #}
 {#   page.extra.competitor_description                           #}
+{# Localized shared UI via data/i18n.json keys (compare.*) with  #}
+{# inline English fallbacks — see the report for the new keys.   #}
+{% set competitor_name = page.extra.competitor_name | default(value="this provider") %}
 
 <section class="relative pt-32 pb-20 overflow-hidden bg-surface-50 border-b border-surface-200">
 
   <div class="relative max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center">
       <div class="inline-flex items-center gap-2 px-2 py-0.5 border border-surface-200 text-xs font-bold tracking-widest text-surface-600 mb-6">
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        Feature Comparison
+        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_badge"] %}{{ i18n_data[l]["compare"]["hero_badge"] }}{% else %}Feature Comparison{% endif %}
       </div>
 
       <h1 class="text-surface-950 mb-6 tracking-tighter text-balance">
         <span class="text-brand-500">ApexMail</span>
         <span class="text-surface-400 mx-2 sm:mx-4">vs</span>
-        <span class="text-surface-900">{{ page.extra.competitor_name | default(value="SendGrid") }}</span>
+        <span class="text-surface-900">{{ competitor_name }}</span>
       </h1>
 
       <p class="text-lg text-surface-600 leading-[1.5] mb-10 max-w-2xl mx-auto">
-        See how ApexMail compares to {{ page.extra.competitor_name | default(value="SendGrid") }}.
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_lead"] %}{{ i18n_data[l]["compare"]["hero_lead"] }} {{ competitor_name }}.{% else %}See how ApexMail compares to {{ competitor_name }}.{% endif %}
         {{ page.extra.competitor_description | default(value="Built for developers who need reliable transactional email.") }}
       </p>
 
       <div class="flex flex-wrap justify-center gap-4">
         <a href="{{ config.extra.app_url }}/signup" class="btn-primary flex items-center gap-2 group">
-          Try ApexMail Free
-          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta"] %}{{ i18n_data[l]["compare"]["hero_cta"] }}{% else %}Try ApexMail Free{% endif %}
+          <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
         </a>
-        <a href="#comparison" class="btn-secondary">See Full Comparison</a>
+        <a href="#comparison" class="btn-secondary">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["hero_cta_secondary"] %}{{ i18n_data[l]["compare"]["hero_cta_secondary"] }}{% else %}See Full Comparison{% endif %}</a>
       </div>
     </div>
   </div>

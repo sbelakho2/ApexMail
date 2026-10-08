@@ -9,9 +9,11 @@
 #![deny(unsafe_code)]
 pub mod auth;
 pub mod compiler;
-pub mod font;
 pub mod routes;
 pub mod world;
+
+#[cfg(test)]
+mod test_extract;
 
 pub use auth::ServiceAuth;
 pub use compiler::render_pdf;

@@ -628,7 +628,7 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
     format!(
         "<div class=\"apex-console-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 transition-all w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
-         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
+         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{content}</nav>\
          <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content = content,
@@ -768,7 +768,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     format!(
         "<div class=\"apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
-         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
+         <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
          <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
          <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",

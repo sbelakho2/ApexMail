@@ -16,8 +16,10 @@
 {% block content %}
 {% include "partials/api-explorer/hero.html" %}
 
-{# API Explorer — live sandbox lanes, zero client-side JS #}
-<div>
+{# Workbench bounded to the same max-width and gutters as the hero above it
+   (the island previously sat in a bare <div>, so its panels ran edge-to-edge
+   at every viewport width while the hero stayed at max-w-7xl). #}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-16">
 	{% include "partials/generated/api-explorer-island.html" %}
 </div>
 

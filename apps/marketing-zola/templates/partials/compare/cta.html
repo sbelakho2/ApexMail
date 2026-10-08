@@ -1,11 +1,16 @@
 {# ── Compare CTA ──────────────────────────────────────────────── #}
 {# Converted from compare/CompareCTA.tsx                         #}
+{# Decision guide: balanced "choose when" rules, no winner       #}
+{# language (review SS47). The alternatives strip lists the      #}
+{# COMPLETE applicable competitor set and marks the comparison   #}
+{# currently being read (aria-current="page").                   #}
+{% set competitor_name = page.extra.competitor_name | default(value="the alternative") %}
 
-<section class="py-20 lg:py-32 bg-surface-100 border-t border-surface-200">
+<section id="decision-guide" class="scroll-mt-20 py-20 lg:py-32 bg-surface-100 border-t border-surface-200">
   <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="bg-surface-50 border border-surface-200 rounded-sm p-10 lg:p-16">
       <div class="text-center mb-16">
-        <span class="inline-block px-2 py-0.5 text-xs font-bold tracking-widest text-surface-400 border border-surface-200 rounded-sm mb-6 uppercase">Decision guide</span>
+        <span class="inline-block px-2 py-0.5 text-xs font-bold tracking-widest text-surface-400 border border-surface-200 rounded-sm mb-6 uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["decision_label"] %}{{ i18n_data[l]["compare"]["decision_label"] }}{% else %}Decision guide{% endif %}</span>
         <h2 class="text-surface-950 mb-6 tracking-tighter">
           {{ page.extra.decision_title | default(value="Which should you choose?") }}
         </h2>
@@ -15,18 +20,18 @@
          better fit — no winner language. #}
       <div class="grid sm:grid-cols-2 gap-6 mb-12 text-left">
         <div class="p-6 border border-surface-200 bg-surface-50">
-          <h3 class="text-sm font-bold text-surface-950 mb-3">Choose ApexMail when…</h3>
+          <h3 class="text-sm font-bold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_apexmail"] %}{{ i18n_data[l]["compare"]["choose_apexmail"] }}{% else %}Choose ApexMail when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_apexmail | default(value=["You need per-message delivery diagnostics and raw SMTP responses", "EEA data storage or private deployment (Dedicated Tenant / BYOC) matters", "You want deliverability tooling (grader, warm-up, reputation) integrated with sending"]) %}
-            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-brand-500 font-bold">+</span>{{ point }}</li>
+            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-brand-500 font-bold" aria-hidden="true">+</span>{{ point }}</li>
             {% endfor %}
           </ul>
         </div>
         <div class="p-6 border border-surface-200 bg-surface-50">
-          <h3 class="text-sm font-bold text-surface-950 mb-3">Choose {{ page.extra.competitor_name | default(value="the alternative") }} when…</h3>
+          <h3 class="text-sm font-bold text-surface-950 mb-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["choose_competitor"] %}{{ i18n_data[l]["compare"]["choose_competitor"] }}{% else %}Choose {{ competitor_name }} when…{% endif %}</h3>
           <ul class="space-y-2">
             {% for point in page.extra.choose_competitor | default(value=["Your stack depends on that provider's ecosystem or marketplace", "Its specific pricing shape fits your volume profile better", "You need a capability ApexMail does not currently offer"]) %}
-            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-surface-400 font-bold">+</span>{{ point }}</li>
+            <li class="flex items-start gap-3 text-[13px] text-surface-600"><span class="text-surface-400 font-bold" aria-hidden="true">+</span>{{ point }}</li>
             {% endfor %}
           </ul>
         </div>
@@ -35,28 +40,31 @@
       <div class="text-center">
         <div class="flex flex-col sm:flex-row justify-center gap-4 mb-10">
           <a href="{{ config.extra.app_url }}/signup" class="btn-primary">
-            Start free
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start free{% endif %}
           </a>
-          <a href="{{ lp }}/pricing/" class="btn-secondary">View pricing</a>
+          <a href="{{ lp }}/pricing/" class="btn-secondary">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}View pricing{% endif %}</a>
         </div>
         <p class="text-xs text-surface-400 font-bold tracking-[0.05em]">
-          No credit card &bull; 3,000 emails/month free
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["cta_note"] %}{{ i18n_data[l]["compare"]["cta_note"] }}{% else %}No credit card &bull; 3,000 emails/month free{% endif %}
         </p>
       </div>
     </div>
 
+    {# Complete applicable competitor set: all five published comparisons,
+       with the current page marked. Pages share this partial; the slug is
+       compared against page.extra.competitor_slug. #}
+    {% set competitor_slugs = ["sendgrid", "resend", "postmark", "mailgun", "amazon-ses"] %}
+    {% set competitor_names = ["SendGrid", "Resend", "Postmark", "Mailgun", "Amazon SES"] %}
     <div class="mt-16 text-center">
-      <p class="text-xs text-surface-500 mb-6 font-bold tracking-widest text-balance uppercase">Alternatives, compared</p>
+      <p class="text-xs text-surface-500 mb-6 font-bold tracking-widest text-balance uppercase">{% if i18n_data and i18n_data[l] and i18n_data[l]["compare"] and i18n_data[l]["compare"]["alternatives"] %}{{ i18n_data[l]["compare"]["alternatives"] }}{% else %}Alternatives, compared{% endif %}</p>
       <div class="flex flex-wrap justify-center gap-2">
-        <a href="{{ lp }}/compare/sendgrid/" class="text-xs font-bold tracking-widest px-4 py-2 bg-surface-50 border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
-          vs SendGrid
+        {% for slug in competitor_slugs %}
+        <a href="{{ lp }}/compare/{{ slug }}/"
+           {% if page.extra.competitor_slug == slug %}aria-current="page"{% endif %}
+           class="text-xs font-bold tracking-widest px-4 py-2 border transition-colors {% if page.extra.competitor_slug == slug %}bg-surface-950 text-white border-surface-950{% else %}bg-surface-50 border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950{% endif %}">
+          vs {{ competitor_names[loop.index0] }}
         </a>
-        <a href="{{ lp }}/compare/resend/" class="text-xs font-bold tracking-widest px-4 py-2 bg-surface-50 border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
-          vs Resend
-        </a>
-        <a href="{{ lp }}/compare/postmark/" class="text-xs font-bold tracking-widest px-4 py-2 bg-surface-50 border border-surface-200 text-surface-600 hover:text-surface-950 hover:border-surface-950 transition-colors">
-          vs Postmark
-        </a>
+        {% endfor %}
       </div>
     </div>
   </div>

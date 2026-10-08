@@ -133,6 +133,39 @@ pub struct BulkActionData {
     pub button_label: String,
 }
 
+/// A secondary page/table action rendered beside the primary one (review
+/// §4.1: "Pagination/export/secondary actions"). Downloads (CSV export) and
+/// other alternate workflows ride here so a data-backed page never loses the
+/// affordances its handwritten counterpart had. `method` is "get" for
+/// downloads (filters stay in the query string) or "post" for mutations that
+/// need a CSRF token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondaryActionData {
+    pub label: String,
+    /// Target URL. Query-bearing GET targets are emitted verbatim.
+    pub action: String,
+    /// "get" | "post" (lower-case; the renderer uppercases it).
+    pub method: String,
+}
+
+impl SecondaryActionData {
+    pub fn get(label: &str, action: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            action: action.to_string(),
+            method: "get".to_string(),
+        }
+    }
+
+    pub fn post(label: &str, action: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            action: action.to_string(),
+            method: "post".to_string(),
+        }
+    }
+}
+
 /// Everything `data_list_page` needs to render a full list/overview page.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ListPageData {
@@ -163,6 +196,12 @@ pub struct ListPageData {
     pub bulk_action: Option<BulkActionData>,
     /// Primary action link (e.g. "New Campaign" → /campaigns/new).
     pub primary_action: Option<(String, String)>,
+    /// Secondary header actions (exports and other alternate workflows)
+    /// rendered beside the primary action. Empty ⇒ none.
+    pub secondary_actions: Vec<SecondaryActionData>,
+    /// Extra buttons rendered inside the bulk-action bar next to the bulk
+    /// submit (e.g. "Export selected" as a GET). Empty ⇒ none.
+    pub bulk_secondary_actions: Vec<SecondaryActionData>,
     /// Per-row action links: detail page prefix (`/campaigns/`) and the
     /// signed-confirm delete intent (`delete-campaign`).
     pub detail_path_prefix: Option<String>,
@@ -187,14 +226,24 @@ pub struct ListPageData {
 
 impl ListPageData {
     /// Human summary line: "Showing 1–10 of 42 campaigns." or an honest
-    /// zero-row phrasing.
+    /// zero-row phrasing. Out-of-range pages (rows absent but the total
+    /// known) never render an inverted "Showing 11–10" range.
     pub fn summary(&self, noun: &str) -> String {
         let plural = format!("{noun}s");
         if self.total_count == 0 {
             return format!("No {plural} yet.");
         }
         let start = (self.page.saturating_sub(1)) * self.per_page.max(1) + 1;
-        let end = ((start + self.rows_len().saturating_sub(1)) as i64).min(self.total_count);
+        let rows_len = self.rows_len();
+        if rows_len == 0 {
+            return format!(
+                "No {plural} on this page — {total} in total.",
+                total = self.total_count
+            );
+        }
+        let end = ((start + rows_len.saturating_sub(1)) as i64)
+            .min(self.total_count)
+            .max(start);
         format!(
             "Showing {start}–{end} of {total} {plural}.",
             total = self.total_count
@@ -216,6 +265,10 @@ pub struct CampaignEditData {
     pub html_body: String,
     /// `datetime-local` value string (may be empty for drafts).
     pub scheduled_at: String,
+    /// The row's real lifecycle status (`draft` | `scheduled` | `sending` |
+    /// `paused` | `stopped` | `completed` | `failed`): the editor's badge
+    /// shows THIS, not an unconditional "Draft" (review §6.2).
+    pub status: String,
 }
 
 /// Prefilled template editor state for `/templates/{id}/edit` (loaded

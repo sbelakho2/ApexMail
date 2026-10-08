@@ -1,32 +1,40 @@
 // ApexMail Data Processing Agreement (DPA) Template
 // GDPR-compliant DPA per Articles 28, 32, 33
 //
-// Expected data.json structure:
+// Expected data.json structure (produced by
+// `enterprise::routes::dpa_generate_pdf`):
 // {
+//   "company_name": "Acme Corp",              // the Controller
+//   "processor_name": "",                     // optional Processor override
 //   "effective_date": "2025-01-15",
-//   "controller": {
-//     "company": "Acme Corp",
-//     "address": "123 Main St, Tallinn, EE",
-//     "contact": "Jane Doe",
-//     "email": "jane@acme.com"
-//   },
-//   "data_categories": ["Email addresses", "First/last names", "IP addresses", "Engagement data"],
-//   "processing_purposes": ["Email delivery", "Analytics", "Bounce processing", "Compliance monitoring"],
+//   "data_categories": ["Email addresses", "Names", "IP addresses"],
+//   "processing_purposes": ["Transactional email delivery"],
 //   "sub_processors": [
-//     { "name": "Hetzner Online GmbH", "purpose": "Core infrastructure (compute, storage)", "location": "Germany/Finland (EEA)" },
-//     { "name": "Google LLC", "purpose": "Optional OAuth authentication", "location": "Global (US entity, SCCs)" },
-//     { "name": "GitHub, Inc.", "purpose": "Optional OAuth authentication", "location": "Global (US entity, SCCs)" },
-//     { "name": "Stripe, Inc.", "purpose": "Payment processing", "location": "US/India (SCCs)" }
+//     { "name": "Hetzner Online GmbH", "purpose": "Core infrastructure (compute, storage)", "location": "Germany/Finland (EEA)" }
 //   ],
-//   "data_retention_days": 365,
-//   "dpa_version": "2.1"
+//   "retention_days": 90,                     // producer key
+//   "data_retention_days": 365,               // legacy alias, honored when present
+//   "dpa_version": "3.0",                     // optional; template revision otherwise
+//   "tenant_id": "…",
+//   "compliance_status": { … }                // recorded compliance snapshot (evidence scope)
 // }
 
 #let data = json("data.json")
 
+// ── Agreement identity ──────────────────────────────────────────────────
+// The revision identifies the template revision that produced this document;
+// a producer-supplied `dpa_version` always wins.
+#let dpa-version = if "dpa_version" in data and data.dpa_version != none { str(data.dpa_version) } else { "3.0" }
+#let effective-date = if "effective_date" in data { str(data.effective_date) } else { "—" }
+#let controller = if "company_name" in data and data.company_name != none and data.company_name != "" { str(data.company_name) } else { "the Controller (name not recorded)" }
+#let processor = if "processor_name" in data and data.processor_name != none and data.processor_name != "" { str(data.processor_name) } else { "Bel Consulting OÜ (trading as ApexMail)" }
+// Retention is the producer's recorded retention window; both the current
+// and the legacy key are honored, and an absent value renders explicitly.
+#let retention-days = if "retention_days" in data and data.retention_days != none { data.retention_days } else if "data_retention_days" in data and data.data_retention_days != none { data.data_retention_days } else { none }
+
 #set document(
-  title: "Data Processing Agreement — " + data.controller.company,
-  author: "Bel Consulting OÜ",
+  title: "Data Processing Agreement — " + controller,
+  author: "Bel Consulting OÜ (trading as ApexMail)",
 )
 
 #set page(
@@ -37,8 +45,8 @@
       #set text(size: 8pt, fill: luma(140))
   #grid(
     columns: (1fr, 1fr),
-    [Data Processing Agreement — v#data.dpa_version],
-    align(right)[Bel Consulting OÜ & #data.controller.company],
+    [Data Processing Agreement — v#dpa-version],
+    align(right)[Bel Consulting OÜ & #controller],
   )
       #line(length: 100%, stroke: 0.3pt + luma(200))
     ]
@@ -47,14 +55,14 @@
     #set text(size: 7pt, fill: luma(140))
     #grid(
       columns: (1fr, 1fr, 1fr),
-      [DPA v#data.dpa_version],
-      align(center)[Page #counter(page).display() of #locate(loc => counter(page).final(loc).first())],
+      [DPA v#dpa-version],
+      align(center)[Page #context { counter(page).display() } of #context { counter(page).final().first() }],
       align(right)[Confidential],
     )
   ],
 )
 
-#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
+#set text(font: ("Noto Sans", "DejaVu Sans"), size: 10pt)
 #set par(justify: true)
 #set heading(numbering: "1.1")
 
@@ -80,18 +88,18 @@
   ]
   #v(8pt)
   #text(weight: "bold", size: 16pt)[
-    #data.controller.company
+    #controller
   ]
   #text(size: 11pt)[(the "Controller")]
   #v(12pt)
   #text(size: 14pt)[and]
   #v(12pt)
-  #text(weight: "bold", size: 16pt)[Bel Consulting OÜ]
+  #text(weight: "bold", size: 16pt)[#processor]
   #text(size: 11pt)[(the "Processor")]
   #v(24pt)
   #text(size: 11pt)[
-    Effective Date: *#data.effective_date* \
-    Version: *#data.dpa_version*
+    Effective Date: *#effective-date* \
+    Revision: *#dpa-version*
   ]
 ]
 
@@ -103,7 +111,7 @@
 
 = Definitions and Scope
 
-This Data Processing Agreement ("DPA") is entered into between *#data.controller.company* ("Controller") and *Bel Consulting OÜ* (trading as ApexMail), a company incorporated under the laws of Estonia (registry code 16588745, VAT EE102951727), with its registered office at Sakala tn 7-2, 10141 Tallinn, Estonia ("Processor").
+This Data Processing Agreement ("DPA") is entered into between *#controller* ("Controller") and *Bel Consulting OÜ* (trading as ApexMail), a company incorporated under the laws of Estonia (registry code 16588745, VAT EE102951727), with its registered office at Sakala tn 7-2, 10141 Tallinn, Estonia ("Processor").
 
 This DPA supplements the Terms of Service and governs the processing of personal data by the Processor on behalf of the Controller in connection with the ApexMail email delivery platform.
 
@@ -128,8 +136,12 @@ The following categories of personal data are processed under this Agreement:
   radius: 0pt,
   width: 100%,
 )[
-  #for (i, cat) in data.data_categories.enumerate() [
-    #numbering("1.", i + 1) #cat \
+  #if "data_categories" in data and data.data_categories.len() > 0 [
+    #for (i, cat) in data.data_categories.enumerate() [
+      #numbering("1.", i + 1) #cat \
+    ]
+  ] else [
+    No processing categories are recorded in this agreement's data.
   ]
 ]
 
@@ -137,13 +149,21 @@ The following categories of personal data are processed under this Agreement:
 
 The Processor shall process the above categories of Personal Data solely for the following purposes:
 
-#for purpose in data.processing_purposes [
-  - #purpose
+#if "processing_purposes" in data and data.processing_purposes.len() > 0 [
+  #for purpose in data.processing_purposes [
+    - #purpose
+  ]
+] else [
+  No processing purposes are recorded in this agreement's data.
 ]
 
 == Data Retention
 
-Personal Data shall be retained for a maximum of *#data.data_retention_days days* from the date of collection, unless a longer retention period is required by applicable law.
+#if retention-days != none [
+  Personal Data shall be retained for a maximum of *#retention-days days* from the date of collection, unless a longer retention period is required by applicable law.
+] else [
+  The retention window is not recorded in this agreement's data. Personal Data is retained only as long as required to provide the service or as required by applicable law.
+]
 
 // ---------------------------------------------------------------------------
 // 3. Obligations of the Processor (Art. 28)
@@ -208,19 +228,23 @@ The Processor implements the following security measures:
 
 The current authorised subprocessors are maintained in the ApexMail Subprocessor Register at https://apexmail.ee/subprocessors/, which is incorporated into this DPA by reference. At the date of this DPA, the authorised sub-processors include:
 
-#table(
-  columns: (1fr, 1fr, auto),
-  stroke: 0.5pt + luma(200),
-  fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
-  inset: 8pt,
-  align: (left, left, left),
-  [*Sub-processor*], [*Purpose*], [*Location*],
-  ..for sp in data.sub_processors {(
-    [#sp.name],
-    [#sp.purpose],
-    [#sp.location],
-  )}
-)
+#if "sub_processors" in data and data.sub_processors.len() > 0 [
+  #table(
+    columns: (1fr, 1fr, auto),
+    stroke: 0.5pt + luma(200),
+    fill: (x, y) => if y == 0 { rgb("#dc2626").lighten(90%) } else { none },
+    inset: 8pt,
+    align: (left, left, left),
+    [*Sub-processor*], [*Purpose*], [*Location*],
+    ..for sp in data.sub_processors {(
+      [#sp.name],
+      [#if "purpose" in sp { sp.purpose } else { [—] }],
+      [#if "location" in sp { sp.location } else { [—] }],
+    )}
+  )
+] else [
+  No sub-processors are recorded in this agreement's data. The ApexMail Subprocessor Register at https://apexmail.ee/subprocessors/ is the authoritative list.
+]
 
 #v(8pt)
 
@@ -274,7 +298,7 @@ This DPA shall be governed by and construed in accordance with the laws of the R
 
 = Signatures
 
-This DPA has been executed in two copies, one for each party.
+This DPA has been executed in two copies, one for each party. The document records the agreement's identity (revision #dpa-version, effective #effective-date); the signatures below are executed by the parties named on the title page.
 
 #v(24pt)
 
@@ -284,18 +308,18 @@ This DPA has been executed in two copies, one for each party.
   [
     *For the Controller:*
     #v(8pt)
-    #data.controller.company
+    #controller
     #v(40pt)
     #line(length: 90%, stroke: 0.5pt)
     #v(4pt)
-    Name: #data.controller.contact \
+    Name: \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_ \
     Title: \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_ \
     Date: \_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_
   ],
   [
     *For the Processor:*
     #v(8pt)
-    Bel Consulting OÜ (trading as ApexMail)
+    #processor
     #v(40pt)
     #line(length: 90%, stroke: 0.5pt)
     #v(4pt)

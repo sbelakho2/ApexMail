@@ -1,19 +1,20 @@
 // ApexMail Invoice Template
 // Rendered by pdf-renderer with JSON data from billing-service
 //
-// Expected data.json structure:
+// Expected data.json structure (produced by
+// `billing_service::invoices::generate_invoice_pdf`):
 // {
 //   "invoice_number": "INV-2025-0042",
-//   "status": "paid",
-//   "currency": "EUR",
+//   "status": "paid",                 // InvoiceStatus, lowercased
+//   "currency": "EUR",                // ISO-4217 code, authoritative
 //   "issued_at": "2025-01-15",
 //   "due_at": "2025-02-14",
-//   "paid_at": "2025-01-20",
+//   "paid_at": "2025-01-20",          // optional
 //   "period_start": "2025-01-01",
 //   "period_end": "2025-01-31",
-//   "subtotal": 9900,       // cents
-//   "vat_total": 2178,      // cents
-//   "total": 12078,         // cents
+//   "subtotal": 9900,                 // minor units (cents)
+//   "vat_total": 2178,
+//   "total": 12078,
 //   "line_items": [
 //     { "description": "Professional Plan", "quantity": 1, "unit_price": 9900, "amount": 9900, "vat_rate": 22, "vat_amount": 2178 }
 //   ],
@@ -36,10 +37,17 @@
 #let seller = if "seller" in data { data.seller } else { (name: "Bel Consulting OÜ",) }
 #let seller-vat = if "vat_number" in seller { seller.vat_number } else { "EE102951727" }
 #let seller-reg = if "registry_code" in seller { seller.registry_code } else { "16588745" }
+#let seller-address = if "address" in seller { seller.address } else { "Sakala 7-2, 10141 Tallinn, Estonia" }
+
+// The authoritative currency is the ISO-4217 code the invoice was issued in.
+// Symbols are presentation only; an unknown code always renders as the code
+// itself, never as a guessed symbol.
+#let currency = if "currency" in data and data.currency != none { upper(str(data.currency)) } else { "" }
+#let currency-symbol = if currency == "EUR" { "€" } else if currency == "USD" { "$" } else if currency == "GBP" { "£" } else if currency == "CHF" { "CHF " } else if currency == "SEK" { "SEK " } else if currency == "NOK" { "NOK " } else if currency == "DKK" { "DKK " } else if currency == "PLN" { "PLN " } else if currency != "" { currency + " " } else { "" }
 
 #set document(
   title: "Invoice " + data.invoice_number,
-  author: "Bel Consulting OÜ",
+  author: "Bel Consulting OÜ (trading as ApexMail)",
 )
 
 #set page(
@@ -53,29 +61,50 @@
       columns: (1fr, 1fr),
       align(left)[
         #seller.name · Reg. #seller-reg · VAT #seller-vat \
-        Sakala 7-2, 10141 Tallinn, Estonia
+        #seller-address
       ],
       align(right)[
         support\@apexmail.ee · apexmail.ee \
-        Page #counter(page).display() of #locate(loc => counter(page).final(loc).first())
+        Page #context { counter(page).display() } of #context { counter(page).final().first() }
       ],
     )
   ],
 )
 
-#set text(font: "Noto Sans", "DejaVu Sans", sans-serif, size: 10pt)
+#set text(font: ("Noto Sans", "DejaVu Sans"), size: 10pt)
 
 // ---------------------------------------------------------------------------
-// Helper: format cents to currency string (handles negative credit amounts)
+// Helpers: authoritative money and date handling
 // ---------------------------------------------------------------------------
 
-#let fmt-money(cents) = {
-  let sign = if cents < 0 { "-" } else { "" }
-  let abs = calc.abs(cents)
-  let eur = calc.floor(abs / 100)
+/// Format minor units (cents) with the invoice's own currency, e.g.
+/// `-€99.00` for -9900 EUR. The sign leads the symbol; unknown currencies
+/// render as `CODE 99.00`.
+#let fmt-money(minor) = {
+  let amount = if type(minor) == int or type(minor) == float { minor } else { 0 }
+  let sign = if amount < 0 { "-" } else { "" }
+  let abs = calc.abs(amount)
+  let major = calc.floor(abs / 100)
   let ct = calc.rem(abs, 100)
   let ct-str = if ct < 10 { "0" + str(ct) } else { str(ct) }
-  "€" + sign + str(eur) + "." + ct-str
+  sign + currency-symbol + str(major) + "." + ct-str
+}
+
+/// Parse an ISO `YYYY-MM-DD` date; `none` for anything else (never throws).
+#let parse-date(s) = {
+  if type(s) != str { return none }
+  let parts = s.split("-")
+  if parts.len() != 3 { return none }
+  let (y, m, d) = (int(parts.at(0)), int(parts.at(1)), int(parts.at(2)))
+  datetime(year: y, month: m, day: d)
+}
+
+/// Payment term in days, derived from the authoritative issue/due dates
+/// (`due_at - issued_at`). `none` when either date is unavailable.
+#let term-days = {
+  let issued = parse-date(if "issued_at" in data { data.issued_at } else { "" })
+  let due = parse-date(if "due_at" in data { data.due_at } else { "" })
+  if issued == none or due == none { none } else { (due - issued).days() }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +119,7 @@
     #v(4pt)
     #text(size: 8pt, fill: luma(100))[
       #seller.name \
-      #if "address" in seller { seller.address } else { [Sakala 7-2, 10141 Tallinn, Estonia] } \
+      #seller-address \
       VAT: #seller-vat \
       Reg: #seller-reg
     ]
@@ -184,7 +213,7 @@
       inset: 6pt,
       align: (left, right),
       [Subtotal], [#fmt-money(data.subtotal)],
-      [VAT (#{ let rates = data.line_items.map(i => str(i.vat_rate) + "%"); rates.dedup(); rates.join(", ") })],
+      [VAT (#{ let seen = (); for item in data.line_items { let rate = str(item.vat_rate) + "%"; if not seen.contains(rate) { seen.push(rate) } }; seen.join(", ") })],
       [#fmt-money(data.vat_total)],
     )
     #line(length: 100%, stroke: 1.5pt + rgb("#000000"))
@@ -193,7 +222,7 @@
       stroke: none,
       inset: 8pt,
       align: (left, right),
-      [*Total (#data.currency)*], [*#fmt-money(data.total)*],
+      [*Total (#currency)*], [*#fmt-money(data.total)*],
     )
   ]
 ]
@@ -204,6 +233,7 @@
 // Payment Information
 // Bank details come from billing configuration (Wise by default); the whole
 // transfer block is omitted when no account details are configured.
+// Payment terms are derived from the invoice's own issue and due dates.
 // ---------------------------------------------------------------------------
 
 #if "bank" in data and data.bank != none [
@@ -226,9 +256,8 @@
       ],
       [
         *Payment Terms:* \
-        Net 30 days from invoice date \
-        Late payment interest: 0.05% per day \
-        \
+        Payment due by #data.due_at#if term-days != none [ (Net #term-days days from the invoice date)].
+
         *Reference:* #data.invoice_number
       ],
     )
@@ -243,6 +272,8 @@
     width: 100%,
   )[
     Payments are collected automatically via the configured payment provider. \
+    Payment due by #data.due_at#if term-days != none [ (Net #term-days days from the invoice date)].
+
     *Reference:* #data.invoice_number
   ]
 ]
@@ -258,7 +289,7 @@
     )[
       #text(weight: "bold", size: 14pt, fill: rgb("#16a34a"))[
         ✓ PAID
-        #if "paid_at" in data [ — #data.paid_at ]
+        #if "paid_at" in data and data.paid_at != none [ — #data.paid_at ]
       ]
     ]
   ]

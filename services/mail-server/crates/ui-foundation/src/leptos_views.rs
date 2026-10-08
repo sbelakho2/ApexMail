@@ -387,7 +387,7 @@ fn render_debounced_filter_bar(
 ) -> String {
     let search_icon = ui_icon("search", "h-4 w-4");
     format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Press Apply to run the search — results are rendered entirely server-side.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\"><form method=\"get\" action=\"{action}\" class=\"flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between\" role=\"search\"><div class=\"min-w-0 flex-1\"><label class=\"sr-only\" for=\"{input_id}\">{search_label}</label><div class=\"relative\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{search_icon}</span><input id=\"{input_id}\" type=\"search\" name=\"query\" aria-label=\"{search_label}\" value=\"{search_value}\" placeholder=\"{search_placeholder}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background pl-10 pr-4 text-[14px] ring-offset-background transition-all duration-200 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div><p class=\"mt-2 text-xs text-muted-foreground\">Results update when you apply the filters.</p></div><div class=\"flex w-full flex-col gap-3 sm:flex-row lg:w-auto\">{filters_html}<div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" class=\"inline-flex w-full items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-brand-700 sm:w-auto\">Apply filters</button><a href=\"{clear_href}\" class=\"inline-flex w-full items-center justify-center rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground sm:w-auto\">Clear filters</a></div></div></form></section>",
         action = clear_href,
         input_id = input_id,
         search_label = search_label,
@@ -598,7 +598,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .join("");
     format!(
         "<section class=\"space-y-4\" data-page=\"domain-detail\">\
-        <div class=\"rounded-sm border border-primary/30 bg-primary/5 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS setup</p><p class=\"mt-1 text-sm text-muted-foreground\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page (no clipboard scripts here).</p></div>{verify_form}</div></div>\
+        <div class=\"rounded-sm border border-primary/30 bg-primary/5 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-primary\">DNS setup</p><p class=\"mt-1 text-sm text-muted-foreground\">Add each record at your DNS provider, then verify. Values are selectable — copy them straight from this page.</p></div>{verify_form}</div></div>\
         <div class=\"space-y-3\">{rows}</div>\
         </section>",
         verify_form = verify_form,
@@ -677,9 +677,9 @@ fn campaign_detail_section(data: &ListPageData) -> String {
 
     format!(
         "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Each action applies only when the campaign's current status allows it.</p></div>\
         {recipients}\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data. Scheduled campaigns start automatically when their time arrives.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update. Scheduled campaigns start automatically when their time arrives.</p></div>\
         </section>",
         actions = actions,
         recipients = recipients_form.map(|form| format!(
@@ -711,7 +711,7 @@ fn domain_transfer_section(data: &ListPageData) -> String {
         <form method=\"post\" action=\"/web/admin/domains/transfer\" class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6 shadow-premium\" data-form-id=\"domain-transfer\">\
         <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
         <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
-        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /><p class=\"text-xs text-muted-foreground\">The exact string is checked again server-side after the POST.</p></div>\
+        <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /><p class=\"text-xs text-muted-foreground\">The exact string is checked again before the transfer runs.</p></div>\
         <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Transfer domain</button>\
         </form></section>",
         expected = html_escape(&expected),
@@ -955,6 +955,37 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
             None => String::new(),
         }
     };
+    // Secondary header actions (review §4.1/§4.4): exports and other
+    // alternate workflows ride beside the primary action as outlined
+    // buttons — one primary per local task, downloads visibly secondary.
+    let secondary_actions = if data.secondary_actions.is_empty() {
+        String::new()
+    } else {
+        let buttons = data
+            .secondary_actions
+            .iter()
+            .map(|action| {
+                let classes = "inline-flex w-full items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground h-12 sm:w-auto";
+                if action.method.eq_ignore_ascii_case("post") {
+                    format!(
+                        "<form method=\"post\" action=\"{action}\" class=\"inline\"><button type=\"submit\" class=\"{classes}\">{label}</button></form>",
+                        action = html_escape(&action.action),
+                        classes = classes,
+                        label = html_escape(&action.label),
+                    )
+                } else {
+                    format!(
+                        "<a href=\"{action}\" class=\"{classes}\">{label}</a>",
+                        action = html_escape(&action.action),
+                        classes = classes,
+                        label = html_escape(&action.label),
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<div class=\"flex flex-col gap-2 sm:flex-row\">{buttons}</div>")
+    };
 
     let kpi_cards = if data.kpis.is_empty() {
         String::new()
@@ -1096,10 +1127,23 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 for (row, row_action) in table.rows.iter().zip(row_actions.iter()) {
                     let mut cells: Vec<String> = Vec::with_capacity(columns.len());
                     if has_bulk {
+                        // Review §6.2: row selection is labeled with the
+                        // row's readable identity (first text cell — e.g.
+                        // the contact email), not only an opaque row id.
+                        let readable = row
+                            .cells
+                            .iter()
+                            .find_map(|cell| match cell {
+                                crate::view_data::DataCell::Text(value) if !value.is_empty() => {
+                                    Some(value.as_str())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(&row.id);
                         cells.push(format!(
-                        "<input type=\"checkbox\" name=\"ids\" value=\"{}\" aria-label=\"Select row {}\" />",
+                        "<input type=\"checkbox\" name=\"ids\" value=\"{}\" aria-label=\"Select {}\" />",
                         html_escape(&row.id),
-                        html_escape(&row.id)
+                        html_escape(readable)
                     ));
                     }
                     for cell in &row.cells {
@@ -1215,7 +1259,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 if has_bulk {
                     let bulk = data.bulk_action.as_ref().expect("checked above");
                     format!(
-                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "{row_forms}<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
                     row_forms = row_forms_html,
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
@@ -1238,12 +1282,13 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     };
 
     format!(
-        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div>{primary_action}</div>{kpis}{filters}{action_form}{table_section}</div>",
+        "<div class=\"space-y-6\">{breadcrumbs}<div class=\"flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between\"><div>{eyebrow}<h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"text-sm text-muted-foreground\">{description}</p></div><div class=\"flex flex-col gap-2 sm:flex-row\">{secondary_actions}{primary_action}</div></div>{kpis}{filters}{action_form}{table_section}</div>",
         breadcrumbs = breadcrumbs,
         eyebrow = eyebrow,
         title = html_escape(&data.title),
         description = html_escape(&data.description),
         primary_action = primary_action,
+        secondary_actions = secondary_actions,
         kpis = kpi_cards,
         filters = filters_html,
         action_form = data.action_form_html,
@@ -1303,18 +1348,24 @@ fn render_campaign_editor_page_with_data(
     );
     // Audit #16: a failed storage read renders a service-problem notice, so
     // the operator never sees "no lists" as if the workspace were empty.
+    // Review §4.2: user-centered wording, no store/implementation lesson.
     let outage_notice = if editor.unavailable {
         "<div class=\"apex-callout apex-callout--warning mb-6\" role=\"status\">\
          <strong>Some of this form could not be loaded</strong>\
-         <span>The workspace store did not answer just now, so lists, segments or the current audience may be missing. This is a service problem — reload before saving.</span></div>"
+         <span>Lists, segments, or the current audience may be missing. This information is temporarily unavailable — reload before saving.</span></div>"
     } else {
         ""
     };
-    let draft_badge = Badge {
-        text: "Draft",
-        variant: "outline",
-        size: "default",
-        icon: Some("<span class=\"h-2.5 w-2.5 rounded-sm bg-warning\"></span>"),
+    // Review §6.2 (Draft badge honesty): edit mode shows the row's REAL
+    // lifecycle status; only a genuinely new campaign is "Draft".
+    let editor_status = editor
+        .edit
+        .as_ref()
+        .map(|edit| edit.status.as_str())
+        .filter(|status| !status.is_empty())
+        .unwrap_or("draft");
+    let status_badge = StatusIndicator {
+        status: editor_status,
     }
     .render_html();
 
@@ -1414,6 +1465,11 @@ fn render_campaign_editor_page_with_data(
     .render_html();
 
     let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{}</button>", primary_action_label);
+    // Review §4.11: saving is save-as-configured, and "Save as draft" is a
+    // distinct native submit that authorizes nothing — the named button
+    // value reaches the handler, which clears any schedule instead of
+    // arming an automatic send.
+    let save_draft_button = "<button type=\"submit\" name=\"as_draft\" value=\"1\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save as draft</button>";
 
     let hidden_id = campaign_id
         .map(|id| {
@@ -1434,23 +1490,24 @@ fn render_campaign_editor_page_with_data(
     format!(
         "{breadcrumbs}{outage_notice}\
 <div class=\"w-full max-w-3xl space-y-6\">\
-<section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to see a sanitized structural view of the HTML.</p></div></div></section>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-surface-500\">Campaign state</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label}.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{status_badge}<span class=\"text-xs font-medium text-muted-foreground\">Saving keeps this status unless the schedule changes it</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to see a sanitized structural view of the HTML.</p></div></div></section>\
 <form class=\"space-y-6\" method=\"post\" action=\"{form_action}\" enctype=\"application/x-www-form-urlencoded\">{hidden_id}\
 <div class=\"space-y-2\">{name_label}{name_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{preview_label}{preview_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{from_label}{from_input}</div><div class=\"space-y-2\">{from_name_label}{from_name_input}</div></div>\
-<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign. Scheduled campaigns start automatically when their time arrives — saving a schedule authorizes that automatic send. Leave blank to save as a draft.</p></div></div>\
+<div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{reply_to_label}{reply_to_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_value}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. Leave blank to keep the campaign as a draft you start yourself.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{audience_label}{audience_select}<p class=\"text-xs text-muted-foreground\">Ctrl/Cmd-click to select several lists. The audience is their subscribed members.</p></div><div class=\"space-y-2\">{segment_label}{segment_select}<p class=\"text-xs text-muted-foreground\">Optional saved segment narrows the audience by its tag and status rules.</p></div></div>\
 <div class=\"space-y-2\">{content_label}{content_input}</div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{variables_label}{variables_input}<p class=\"text-xs text-muted-foreground\">One <code>key=value</code> per line, usable as {{{{key}}}} in the subject and body.</p></div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Tracking</p>{track_opens_box}{track_clicks_box}<p class=\"text-xs text-muted-foreground\">The unsubscribe link is always included.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-3\"><div class=\"space-y-2\">{utm_source_label}{utm_source_input}</div><div class=\"space-y-2\">{utm_medium_label}{utm_medium_input}</div><div class=\"space-y-2\">{utm_campaign_label}{utm_campaign_input}</div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{throttle_label}{throttle_input}<p class=\"text-xs text-muted-foreground\">Maximum emails per hour for this campaign (0 = unlimited).</p></div><div class=\"space-y-2\">{ip_pool_label}{ip_pool_input}<p class=\"text-xs text-muted-foreground\">Optional dedicated-IP pool name to route this campaign through.</p></div></div>\
 <div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{timezone_label}{timezone_input}</div><div class=\"space-y-2\"><p class=\"text-sm font-medium leading-none\">Send-time optimization</p>{sto_box}<p class=\"text-xs text-muted-foreground\">Schedule each recipient at their optimal engagement hour.</p></div></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div>\
+<section class=\"rounded-sm border border-surface-200 bg-card/80 p-4\"><p class=\"text-xs font-bold uppercase tracking-[0.18em] text-surface-500\">Before you save</p><p class=\"mt-1 text-sm text-muted-foreground\">With a schedule set, scheduled delivery will begin automatically at that time (UTC) — saving the schedule authorizes that send. Without one, the campaign stays a draft until you start it. Save as draft always clears the schedule.</p></section>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_draft_button}{save_button}</div></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         title = title,
-        draft_badge = draft_badge,
+        status_badge = status_badge,
         outage_notice = outage_notice,
         primary_action_label = primary_action_label,
         hidden_id = hidden_id,
@@ -1492,6 +1549,7 @@ fn render_campaign_editor_page_with_data(
         timezone_input = Input { id: Some("campaign-timezone"), input_type: "text", variant: "default", size: "default", placeholder: "Europe/Tallinn", value: &editor.timezone, left_icon: None, right_icon: None, error: None, disabled: false, autocomplete: None, required: false, name: Some("timezone") }.render_html(),
         sto_box = NativeCheckbox { id: "campaign-sto", name: "send_time_optimization", checked: editor.send_time_optimization, label: "Optimize send time per recipient" }.render_html(),
         preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
+        save_draft_button = save_draft_button,
         save_button = save_button,
     )
 }
@@ -2399,8 +2457,9 @@ fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
 }
 
 /// Dead-letter row with the replay control (Actions section). Replay is a
-/// JSON mutation with no SSR form handler — the control is read-only and
-/// says why, instead of posting a form the server cannot accept.
+/// real native POST — the console mounts its own handler
+/// (`/web/admin/autopilot/actions/{id}/replay`), so a failed action can be
+/// requeued without JavaScript and without an API client (review §7).
 fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
     let due = letter
         .due_at
@@ -2408,7 +2467,7 @@ fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
         .and_then(rfc3339_utc_label)
         .unwrap_or_else(|| "not recorded".to_string());
     format!(
-        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class=\"apex-btn apex-btn--sm\">Replay</button><p class="text-xs leading-5 text-surface-500">Read-only: replay is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
+        r#"<li class="rounded-sm border border-border bg-surface-50 p-4"><p class="font-mono text-xs text-surface-600">{id}</p><p class="mt-1 text-xs text-surface-600">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-600">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><form method="post" action="/web/admin/autopilot/actions/{id}/replay" class="mt-3 flex flex-wrap items-center gap-3"><input type="hidden" name="return_to" value="/sales"><button type="submit" class="apex-btn apex-btn--sm">Replay</button><p class="text-xs leading-5 text-surface-500">Requeues this action with a fresh attempt budget — it runs when the engine next polls.</p></form></li>"#,
         id = html_escape(&letter.id),
         action_type = html_escape(&letter.action_type),
         entity_type = html_escape(&letter.entity_type),
@@ -2434,7 +2493,7 @@ fn sales_hero(data: &SalesPageData) -> String {
         ),
         None => (
             "Unavailable".to_string(),
-            "The sales-autopilot control API did not answer.",
+            "This information is temporarily unavailable. Reload to try again.",
         ),
     };
     let (meetings_value, meetings_hint) = match overview {
@@ -2444,7 +2503,7 @@ fn sales_hero(data: &SalesPageData) -> String {
         ),
         None => (
             "Unavailable".to_string(),
-            "The sales-autopilot control API did not answer.",
+            "This information is temporarily unavailable. Reload to try again.",
         ),
     };
     let (decisions_value, decisions_hint) = match overview {
@@ -2454,7 +2513,7 @@ fn sales_hero(data: &SalesPageData) -> String {
         ),
         None => (
             "Unavailable".to_string(),
-            "The sales-autopilot control API did not answer.",
+            "This information is temporarily unavailable. Reload to try again.",
         ),
     };
     let (blocked_value, blocked_hint) = match overview {
@@ -2464,19 +2523,19 @@ fn sales_hero(data: &SalesPageData) -> String {
         ),
         None => (
             "Unavailable".to_string(),
-            "The sales-autopilot control API did not answer.",
+            "This information is temporarily unavailable. Reload to try again.",
         ),
     };
     let gap_banner = if overview.is_none() {
         sales_warning_note(
-            "Live overview data is unavailable: the sales-autopilot control API did not answer. Each section below states its own gap; nothing is estimated.",
+            "Live overview data is temporarily unavailable. Each section below states its own gap.",
         )
     } else {
         String::new()
     };
-    let session = r#"<section class="apex-panel"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-foreground">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-surface-50 px-1 py-0.5 text-primary">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
+    let session = r#"<section class="apex-panel"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-foreground">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console uses your signed-in operator session; system-tenant access is enforced on every action. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
     format!(
-        r#"<header class="apex-cp-dark-hero p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-foreground">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-600">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Zero JavaScript: every mutating form is a plain server-rendered post.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
+        r#"<header class="apex-cp-dark-hero p-6"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-primary">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-foreground">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-600">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Every action below takes effect when you submit it.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
         gap_banner = gap_banner,
         revenue_tile = sales_kpi_tile("Revenue (30d)", &revenue_value, revenue_hint),
         meetings_tile = sales_kpi_tile("Meetings booked (30d)", &meetings_value, meetings_hint),
@@ -2490,7 +2549,7 @@ fn sales_hero(data: &SalesPageData) -> String {
 fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
     let body = match overview {
         None => sales_note(
-            "Revenue is unavailable: the sales-autopilot control API did not answer. No figure is estimated.",
+            "Revenue is temporarily unavailable. No figure is estimated.",
         ),
         Some(overview) => {
             let window = format!(
@@ -2585,7 +2644,7 @@ fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
 fn sales_autonomy_section(overview: Option<&SalesOverviewData>) -> String {
     let body = match overview {
         None => sales_note(
-            "Autonomy state is unavailable: the sales-autopilot control API did not answer. No mode or kill-switch state is assumed.",
+            "Autonomy state is temporarily unavailable. No mode or kill-switch state is assumed.",
         ),
         Some(overview) => sales_autonomy_body(&overview.autonomy),
     };
@@ -2601,7 +2660,7 @@ fn sales_autonomy_section(overview: Option<&SalesOverviewData>) -> String {
 fn sales_decision_stream_section(data: &SalesPageData) -> String {
     let body = match data.decisions.as_ref() {
         None => sales_note(
-            "The decision stream is unavailable: the control API did not answer, so no rows are shown and nothing is inferred.",
+            "The decision stream is temporarily unavailable, so no rows are shown and nothing is inferred.",
         ),
         Some(decisions) if decisions.is_empty() => sales_note(
             "No decisions yet — the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
@@ -2628,7 +2687,7 @@ fn sales_decision_stream_section(data: &SalesPageData) -> String {
 fn sales_decisions_section(data: &SalesPageData) -> String {
     let body = match data.decisions.as_ref() {
         None => sales_note(
-            "Recent decisions are unavailable: the control API did not answer. No rows are shown.",
+            "Recent decisions are temporarily unavailable. No rows are shown.",
         ),
         Some(decisions) if decisions.is_empty() => sales_note(
             "No decisions recorded yet — the engine has not produced a decision for this tenant.",
@@ -2654,7 +2713,7 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
     let mut parts: Vec<String> = Vec::new();
     match data.exceptions.as_ref() {
         None => parts.push(sales_note(
-            "Blocked and pending-approval decisions are unavailable: the control API did not answer.",
+            "Blocked and pending-approval decisions are temporarily unavailable.",
         )),
         Some(exceptions) if exceptions.is_empty() => parts.push(sales_note(
             "No blocked or pending-approval decisions — nothing requires operator action.",
@@ -2668,10 +2727,10 @@ fn sales_exceptions_section(data: &SalesPageData) -> String {
             parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
         }
     }
-    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-surface-50 px-1.5 py-0.5 text-primary break-words">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
+    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-500">Approving or rejecting a decision with a note is not available in this console yet. Until it is, decisions can be reviewed through the sales-autopilot control API.</p>"#.to_string());
     match data.dead_letters.as_ref() {
         None => parts.push(sales_note(
-            "The dead-letter feed is unavailable: the control API did not answer.",
+            "The dead-letter feed is temporarily unavailable.",
         )),
         Some(letters) if letters.is_empty() => parts.push(sales_note(
             "No dead letters — every queued action completed or is still retrying within its attempt budget.",
@@ -2704,7 +2763,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
             "Queue",
             "Action queue health",
             &sales_note(
-                "Action queue stats are unavailable: the sales-autopilot control API did not answer. No counts are estimated.",
+                "Action queue stats are temporarily unavailable. No counts are estimated.",
             ),
         );
     };
@@ -2737,7 +2796,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
     };
     let replay = match data.dead_letters.as_ref() {
         None => sales_note(
-            "The dead-letter replay list is unavailable: the control API did not answer.",
+            "The dead-letter replay list is temporarily unavailable.",
         ),
         Some(letters) if letters.is_empty() => {
             sales_note("No dead letters to replay — the queue has no exhausted action.")
@@ -2769,7 +2828,7 @@ fn sales_actions_section(data: &SalesPageData) -> String {
 fn sales_enrollments_section(data: &SalesPageData) -> String {
     let counts = match data.overview.as_ref() {
         None => sales_note(
-            "Enrollment counts are unavailable: the sales-autopilot control API did not answer.",
+            "Enrollment counts are temporarily unavailable.",
         ),
         Some(overview) if overview.enrollments.is_empty() => {
             sales_note("No enrollments yet — no contact is currently enrolled in a sequence.")
@@ -2999,7 +3058,8 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 }
 
 fn web_auth_logo() -> String {
-    "<span class=\"text-2xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>".to_string()
+    // Two-tone wordmark matching marketing: "Apex" brand red, "Mail" near-black.
+    "<span class=\"text-2xl font-bold tracking-tighter\"><span class=\"text-brand-600\">Apex</span><span class=\"text-surface-950\">Mail</span></span>".to_string()
 }
 
 fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &str) -> String {
@@ -3417,7 +3477,7 @@ pub fn web_dashboard_page() -> String {
     let dna_block = "<div class=\"rounded-sm border border-surface-200 bg-surface-50 p-4\">\
 <p class=\"apex-klabel mb-1\">delivery · 30d</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight\">unavailable</p>\
-<p class=\"mt-1 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health and send-volume charts load from your own send events — nothing has been fabricated here, and an absent figure is not zero.</p>\
+<p class=\"mt-1 text-xs text-surface-500 max-w-md leading-relaxed\">Delivery health and send-volume charts appear after your first send — an absent figure is not zero.</p>\
 </div>";
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
@@ -3545,7 +3605,7 @@ pub fn web_campaigns_page() -> String {
         ],
     };
     let bulk_bar = format!(
-        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
+        "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the rows you want to act on, then choose an action.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
         delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
     );
     let pagination_key = pagination_storage_key("campaigns");
@@ -3656,8 +3716,8 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-name\">Campaign Name</label><input id=\"campaign-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
-<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional, UTC)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Enter the send time in UTC. A scheduled time starts the send automatically when it arrives — saving a schedule authorizes that automatic send. Keep the field empty to store the campaign as a draft.</p></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         id = html_escape(&edit.id),
@@ -3756,7 +3816,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each contact you want. Checked contacts can be exported or deleted in one plain form post.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
+    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">Select the contacts you want to act on, then choose an action.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -3826,7 +3886,7 @@ pub fn web_contact_edit_page_with_values(contact: &crate::view_data::ContactEdit
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-email\">Email address</label><input id=\"contact-email\" type=\"text\" value=\"{email}\" readonly disabled class=\"flex h-12 w-full rounded-sm border border-input bg-muted/40 px-3 text-[14px] text-surface-500\" /><p class=\"text-xs text-muted-foreground\">The address is the contact's identity and cannot be changed — delete the contact and add the new address instead.</p></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-name\">Name</label><input id=\"contact-name\" name=\"name\" type=\"text\" value=\"{name}\" maxlength=\"120\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"contact-status\">Subscription status</label><select id=\"contact-status\" name=\"status\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{options}</select></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Contact</button></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Contact</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         id = html_escape(&contact.id),
@@ -3863,7 +3923,7 @@ pub fn web_contacts_new_page() -> String {
 <div class=\"space-y-2\">\
 <label class=\"text-sm font-medium leading-none\" for=\"contacts-import-file\">…or upload a .csv file</label>\
 <input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full rounded-sm border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-all file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" />\
-<p class=\"text-xs text-muted-foreground\">When both are provided the file wins. The import runs server-side — validation results arrive as a flash summary.</p>\
+<p class=\"text-xs text-muted-foreground\">When both are provided the file wins. The import result arrives as a summary after you submit.</p>\
 </div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Import contacts</button>\
 </form>\
@@ -4244,7 +4304,7 @@ pub fn web_template_edit_page_with_values(edit: &crate::view_data::TemplateEditD
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-name\">Template Name</label><input id=\"template-name\" name=\"name\" type=\"text\" required value=\"{name}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{html_body}</textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body. Preview with an empty field renders the stored version.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Your changes take effect when you submit this form.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
 <button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
 </div></div>\
@@ -4818,7 +4878,7 @@ pub fn web_demo_viewer_page(data: Option<&DemoViewerData>) -> String {
             // empty walkthrough.
             "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
              <strong>The walkthrough could not be loaded</strong>\
-             <span>The demo store did not answer just now. This is a service problem, not an empty walkthrough — reload in a moment.</span></div>"
+             <span>This information is temporarily unavailable. Reload to try again.</span></div>"
                 .to_string()
         }
         "expired" => "<div class=\"apex-callout apex-callout--warning\" role=\"status\">\
@@ -5172,70 +5232,98 @@ pub fn web_settings_api_keys_page() -> String {
     };
     format!(
         "<div class=\"space-y-6\">\
-<div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1></div>\
-<form class=\"space-y-4\" method=\"post\" action=\"/web/api-keys\">\
-<div class=\"space-y-2\"><label class=\"apex-klabel\" for=\"api-key-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Key name</label>\
-<input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
-<div class=\"space-y-2\">\
-<span class=\"apex-klabel\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Scopes</span>\
-<fieldset class=\"flex flex-wrap gap-x-5 gap-y-2 border-0 p-0\">\
-{scope_checkboxes}\
-</fieldset>\
-<p class=\"text-xs text-surface-500\">Only scopes your account already holds can be issued; the request is refused otherwise.</p>\
-</div>\
-<div class=\"space-y-2\"><label class=\"apex-klabel\" for=\"api-key-expiry\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Expires in</label>\
-<select id=\"api-key-expiry\" name=\"expires_in_days\" class=\"w-full sm:w-56 px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\">\
-<option value=\"90\" selected>90 days (default)</option>\
-<option value=\"30\">30 days</option>\
-<option value=\"180\">180 days</option>\
-<option value=\"365\">365 days</option>\
-</select></div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
-</form>\
+<div class=\"flex flex-col gap-1\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1>\
+<p class=\"text-sm text-muted-foreground\">Machine credentials for this workspace. Secrets are shown once at creation.</p></div>\
+{form}\
 {table}</div>",
+        form = api_key_create_form_html(),
         table = table.render_html(),
-        // The same registry the JSON endpoint validates against
-        // (routes::auth::registered_api_key_scopes): the developer-role
-        // grant set is the generally issueable surface; the handler still
-        // authorizes each requested scope against the caller.
-        scope_checkboxes = [
-            "messages:send",
-            "messages:read",
-            "domains:read",
-            "templates:read",
-            "templates:write",
-            "events:read",
-            "analytics:read",
-            "contacts:read",
-            "contacts:write",
-            "logs:read",
-            "webhooks:read",
-            "webhooks:write",
-            "campaigns:read",
-            "campaigns:write",
-            "suppressions:read",
-            "suppressions:write",
-        ]
-        .iter()
-        .map(|scope| {
-            format!(
-                "<label class=\"flex items-center gap-2 text-sm text-surface-700 font-medium\"><input type=\"checkbox\" name=\"scopes\" value=\"{scope}\" class=\"h-4 w-4 rounded border-surface-300 text-primary\" />{scope}</label>"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(""),
     )
 }
 
-/// API-key creation form, composed beside the live keys table so a
-/// data-backed page never drops the create affordance.
+/// API-key creation form: name + expiry + scopes grouped by task. Used both
+/// on the handwritten settings page and beside the live keys table.
 pub fn api_key_create_form_html() -> String {
-    "<form class=\"space-y-4 rounded-sm border border-surface-200 bg-card p-6\" method=\"post\" action=\"/web/api-keys\">\
+    // Scopes grouped by job — least privilege is the default story, not a
+    // wall of equal checkboxes.
+    let groups: [(&str, &str, &[&str]); 6] = [
+        (
+            "Sending",
+            "Required to deliver mail through the API or SMTP.",
+            &["messages:send"],
+        ),
+        (
+            "Reading",
+            "Inspect messages, events, and logs.",
+            &["messages:read", "events:read", "logs:read"],
+        ),
+        (
+            "Contacts & lists",
+            "Manage the addressable audience.",
+            &["contacts:read", "contacts:write"],
+        ),
+        (
+            "Templates & campaigns",
+            "Create and update reusable content and campaigns.",
+            &["templates:read", "templates:write", "campaigns:read", "campaigns:write"],
+        ),
+        (
+            "Domains & webhooks",
+            "Read sending domains; register webhook endpoints.",
+            &["domains:read", "webhooks:read", "webhooks:write"],
+        ),
+        (
+            "Analytics & suppressions",
+            "Read engagement metrics; manage suppression lists.",
+            &["analytics:read", "suppressions:read", "suppressions:write"],
+        ),
+    ];
+    let scope_groups = groups
+        .iter()
+        .map(|(title, hint, scopes)| {
+            let boxes = scopes
+                .iter()
+                .map(|scope| {
+                    format!(
+                        "<label class=\"flex items-start gap-2 rounded-sm border border-surface-200 bg-background px-3 py-2 cursor-pointer hover:border-surface-300\"><input type=\"checkbox\" name=\"scopes\" value=\"{scope}\" class=\"mt-0.5 h-4 w-4 rounded-sm border-surface-300 text-brand-600 focus-visible:ring-2 focus-visible:ring-primary/20\" /><span class=\"text-sm font-mono text-surface-800\">{scope}</span></label>",
+                        scope = html_escape(scope),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<fieldset class=\"space-y-2\"><legend class=\"text-sm font-semibold text-surface-950\">{title}</legend><p class=\"text-xs text-muted-foreground\">{hint}</p><div class=\"flex flex-wrap gap-2\">{boxes}</div></fieldset>",
+                title = html_escape(title),
+                hint = html_escape(hint),
+                boxes = boxes,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    format!(
+        "<form class=\"rounded-sm border border-surface-200 bg-card p-6 space-y-6\" method=\"post\" action=\"/web/api-keys\">\
+<div class=\"space-y-1\"><h2 class=\"text-base font-semibold text-surface-950\">Create an API key</h2>\
+<p class=\"text-sm text-muted-foreground\">Pick only the scopes this integration needs. The secret appears once after creation.</p></div>\
+<div class=\"grid gap-4 sm:grid-cols-2\">\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"api-key-name\">Key name</label>\
 <input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\" placeholder=\"Production sender\" /></div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white\">Create API Key</button>\
-</form>"
-        .to_string()
+<div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"api-key-expiry\">Expires in</label>\
+<select id=\"api-key-expiry\" name=\"expires_in_days\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px]\">\
+<option value=\"90\" selected>90 days (recommended)</option>\
+<option value=\"30\">30 days</option>\
+<option value=\"180\">180 days</option>\
+<option value=\"365\">365 days</option>\
+</select></div></div>\
+<div class=\"space-y-4\"><div><p class=\"text-sm font-semibold text-surface-950\">Scopes</p>\
+<p class=\"text-xs text-muted-foreground mt-0.5\">Only scopes your account already holds can be issued. Prefer read-only keys when write access is not required.</p></div>\
+{scope_groups}</div>\
+<div class=\"flex items-center gap-3 pt-2 border-t border-surface-100\">\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-5 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Create API Key</button>\
+<p class=\"text-xs text-muted-foreground\">No scopes selected still creates a key with no API access.</p></div>\
+</form>",
+        scope_groups = scope_groups,
+    )
 }
 
 /// Team invitation form, composed beside the live membership table.
@@ -6803,7 +6891,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
     let mfa_section: String = match setup {
         None => "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration</h3>\
-<p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. Status is checked server-side on every page load.</p>\
+<p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. This page shows the current state of your second factor.</p>\
 <form method=\"post\" action=\"/web/auth/mfa/setup\">\
 <button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
 </form></div>".to_string(),
@@ -6838,7 +6926,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 {mfa_section}\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Session policy</h3>\
-<p class=\"text-sm text-muted-foreground\">Operator sessions are cookie-based, CSRF-protected on every state-changing POST, and rate-limited server-side.</p>\
+<p class=\"text-sm text-muted-foreground\">Operator sessions are protected against cross-site request forgery and rate-limited.</p>\
 </div>\
 </div>"
     )

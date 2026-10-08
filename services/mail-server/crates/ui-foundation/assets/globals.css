@@ -622,6 +622,11 @@ video {
   --brand-400: 248 113 113;
   --brand-500: 220 38 38;
   --brand-600: 185 28 28;
+  /* Text-safe brand accent (used by .text-primary). Must be defined —
+     .text-primary previously referenced it while nothing set it, so every
+     "text-primary" red (including the ApexMail wordmark) rendered inherited
+     black and the two-tone logo collapsed. */
+  --accent-text: 185 28 28;
   --brand-700: 153 27 27;
   --brand-800: 127 29 29;
   --brand-900: 69 10 10;

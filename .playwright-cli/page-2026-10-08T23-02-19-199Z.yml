@@ -1,0 +1,47 @@
+- generic [active] [ref=e1]:
+  - link "Skip to content" [ref=e2] [cursor=pointer]:
+    - /url: "#app-main"
+  - main [ref=e3]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - link "ApexMail" [ref=e7] [cursor=pointer]:
+          - /url: /
+        - heading "Welcome back" [level=1] [ref=e9]
+        - paragraph [ref=e10]: Sign in to your ApexMail account
+      - generic [ref=e11]:
+        - generic [ref=e12]:
+          - generic [ref=e13]: Email
+          - textbox "Email" [ref=e16]:
+            - /placeholder: you@example.com
+        - generic [ref=e17]:
+          - generic [ref=e18]: Password
+          - textbox "Password" [ref=e23]:
+            - /placeholder: Enter password
+        - generic [ref=e24]:
+          - generic [ref=e25]:
+            - checkbox "Keep me signed in" [checked] [ref=e26] [cursor=pointer]
+            - generic [ref=e27] [cursor=pointer]: Keep me signed in
+          - link "Forgot password?" [ref=e28] [cursor=pointer]:
+            - /url: /forgot-password
+        - button "Sign In" [ref=e29] [cursor=pointer]
+        - generic [ref=e33]:
+          - text: No account?
+          - link "Sign up" [ref=e34] [cursor=pointer]:
+            - /url: /signup
+      - generic [ref=e35]:
+        - generic [ref=e36]: Or continue with
+        - generic [ref=e41]:
+          - link "Continue with Google" [ref=e42] [cursor=pointer]:
+            - /url: /v1/auth/sso/google
+            - generic [ref=e48]: Google
+          - link "Continue with GitHub" [ref=e49] [cursor=pointer]:
+            - /url: /v1/auth/sso/github
+            - generic [ref=e52]: GitHub
+        - paragraph [ref=e53]:
+          - text: By signing in, you agree to our
+          - link "Terms of Service" [ref=e54] [cursor=pointer]:
+            - /url: /terms
+          - text: and
+          - link "Privacy Policy" [ref=e55] [cursor=pointer]:
+            - /url: /privacy
+          - text: .

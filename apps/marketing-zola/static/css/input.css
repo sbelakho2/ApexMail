@@ -1140,6 +1140,19 @@ html.dark :focus-visible {
     box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.07);
   }
 
+  /* Reserve space under the fixed consent bar while it is visible (the
+     pending state only — [data-consent-state="recorded"] collapses it), so
+     the last line of page content and the focused element are never hidden
+     behind the bar on narrow screens. */
+  body:has(.cookie-consent-banner[data-consent-state="pending"]) {
+    padding-bottom: 5.5rem;
+  }
+  @media (min-width: 768px) {
+    body:has(.cookie-consent-banner[data-consent-state="pending"]) {
+      padding-bottom: 3.5rem;
+    }
+  }
+
   .cookie-consent-inner {
     max-width: 80rem;
     margin: 0 auto;
@@ -1626,12 +1639,18 @@ html.dark .k-receipt .ok { color: rgb(var(--brand-500)); }
 /* ARCH: every card/panel and button carries the shackle crown. */
 .apex-card, .card, [class*="rounded-2xl"] { border-radius: var(--radius-arch-lg) !important; }
 .btn-primary, .btn-secondary, button[class*="btn"] { border-radius: var(--radius-arch-btn) !important; }
-/* CONCENTRIC: focus is the spiral's two arms. */
+/* CONCENTRIC: focus is the spiral's two arms.
+   Token note: --surface-50 / --surface-300 hold CHANNEL TRIPLETS
+   ("244 244 246"), so they must be wrapped in rgb() — the previous
+   `0 0 0 5px var(--surface-50, #fafafa)` substituted the raw triplet and
+   produced an invalid box-shadow value (the whole declaration was dropped,
+   so the concentric ring never painted; the fallback never applied because
+   the custom property IS defined). */
 .btn-primary:focus-visible, .btn-secondary:focus-visible, a:focus-visible, button:focus-visible,
 input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 2px solid rgb(var(--brand-500));
   outline-offset: 2px;
-  box-shadow: 0 0 0 5px var(--surface-50, #fafafa), 0 0 0 6px var(--surface-300, #d4d4d8);
+  box-shadow: 0 0 0 5px rgb(var(--surface-50)), 0 0 0 6px rgb(var(--surface-300));
 }
 /* POINT: meters terminate in the found nonce. */
 .k-meter { position: relative; height: 2px; background: rgb(var(--surface-200)); border-radius: 2px; }
@@ -1869,19 +1888,20 @@ html.dark .ix { color: rgb(var(--brand-500)); }
 }
 
 
-/* ── Features page: 38 cards at 1-up on phones is endless — 2-up compact ──
-   The compact 2-up grid is kept, but the descriptions are NO LONGER
-   clamped: the old -webkit-line-clamp:2 + overflow:hidden silently cut
-   card text off after two lines (flagged as cut-off-text-y). Descriptions
-   now wrap to their full height, and long German compounds
-   (IP-Reputationsüberwachung) break instead of spilling past the card
-   (text-spills-box). min-width:0 lets the 1fr tracks shrink below the
-   unbreakable-word minimum. */
+/* ── Features page: 2-up on phones only while the cards stay readable ──
+   The compact 2-up grid is kept for real phones, but the forced
+   `repeat(2, 1fr)` used to hold even on the narrowest screens, squeezing
+   11px descriptions into ~150px columns. Below 480px the forced pair is
+   relaxed to 1-up (auto-fit with a ~220px floor: two columns while they
+   fit, one column when they do not). Descriptions are NOT clamped: the
+   old -webkit-line-clamp:2 + overflow:hidden silently cut card text off
+   after two lines (flagged as cut-off-text-y). min-width:0 lets the 1fr
+   tracks shrink below the unbreakable-word minimum. */
 @media (max-width: 640px) {
   .features-grid .animate-in { padding: 0.75rem !important; min-width: 0; }
-  .features-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 0.5rem !important; }
+  .features-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important; gap: 0.5rem !important; }
   .features-grid h4 { font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
-  .features-grid p { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+  .features-grid p { font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
   .features-grid .w-8 { width: 1.5rem; height: 1.5rem; }
   .features-grid .mb-4 { margin-bottom: 0.5rem; }
 }
@@ -2001,12 +2021,25 @@ html.dark .ix { color: rgb(var(--brand-500)); }
   box-shadow: 0 2px 6px rgb(var(--brand-500) / 0.3);
 }
 
-/* ── Tables: prevent unnecessary word breaks ── */
+/* ── Tables: no-wrap only where it is genuinely needed ──
+   The previous rule forced `white-space: nowrap` on EVERY cell, so prose
+   columns (retention descriptions, comparison cells, review notes) rendered
+   as single unbreakable lines that spilled past their column instead of
+   wrapping. nowrap is scoped here to the numeric/identifier cells the
+   design treats as data (tabular-nums figures, mono identifiers, or cells
+   explicitly marked data-nowrap); prose cells wrap and long compounds
+   break only when they would overflow. */
 table td, table th {
-  word-break: keep-all;
-  overflow-wrap: normal;
-  hyphens: none;
+  word-break: normal;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+table td.tabular-nums, table th.tabular-nums,
+table td.font-mono, table th.font-mono,
+table td[data-nowrap], table th[data-nowrap],
+table th .num, table td .num {
   white-space: nowrap;
+  overflow-wrap: normal;
 }
 /* comparison tables: let the container scroll, not the words break */
 .overflow-x-auto table {

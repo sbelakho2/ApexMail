@@ -1,12 +1,18 @@
 {% extends "base.html" %}
 
-{% block title %}Page Not Found | {{ config.extra.site_name }}{% endblock title %}
-{% block description %}The page you requested could not be found. Explore ApexMail pricing, docs, or the developer console from here.{% endblock description %}
+{# Metadata is localized with the same i18n_data lookups as the recovery
+   actions below (the title/description used to be hardcoded English while
+   the body was translated). #}
+{% block title %}{% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["meta_title"] %}{{ i18n_data[l]["not_found"]["meta_title"] }}{% else %}Page Not Found{% endif %} | {{ config.extra.site_name }}{% endblock title %}
+{% block description %}{% if i18n_data and i18n_data[l] and i18n_data[l]["not_found"] and i18n_data[l]["not_found"]["meta_description"] %}{{ i18n_data[l]["not_found"]["meta_description"] }}{% else %}The page you requested could not be found. Explore ApexMail pricing, docs, or the developer console from here.{% endif %}{% endblock description %}
 {% block canonical_tag %}{% endblock canonical_tag %}
 
-{% block head %}
+{# noindex is centralized in base.html's robots block — this template only
+   overrides the block's content, so the document can never ship two
+   contradictory robots metas. #}
+{% block robots %}
   <meta name="robots" content="noindex, nofollow" />
-{% endblock head %}
+{% endblock robots %}
 
 {% block content %}
 <section class="relative overflow-hidden bg-surface-950 text-white">

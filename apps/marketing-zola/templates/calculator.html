@@ -16,7 +16,10 @@
 {% block content %}
 {% include "partials/calculator/hero.html" %}
 
-{# Interactive Pricing Calculator (JS, aligned with billing engine) #}
+{# Server-submitted pricing estimate: the form POSTs to the api-server's
+   pricing endpoint, which computes the estimate from the billing-service
+   plan tables and renders the result page. No client-side calculator — the
+   site ships zero scripts. #}
 {% include "partials/pricing/calculator.html" %}
 
 {% include "partials/calculator/competitor-breakdown.html" %}

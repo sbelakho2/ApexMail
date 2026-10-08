@@ -118,6 +118,8 @@ summary {
     --brand-400: 248 113 113;
     --brand-500: 220 38 38;
     --brand-600: 185 28 28;
+    /* Text-safe brand accent for .text-primary (wordmark + emphasis). */
+    --accent-text: 185 28 28;
     --brand-700: 153 27 27;
     --brand-800: 127 29 29;
     --brand-900: 69 10 10;

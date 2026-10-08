@@ -1,6 +1,12 @@
 {% extends "base.html" %}
-{# Section Index Template #}
-{# For section landing pages (e.g., /features/, /compare/) #}
+{# Section Index Template
+   Contract for section landing pages (e.g., /features/, /compare/, /contact/):
+     1. Section identity — the section title renders as the page h1 unless the
+        authored body already carries its own <h1> (fully authored layouts).
+     2. Subsection index — real Zola subsections are listed alongside pages so
+        a nested index is never silently invisible.
+     3. Empty-index state — a section with neither pages, subsections nor body
+        content renders a useful destination list instead of an empty page. #}
 
 {% block title %}
   {% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
@@ -14,14 +20,24 @@
   {% if section.content %}
   <section class="bg-surface-50 pt-24 pb-4 lg:pt-28">
     <div class="mx-auto max-w-3xl px-6">
+      {% if "<h1" not in section.content %}
+      <h1 class="text-surface-950 mb-6 text-[40px] sm:text-[48px] tracking-normal">{{ section.title }}</h1>
+      {% endif %}
       <div class="prose max-w-none">
         {{ section.content | safe }}
       </div>
     </div>
   </section>
+  {% elif section.title %}
+  <section class="bg-surface-50 pt-24 pb-4 lg:pt-28">
+    <div class="mx-auto max-w-3xl px-6">
+      <h1 class="text-surface-950 text-[40px] sm:text-[48px] tracking-normal">{{ section.title }}</h1>
+      {% if section.description %}<p class="mt-4 text-lg text-surface-600">{{ section.description }}</p>{% endif %}
+    </div>
+  </section>
   {% endif %}
 
-  {% if section.pages %}
+  {% if section.pages or section.subsections %}
   <div class="mx-auto max-w-3xl px-6 py-12">
     {% for page in section.pages %}
     <a href="{{ page.permalink }}" class="block mb-4 p-6 rounded-sm border border-surface-200 bg-surface-50 hover:border-brand-300 hover:bg-surface-50 transition-colors">
@@ -29,6 +45,33 @@
       {% if page.description %}<p class="mt-2 text-surface-600">{{ page.description }}</p>{% endif %}
     </a>
     {% endfor %}
+    {# Real subsections (folders with _index.md) render in the same list so
+       nested indexes stay discoverable. #}
+    {% for sub in section.subsections %}
+    {% set subsec = get_section(path=sub) %}
+    <a href="{{ subsec.permalink }}" class="block mb-4 p-6 rounded-sm border border-surface-200 bg-surface-50 hover:border-brand-300 hover:bg-surface-50 transition-colors">
+      <h2 class="text-xl font-semibold text-surface-950">{{ subsec.title }}</h2>
+      {% if subsec.description %}<p class="mt-2 text-surface-600">{{ subsec.description }}</p>{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  {# Empty-index state: name what this section is and give real destinations
+     rather than shipping a blank page. #}
+  <div class="mx-auto max-w-3xl px-6 py-12">
+    <div class="p-6 rounded-sm border border-surface-200 bg-surface-50">
+      <h2 class="text-lg font-semibold text-surface-950">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries'] %}{{ i18n_data[l]['a11y']['no_entries'] }}{% else %}Nothing here yet.{% endif %}
+      </h2>
+      <p class="mt-2 text-sm leading-6 text-surface-600">
+        {% if i18n_data and i18n_data[l] and i18n_data[l]['a11y'] and i18n_data[l]['a11y']['no_entries_body'] %}{{ i18n_data[l]['a11y']['no_entries_body'] }}{% else %}This index has no published entries yet. Start with the quickstart, the API reference, or contact us if you expected something here.{% endif %}
+      </p>
+      <div class="mt-4 flex flex-wrap gap-3">
+        <a href="/quickstart/" class="text-sm font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['documentation'] %}{{ i18n_data[l]['footer']['documentation'] }}{% else %}Quickstart{% endif %}</a>
+        <a href="/docs/" class="text-sm font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]['header'] and i18n_data[l]['header']['documentation'] %}{{ i18n_data[l]['header']['documentation'] }}{% else %}Documentation{% endif %}</a>
+        <a href="{{ lp }}/contact/" class="text-sm font-bold text-brand-600 hover:underline">{% if i18n_data and i18n_data[l] and i18n_data[l]['footer'] and i18n_data[l]['footer']['contact'] %}{{ i18n_data[l]['footer']['contact'] }}{% else %}Contact{% endif %}</a>
+      </div>
+    </div>
   </div>
   {% endif %}
 {% endblock content %}

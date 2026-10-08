@@ -112,30 +112,30 @@
         </a>
       </div>
 
-      {# ── Mobile Menu Button (CSS checkbox hack) ───── #}
-      {# The visually-hidden #nav-toggle checkbox itself is the keyboard
-         operative control (Space toggles it); this label is the pointer
-         affordance only, so it carries no button ARIA it cannot honor
-         (design audit item 14 — stale aria-expanded removed). #}
-      <label
-        for="nav-toggle"
-        id="mobile-menu-toggle"
-        class="lg:hidden p-2 text-surface-600 hover:text-surface-950 rounded-sm hover:bg-surface-100 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
-        aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["toggle_menu"] %}{{ i18n_data[l]["header"]["toggle_menu"] }}{% else %}Toggle menu{% endif %}"
-      >
-        <svg id="menu-icon-open" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-        <svg id="menu-icon-close" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </label>
-    </div>
-  </nav>
+      {# ── Mobile Menu (native <details> disclosure) ───── #}
+      {# The visible hamburger IS the <summary> of a native disclosure:
+         focusability, focus ring, expanded state and Escape-to-close are
+         the element's own semantics, not promised-but-unimplemented
+         keyboard behavior. The former checkbox hack + off-screen input
+         needed a JS-free proxy focus ring and could not honour Escape.
+         The panel lives inside this <details> (so the closed state is
+         genuinely hidden by the user agent) and is absolutely positioned
+         against the sticky header to span the full width. #}
+      <details id="mobile-nav" class="lg:hidden">
+        <summary
+          id="mobile-menu-toggle"
+          class="p-2 text-surface-600 hover:text-surface-950 rounded-sm hover:bg-surface-100 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer list-none"
+          aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["toggle_menu"] %}{{ i18n_data[l]["header"]["toggle_menu"] }}{% else %}Toggle menu{% endif %}"
+        >
+          <svg id="menu-icon-open" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          <svg id="menu-icon-close" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" class="w-6 h-6 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </summary>
 
-  {# ── Mobile Menu ───────────────────────────────────── #}
-  {# Collapsed via the grid-template-rows 0fr→1fr animation in no-js.css
-     (design audit item 17) — not a display:none flip. The .mobile-menu-inner
-     wrapper is the row that collapses; vertical padding lives on the
-     content inside it so the panel can reach a true 0 height. #}
-  <nav id="mobile-menu" class="lg:hidden bg-surface-50 border-b border-surface-200 overflow-hidden" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
-    <div class="mobile-menu-inner">
+        {# The panel is inside the disclosure, so a closed <details> hides it
+           natively (details:not([open]) > *:not(summary) in no-js.css keeps
+           that authoritative even if a UA stylesheet is overridden). #}
+        <nav id="mobile-menu" class="mobile-nav-panel lg:hidden bg-surface-50 border-b border-surface-200" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["mobile_nav"] %}{{ i18n_data[l]["header"]["mobile_nav"] }}{% else %}Mobile navigation{% endif %}">
+          <div class="mobile-menu-inner">
     <div class="px-4 py-6 space-y-6">
       <div class="space-y-3">
         <div class="text-xs font-bold uppercase text-surface-950 px-3">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["product_mobile"] %}{{ i18n_data[l]["header"]["product_mobile"] }}{% else %}Product{% endif %}</div>
@@ -184,6 +184,9 @@
         </a>
       </div>
     </div>
+    </div>
+  </nav>
+      </details>
     </div>
   </nav>
 </header>

@@ -71,11 +71,17 @@
   {% if xdefault_url %}
   <link rel="alternate" hreflang="x-default" href="{{ xdefault_url }}" />
   {% endif %}
-  {% if page.extra.noindex %}
+  {# Single robots authority: every template inherits this block, so a page
+     can never ship two contradictory robots metas (the 404 template used to
+     append its own on top of the generic one). noindex is read from page OR
+     section front matter. #}
+  {% block robots %}
+  {% if page.extra.noindex or section.extra.noindex %}
   <meta name="robots" content="noindex, follow" />
   {% else %}
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   {% endif %}
+  {% endblock robots %}
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR-oriented email, email deliverability, enterprise email, developer email API" />
   <meta name="author" content="{{ config.extra.author }}" />
@@ -118,7 +124,16 @@
   {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />
+  {# giallo.css is the syntax-highlighting sheet (~28KB) and only ~14 of the
+     177 built pages render highlighted code. Load it only when the current
+     document actually contains a giallo block (`<pre class="giallo z-code">`)
+     instead of shipping it to every page view. #}
+  {% set has_highlighted_code = false %}
+  {% if page and page.content and "giallo z-code" in page.content %}{% set_global has_highlighted_code = true %}{% endif %}
+  {% if section and section.content and "giallo z-code" in section.content %}{% set_global has_highlighted_code = true %}{% endif %}
+  {% if has_highlighted_code %}
   <link rel="stylesheet" href="{{ giallo_css_url }}" />
+  {% endif %}
   {# JSON-LD values are build-time config constants (no user data); `|safe`
      prevents Tera's HTML autoescaping from mangling "https://" into
      "https:&#x2F;/..." inside ld+json, which broke structured-data parsing. #}
@@ -150,7 +165,6 @@
 </head>
 <body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
   <a href="#main-content" id="skip-to-content">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
-  <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["toggle_nav"] %}{{ i18n_data[l]["a11y"]["toggle_nav"] }}{% else %}Toggle navigation menu{% endif %}" />
   {% include "partials/header.html" %}
   <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">
     {% block content %}{% endblock content %}

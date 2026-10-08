@@ -57,7 +57,17 @@
   </div>
 </section>
 
-{# ── Pricing teaser: three plans inline, link to the full page ── #}
+{# ── Pricing teaser: three plans inline, link to the full page ──
+   Every price, quota and retention value below is DERIVED from
+   data/pricing.json (the commercial UI authority); the plan order
+   free/pro/business is the pinned plan order validated by
+   tools/validate_pricing_drift.py. The only prose is the localized
+   unit labels — no independent numbers live in this template. #}
+{% set pricing_teaser = load_data(path="data/pricing.json", format="json") %}
+{% set teaser_free = pricing_teaser.plans[0] %}
+{% set teaser_pro = pricing_teaser.plans[2] %}
+{% set teaser_business = pricing_teaser.plans[4] %}
+{% set launch_allowance = pricing_teaser.free_launch_allowance %}
 <section class="bg-surface-50" aria-label="Pricing">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 lg:py-16">
     <div class="flex items-baseline justify-between mb-8">
@@ -69,22 +79,22 @@
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
       {# three representative plans; the full six live on /pricing/ #}
       <div class="card-dna p-6">
-        <span class="k-arc-label">free</span>
-        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">€0</span><span class="text-sm text-surface-500">/mo</span></div>
-        <p class="text-[13px] text-surface-500">3,000 emails/mo + 30,000 launch allowance</p>
-        <a href="{{ config.extra.app_url }}/signup" class="btn-secondary w-full mt-4">Start free</a>
+        <span class="k-arc-label">{{ teaser_free.name | lower }}</span>
+        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">{{ teaser_free.monthly_price_display }}</span><span class="text-sm text-surface-500">/mo</span></div>
+        <p class="text-[13px] text-surface-500">{{ teaser_free.included_volume_display }} {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails_per_month"] %}{{ i18n_data[l]["home"]["teaser_emails_per_month"] }}{% else %}emails/mo{% endif %} + {{ launch_allowance.emails_display }} {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_launch_allowance"] %}{{ i18n_data[l]["home"]["teaser_launch_allowance"] }}{% else %}launch allowance{% endif %}</p>
+        <a href="{{ config.extra.app_url }}/signup" class="btn-secondary w-full mt-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["cta_button"] %}{{ i18n_data[l]["cta"]["cta_button"] }}{% else %}Start free{% endif %}</a>
       </div>
       <div class="card-dna p-6 relative" style="outline:2px solid rgb(var(--brand-500));outline-offset:-1px">
-        <span class="k-arc-label k-arc-label--brand">pro · most verified</span>
-        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono" style="color:rgb(var(--brand-500))">€89</span><span class="text-sm text-surface-500">/mo</span></div>
-        <p class="text-[13px] text-surface-500">150,000 emails · 60-day retention</p>
-        <a href="{{ config.extra.app_url }}/signup?plan=pro" class="btn-primary w-full mt-4">Choose Pro</a>
+        <span class="k-arc-label k-arc-label--brand">{{ teaser_pro.name | lower }} · {% if i18n_data and i18n_data[l] and i18n_data[l]["pricing"] and i18n_data[l]["pricing"]["card_most_popular"] %}{{ i18n_data[l]["pricing"]["card_most_popular"] }}{% else %}most popular{% endif %}</span>
+        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono" style="color:rgb(var(--brand-500))">{{ teaser_pro.monthly_price_display }}</span><span class="text-sm text-surface-500">/mo</span></div>
+        <p class="text-[13px] text-surface-500">{{ teaser_pro.included_volume_display }} {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails"] %}{{ i18n_data[l]["home"]["teaser_emails"] }}{% else %}emails{% endif %} &middot; {{ teaser_pro.retention_days }}{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_retention_suffix"] %}{{ i18n_data[l]["home"]["teaser_retention_suffix"] }}{% else %}-day retention{% endif %}</p>
+        <a href="{{ config.extra.app_url }}/signup?plan=pro" class="btn-primary w-full mt-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_choose_plan"] %}{{ i18n_data[l]["home"]["teaser_choose_plan"] }}{% else %}Choose{% endif %} {{ teaser_pro.name }}</a>
       </div>
       <div class="card-dna p-6">
-        <span class="k-arc-label">business</span>
-        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">€699</span><span class="text-sm text-surface-500">/mo</span></div>
-        <p class="text-[13px] text-surface-500">2M emails · 365-day retention</p>
-        <a href="{{ config.extra.app_url }}/signup?plan=scale" class="btn-secondary w-full mt-4">Choose Business</a>
+        <span class="k-arc-label">{{ teaser_business.name | lower }}</span>
+        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">{{ teaser_business.monthly_price_display }}</span><span class="text-sm text-surface-500">/mo</span></div>
+        <p class="text-[13px] text-surface-500">{{ teaser_business.included_volume_display }} {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_emails"] %}{{ i18n_data[l]["home"]["teaser_emails"] }}{% else %}emails{% endif %} &middot; {{ teaser_business.retention_days }}{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_retention_suffix"] %}{{ i18n_data[l]["home"]["teaser_retention_suffix"] }}{% else %}-day retention{% endif %}</p>
+        <a href="{{ config.extra.app_url }}/signup?plan=scale" class="btn-secondary w-full mt-4">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["teaser_choose_plan"] %}{{ i18n_data[l]["home"]["teaser_choose_plan"] }}{% else %}Choose{% endif %} {{ teaser_business.name }}</a>
       </div>
     </div>
   </div>

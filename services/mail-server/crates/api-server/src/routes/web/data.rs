@@ -18,7 +18,7 @@
 use ui_foundation::axum_router::RouteData;
 use ui_foundation::view_data::{
     AlertRuleData, AlertRulesPageData, BulkActionData, DataCell, DataRowData, FilterSelectData,
-    KpiCardData, ListPageData, TableData, TenantChoiceData,
+    KpiCardData, ListPageData, SecondaryActionData, TableData, TenantChoiceData,
 };
 
 use crate::analytics_metrics::SendCohortCounts;
@@ -30,6 +30,10 @@ const PER_PAGE: usize = 20;
 /// Hard cap on the `page` parameter — hostile values must not create giant
 /// offsets.
 const MAX_PAGE: usize = 500;
+/// The tenant the sales-autopilot control surface reads (and the web replay
+/// handler mutates): the engine's queue lives under this tenant, so the page
+/// and its Replay control must agree on it.
+pub(crate) const SALES_AUTOPILOT_TENANT: &str = "system";
 
 /// Parsed GET list parameters (`query`, `status`, `sort`, `stage`, `page`,
 /// `days`).
@@ -579,6 +583,13 @@ pub(crate) fn time_cell(timestamp: Option<chrono::DateTime<chrono::Utc>>) -> Dat
         Some(ts) => DataCell::time(relative_time(Some(ts)), ts.to_rfc3339()),
         None => DataCell::text("—"),
     }
+}
+
+/// MFA enrollment state for people tables (Operators, Team). Review §7:
+/// the reused sent/draft campaign vocabulary must become
+/// Enabled/Not configured — a person's second factor is not a message.
+pub(crate) fn mfa_state_cell(enabled: bool) -> DataCell {
+    DataCell::text(if enabled { "Enabled" } else { "Not configured" })
 }
 
 /// Entry point: build the [`RouteData`] for a GET render of `path`.
@@ -1391,9 +1402,13 @@ async fn web_dashboard(state: &AppState, tenant: &str, cid: &str) -> ListPageDat
 async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
+    // `scheduled` is a first-class lifecycle status (the worker claims
+    // status='scheduled' rows when due) — the filter must include it or
+    // filtering by it would quietly return everything (review §6.2).
     where_sql.status_in(
         &[
             "draft",
+            "scheduled",
             "sending",
             "paused",
             "stopped",
@@ -1465,6 +1480,11 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
         vec![
             ("".into(), "All statuses".into(), q.status.is_empty()),
             ("draft".into(), "Draft".into(), q.status == "draft"),
+            (
+                "scheduled".into(),
+                "Scheduled".into(),
+                q.status == "scheduled",
+            ),
             ("sending".into(), "Sending".into(), q.status == "sending"),
             ("paused".into(), "Paused".into(), q.status == "paused"),
             ("stopped".into(), "Stopped".into(), q.status == "stopped"),
@@ -1581,10 +1601,12 @@ async fn load_campaign_editor(
         bool,
         serde_json::Value,
         serde_json::Value,
+        String,
     )> = match sqlx::query_as(
         "SELECT id::text, name, subject, from_email, from_name, reply_to, preview_text, html_body, \
                 scheduled_at, track_opens, track_clicks, \
-                COALESCE(utm_params, '{}'::jsonb), COALESCE(settings, '{}'::jsonb) \
+                COALESCE(utm_params, '{}'::jsonb), COALESCE(settings, '{}'::jsonb), \
+                COALESCE(status, 'draft') \
          FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(id)
@@ -1614,6 +1636,7 @@ async fn load_campaign_editor(
         track_clicks,
         utm_params,
         settings,
+        status,
     )) = row
     else {
         return editor;
@@ -1691,6 +1714,7 @@ async fn load_campaign_editor(
         scheduled_at: scheduled_at
             .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default(),
+        status,
     });
     editor
 }
@@ -1710,13 +1734,24 @@ async fn load_campaign_edit_legacy(
     tenant: &str,
     id: &str,
 ) -> Option<ui_foundation::view_data::CampaignEditData> {
-    let row: Option<(String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        match sqlx::query_as::<
-            _,
-            (String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>),
+    let row: Option<(
+        String,
+        String,
+        Option<String>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+    )> = match sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        ),
         // campaigns.id is a UUID in both schema lineages: cast it to text for
         // the String row shape (and cast the bound id back for the comparison).
-        >("SELECT id::text, name, subject, scheduled_at FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
+        >("SELECT id::text, name, subject, scheduled_at, status FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
             .bind(id)
             .bind(tenant)
             .fetch_optional(&state.db)
@@ -1728,7 +1763,7 @@ async fn load_campaign_edit_legacy(
                 return None;
             }
         };
-    let (id, name, subject, scheduled_at) = row?;
+    let (id, name, subject, scheduled_at, status) = row?;
     Some(ui_foundation::view_data::CampaignEditData {
         id,
         name,
@@ -1737,6 +1772,7 @@ async fn load_campaign_edit_legacy(
         scheduled_at: scheduled_at
             .map(|ts| ts.format("%Y-%m-%dT%H:%M").to_string())
             .unwrap_or_default(),
+        status: status.unwrap_or_default(),
     })
 }
 
@@ -1831,6 +1867,14 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
         button_label: "Delete selected".into(),
     });
     data.primary_action = Some(("Add Contact".into(), "/contacts/new".into()));
+    // Review §6.2: the CSV export lives in the live header again, and the
+    // bulk bar keeps the export-selected affordance the handwritten page
+    // had — the export handler was always mounted.
+    data.secondary_actions = vec![SecondaryActionData::get("Export CSV", "/web/contacts/export.csv")];
+    data.bulk_secondary_actions = vec![SecondaryActionData::get(
+        "Export selected",
+        "/web/contacts/export.csv",
+    )];
     // Deferred-feature 3: per-row Edit (→ /contacts/{id}/edit) and single
     // Delete (signed confirm intent `delete-contact`, soft-deleting to
     // status 'deleted' exactly like the bulk path). Contacts have no detail
@@ -2840,7 +2884,7 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
                     DataCell::text(name.unwrap_or_default()),
                     DataCell::text(role),
                     DataCell::status(&status),
-                    DataCell::status(if mfa { "sent" } else { "draft" }),
+                    mfa_state_cell(mfa),
                 ],
             })
             .collect(),
@@ -3312,7 +3356,7 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
         SalesPageData, SalesRevenueData,
     };
 
-    const TENANT: &str = "system";
+    const TENANT: &str = SALES_AUTOPILOT_TENANT;
 
     // One shared load for the whole page — exactly the read path the control
     // API's handlers use.
@@ -3921,7 +3965,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
                         DataCell::text(email),
                         DataCell::text(name.unwrap_or_default()),
                         DataCell::text(role),
-                        DataCell::status(if mfa { "sent" } else { "draft" }),
+                        mfa_state_cell(mfa),
                         DataCell::status(&status),
                     ],
                 },
@@ -4093,6 +4137,25 @@ async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
         total.total_or_zero()
     };
     data.filter_query = filter_query(q);
+    // Review §7 (Audit): "Restore filter-preserving CSV access in the live
+    // view; the export handler already exists." The handler honors the same
+    // `query` + `days` filters the list applies, so the link carries them.
+    let export_query = {
+        let mut parts: Vec<String> = Vec::new();
+        if !q.search.is_empty() {
+            parts.push(format!("query={}", urlencode(&q.search)));
+        }
+        if let Some(days) = q.days {
+            parts.push(format!("days={days}"));
+        }
+        parts.join("&")
+    };
+    let export_href = if export_query.is_empty() {
+        "/web/admin/audit/export".to_string()
+    } else {
+        format!("/web/admin/audit/export?{export_query}")
+    };
+    data.secondary_actions = vec![SecondaryActionData::get("Export CSV", &export_href)];
     data.empty_title = "No audit events yet".into();
     data.empty_description = "Operator actions are recorded here as they happen.".into();
     if rows_unavailable {
