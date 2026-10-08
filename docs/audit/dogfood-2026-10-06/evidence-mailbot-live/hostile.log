@@ -1,0 +1,11 @@
+FAIL  hostile-huge-body :: pending=False note=''
+PASS  hostile-oversized-line :: refused_with_552=True
+PASS  hostile-malformed-mime :: processed=2026-10-07T22:13:56.814065+00:00 pending=False
+PASS  hostile-non-utf8 :: processed=2026-10-07T22:14:01.335987+00:00 classification=None
+PASS  hostile-header-injection :: to_email='inbox-1723febfc2@mb-1723febfc2.test' classification=question
+PASS  hostile-unknown-sender-domain :: row=inb_88e2223190fb4b2c811a22 classification=question
+PASS  hostile-worker-not-crashed :: worker state=running healthy
+PASS  hostile-no-worker-panics :: panic_lines=0 []
+
+=== 8 probes, 1 FAIL ===
+  FAIL hostile-huge-body :: pending=False note=''

@@ -1,0 +1,24 @@
+PASS  conc-six :: sent=6 send_errors=0 drops=0 cross_tenant=0 drafts=6
+PASS  conc-twenty :: sent=20 accepted=20 send_errors=0 lost=0 dup=0 drain_s=61.3 p95_s=61.2
+FAIL  dedup-message-id :: rows=2 queue_before=0 queue_after=0
+
+=== 71 probes, 19 FAIL ===
+  FAIL tax:tax-positive :: disposition=ok (observed='positive' want=['positive']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:tax-meeting :: disposition=ok (observed='meeting_request' want=['meeting_request']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:tax-question :: disposition=ok (observed='question' want=['question']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:tax-referral :: disposition=ok (observed='referral' want=['referral']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:tax-not-interested :: disposition=ok (observed='not_interested' want=['not_interested']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:tax-complaint :: disposition=ok (observed='complaint' want=['complaint']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-price :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='price' want='price'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-timing :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='timing' want='timing'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-competitor :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='competitor' want='competitor'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-authority :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='authority' want='authority'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-trust :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='trust' want='trust'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:obj-need :: disposition=ok (observed='not_interested' want=['not_interested', 'question']); classifier=ok (observed='ai' want=['ai']); objection_class=ok (observed='need' want='need'); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL tax:auto-list-unsubscribe-mailto :: disposition=BAD (observed='unknown' want=['unsubscribe']); classifier=BAD (observed='ai' want=['deterministic'])
+  FAIL tax:auto-warranty-support :: disposition=ok (observed='question' want=['question', 'complaint']); classifier=ok (observed='ai' want=['ai']); draft=BAD (pending=False); draft_constraints=BAD (missing signature)
+  FAIL conc-twenty :: sent=20 lost=10 duplicated=0 drain_s=31.7 p95_s=31.6
+  FAIL dedup-message-id :: rows=2 queue_before=0 queue_after=0
+  FAIL conc-twenty :: sent=20 accepted=10 send_errors=10 lost=0 dup=0 drain_s=31.4 p95_s=31.3
+  FAIL dedup-message-id :: rows=2 queue_before=0 queue_after=0
+  FAIL dedup-message-id :: rows=2 queue_before=0 queue_after=0

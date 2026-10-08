@@ -1,0 +1,1275 @@
+warning: unused import: `SubsecRound`
+  --> crates/compliance/src/gdpr_automation.rs:17:42
+   |
+17 | use chrono::{DateTime, Duration, Months, SubsecRound, TimeDelta, Utc};
+   |                                          ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `compliance` (lib) generated 1 warning
+warning: duplicated attribute
+    --> crates/ai-service/src/verifier.rs:1787:5
+     |
+1787 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: function `euro_spelled_as_a_word_is_the_same_canonical_price` is never used
+    --> crates/ai-service/src/verifier.rs:1807:8
+     |
+1807 |     fn euro_spelled_as_a_word_is_the_same_canonical_price() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ai-service` (lib test) generated 2 warnings
+warning: function `string_set` is never used
+  --> crates/ai-service/tests/eval_corpus_drift.rs:30:4
+   |
+30 | fn string_set(value: &serde_json::Value, pointer: &str) -> BTreeSet<String> {
+   |    ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ai-service` (test "eval_corpus_drift") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+────────────
+ Nextest run ID 1d627b46-ebbf-4535-bbfa-5cd7b530e998 with nextest profile: default
+    Starting 1211 tests across 6 binaries
+        PASS [   0.008s] (   1/1211) ai-service analytics::tests::test_predict_open_rate_business_hours
+        PASS [   0.008s] (   2/1211) ai-service analytics::tests::test_predict_unsubscribe_risk
+        PASS [   0.008s] (   3/1211) ai-service assistant::tests::test_sentiment_positive_and_negative
+        PASS [   0.008s] (   4/1211) ai-service analytics::tests::test_segment_users_kmeans
+        PASS [   0.008s] (   5/1211) ai-service assistant::tests::improve_content_does_not_panic_on_long_text_with_few_words
+        PASS [   0.008s] (   6/1211) ai-service analytics::tests::test_predict_click_rate_urgency_boost
+        PASS [   0.008s] (   7/1211) ai-service assistant::tests::test_suggest_subject_lines_count
+        PASS [   0.009s] (   8/1211) ai-service assistant::tests::test_improve_content_adds_personalization
+        PASS [   0.009s] (   9/1211) ai-service assistant::tests::test_summarize_truncation
+        PASS [   0.008s] (  10/1211) ai-service bandits::tests::test_record_reward_and_stats
+        PASS [   0.008s] (  11/1211) ai-service bandits::tests::test_reward_unknown_arm_errors
+        PASS [   0.009s] (  12/1211) ai-service bandits::tests::test_add_and_select_arm
+        PASS [   0.009s] (  13/1211) ai-service bandits::tests::test_thompson_sample_in_range
+        PASS [   0.009s] (  14/1211) ai-service bandits::tests::test_invalid_persisted_state_fails_to_load
+        PASS [   0.010s] (  15/1211) ai-service bandits::tests::test_persisted_state_survives_restart
+        PASS [   0.010s] (  16/1211) ai-service bandits::tests::test_encrypted_state_survives_restart
+        PASS [   0.009s] (  17/1211) ai-service chat::tests::build_response_sanitizes_answer_for_response_and_audit_alike
+        PASS [   0.016s] (  18/1211) ai-service chat::tests::chat_fails_closed_without_model_runtime
+        PASS [   0.015s] (  19/1211) ai-service chat::tests::chat_rejects_injection_attempts_pre_model
+        PASS [   0.017s] (  20/1211) ai-service chat::tests::chat_model_outage_is_an_error_not_a_guess
+        PASS [   0.033s] (  21/1211) ai-service chat::tests::chat_delivers_verified_answer_with_bounded_token_budget
+        PASS [   0.035s] (  22/1211) ai-service chat::tests::chat_refuses_raw_script_payload_from_the_model
+        PASS [   0.034s] (  23/1211) ai-service chat::tests::chat_replays_only_bounded_sanitized_history
+        PASS [   0.036s] (  24/1211) ai-service chat::tests::chat_verification_failure_retries_once_then_escalates
+        PASS [   0.033s] (  25/1211) ai-service chat::tests::chat_verification_retry_recovers
+        PASS [   0.016s] (  26/1211) ai-service chat::tests::chat_with_sanitization_disabled_fails_closed
+        PASS [   0.008s] (  27/1211) ai-service chat::tests::disclosure_names_the_ai_and_the_human_route
+        PASS [   0.007s] (  28/1211) ai-service chat::tests::history_sanitizer_drops_non_replayable_roles
+        PASS [   0.014s] (  29/1211) ai-service chat::tests::history_sanitizer_drops_critical_payloads
+        PASS [   0.014s] (  30/1211) ai-service chat::tests::history_sanitizer_drops_role_marker_forgeries_after_sanitization
+        PASS [   0.033s] (  31/1211) ai-service chat::tests::chat_with_sanitization_enabled_answers
+        PASS [   0.014s] (  32/1211) ai-service chat::tests::history_sanitizer_normalizes_legitimate_roles
+        PASS [   0.007s] (  33/1211) ai-service chat::tests::passages_block_names_the_unavailable_state_and_forbids_citations
+        PASS [   0.014s] (  34/1211) ai-service chat::tests::history_sanitizer_strips_chatml_delimiters_but_keeps_the_turn
+        PASS [   0.014s] (  35/1211) ai-service chat::tests::persist_audit_without_pool_is_a_noop
+        PASS [   0.008s] (  36/1211) ai-service chat::tests::serialization_uses_the_policy_verification_field_name
+        PASS [   0.007s] (  37/1211) ai-service chat::tests::shared_prefix_carries_canonical_facts_and_rules
+        PASS [   0.007s] (  38/1211) ai-service chat::tests::shared_prefix_is_byte_stable_for_caching
+        PASS [   0.007s] (  39/1211) ai-service config::tests::plaintext_http_gate_flags_only_non_loopback_hosts
+        PASS [   0.007s] (  40/1211) ai-service config::tests::production_boots_require_ai_admin_token
+        PASS [   0.008s] (  41/1211) ai-service config::tests::rejects_invalid_boolean_values
+        PASS [   0.008s] (  42/1211) ai-service config::tests::test_config_roundtrip_json
+        PASS [   0.007s] (  43/1211) ai-service config::tests::test_default_config
+        PASS [   0.007s] (  44/1211) ai-service config::tests::validate_refuses_api_key_over_plaintext_non_loopback_http
+        PASS [   0.007s] (  45/1211) ai-service content::tests::sanitize_model_output_preserves_benign_text
+        PASS [   0.008s] (  46/1211) ai-service content::tests::sanitize_model_output_strips_raw_tag_payloads
+        PASS [   0.007s] (  47/1211) ai-service content::tests::streaming_sanitizer_forwards_benign_tokens_losslessly
+        PASS [   0.008s] (  48/1211) ai-service content::tests::streaming_sanitizer_escapes_stray_angle_bracket_and_bounds_its_buffer
+        PASS [   0.129s] (  49/1211) ai-service chat::tests::chat_rejects_cited_claims_the_passage_does_not_support
+        PASS [   0.007s] (  50/1211) ai-service content::tests::test_ab_test_winner_selects_best
+        PASS [   0.008s] (  51/1211) ai-service content::tests::streaming_sanitizer_neutralizes_trailing_partial_tag
+        PASS [   0.007s] (  52/1211) ai-service content::tests::streaming_sanitizer_strips_tags_split_across_tokens
+        PASS [   0.074s] (  53/1211) ai-service chat::tests::persist_audit_survives_an_unwritable_row
+        PASS [   0.007s] (  54/1211) ai-service content::tests::test_generate_preview_strips_html
+        PASS [   0.007s] (  55/1211) ai-service content::tests::test_sanitize_html_removes_event_handlers
+        PASS [   0.007s] (  56/1211) ai-service content::tests::test_sanitize_html_strips_scripts
+        PASS [   0.007s] (  57/1211) ai-service content::tests::test_sanitize_html_validates_links
+        PASS [   0.006s] (  58/1211) ai-service content::tests::test_score_subject_line_good
+        PASS [   0.006s] (  59/1211) ai-service defense::tests::apexmail_subdomains_are_allowed
+        PASS [   0.007s] (  60/1211) ai-service content::tests::test_suggest_improvements_short_text
+        PASS [   0.007s] (  61/1211) ai-service defense::tests::attacker_urls_embedding_the_domain_are_rejected
+        PASS [   0.015s] (  62/1211) ai-service defense::tests::sanitize_output_keeps_ordinary_hrefs
+        PASS [   0.015s] (  63/1211) ai-service defense::tests::sanitize_output_strips_case_folded_payloads
+        PASS [   0.018s] (  64/1211) ai-service defense::tests::sanitize_email_body_matches_ascii_case_insensitively
+        PASS [   0.016s] (  65/1211) ai-service defense::tests::sanitize_output_strips_data_and_case_folded_url_schemes
+        PASS [   0.007s] (  66/1211) ai-service defense::tests::test_clean_message_passes
+        PASS [   0.006s] (  67/1211) ai-service defense::tests::test_clean_multilingual_passes
+        PASS [   0.006s] (  68/1211) ai-service defense::tests::test_detect_arabic_injection
+        PASS [   0.015s] (  69/1211) ai-service defense::tests::sanitize_output_strips_even_when_no_detector_fires
+        PASS [   0.007s] (  70/1211) ai-service defense::tests::test_detect_chinese_injection
+        PASS [   0.011s] (  71/1211) ai-service defense::tests::test_detect_base64_payload
+        PASS [   0.008s] (  72/1211) ai-service defense::tests::test_detect_context_switch
+        PASS [   0.008s] (  73/1211) ai-service defense::tests::test_detect_instruction_override
+        PASS [   0.007s] (  74/1211) ai-service defense::tests::test_detect_japanese_injection
+        PASS [   0.011s] (  75/1211) ai-service defense::tests::test_detect_hex_payload
+        PASS [   0.007s] (  76/1211) ai-service defense::tests::test_detect_recursive_prompt
+        PASS [   0.122s] (  77/1211) ai-service chat::tests::persist_audit_writes_tenant_scoped_rows_and_tolerates_bad_retention_env
+        PASS [   0.008s] (  78/1211) ai-service defense::tests::test_detect_role_switch
+        PASS [   0.185s] (  79/1211) ai-service chat::tests::chat_with_an_empty_docs_index_answers_without_citations
+        PASS [   0.012s] (  80/1211) ai-service defense::tests::test_detect_url_encoded_payload
+        PASS [   0.015s] (  81/1211) ai-service defense::tests::test_full_pipeline_bidi_attack
+        PASS [   0.014s] (  82/1211) ai-service defense::tests::test_full_pipeline_clean_input
+        PASS [   0.015s] (  83/1211) ai-service defense::tests::test_full_pipeline_injection_detected
+        PASS [   0.016s] (  84/1211) ai-service defense::tests::test_full_pipeline_encoded_payload
+        PASS [   0.012s] (  85/1211) ai-service defense::tests::test_no_false_positive_on_clean_text
+        PASS [   0.008s] (  86/1211) ai-service defense::tests::test_no_recursive_detection_on_normal
+        PASS [   0.016s] (  87/1211) ai-service defense::tests::test_full_pipeline_multilingual
+        PASS [   0.020s] (  88/1211) ai-service defense::tests::test_sanitize_email_body_preserves_content
+        PASS [   0.015s] (  89/1211) ai-service defense::tests::test_sanitize_output_clean
+        PASS [   0.016s] (  90/1211) ai-service defense::tests::test_sanitize_output_javascript_url
+        PASS [   0.016s] (  91/1211) ai-service defense::tests::test_sanitize_output_event_handler
+        PASS [   0.019s] (  92/1211) ai-service defense::tests::test_sanitize_email_body_strips_xss
+        PASS [   0.016s] (  93/1211) ai-service defense::tests::test_sanitize_output_script_tag
+        PASS [   0.008s] (  94/1211) ai-service defense::tests::test_strip_bidi_characters
+        PASS [   0.007s] (  95/1211) ai-service defense::tests::test_strip_zero_width_chars
+        PASS [   0.007s] (  96/1211) ai-service defense::tests::test_threat_level_clean
+        PASS [   0.007s] (  97/1211) ai-service defense::tests::test_threat_level_critical
+        PASS [   0.007s] (  98/1211) ai-service defense::tests::test_validate_tool_params_clean
+        PASS [   0.007s] (  99/1211) ai-service defense::tests::test_validate_tool_params_excessive_emails
+        PASS [   0.007s] ( 100/1211) ai-service defense::tests::test_validate_tool_params_negative_emails
+        PASS [   0.007s] ( 101/1211) ai-service defense::tests::test_validate_tool_params_suspicious_domain
+        PASS [   0.007s] ( 102/1211) ai-service domain_dns::tests::direct_dkim_records_use_the_domain_specific_selector_and_key
+        PASS [   0.006s] ( 103/1211) ai-service domain_dns::tests::normalizes_valid_domains_and_rejects_invalid_values
+        PASS [   0.007s] ( 104/1211) ai-service domain_dns::tests::ses_records_include_custom_mail_from_pair_only_in_ses_mode
+        PASS [   0.007s] ( 105/1211) ai-service email_agent::adversarial_tests::body_extraction_falls_back_to_html_and_handles_whitespace
+        PASS [   0.007s] ( 106/1211) ai-service email_agent::adversarial_tests::from_env_reads_overrides_and_defaults
+        PASS [   0.007s] ( 107/1211) ai-service email_agent::adversarial_tests::inbound_row_parses_the_mime_envelope
+        PASS [   0.019s] ( 108/1211) ai-service email_agent::adversarial_tests::format_reply_sanitizes_quoted_from_and_subject
+        PASS [   0.252s] ( 109/1211) ai-service chat::tests::citations_are_filtered_to_referenced_passages
+        PASS [   0.086s] ( 110/1211) ai-service email_agent::adversarial_tests::an_approved_objection_entry_shapes_the_draft_and_is_the_only_valid_source
+        PASS [   0.247s] ( 111/1211) ai-service email_agent::adversarial_tests::duplicate_delivery_gets_no_second_draft
+        PASS [   0.380s] ( 112/1211) ai-service email_agent::adversarial_tests::first_response_request_becomes_a_pending_approval_draft
+        PASS [   0.406s] ( 113/1211) ai-service email_agent::adversarial_tests::fetch_raw_headers_returns_none_without_a_raw_copy
+        PASS [   0.024s] ( 114/1211) ai-service email_agent::adversarial_tests::manual_reply_generation_sanitizes_and_fails_closed
+        PASS [   0.490s] ( 115/1211) ai-service email_agent::adversarial_tests::llm_outage_retries_then_quarantines_without_drafts
+        PASS [   0.560s] ( 116/1211) ai-service email_agent::adversarial_tests::loop_guard_declines_auto_submitted_headers
+        PASS [   0.015s] ( 117/1211) ai-service email_agent::adversarial_tests::prompt_builder_sanitizes_hostile_fields
+        PASS [   0.611s] ( 118/1211) ai-service email_agent::adversarial_tests::loop_guard_declines_robot_senders
+        PASS [   0.653s] ( 119/1211) ai-service email_agent::adversarial_tests::loop_guard_declines_senders_at_the_reply_cap
+        PASS [   0.008s] ( 120/1211) ai-service email_agent::adversarial_tests::redaction_handles_multiple_at_signs_and_short_digit_runs
+        PASS [   0.871s] ( 121/1211) ai-service email_agent::adversarial_tests::loop_guard_declines_tenants_at_the_daily_draft_cap
+        PASS [   0.009s] ( 122/1211) ai-service email_agent::tests::auto_submitted_header_suppresses_reply
+        PASS [   0.007s] ( 123/1211) ai-service email_agent::tests::auto_submitted_no_value_is_not_an_auto_reply
+        PASS [   0.007s] ( 124/1211) ai-service email_agent::tests::behavior_directives_are_detected_case_insensitively
+        PASS [   0.008s] ( 125/1211) ai-service email_agent::tests::caps_are_bounded_constants
+        PASS [   0.007s] ( 126/1211) ai-service email_agent::tests::claim_query_has_no_age_window_and_targets_rows_without_a_terminal_write
+        PASS [   0.007s] ( 127/1211) ai-service email_agent::tests::claim_query_reclaims_stale_claims_left_by_dead_workers
+        PASS [   0.007s] ( 128/1211) ai-service email_agent::tests::claim_query_tracks_the_tenant_for_per_tenant_caps
+        PASS [   0.013s] ( 129/1211) ai-service email_agent::tests::classified_prompt_carries_the_objection_hint
+        PASS [   0.007s] ( 130/1211) ai-service email_agent::tests::declined_messages_can_never_be_released_as_mail
+        PASS [   0.007s] ( 131/1211) ai-service email_agent::tests::failures_retry_until_max_attempts_then_quarantine
+        PASS [   0.007s] ( 132/1211) ai-service email_agent::tests::governor_keys_are_per_tenant
+        PASS [   0.840s] ( 133/1211) ai-service email_agent::adversarial_tests::low_confidence_llm_output_is_never_a_draft
+        PASS [   0.025s] ( 134/1211) ai-service email_agent::tests::grounded_assessment_rejects_a_stale_price_and_accepts_a_canonical_one
+        PASS [   0.009s] ( 135/1211) ai-service email_agent::tests::grounded_system_prompt_appends_the_canonical_facts
+        PASS [   0.009s] ( 136/1211) ai-service email_agent::tests::loop_guard_allows_real_customers
+        PASS [   0.009s] ( 137/1211) ai-service email_agent::tests::loop_guard_blocks_robot_local_parts
+        PASS [   0.009s] ( 138/1211) ai-service email_agent::tests::loop_guard_blocks_self_and_null_senders
+        PASS [   0.008s] ( 139/1211) ai-service email_agent::tests::no_write_path_touches_the_outbound_queue_or_smtp
+        PASS [   0.018s] ( 140/1211) ai-service email_agent::tests::manual_reply_output_is_sanitized
+        PASS [   0.008s] ( 141/1211) ai-service email_agent::tests::ordinary_customer_emails_are_not_flagged
+        PASS [   0.007s] ( 142/1211) ai-service email_agent::tests::ordinary_headers_do_not_suppress_reply
+        PASS [   0.007s] ( 143/1211) ai-service email_agent::tests::quarantine_write_is_terminal_and_never_pending_approval
+        PASS [   0.007s] ( 144/1211) ai-service email_agent::tests::precedence_bulk_junk_list_suppress_reply
+        PASS [   0.007s] ( 145/1211) ai-service email_agent::tests::release_claim_clears_both_markers_so_rows_can_be_reclaimed
+        PASS [   0.007s] ( 146/1211) ai-service email_agent::tests::redact_for_log_masks_emails_and_long_digit_runs
+        PASS [   0.008s] ( 147/1211) ai-service email_agent::tests::reply_cap_counts_drafts_only
+        PASS [   0.008s] ( 148/1211) ai-service email_agent::tests::tenant_daily_cap_is_scoped_to_the_tenant_and_counts_drafts
+        PASS [   0.027s] ( 149/1211) ai-service email_agent::tests::support_reply_against_the_deliverability_facts_grounds
+        PASS [   0.015s] ( 150/1211) ai-service email_agent::tests::test_build_prompt
+        PASS [   0.009s] ( 151/1211) ai-service email_agent::tests::test_extract_body_falls_back_to_html
+        PASS [   0.010s] ( 152/1211) ai-service email_agent::tests::test_extract_body_prefers_text
+        PASS [   0.010s] ( 153/1211) ai-service email_agent::tests::test_limit_body_truncates
+        PASS [   0.023s] ( 154/1211) ai-service email_agent::tests::test_format_reply
+        PASS [   0.009s] ( 155/1211) ai-service email_agent::tests::test_strip_html_entities
+        PASS [   0.008s] ( 156/1211) ai-service email_agent::tests::the_only_success_write_is_a_pending_approval_draft
+        PASS [   0.009s] ( 157/1211) ai-service email_agent::tests::test_strip_html_tags
+        PASS [   0.023s] ( 158/1211) ai-service email_agent::tests::verify_empty_response_is_low_confidence
+        PASS [   0.024s] ( 159/1211) ai-service email_agent::tests::verify_injection_remnants_in_output_are_low_confidence
+        PASS [   0.960s] ( 160/1211) ai-service email_agent::adversarial_tests::oversized_messages_are_flagged_not_retried
+        PASS [   0.023s] ( 161/1211) ai-service email_agent::tests::verify_too_short_response_is_low_confidence
+        PASS [   0.026s] ( 162/1211) ai-service email_agent::tests::verify_reasonable_response_passes
+        PASS [   0.009s] ( 163/1211) ai-service email_agent::tests::x_autoreply_headers_suppress_reply
+        PASS [   0.009s] ( 164/1211) ai-service governor::tests::allows_limit_then_rejects_the_next_rapid_call
+        PASS [   0.013s] ( 165/1211) ai-service governor::tests::capped_map_evicts_instead_of_growing_forever
+        PASS [   0.009s] ( 166/1211) ai-service governor::tests::keys_are_isolated
+        PASS [   0.009s] ( 167/1211) ai-service governor::tests::would_allow_does_not_consume_budget
+        PASS [   0.008s] ( 168/1211) ai-service inference::tests::accessors_report_configuration
+        PASS [   0.034s] ( 169/1211) ai-service governor::tests::full_size_cap_stays_fast
+        PASS [   0.008s] ( 170/1211) ai-service inference::tests::degenerate_generation_inputs_are_rejected_before_the_network
+        PASS [   0.008s] ( 171/1211) ai-service inference::tests::effective_timeout_floors_zero_timeouts
+        PASS [   0.008s] ( 172/1211) ai-service inference::tests::disabled_runtime_fails_closed
+        PASS [   0.041s] ( 173/1211) ai-service governor::tests::window_slides_and_budget_is_restored
+        PASS [   0.009s] ( 174/1211) ai-service inference::tests::inference_config_debug_redacts_the_api_key
+        PASS [   0.008s] ( 175/1211) ai-service inference::tests::normalizes_chat_completion_urls
+        PASS [   0.010s] ( 176/1211) ai-service inference::tests::plan_uses_the_configured_budget_and_temperature
+        PASS [   0.010s] ( 177/1211) ai-service inference::tests::provider_credentials_travel_as_bearer_tokens
+        PASS [   0.011s] ( 178/1211) ai-service inference::tests::predict_fences_user_json_against_prompt_injection
+        PASS [   0.009s] ( 179/1211) ai-service inference::tests::provider_error_bodies_are_truncated_before_logging_or_returning
+        PASS [   0.008s] ( 180/1211) ai-service inference::tests::rejects_unknown_model_before_network_access
+        PASS [   0.011s] ( 181/1211) ai-service inference::tests::response_shape_fallbacks_and_failures
+        PASS [   0.009s] ( 182/1211) ai-service inference::tests::streaming_chunks_are_boundary_safe_and_lossless
+        PASS [   0.009s] ( 183/1211) ai-service inference::tests::truncate_input_strings_caps_every_string_field_recursively
+        PASS [   0.009s] ( 184/1211) ai-service inference::tests::truncated_provider_response_is_an_error_not_a_partial_answer
+        PASS [   0.009s] ( 185/1211) ai-service inference::tests::validation_rejects_hostile_configuration_before_the_network
+        PASS [   0.008s] ( 186/1211) ai-service knowledge::tests::catalog_is_the_canonical_source
+        PASS [   0.008s] ( 187/1211) ai-service knowledge::tests::sdks_are_described_as_unpublished
+        PASS [   0.008s] ( 188/1211) ai-service knowledge::tests::security_facts_name_the_deployed_controls
+        PASS [   0.008s] ( 189/1211) ai-service knowledge::tests::shared_knowledge_is_stable_for_prefix_caching
+        PASS [   0.008s] ( 190/1211) ai-service knowledge::tests::shared_knowledge_is_truthful_about_certifications
+        PASS [   0.016s] ( 191/1211) ai-service pentest::llm_pentests::comprehensive_multi_vector_attack_blocked
+        PASS [   0.018s] ( 192/1211) ai-service pentest::llm_pentests::email_agent_prompt_builder_sanitizes_inputs
+        PASS [   0.023s] ( 193/1211) ai-service pentest::llm_pentests::email_agent_format_reply_sanitizes_response
+        PASS [   0.010s] ( 194/1211) ai-service pentest::llm_pentests::email_agent_truncate_response_enforces_limit
+        PASS [   0.016s] ( 195/1211) ai-service pentest::llm_pentests::llm01_clean_queries_pass_through
+        PASS [   0.017s] ( 196/1211) ai-service pentest::llm_pentests::llm01_base64_encoded_injection_detected
+        PASS [   0.016s] ( 197/1211) ai-service pentest::llm_pentests::llm01_code_fence_injection_stripped
+        PASS [   1.031s] ( 198/1211) ai-service email_agent::adversarial_tests::processed_message_becomes_a_pending_approval_draft_exactly_once
+        PASS [   0.018s] ( 199/1211) ai-service pentest::llm_pentests::llm01_direct_injection_blocked
+        PASS [   0.017s] ( 200/1211) ai-service pentest::llm_pentests::llm01_indirect_injection_blocked
+        PASS [   0.018s] ( 201/1211) ai-service pentest::llm_pentests::llm01_hex_encoded_injection_detected
+        PASS [   0.020s] ( 202/1211) ai-service pentest::llm_pentests::llm01_instruction_override_blocked
+        PASS [   0.019s] ( 203/1211) ai-service pentest::llm_pentests::llm01_markdown_image_exfiltration_blocked
+        PASS [   0.019s] ( 204/1211) ai-service pentest::llm_pentests::llm01_multilingual_injection_blocked
+        PASS [   0.019s] ( 205/1211) ai-service pentest::llm_pentests::llm01_role_switching_blocked
+        PASS [   0.019s] ( 206/1211) ai-service pentest::llm_pentests::llm01_unicode_bidi_injection_blocked
+        PASS [   0.018s] ( 207/1211) ai-service pentest::llm_pentests::llm01_zero_width_injection_blocked
+        PASS [   0.018s] ( 208/1211) ai-service pentest::llm_pentests::llm01_url_encoded_injection_detected
+        PASS [   0.019s] ( 209/1211) ai-service pentest::llm_pentests::llm02_clean_output_passes
+        PASS [   0.021s] ( 210/1211) ai-service pentest::llm_pentests::llm02_document_cookie_leak_blocked
+        PASS [   0.021s] ( 211/1211) ai-service pentest::llm_pentests::llm02_event_handler_blocked
+        PASS [   0.024s] ( 212/1211) ai-service pentest::llm_pentests::llm02_email_body_preserves_valids
+        PASS [   0.024s] ( 213/1211) ai-service pentest::llm_pentests::llm02_email_body_sanitization
+        PASS [   0.021s] ( 214/1211) ai-service pentest::llm_pentests::llm02_iframe_in_output_blocked
+        PASS [   0.020s] ( 215/1211) ai-service pentest::llm_pentests::llm02_javascript_url_blocked
+        PASS [   0.020s] ( 216/1211) ai-service pentest::llm_pentests::llm02_script_tag_in_output_blocked
+        PASS [   0.010s] ( 217/1211) ai-service pentest::llm_pentests::llm04_deeply_nested_detected
+        PASS [   0.022s] ( 218/1211) ai-service pentest::llm_pentests::llm02_innerhtml_injection_blocked
+        PASS [   0.009s] ( 219/1211) ai-service pentest::llm_pentests::llm04_recursive_prompt_detected
+        PASS [   0.020s] ( 220/1211) ai-service pentest::llm_pentests::llm04_long_input_truncated
+        PASS [   0.023s] ( 221/1211) ai-service pentest::llm_pentests::llm06_api_key_prefix_leak_detected
+        PASS [   0.022s] ( 222/1211) ai-service pentest::llm_pentests::llm06_database_password_leak_detected
+        PASS [   0.009s] ( 223/1211) ai-service pentest::llm_pentests::llm07_owner_can_access_billing_tools
+        PASS [   0.023s] ( 224/1211) ai-service pentest::llm_pentests::llm06_internal_infrastructure_leak_detected
+        PASS [   1.076s] ( 225/1211) ai-service email_agent::adversarial_tests::prompt_injection_and_directives_are_declined_without_a_draft
+        PASS [   0.010s] ( 226/1211) ai-service pentest::llm_pentests::llm07_tool_clean_params_pass
+        PASS [   0.011s] ( 227/1211) ai-service pentest::llm_pentests::llm07_tenant_isolation_blocks_cross_tenant
+        PASS [   0.023s] ( 228/1211) ai-service pentest::llm_pentests::llm06_pii_credit_card_not_allowed
+        PASS [   0.022s] ( 229/1211) ai-service pentest::llm_pentests::llm06_refusal_is_not_flagged
+        PASS [   0.010s] ( 230/1211) ai-service pentest::llm_pentests::llm07_tool_param_injection_blocked
+        PASS [   0.011s] ( 231/1211) ai-service pentest::llm_pentests::llm07_tool_excessive_emails_blocked
+        PASS [   0.010s] ( 232/1211) ai-service pentest::llm_pentests::llm07_tool_suspicious_domain_blocked
+        PASS [   0.010s] ( 233/1211) ai-service pentest::llm_pentests::llm07_viewer_cannot_access_billing_tools
+        PASS [   0.010s] ( 234/1211) ai-service pentest::llm_pentests::llm08_admin_can_access_admin_tools
+        PASS [   0.009s] ( 235/1211) ai-service pentest::llm_pentests::llm08_developer_cannot_access_owner_tools
+        PASS [   0.009s] ( 236/1211) ai-service pentest::llm_pentests::llm08_growth_plan_maps_to_developer
+        PASS [   0.009s] ( 237/1211) ai-service pentest::llm_pentests::llm08_enterprise_maps_to_owner
+        PASS [   0.009s] ( 238/1211) ai-service pentest::llm_pentests::llm08_free_plan_maps_to_viewer
+        PASS [   0.010s] ( 239/1211) ai-service pentest::llm_pentests::llm08_rbac_blocks_viewer_from_admin_tools
+        PASS [   0.022s] ( 240/1211) ai-service pentest::llm_pentests::llm09_verifier_allows_objective_comparison
+        PASS [   0.023s] ( 241/1211) ai-service pentest::llm_pentests::llm09_verifier_allows_apexmail_urls
+        PASS [   0.022s] ( 242/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_competitor_bashing
+        PASS [   0.024s] ( 243/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_correct_pricing
+        PASS [   0.024s] ( 244/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_false_pricing
+        PASS [   0.009s] ( 245/1211) ai-service pentest::llm_pentests::llm10_output_truncation_enforced
+        PASS [   0.010s] ( 246/1211) ai-service pentest::llm_pentests::llm10_output_truncation_preserves_short
+        PASS [   0.022s] ( 247/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_too_short
+        PASS [   0.023s] ( 248/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_unauthorized_urls
+        PASS [   0.024s] ( 249/1211) ai-service pentest::llm_pentests::llm09_verifier_catches_too_long
+        PASS [   0.008s] ( 250/1211) ai-service pipeline::tests::context_resolution_is_key_scoped
+        PASS [   0.021s] ( 251/1211) ai-service pentest::llm_pentests::verifier_detects_base64_payload_in_output
+        PASS [   0.021s] ( 252/1211) ai-service pentest::llm_pentests::verifier_detects_html_injection_in_output
+        PASS [   0.020s] ( 253/1211) ai-service pentest::llm_pentests::verifier_detects_multilingual_injection
+        PASS [   0.020s] ( 254/1211) ai-service pentest::llm_pentests::verifier_detects_stored_xss_entity_encoding
+        PASS [   0.010s] ( 255/1211) ai-service pipeline::tests::generator_invocation_never_passes_an_empty_user_prompt
+        PASS [   0.016s] ( 256/1211) ai-service pipeline::tests::critical_injection_is_blocked_before_any_model_call
+        PASS [   0.017s] ( 257/1211) ai-service pipeline::tests::customer_context_section_is_all_or_nothing
+        PASS [   1.118s] ( 258/1211) ai-service email_agent::adversarial_tests::rate_limit_deferral_releases_the_claim_without_consuming_an_attempt
+        PASS [   0.009s] ( 259/1211) ai-service pipeline::tests::knowledge_store_contains_no_mojibake
+        PASS [   0.018s] ( 260/1211) ai-service pipeline::tests::generator_prompt_sanitizes_entities_and_oversize_messages
+        PASS [   0.020s] ( 261/1211) ai-service pipeline::tests::generator_outage_retries_bounded_then_fails_closed
+        PASS [   0.009s] ( 262/1211) ai-service pipeline::tests::plan_parsing_survives_hostile_payloads
+        PASS [   0.017s] ( 263/1211) ai-service pipeline::tests::off_topic_plan_short_circuits_before_generation
+        PASS [   0.018s] ( 264/1211) ai-service pipeline::tests::planner_injection_rejection_names_the_infrastructure_guard
+        PASS [   0.019s] ( 265/1211) ai-service pipeline::tests::planner_outage_degrades_to_default_plan_and_generation_still_bounds
+        PASS [   0.048s] ( 266/1211) ai-service pipeline::tests::hostile_model_cannot_exceed_three_tool_iterations
+        PASS [   2.039s] ( 267/1211) ai-service chat::tests::chat_with_broken_retrieval_refuses_citations_and_names_the_degradation
+        PASS [   0.020s] ( 268/1211) ai-service pipeline::tests::streaming_generation_error_retries_then_falls_back
+        PASS [   0.009s] ( 269/1211) ai-service pipeline::tests::test_context
+        PASS [   0.049s] ( 270/1211) ai-service pipeline::tests::planner_garbage_json_degrades_to_default_plan
+        PASS [   0.041s] ( 271/1211) ai-service pipeline::tests::streamed_tokens_are_sanitized_before_the_channel_sees_them
+        PASS [   0.008s] ( 272/1211) ai-service pipeline::tests::test_extract_tool
+        PASS [   0.020s] ( 273/1211) ai-service pipeline::tests::streaming_generation_failure_stays_bounded_and_fails_closed
+        PASS [   0.008s] ( 274/1211) ai-service pipeline::tests::test_plan_parse
+        PASS [   0.009s] ( 275/1211) ai-service pipeline::tests::test_off_topic
+        PASS [   0.052s] ( 276/1211) ai-service pipeline::tests::saturated_concurrency_returns_high_demand_fallback_without_a_model_call
+        PASS [   0.008s] ( 277/1211) ai-service pipeline::tests::tool_call_extraction_rejects_hostile_near_misses
+        PASS [   0.017s] ( 278/1211) ai-service pipeline::tests::test_prompt_build
+        PASS [   0.049s] ( 279/1211) ai-service pipeline::tests::streaming_forwards_tokens_tool_events_and_allowlisted_tool_total
+        PASS [   0.010s] ( 280/1211) ai-service reply_classify::tests::clamps_and_sanitizes_confidence
+        PASS [   0.010s] ( 281/1211) ai-service reply_classify::tests::disabled_runtime_is_a_503_the_client_falls_back_from
+        PASS [   0.039s] ( 282/1211) ai-service pipeline::tests::verification_failures_retry_with_hint_then_fail_closed
+        PASS [   0.045s] ( 283/1211) ai-service pipeline::tests::tool_followup_failure_serves_the_pre_tool_text_without_fabrication
+        PASS [   0.011s] ( 284/1211) ai-service reply_classify::tests::enabled_runtime_returns_the_worker_contract_shape
+        PASS [   0.046s] ( 285/1211) ai-service pipeline::tests::verification_failure_recovers_on_hinted_retry
+        PASS [   0.047s] ( 286/1211) ai-service pipeline::tests::tool_calls_are_tenant_stamped_from_the_authenticated_caller
+        PASS [   0.045s] ( 287/1211) ai-service pipeline::tests::verified_generation_delivered_on_first_pass_with_context
+        PASS [   0.009s] ( 288/1211) ai-service reply_classify::tests::objection_class_only_survives_on_not_interested_and_question
+        PASS [   0.009s] ( 289/1211) ai-service reply_classify::tests::parses_a_code_fenced_response
+        PASS [   0.009s] ( 290/1211) ai-service reply_classify::tests::parses_a_full_response
+        PASS [   0.008s] ( 291/1211) ai-service reply_classify::tests::rejects_a_disposition_outside_the_taxonomy
+        PASS [   0.045s] ( 292/1211) ai-service pipeline::tests::verified_output_is_still_sanitized_before_delivery
+        PASS [   0.009s] ( 293/1211) ai-service reply_classify::tests::prompts_carry_the_taxonomy_and_bounded_input
+        PASS [   0.008s] ( 294/1211) ai-service reply_classify::tests::taxonomy_validation_rejects_unknown_values
+        PASS [   0.008s] ( 295/1211) ai-service retrieval::tests::chunk_start_advance_repairs_multibyte_boundaries
+        PASS [   0.009s] ( 296/1211) ai-service retrieval::tests::chunking_respects_boundaries_and_overlaps
+        PASS [   0.008s] ( 297/1211) ai-service retrieval::tests::docs_dir_honors_the_env_override
+        PASS [   0.010s] ( 298/1211) ai-service retrieval::tests::chunk_text_survives_multibyte_and_degenerate_input
+        PASS [   0.009s] ( 299/1211) ai-service retrieval::tests::collect_markdown_skips_missing_dirs_and_foreign_extensions
+        PASS [   0.009s] ( 300/1211) ai-service retrieval::tests::docs_version_is_stable_and_sensitive
+        PASS [   0.009s] ( 301/1211) ai-service retrieval::tests::titles_and_locales_extract
+        PASS [   0.009s] ( 302/1211) ai-service retrieval::tests::truncate_chars_bounds_length_and_respects_boundaries
+        PASS [   0.010s] ( 303/1211) ai-service routes::tests::ai_control_routes_require_the_dedicated_admin_credential
+        PASS [   0.010s] ( 304/1211) ai-service routes::tests::admin_routes_fail_closed_without_a_docs_database
+        PASS [   0.009s] ( 305/1211) ai-service routes::tests::blank_tenant_header_falls_back_to_the_control_plane_bucket
+        PASS [   0.017s] ( 306/1211) ai-service routes::tests::chat_rejects_tenant_header_body_mismatch
+        PASS [   0.017s] ( 307/1211) ai-service routes::tests::chat_route_enforces_the_configured_rate_limit
+        PASS [   0.010s] ( 308/1211) ai-service routes::tests::chat_route_rejects_empty_identities_and_messages
+        PASS [   0.009s] ( 309/1211) ai-service routes::tests::chat_route_rejects_malformed_tenant_headers
+        PASS [   0.017s] ( 310/1211) ai-service routes::tests::chat_route_with_dead_runtime_is_unavailable
+        PASS [   0.010s] ( 311/1211) ai-service routes::tests::deterministic_routes_reject_hostile_arguments
+        PASS [   1.214s] ( 312/1211) ai-service email_agent::adversarial_tests::worker_classified_rows_still_receive_their_draft
+        PASS [   0.010s] ( 313/1211) ai-service routes::tests::docs_pool_carries_the_chat_concurrency_budget
+        PASS [   0.081s] ( 314/1211) ai-service retrieval::tests::empty_index_reports_empty_not_unavailable
+        PASS [   0.011s] ( 315/1211) ai-service routes::tests::domain_dns_route_is_registered_and_fails_closed_without_data_source
+        PASS [   0.009s] ( 316/1211) ai-service routes::tests::health_is_public_and_reports_runtime_readiness
+        PASS [   0.010s] ( 317/1211) ai-service routes::tests::evaluation_uses_real_metrics
+        PASS [   0.009s] ( 318/1211) ai-service routes::tests::helpers_and_model_control_plane_require_service_authentication
+        PASS [   0.009s] ( 319/1211) ai-service routes::tests::models_route_reflects_runtime_state
+        PASS [   0.009s] ( 320/1211) ai-service routes::tests::optimize_time_handler_rejects_more_than_ten_thousand_entries
+        PASS [   0.010s] ( 321/1211) ai-service routes::tests::oversize_request_bodies_are_rejected
+        PASS [   0.011s] ( 322/1211) ai-service routes::tests::predict_enforces_the_configured_inference_rate_limit
+        PASS [   0.011s] ( 323/1211) ai-service routes::tests::predict_rate_limit_buckets_by_validated_tenant_key
+        PASS [   0.113s] ( 324/1211) ai-service routes::tests::chat_history_is_scoped_to_the_forwarded_user
+        PASS [   0.010s] ( 325/1211) ai-service routes::tests::predict_rejects_malformed_tenant_rate_key_headers
+        PASS [   0.010s] ( 326/1211) ai-service routes::tests::predict_with_live_runtime_returns_the_prediction
+        PASS [   0.011s] ( 327/1211) ai-service routes::tests::restored_model_routes_fail_closed_when_not_configured
+        PASS [   0.010s] ( 328/1211) ai-service routes::tests::service_authentication_accepts_only_the_configured_credential
+        PASS [   0.010s] ( 329/1211) ai-service routes::tests::state_builds_from_environment
+        PASS [   0.010s] ( 330/1211) ai-service routes::tests::subject_suggestions_remain_available_as_heuristics
+        PASS [   0.009s] ( 331/1211) ai-service routes::tests::tenant_rate_key_validator_direct_cases
+        PASS [   0.011s] ( 332/1211) ai-service routes::tests::train_route_starts_a_governed_job_readable_by_id
+        PASS [   0.009s] ( 333/1211) ai-service sto::tests::test_build_heatmap_averages
+        PASS [   0.167s] ( 334/1211) ai-service retrieval::tests::reindex_search_and_tenant_scoping_are_version_and_scope_exact
+        PASS [   0.008s] ( 335/1211) ai-service sto::tests::test_find_optimal_time
+        PASS [   0.009s] ( 336/1211) ai-service sto::tests::test_predict_best_window_timezone
+        PASS [   0.009s] ( 337/1211) ai-service tools::tests::ab_test_duration_arms
+        PASS [   0.008s] ( 338/1211) ai-service tools::tests::authoritative_executor_guards_every_arm
+        PASS [   0.008s] ( 339/1211) ai-service tools::tests::bounce_classification_unknown_codes_get_rfc_pointers
+        PASS [   0.008s] ( 340/1211) ai-service tools::tests::compliance_topics_cover_every_arm
+        PASS [   0.009s] ( 341/1211) ai-service tools::tests::dns_tool_refuses_to_invent_static_records
+        PASS [   0.009s] ( 342/1211) ai-service tools::tests::f89_generated_sql_is_parameterized_and_window_derived
+        PASS [   0.009s] ( 343/1211) ai-service tools::tests::f89_generated_sql_uses_only_canonical_audit_columns
+        PASS [   0.009s] ( 344/1211) ai-service tools::tests::f89_response_states_key_scoping_limit_and_evidence_status
+        PASS [   0.009s] ( 345/1211) ai-service tools::tests::incident_timeline_handles_zero_exposure
+        PASS [   0.009s] ( 346/1211) ai-service tools::tests::incident_timeline_query_is_parameterized
+        PASS [   0.009s] ( 347/1211) ai-service tools::tests::overage_unknown_plan_is_an_error_not_a_zero
+        PASS [   0.008s] ( 348/1211) ai-service tools::tests::payg_at_exact_tier_boundaries_has_no_negative_volumes
+        PASS [   0.010s] ( 349/1211) ai-service tools::tests::parameter_validation_runs_before_execution
+        PASS [   0.009s] ( 350/1211) ai-service tools::tests::payg_tier_one_covers_exactly_ten_thousand_emails
+        PASS [   0.009s] ( 351/1211) ai-service tools::tests::payg_tier_two_caps_at_ninety_thousand_emails
+        PASS [   0.008s] ( 352/1211) ai-service tools::tests::permission_matrix_grants_by_role_tier
+        PASS [   0.008s] ( 353/1211) ai-service tools::tests::plan_comparisons_reject_unknown_plans_and_cover_all_known
+        PASS [   0.008s] ( 354/1211) ai-service tools::tests::provider_event_maps_cover_every_arm
+        PASS [   0.009s] ( 355/1211) ai-service tools::tests::price_diff_labels_use_euro_not_dollar
+        PASS [   0.009s] ( 356/1211) ai-service tools::tests::rbac_denial_names_the_required_roles
+        PASS [   0.009s] ( 357/1211) ai-service tools::tests::recovery_plan_severity_arms
+        PASS [   0.141s] ( 358/1211) ai-service routes::tests::reindex_route_reports_counts_and_fails_on_missing_dir
+        PASS [   0.009s] ( 359/1211) ai-service tools::tests::retry_guidance_covers_every_provider_arm
+        PASS [   0.009s] ( 360/1211) ai-service tools::tests::role_parsing_covers_every_arm
+        FAIL [   0.261s] ( 361/1211) ai-service routes::tests::chat_route_delivers_answer_and_persists_audit
+  stdout ───
+
+    running 1 test
+    test routes::tests::chat_route_delivers_answer_and_persists_audit ... FAILED
+
+    failures:
+
+    failures:
+        routes::tests::chat_route_delivers_answer_and_persists_audit
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 460 filtered out; finished in 0.25s
+
+  stderr ───
+
+    thread 'routes::tests::chat_route_delivers_answer_and_persists_audit' (6147252) panicked at crates/ai-service/src/routes.rs:1877:9:
+    assertion `left == right` failed
+      left: 401
+     right: 200
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.009s] ( 362/1211) ai-service tools::tests::tenant_guard_requires_matching_nonempty_identities
+        PASS [   0.008s] ( 363/1211) ai-service tools::tests::test_ab_guidance
+        PASS [   0.008s] ( 364/1211) ai-service tools::tests::test_blocklist
+        PASS [   0.008s] ( 365/1211) ai-service tools::tests::test_bounce
+        PASS [   0.007s] ( 366/1211) ai-service tools::tests::test_compliance
+        PASS [   0.007s] ( 367/1211) ai-service tools::tests::test_event_map
+        PASS [   0.007s] ( 368/1211) ai-service tools::tests::test_dmarc
+        PASS [   0.007s] ( 369/1211) ai-service tools::tests::test_global_tools_skip_isolation
+        PASS [   0.007s] ( 370/1211) ai-service tools::tests::test_incident_timeline
+        PASS [   0.007s] ( 371/1211) ai-service tools::tests::test_overage_pro_160k
+        PASS [   0.007s] ( 372/1211) ai-service tools::tests::test_overage_starter_210k
+        PASS [   0.008s] ( 373/1211) ai-service tools::tests::test_price_diff
+        PASS [   0.008s] ( 374/1211) ai-service tools::tests::test_payg_50k
+        PASS [   0.008s] ( 375/1211) ai-service tools::tests::test_rbac_blocks_viewer_from_billing
+        PASS [   0.008s] ( 376/1211) ai-service tools::tests::test_rbac_allows_owner_to_billing
+        PASS [   0.008s] ( 377/1211) ai-service tools::tests::test_recovery_plan
+        PASS [   0.008s] ( 378/1211) ai-service tools::tests::test_retry
+        PASS [   0.008s] ( 379/1211) ai-service tools::tests::test_sto
+        PASS [   0.008s] ( 380/1211) ai-service tools::tests::test_tenant_isolation_allows_same_tenant
+        PASS [   0.008s] ( 381/1211) ai-service tools::tests::test_tenant_isolation_blocks_cross_tenant
+        PASS [   0.008s] ( 382/1211) ai-service tools::tests::test_warmup
+        PASS [   0.007s] ( 383/1211) ai-service tools::tests::thousands_formatting_groups_digits
+        PASS [   0.008s] ( 384/1211) ai-service tools::tests::test_webhook_setup
+        PASS [   0.007s] ( 385/1211) ai-service tools::tests::unknown_tools_error_without_executing_anything
+        PASS [   0.007s] ( 386/1211) ai-service tools::tests::webhook_setup_defaults_to_no_requested_events
+        PASS [   0.254s] ( 387/1211) ai-service routes::tests::domain_dns_route_scopes_to_the_forwarded_tenant
+        PASS [   0.008s] ( 388/1211) ai-service training::tests::calculates_real_evaluation_metrics
+        PASS [   0.009s] ( 389/1211) ai-service training::tests::atomic_write_publication_failure_is_reported_and_cleans_up
+        PASS [   0.008s] ( 390/1211) ai-service training::tests::evaluate_rejects_empty_and_mismatched_inputs
+        PASS [   0.008s] ( 391/1211) ai-service training::tests::evaluate_with_no_positive_predictions_degrades_to_zero
+        PASS [   0.007s] ( 392/1211) ai-service training::tests::get_job_reports_unknown_ids
+        PASS [   0.299s] ( 393/1211) ai-service tools::tests::authoritative_dns_reads_owned_domains_only
+        PASS [   0.144s] ( 394/1211) ai-service training::tests::job_index_is_capped_and_running_jobs_are_never_evicted
+        PASS [   0.009s] ( 395/1211) ai-service training::tests::refuses_unconfigured_training_runner
+        PASS [   0.008s] ( 396/1211) ai-service training::tests::runner_must_be_an_absolute_existing_file
+        PASS [   0.484s] ( 397/1211) ai-service training::tests::failing_runner_exit_code_is_tracked
+        PASS [   0.008s] ( 398/1211) ai-service training::tests::start_job_rejects_hostile_identifiers_and_epoch_bounds
+        PASS [   0.008s] ( 399/1211) ai-service training::tests::unexecutable_runner_reports_spawn_failure_and_fails_the_job
+        PASS [   0.007s] ( 400/1211) ai-service training::tests::unwritable_checkpoint_dir_is_a_checkpoint_error
+        PASS [   0.007s] ( 401/1211) ai-service training::tests::unwritable_job_directory_is_a_checkpoint_error
+        PASS [   0.007s] ( 402/1211) ai-service types::tests::model_and_training_records_have_safe_defaults
+        PASS [   0.007s] ( 403/1211) ai-service types::tests::test_ai_error_status_codes
+        PASS [   0.023s] ( 404/1211) ai-service verifier::grounding_tests::absolute_quantifier_claims_need_support
+        PASS [   0.024s] ( 405/1211) ai-service verifier::grounding_tests::account_context_grounded_claims_pass
+        PASS [   0.025s] ( 406/1211) ai-service verifier::grounding_tests::canonical_fact_and_tool_backed_claims_pass_without_citations
+        PASS [   0.023s] ( 407/1211) ai-service verifier::grounding_tests::cited_marker_with_unrelated_chunk_does_not_support_a_claim
+        PASS [   0.024s] ( 408/1211) ai-service verifier::grounding_tests::fabricated_entity_is_rejected_even_with_a_real_plan_name
+        PASS [   0.024s] ( 409/1211) ai-service verifier::grounding_tests::non_factual_sentences_need_no_support
+        PASS [   0.008s] ( 410/1211) ai-service verifier::grounding_tests::numbers_normalize_across_formatting_differences
+        PASS [   0.018s] ( 411/1211) ai-service verifier::grounding_tests::policy_only_verify_does_not_enforce_claim_support
+        PASS [   0.007s] ( 412/1211) ai-service verifier::grounding_tests::sentence_splitting_keeps_decimals_and_hostnames_whole
+        PASS [   0.023s] ( 413/1211) ai-service verifier::grounding_tests::supported_cited_claim_passes
+        PASS [   0.026s] ( 414/1211) ai-service verifier::grounding_tests::unavailable_retrieval_makes_chunk_provenance_impossible
+        PASS [   0.027s] ( 415/1211) ai-service verifier::grounding_tests::unavailable_retrieval_rejects_any_citation_marker
+        PASS [   0.790s] ( 416/1211) ai-service training::tests::metrics_artifact_with_invalid_json_fails_the_job
+        PASS [   0.024s] ( 417/1211) ai-service verifier::grounding_tests::unavailable_retrieval_rejects_unsourced_factual_claims
+        PASS [   0.007s] ( 418/1211) ai-service verifier::knowledge_lockstep::canonical_tables_match_knowledge
+        PASS [   0.011s] ( 419/1211) ai-service verifier::tests::a_word_currency_price_cannot_bypass_the_price_check
+        PASS [   0.025s] ( 420/1211) ai-service verifier::grounding_tests::unsupported_claims_are_reported_alongside_policy_violations
+        PASS [   0.018s] ( 421/1211) ai-service verifier::tests::accepts_direct_dkim_explanation_without_a_static_target
+        PASS [   0.017s] ( 422/1211) ai-service verifier::tests::allowed_hosts_with_fragments_and_plain_http_are_examined_not_flagged
+        PASS [   0.007s] ( 423/1211) ai-service verifier::tests::boundary_helpers_floor_and_ceil_to_char_boundaries
+        PASS [   0.018s] ( 424/1211) ai-service verifier::tests::canonical_overage_rate_is_not_rejected
+        PASS [   0.019s] ( 425/1211) ai-service verifier::tests::cents_are_preserved_not_rounded
+        PASS [   0.019s] ( 426/1211) ai-service verifier::tests::cjk_availability_wording_is_flagged_as_sla_claims
+        PASS [   0.018s] ( 427/1211) ai-service verifier::tests::more_than_three_email_addresses_are_flagged_as_pii
+        PASS [   0.020s] ( 428/1211) ai-service verifier::tests::non_canonical_overage_rate_is_flagged
+        PASS [   0.019s] ( 429/1211) ai-service verifier::tests::non_canonical_round_email_volume_in_plan_context_is_flagged
+        PASS [   0.007s] ( 430/1211) ai-service verifier::tests::normalize_number_handles_versions_suffixes_and_degenerate_tokens
+        PASS [   0.018s] ( 431/1211) ai-service verifier::tests::padded_clause_repetition_is_still_rejected
+        PASS [   0.019s] ( 432/1211) ai-service verifier::tests::parallel_plan_lists_are_not_repetition
+        PASS [   0.017s] ( 433/1211) ai-service verifier::tests::rejects_obsolete_static_dkim_and_spf_guidance
+        PASS [   0.019s] ( 434/1211) ai-service verifier::tests::raw_markup_payloads_are_refused
+        PASS [   0.018s] ( 435/1211) ai-service verifier::tests::status_host_taught_by_knowledge_verifies
+        PASS [   0.018s] ( 436/1211) ai-service verifier::tests::repeated_phrases_are_flagged_with_a_rephrase_hint
+        PASS [   0.018s] ( 437/1211) ai-service verifier::tests::test_apexmail_domains_allowed
+        PASS [   0.019s] ( 438/1211) ai-service verifier::tests::test_clean_response_passes
+        PASS [   0.017s] ( 439/1211) ai-service verifier::tests::test_competitor_comparison_is_allowed
+        PASS [   0.018s] ( 440/1211) ai-service verifier::tests::test_competitor_bashing_detected
+        PASS [   0.018s] ( 441/1211) ai-service verifier::tests::test_forbidden_domain_detected
+        PASS [   0.019s] ( 442/1211) ai-service verifier::tests::test_forbidden_price_detected
+        PASS [   0.019s] ( 443/1211) ai-service verifier::tests::test_prompt_injection_blocked
+        PASS [   0.018s] ( 444/1211) ai-service verifier::tests::test_refusal_is_not_flagged
+        PASS [   0.019s] ( 445/1211) ai-service verifier::tests::test_sla_claim_detected
+        PASS [   0.021s] ( 446/1211) ai-service verifier::tests::test_too_long_response_carries_summarize_hint
+        PASS [   0.018s] ( 447/1211) ai-service verifier::tests::test_too_short_response
+        PASS [   0.019s] ( 448/1211) ai-service verifier::tests::tool_computed_total_passes_when_allowlisted
+        PASS [   1.078s] ( 449/1211) ai-service training::tests::metrics_artifact_with_partial_values_completes
+        PASS [   0.020s] ( 450/1211) ai-service verifier::tests::verify_flags_non_canonical_price_in_multibyte_text_without_panicking
+        PASS [   0.020s] ( 451/1211) ai-service verifier::tests::verify_survives_cjk_text_around_internal_keywords
+        PASS [   0.008s] ( 452/1211) ai-service verifier::tests::violation_display_is_actionable_for_every_variant
+        PASS [   0.019s] ( 453/1211) ai-service verifier::tests::verify_survives_sla_percentage_in_multibyte_text
+        PASS [   0.022s] ( 454/1211) ai-service verifier::tests::verify_survives_emoji_and_euro_amounts_around_prices
+        PASS [   0.008s] ( 455/1211) ai-service::eval_corpus_drift objection_corpus_covers_every_class
+        PASS [   0.008s] ( 456/1211) ai-service::eval_corpus_drift chat_corpus_covers_the_canonical_plan_facts
+        PASS [   0.021s] ( 457/1211) ai-service verifier::tests::wrong_monthly_price_is_flagged
+        PASS [   0.007s] ( 458/1211) ai-service::eval_corpus_drift reply_corpus_covers_the_canonical_taxonomy
+        PASS [   0.018s] ( 459/1211) worker-processors analytics::processor::adversarial_db_tests::aggregation_buffer_growth_is_eviction_free_at_the_cap
+        PASS [   1.407s] ( 460/1211) ai-service training::tests::metrics_artifact_without_any_values_fails_the_job
+        PASS [   0.441s] ( 461/1211) worker-processors analytics::processor::adversarial_db_tests::event_buffer_cap_sheds_oldest_after_a_failed_flush_without_losing_the_newest
+        PASS [   2.015s] ( 462/1211) ai-service retrieval::tests::search_reports_unavailable_on_database_failure
+        PASS [   1.548s] ( 463/1211) ai-service training::tests::runner_with_metrics_artifact_completes_the_job
+        PASS [   1.764s] ( 464/1211) ai-service training::tests::runner_without_metrics_artifact_fails_the_job
+        PASS [   2.034s] ( 465/1211) worker-processors analytics::processor::adversarial_db_tests::analytics_poll_loop_survives_poll_errors_until_shutdown
+        PASS [   2.314s] ( 466/1211) worker-processors analytics::processor::adversarial_db_tests::fetch_events_claims_pending_and_reclaims_stale_processing_only
+        PASS [   1.989s] ( 467/1211) worker-processors analytics::processor::adversarial_db_tests::hourly_rollup_is_additive_across_runs
+        PASS [   2.219s] ( 468/1211) worker-processors analytics::processor::adversarial_db_tests::flush_loop_survives_database_outage_until_shutdown
+        PASS [   2.227s] ( 469/1211) worker-processors analytics::processor::adversarial_db_tests::flush_writes_additive_hourly_aggregates_across_all_key_shapes
+        PASS [   2.831s] ( 470/1211) worker-processors analytics::processor::adversarial_db_tests::analytics_poll_loop_breaks_on_shutdown_when_idle
+        PASS [   2.538s] ( 471/1211) worker-processors analytics::processor::adversarial_db_tests::failed_aggregation_write_restores_buffers_and_keeps_events_unprocessed
+        PASS [   0.019s] ( 472/1211) worker-processors analytics::processor::adversarial_db_tests::update_aggregation_builds_tenant_domain_campaign_buckets
+        PASS [   1.984s] ( 473/1211) worker-processors analytics::processor::adversarial_db_tests::update_aggregation_falls_back_for_uncanonical_hours
+        PASS [   2.009s] ( 474/1211) worker-processors analytics::processor::adversarial_db_tests::update_aggregation_buckets_the_event_to_its_hour
+        PASS [   2.831s] ( 475/1211) worker-processors analytics::processor::adversarial_db_tests::mark_processing_is_exact_and_empty_safe
+        PASS [   2.114s] ( 476/1211) worker-processors analytics::processor::adversarial_db_tests::redis_outage_does_not_block_durable_aggregation
+        PASS [   2.100s] ( 477/1211) worker-processors analytics::processor::adversarial_db_tests::stop_flushes_buffers_and_repeated_flush_is_a_noop
+        PASS [   2.149s] ( 478/1211) worker-processors analytics::processor::adversarial_db_tests::start_ingests_queued_events_and_stop_drains_the_pipeline
+        PASS [   8.014s] ( 479/1211) ai-service routes::tests::docs_pool_failure_degrades_the_service_without_panicking
+        PASS [   0.011s] ( 480/1211) worker-processors analytics::processor::tests::analytics_hourly_upserts_are_additive_and_campaign_consistent
+        PASS [   1.884s] ( 481/1211) worker-processors analytics::processor::residual_arms::restore_buffers_restarts_the_age_clock_from_empty
+        PASS [   0.011s] ( 482/1211) worker-processors analytics::processor::tests::remove_aggregation_is_exact_and_tolerates_missing_buckets
+        PASS [   0.008s] ( 483/1211) worker-processors analytics::processor::tests::test_aggregated_stats_increment
+        PASS [   0.023s] ( 484/1211) worker-processors analytics::processor::tests::update_aggregation_grows_without_inline_eviction
+        PASS [   1.942s] ( 485/1211) worker-processors analytics::processor::residual_arms::mark_processed_failure_degrades_without_failing_the_flush
+        PASS [   1.988s] ( 486/1211) worker-processors analytics::processor::residual_arms::age_based_flush_pushes_sub_minimum_batches
+        PASS [   0.009s] ( 487/1211) worker-processors analytics::types::tests::aggregation_increments_every_wire_event_type_once
+        PASS [   1.892s] ( 488/1211) worker-processors analytics::processor::residual_arms::stop_flush_failure_with_buffered_events_restores_and_reports
+        PASS [   0.009s] ( 489/1211) worker-processors analytics::types::tests::decrement_inverts_increment_and_clamps_at_zero
+        PASS [   0.007s] ( 490/1211) worker-processors analytics::types::tests::event_type_round_trips_every_variant_and_rejects_garbage
+        PASS [   0.008s] ( 491/1211) worker-processors analytics::types::tests::merge_from_adds_every_counter
+        PASS [   0.008s] ( 492/1211) worker-processors automations::tests::absent_or_empty_conditions_are_met
+        PASS [   0.008s] ( 493/1211) worker-processors automations::tests::action_records_carry_the_classification
+        PASS [   0.007s] ( 494/1211) worker-processors automations::tests::action_type_reads_only_a_non_empty_string
+        PASS [   2.010s] ( 495/1211) worker-processors analytics::processor::residual_arms::claim_reset_failure_is_logged_and_counted
+        PASS [   0.008s] ( 496/1211) worker-processors automations::tests::any_and_all_group_semantics
+        PASS [   0.008s] ( 497/1211) worker-processors automations::tests::backoff_grows_quadratically_and_is_capped
+        PASS [   2.075s] ( 498/1211) worker-processors analytics::processor::residual_arms::hourly_rollup_error_arm_is_logged_and_the_loop_stops
+        PASS [   0.010s] ( 499/1211) worker-processors automations::tests::condition_leaves_cover_every_operator
+        PASS [   0.009s] ( 500/1211) worker-processors automations::tests::condition_operators_cover_every_scalar_and_array_path
+        PASS [   0.010s] ( 501/1211) worker-processors automations::tests::event_kind_names_are_canonical
+        PASS [   0.009s] ( 502/1211) worker-processors automations::tests::event_kind_wire_names_parse_both_spellings_and_reject_unknown
+        PASS [   0.011s] ( 503/1211) worker-processors automations::tests::fenced_node_skips_the_tick_without_claiming
+        PASS [   0.799s] ( 504/1211) worker-processors analytics::processor::tests::cap_hit_with_failing_flush_sheds_events_and_their_counts_together
+        PASS [   0.009s] ( 505/1211) worker-processors automations::tests::malformed_condition_shapes_are_unsupported_never_silently_true
+        PASS [   1.901s] ( 506/1211) worker-processors automations::tests::an_unverified_sender_domain_is_a_recorded_skip
+        PASS [   0.009s] ( 507/1211) worker-processors automations::tests::only_message_received_is_transactional
+        PASS [   1.936s] ( 508/1211) worker-processors automations::tests::a_spent_attempt_budget_makes_the_resume_terminal
+        PASS [   0.009s] ( 509/1211) worker-processors automations::tests::resolve_trigger_accepts_underscore_aliases_and_no_filters
+        PASS [   1.937s] ( 510/1211) worker-processors automations::tests::admission_outages_are_retryable_and_quota_refusals_defer
+        PASS [   0.008s] ( 511/1211) worker-processors automations::tests::resolve_trigger_reads_the_documented_shape
+        PASS [   0.009s] ( 512/1211) worker-processors automations::tests::resolve_trigger_reports_every_unsupported_shape_with_a_reason
+        PASS [   0.008s] ( 513/1211) worker-processors automations::tests::sender_domain_is_normalized_and_refuses_non_addresses
+        PASS [   1.836s] ( 514/1211) worker-processors automations::tests::inbound_reply_trigger_sends_transactional_to_the_sender
+        PASS [   1.998s] ( 515/1211) worker-processors automations::tests::automation_tick_sends_marketing_once_and_replay_never_resends
+        PASS [   0.009s] ( 516/1211) worker-processors automations::tests::template_rendering_escapes_html_and_leaves_unknown_placeholders
+        PASS [   2.006s] ( 517/1211) worker-processors automations::tests::concurrent_ticks_claim_each_event_once
+        PASS [   0.008s] ( 518/1211) worker-processors automations::tests::tick_report_merge_accumulates_every_counter
+        PASS [   0.008s] ( 519/1211) worker-processors automations::tests::trigger_filters_distinguish_the_tag_added_family
+        PASS [   1.462s] ( 520/1211) worker-processors automations::tests::malformed_rules_and_action_refusals_never_execute
+        PASS [   0.212s] ( 521/1211) worker-processors automations::tests::unfenced_node_attempts_the_claim_against_the_database
+        PASS [   0.011s] ( 522/1211) worker-processors automations::tests::unreadable_fence_authority_skips_the_tick
+        PASS [   0.009s] ( 523/1211) worker-processors automations::tests::unsupported_operators_and_missing_values_are_reported
+        PASS [   1.963s] ( 524/1211) worker-processors automations::tests::tag_list_and_webhook_actions_record_their_effects
+        PASS [   1.677s] ( 525/1211) worker-processors automations::tests::unsupported_trigger_and_action_kinds_are_recorded
+        PASS [   1.887s] ( 526/1211) worker-processors automations::tests::unknown_events_exhausted_budgets_and_pruning_fail_closed
+        PASS [   2.024s] ( 527/1211) worker-processors automations::tests::tag_list_and_webhook_actions_apply_their_effects
+        PASS [   2.042s] ( 528/1211) worker-processors automations::tests::send_action_skip_ladder_records_every_reason
+        PASS [   1.975s] ( 529/1211) worker-processors automations::tests::the_action_ladder_resumes_and_folds_previous_results
+        PASS [   2.095s] ( 530/1211) worker-processors automations::tests::quota_refusal_defers_then_resumes_and_suppression_is_terminal
+        PASS [   0.008s] ( 531/1211) worker-processors campaigns::tests::contact_name_strips_local_part_punctuation
+        PASS [   1.990s] ( 532/1211) worker-processors campaigns::tests::missing_sender_or_template_fails_rows_honestly
+        PASS [   2.075s] ( 533/1211) worker-processors campaigns::tests::ab_winner_is_refused_below_the_minimum_sample
+        PASS [   2.087s] ( 534/1211) worker-processors campaigns::tests::claims_are_tenant_scoped_and_due_order_holds
+        PASS [   0.010s] ( 535/1211) worker-processors campaigns::tests::render_escapes_html_and_leaves_unknown_placeholders
+        PASS [   2.371s] ( 536/1211) worker-processors campaigns::tests::ab_holdout_receives_nothing_until_a_winner_is_declared
+        PASS [   2.584s] ( 537/1211) worker-processors campaigns::tests::ab_winner_is_declared_above_the_sample_with_the_documented_rule
+        PASS [   2.572s] ( 538/1211) worker-processors campaigns::tests::ab_winner_is_refused_without_a_significant_leader
+        PASS [   0.009s] ( 539/1211) worker-processors campaigns::tests::truncate_error_respects_char_boundaries
+        PASS [   0.009s] ( 540/1211) worker-processors campaigns::tests::uuid_array_tolerates_junk_elements_and_non_arrays
+        PASS [   0.008s] ( 541/1211) worker-processors common::audit::tests::head_advance_sql_never_scans_audit_logs
+        PASS [   0.049s] ( 542/1211) worker-processors common::backpressure::overload_tests::backlog_over_threshold_sheds_until_the_cooldown_elapses
+        PASS [   0.010s] ( 543/1211) worker-processors common::backpressure::overload_tests::blocked_acquire_is_admitted_when_capacity_frees
+        PASS [   0.008s] ( 544/1211) worker-processors common::backpressure::overload_tests::saturated_acquire_is_shed_and_counted
+        PASS [   0.007s] ( 545/1211) worker-processors common::backpressure::overload_tests::zero_capacity_never_divides_by_zero
+        PASS [   0.008s] ( 546/1211) worker-processors common::backpressure::tests::test_backpressure_acquire_release
+        PASS [   0.008s] ( 547/1211) worker-processors common::backpressure::tests::test_backpressure_default_config
+        PASS [   0.510s] ( 548/1211) worker-processors common::backpressure::tests::test_backpressure_exhaustion
+        PASS [   0.009s] ( 549/1211) worker-processors common::backpressure::tests::test_backpressure_initial_state
+        PASS [   0.161s] ( 550/1211) worker-processors common::backpressure::tests::test_backpressure_load_shedding
+        PASS [   0.009s] ( 551/1211) worker-processors common::circuit_breaker::lifecycle_tests::default_breaker_starts_closed_and_permits_calls
+        PASS [   0.008s] ( 552/1211) worker-processors common::circuit_breaker::lifecycle_tests::reset_closes_a_tripped_breaker
+        PASS [   0.065s] ( 553/1211) worker-processors common::circuit_breaker::lifecycle_tests::success_while_open_is_ignored_and_a_probe_resets_after_the_window
+        PASS [   3.496s] ( 554/1211) worker-processors campaigns::tests::ab_split_is_deterministic_per_recipient_and_meets_the_configured_bound
+        PASS [   0.008s] ( 555/1211) worker-processors common::circuit_breaker::tests::test_circuit_opens_after_threshold
+        PASS [   0.025s] ( 556/1211) worker-processors common::circuit_breaker::tests::test_circuit_closes_after_successes
+        PASS [   0.007s] ( 557/1211) worker-processors common::config::default_tests::analytics_defaults_are_documented_values
+        PASS [   0.007s] ( 558/1211) worker-processors common::config::default_tests::transport_type_from_env_selects_smtp_only_on_smtp
+        PASS [   0.007s] ( 559/1211) worker-processors common::config::dlp_gate_tests::dlp_gate_default_reads_env
+        PASS [   0.007s] ( 560/1211) worker-processors common::config::dlp_gate_tests::dlp_gate_defaults_off_and_parses_the_env_switch
+        PASS [   0.007s] ( 561/1211) worker-processors common::config::tests::send_rate_per_second_plumbs_both_transport_configs
+        PASS [   0.007s] ( 562/1211) worker-processors common::config::tests::tracking_config_default_reads_env
+        PASS [   0.007s] ( 563/1211) worker-processors common::config::tests::tracking_config_disabled_by_default_and_rejects_short_secrets
+        PASS [   0.007s] ( 564/1211) worker-processors common::config::tests::tracking_config_parses_enabled_and_secret_from_env
+        PASS [   1.154s] ( 565/1211) worker-processors common::graduation::db_tests::graduation_audit_row_advances_the_canonical_chain_head
+        PASS [   1.163s] ( 566/1211) worker-processors common::graduation::db_tests::graduation_is_exact_idempotent_and_audited
+        PASS [   0.009s] ( 567/1211) worker-processors common::graduation::tests::graduation_sql_pins_term_and_state
+        PASS [   2.627s] ( 568/1211) worker-processors campaigns::tests::quota_deferred_recipients_stay_queued_and_batch_continues
+        PASS [   0.010s] ( 569/1211) worker-processors common::pool::tests::db_pool_rejects_unparseable_urls_without_connecting
+        PASS [   0.036s] ( 570/1211) worker-processors common::pool::tests::db_pool_connects_to_the_configured_database
+        PASS [   0.009s] ( 571/1211) worker-processors common::pool::tests::redis_pool_builds_lazily_from_a_url
+        PASS [   2.177s] ( 572/1211) worker-processors campaigns::tests::suppression_is_terminal_and_yields_partial
+        PASS [   0.022s] ( 573/1211) worker-processors email::dlp::tests::attachment_content_and_filename_are_scanned
+        PASS [   0.020s] ( 574/1211) worker-processors email::dlp::tests::clean_copy_scans_allow
+        PASS [   2.725s] ( 575/1211) worker-processors campaigns::tests::pause_stops_the_drain_and_resume_finishes_it
+        PASS [   0.019s] ( 576/1211) worker-processors email::dlp::tests::combine_takes_the_worst_channel
+        PASS [   0.019s] ( 577/1211) worker-processors email::dlp::tests::default_scanner_is_the_production_scanner
+        PASS [   0.018s] ( 578/1211) worker-processors email::dlp::tests::entropy_and_policy_findings_slug_to_rule_classes
+        PASS [   2.654s] ( 579/1211) worker-processors campaigns::tests::resend_requeues_only_failed_rows_and_jobs_complete
+        PASS [   0.010s] ( 580/1211) worker-processors email::dlp::tests::html_to_text_strips_tags_and_decodes_entities
+        PASS [   0.011s] ( 581/1211) worker-processors email::dlp::tests::recipient_domain_extraction_is_safe
+        PASS [   0.020s] ( 582/1211) worker-processors email::dlp::tests::html_hidden_card_is_detected_after_stripping
+        PASS [   0.010s] ( 583/1211) worker-processors email::dlp::tests::rule_classes_slug_every_pii_type
+        PASS [   0.020s] ( 584/1211) worker-processors email::dlp::tests::low_severity_finding_maps_to_audit_not_enforcement
+        PASS [   0.012s] ( 585/1211) worker-processors email::outbound_mta::tests::a_failing_submitter_surfaces_as_transport_errors
+        PASS [   0.012s] ( 586/1211) worker-processors email::outbound_mta::tests::acceptance_verification_covers_every_rejection_shape
+        PASS [   0.025s] ( 587/1211) worker-processors email::dlp::tests::subject_is_scanned
+        PASS [   0.016s] ( 588/1211) worker-processors email::outbound_mta::tests::build_request_carries_the_verp_identity_when_well_formed
+        PASS [   0.015s] ( 589/1211) worker-processors email::outbound_mta::tests::build_request_refuses_a_missing_send_unit
+        PASS [   0.016s] ( 590/1211) worker-processors email::outbound_mta::tests::dedicated_route_verifies_and_consumes_warmup_capacity
+        PASS [   0.015s] ( 591/1211) worker-processors email::outbound_mta::tests::mismatched_actual_source_ip_is_a_hard_failure_and_releases_capacity
+        PASS [   0.015s] ( 592/1211) worker-processors email::outbound_mta::tests::missing_source_ip_report_never_verifies
+        PASS [   0.015s] ( 593/1211) worker-processors email::outbound_mta::tests::relay_errors_map_onto_the_processor_taxonomy
+        PASS [   0.019s] ( 594/1211) worker-processors email::outbound_mta::tests::replayed_submission_returns_the_stored_acceptance_and_delivers_once
+        PASS [   0.020s] ( 595/1211) worker-processors email::outbound_mta::tests::retry_after_a_transient_failure_defers_and_never_resubmits_rebuilt_bytes
+        PASS [   0.020s] ( 596/1211) worker-processors email::outbound_mta::tests::shared_route_never_reaches_the_outbound_mta
+        PASS [   0.023s] ( 597/1211) worker-processors email::outbound_mta::tests::stored_terminal_failure_maps_to_a_5xx_refusal_without_resubmitting
+        PASS [   0.020s] ( 598/1211) worker-processors email::outbound_mta::tests::submission_carries_the_shared_send_unit_identity
+        PASS [   2.513s] ( 599/1211) worker-processors campaigns::tests::scheduled_campaign_drains_to_sent_with_queued_messages
+        PASS [   0.022s] ( 600/1211) worker-processors email::outbound_mta::tests::unverifiable_dedicated_transport_still_defers_before_data
+        PASS [   0.019s] ( 601/1211) worker-processors email::processor::acceptance_ledger_db_tests::acceptance_doubles_contract_is_exercised
+        PASS [   2.297s] ( 602/1211) worker-processors email::outbound_mta::tests::dkim_signing_happens_before_submission
+        PASS [   3.552s] ( 603/1211) worker-processors email::processor::acceptance_ledger_db_tests::dedicated_route_without_dedicated_transport_inserts_no_acceptance_row
+        PASS [   3.569s] ( 604/1211) worker-processors email::processor::acceptance_ledger_db_tests::duplicate_reserve_never_submits_twice
+        PASS [   3.560s] ( 605/1211) worker-processors email::processor::acceptance_ledger_db_tests::failed_submission_allows_retry_accepted_blocks_it
+        PASS [   1.341s] ( 606/1211) worker-processors email::processor::acceptance_ledger_db_tests::sales_send_unit_is_the_queue_idempotency_key
+        PASS [   3.612s] ( 607/1211) worker-processors email::processor::acceptance_ledger_db_tests::crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once
+        PASS [   3.833s] ( 608/1211) worker-processors common::graduation::db_tests::graduation_is_the_genesis_link_of_an_empty_audit_chain
+        PASS [   0.010s] ( 609/1211) worker-processors email::processor::end_to_end_db_tests::dedicated_ip_decoding_drops_corrupt_entries
+        PASS [   0.009s] ( 610/1211) worker-processors email::processor::end_to_end_db_tests::dkim_config_refuses_incomplete_domain_material
+        PASS [   0.009s] ( 611/1211) worker-processors email::processor::end_to_end_db_tests::e2e_doubles_contract_is_exercised
+        PASS [   0.012s] ( 612/1211) worker-processors email::processor::end_to_end_db_tests::error_rate_breaker_latches_and_recovers
+        PASS [   0.010s] ( 613/1211) worker-processors email::processor::end_to_end_db_tests::expand_rows_stops_at_the_cap_and_warns
+        PASS [   0.009s] ( 614/1211) worker-processors email::processor::end_to_end_db_tests::fenced_out_only_matches_zero_rows
+        PASS [   4.163s] ( 615/1211) worker-processors email::outbound_mta::residual_arms::production_relay_reports_readiness_and_transport_identity
+        PASS [   2.495s] ( 616/1211) worker-processors email::processor::acceptance_ledger_db_tests::unverifiable_dedicated_route_defers_before_the_ledger
+        PASS [   0.012s] ( 617/1211) worker-processors email::processor::end_to_end_db_tests::logical_message_id_uses_the_sender_domain_and_refuses_degenerate_ids
+        PASS [   0.010s] ( 618/1211) worker-processors email::processor::end_to_end_db_tests::overlay_status_counts_zero_fills_and_appends_unknowns
+        PASS [   2.674s] ( 619/1211) worker-processors email::processor::end_to_end_db_tests::circuit_open_defers_row_without_submission
+        PASS [   2.767s] ( 620/1211) worker-processors email::processor::end_to_end_db_tests::hard_bounce_suppresses_only_the_proven_invalid_recipient
+        PASS [   0.012s] ( 621/1211) worker-processors email::processor::end_to_end_db_tests::recipient_provider_normalization_rejects_garbage
+        PASS [   2.936s] ( 622/1211) worker-processors email::processor::end_to_end_db_tests::crash_after_external_acceptance_completes_without_a_second_send
+        PASS [   0.010s] ( 623/1211) worker-processors email::processor::end_to_end_db_tests::route_and_transport_labels_are_total
+        PASS [   2.451s] ( 624/1211) worker-processors email::processor::end_to_end_db_tests::in_flight_acceptance_reservation_defers_until_the_lease_expires
+        PASS [   2.994s] ( 625/1211) worker-processors email::processor::end_to_end_db_tests::counters_write_exactly_once_after_the_result_commits
+        PASS [   0.010s] ( 626/1211) worker-processors email::processor::end_to_end_db_tests::send_failure_classification_covers_structured_and_legacy_signals
+        PASS [   2.980s] ( 627/1211) worker-processors email::processor::end_to_end_db_tests::crash_between_claim_and_send_recovers_exactly_once
+        PASS [   2.149s] ( 628/1211) worker-processors email::processor::end_to_end_db_tests::sender_domain_mismatch_is_a_permanent_job_error
+        PASS [   2.208s] ( 629/1211) worker-processors email::processor::end_to_end_db_tests::row_without_an_authorized_domain_is_permanently_rejected
+        PASS [   2.260s] ( 630/1211) worker-processors email::processor::end_to_end_db_tests::replayed_send_is_completed_without_a_second_submission
+        PASS [   0.011s] ( 631/1211) worker-processors email::processor::end_to_end_db_tests::split_mime_headers_prefers_structured_forms_and_parses_legacy
+        PASS [   2.530s] ( 632/1211) worker-processors email::processor::end_to_end_db_tests::policy_refusal_never_suppresses_the_recipient
+        PASS [   2.290s] ( 633/1211) worker-processors email::processor::end_to_end_db_tests::send_admission_exhaustion_defers_the_second_send
+        PASS [   3.163s] ( 634/1211) worker-processors email::processor::end_to_end_db_tests::perf_first_response_priority_lane_clears_a_seeded_burst
+        PASS [   2.210s] ( 635/1211) worker-processors email::processor::end_to_end_db_tests::the_priority_lane_claims_first_response_mail_before_the_backlog
+        PASS [   1.836s] ( 636/1211) worker-processors email::processor::end_to_end_db_tests::unconfigured_transport_defers_before_data
+        PASS [   2.288s] ( 637/1211) worker-processors email::processor::end_to_end_db_tests::suspended_tenant_defers_before_any_effect
+        PASS [   2.362s] ( 638/1211) worker-processors email::processor::end_to_end_db_tests::suppressed_recipient_is_never_submitted
+        PASS [   2.410s] ( 639/1211) worker-processors email::processor::end_to_end_db_tests::soft_bounce_requeues_with_backoff_and_advances_the_attempt
+        PASS [   2.451s] ( 640/1211) worker-processors email::processor::end_to_end_db_tests::successful_dispatch_transitions_every_durable_surface_once
+        PASS [   2.108s] ( 641/1211) worker-processors email::processor::orchestration_tests::absurd_visibility_timeout_clamps_instead_of_panicking
+        PASS [   2.091s] ( 642/1211) worker-processors email::processor::orchestration_tests::acceptance_ledger_unavailable_defers_without_submitting
+        PASS [   0.013s] ( 643/1211) worker-processors email::processor::orchestration_tests::background_loops_spawn_exactly_once_across_supervised_restarts
+        PASS [   2.211s] ( 644/1211) worker-processors email::processor::orchestration_tests::absurd_retry_delay_clamps_instead_of_panicking
+        PASS [   2.282s] ( 645/1211) worker-processors email::processor::end_to_end_db_tests::vanished_domain_row_is_a_permanent_job_error
+        PASS [   2.368s] ( 646/1211) worker-processors email::processor::end_to_end_db_tests::unknown_error_at_the_ceiling_moves_the_row_to_the_dlq
+        PASS [   1.711s] ( 647/1211) worker-processors email::processor::orchestration_tests::database_outage_degrades_every_best_effort_surface
+        PASS [   1.945s] ( 648/1211) worker-processors email::processor::orchestration_tests::consent_with_a_missing_recipient_identity_defers_dispatch
+        PASS [   1.901s] ( 649/1211) worker-processors email::processor::orchestration_tests::dedicated_route_with_dkim_disabled_defers
+        PASS [   4.253s] ( 650/1211) worker-processors email::processor::end_to_end_db_tests::warmup_reservation_cap_and_store_outage_fail_closed
+        PASS [   3.179s] ( 651/1211) worker-processors email::processor::orchestration_tests::accepted_send_with_a_route_contract_violation_is_recorded_not_retried
+        PASS [   0.013s] ( 652/1211) worker-processors email::processor::orchestration_tests::dlp_gate_is_the_single_presend_enforcement_point
+        PASS [   2.283s] ( 653/1211) worker-processors email::processor::orchestration_tests::dlp_audit_append_advances_the_canonical_chain_head_and_re_derives
+        PASS [   2.531s] ( 654/1211) worker-processors email::processor::orchestration_tests::dedicated_route_without_a_relay_defers_unconfigured
+        PASS [  11.117s] ( 655/1211) worker-processors email::processor::end_to_end_db_tests::ses_error_outcomes_map_to_bounce_classes
+        PASS [   1.318s] ( 656/1211) worker-processors email::processor::orchestration_tests::dlp_high_severity_refusal_bounces_without_sending
+        PASS [   2.463s] ( 657/1211) worker-processors email::processor::orchestration_tests::dlp_disabled_keeps_byte_identical_delivery
+        PASS [   2.443s] ( 658/1211) worker-processors email::processor::orchestration_tests::dlp_engine_error_fails_open_and_delivers
+        PASS [   0.011s] ( 659/1211) worker-processors email::processor::orchestration_tests::orch_double_contract_is_exercised
+        PASS [  32.125s] ( 660/1211) worker-processors analytics::processor::adversarial_db_tests::stop_reports_a_failing_final_flush_and_waits_for_active_jobs
+        PASS [   2.012s] ( 661/1211) worker-processors email::processor::orchestration_tests::idle_loop_breaks_promptly_on_shutdown
+        PASS [   2.115s] ( 662/1211) worker-processors email::processor::orchestration_tests::relay_delivery_pending_defers_instead_of_dead_lettering
+        PASS [   2.404s] ( 663/1211) worker-processors email::processor::orchestration_tests::dlp_medium_severity_holds_the_message_in_queue
+        PASS [   2.405s] ( 664/1211) worker-processors email::processor::orchestration_tests::error_cooldown_pauses_polling_until_it_elapses
+        PASS [   2.581s] ( 665/1211) worker-processors email::processor::orchestration_tests::dlp_low_severity_and_clean_deliver_byte_identical
+        PASS [   2.393s] ( 666/1211) worker-processors email::processor::orchestration_tests::one_bad_recipient_never_blocks_the_others
+        PASS [   7.554s] ( 667/1211) worker-processors email::processor::orchestration_tests::backpressured_loop_sheds_then_resumes_and_stops_promptly
+        PASS [   1.807s] ( 668/1211) worker-processors email::processor::orchestration_tests::start_fails_when_the_transport_cannot_verify
+        PASS [   1.698s] ( 669/1211) worker-processors email::processor::orchestration_tests::start_refuses_smtp_transport_without_dkim
+        PASS [   2.587s] ( 670/1211) worker-processors email::processor::orchestration_tests::sent_reputation_survives_a_redis_outage
+        PASS [   1.894s] ( 671/1211) worker-processors email::processor::orchestration_tests::suspended_tenant_requeues_with_the_gate_reason
+        PASS [   2.225s] ( 672/1211) worker-processors email::processor::orchestration_tests::stale_lease_tokens_fence_every_durable_write
+        PASS [   2.354s] ( 673/1211) worker-processors email::processor::orchestration_tests::soft_bounce_at_the_retry_ceiling_escalates_without_suppressing
+        PASS [   2.156s] ( 674/1211) worker-processors email::processor::orchestration_tests::start_serves_the_queue_and_runs_the_background_sweeps
+        PASS [   2.170s] ( 675/1211) worker-processors email::processor::residual_arms_db_tests::acceptance_record_missed_after_lease_loss_is_loud
+        PASS [   1.906s] ( 676/1211) worker-processors email::processor::residual_arms_db_tests::carried_recipient_provider_arms
+        PASS [   1.772s] ( 677/1211) worker-processors email::processor::residual_arms_db_tests::db_sent_reputation_failure_degrades
+        PASS [   0.010s] ( 678/1211) worker-processors email::processor::residual_arms_db_tests::dkim_config_refuses_an_invalid_private_key
+        PASS [   0.012s] ( 679/1211) worker-processors email::processor::residual_arms_db_tests::expansion_warns_and_truncates_beyond_the_slot_cap
+        PASS [   1.966s] ( 680/1211) worker-processors email::processor::residual_arms_db_tests::batch_suppression_check_arms
+        PASS [   0.010s] ( 681/1211) worker-processors email::processor::residual_arms_db_tests::gmail_annotations_absent_or_htmlless_is_untouched
+        PASS [   0.009s] ( 682/1211) worker-processors email::processor::residual_arms_db_tests::gmail_annotations_head_detection_variants
+        PASS [   0.010s] ( 683/1211) worker-processors email::processor::residual_arms_db_tests::gmail_annotations_invalid_config_is_fail_open
+        PASS [   0.010s] ( 684/1211) worker-processors email::processor::residual_arms_db_tests::gmail_annotations_metadata_injects_json_ld_into_head
+        PASS [   3.293s] ( 685/1211) worker-processors email::processor::orchestration_tests::tenant_identity_gates_refuse_without_sending
+        PASS [   2.380s] ( 686/1211) worker-processors email::processor::orchestration_tests::unverified_shared_domain_defers_at_the_readiness_gate
+        PASS [   2.279s] ( 687/1211) worker-processors email::processor::residual_arms_db_tests::accepted_send_with_a_failing_ledger_write_is_loud
+        PASS [   3.541s] ( 688/1211) worker-processors email::processor::orchestration_tests::warmup_disabled_keeps_the_dedicated_route_without_consuming_quota
+        PASS [   2.459s] ( 689/1211) worker-processors email::processor::residual_arms_db_tests::permanent_failure_with_zero_rows_writes_no_dlq
+        PASS [   2.690s] ( 690/1211) worker-processors email::processor::residual_arms_db_tests::handle_success_without_envelope_domain_skips_reputation
+        PASS [   2.849s] ( 691/1211) worker-processors email::processor::residual_arms_db_tests::dispatch_consent_suppresses_category_opt_outs
+        PASS [   2.820s] ( 692/1211) worker-processors email::processor::residual_arms_db_tests::hard_bounce_event_failure_does_not_skip_the_sales_feedback_ledger
+        PASS [   2.912s] ( 693/1211) worker-processors email::processor::residual_arms_db_tests::fetch_outage_hits_the_error_arm_and_recovers
+        PASS [   3.031s] ( 694/1211) worker-processors email::processor::residual_arms_db_tests::depth_probe_failure_keeps_the_last_sample_and_fetch_outages_recover
+        PASS [   1.762s] ( 695/1211) worker-processors email::processor::residual_arms_db_tests::poll_loop_dead_letters_permanent_job_errors_and_continues
+        PASS [   0.016s] ( 696/1211) worker-processors email::processor::residual_arms_db_tests::redis_ready_exhaustion_kills_the_child
+        PASS [   2.381s] ( 697/1211) worker-processors email::processor::residual_arms_db_tests::prepare_email_refuses_dedicated_routes_without_dkim
+        PASS [   2.475s] ( 698/1211) worker-processors email::processor::residual_arms_db_tests::prepare_email_refuses_an_invalid_sender
+        PASS [   0.010s] ( 699/1211) worker-processors email::processor::residual_arms_db_tests::residual_transport_double_contract_is_exercised
+        PASS [   2.340s] ( 700/1211) worker-processors email::processor::residual_arms_db_tests::provider_acceptance_records_neither_outcome_nor_ledger_row
+        PASS [   2.319s] ( 701/1211) worker-processors email::processor::residual_arms_db_tests::queue_depth_metrics_are_time_gated
+        PASS [   2.319s] ( 702/1211) worker-processors email::processor::residual_arms_db_tests::reconcile_stuck_parents_sweeps_and_reports
+        PASS [   2.360s] ( 703/1211) worker-processors email::processor::residual_arms_db_tests::refused_send_with_a_failing_ledger_write_still_retries
+        PASS [   2.926s] ( 704/1211) worker-processors email::processor::residual_arms_db_tests::poll_loop_suppresses_and_survives_suppression_write_failures
+        PASS [   5.617s] ( 705/1211) worker-processors email::processor::residual_arms_db_tests::message_write_outages_degrade_every_best_effort_surface
+        PASS [   2.253s] ( 706/1211) worker-processors email::processor::residual_arms_db_tests::release_rows_degrades_when_the_write_fails
+        PASS [   2.206s] ( 707/1211) worker-processors email::processor::residual_arms_db_tests::select_warmup_ip_empty_pool_returns_none
+        PASS [   2.155s] ( 708/1211) worker-processors email::processor::residual_arms_db_tests::sent_reputation_redis_hash_failure_degrades
+        PASS [   0.056s] ( 709/1211) worker-processors email::processor::residual_arms_db_tests::wait_until_reports_the_deadline_value
+        PASS [   2.409s] ( 710/1211) worker-processors email::processor::residual_arms_db_tests::sales_record_gates_for_non_uuid_and_missing_links
+        PASS [   2.627s] ( 711/1211) worker-processors email::processor::residual_arms_db_tests::sales_feedback_arms_prove_out
+        PASS [   2.211s] ( 712/1211) worker-processors email::processor::residual_arms_db_tests::successful_dispatch_with_admission_rates_logs_and_sends
+        PASS [   0.010s] ( 713/1211) worker-processors email::processor::sales_feedback_db_tests::mapping_table_marks_smtp_acceptance_prohibited
+        PASS [   2.510s] ( 714/1211) worker-processors email::processor::residual_arms_db_tests::start_stop_lifecycle_exercises_the_transport_contract
+        PASS [   0.011s] ( 715/1211) worker-processors email::processor::tests::active_ip_routes_dedicated_without_consuming_quota
+        PASS [   2.244s] ( 716/1211) worker-processors email::processor::residual_arms_db_tests::suppression_check_failure_requeues_and_survives_a_failing_requeue
+        PASS [   0.010s] ( 717/1211) worker-processors email::processor::tests::canonical_recipient_normalizes_like_the_api
+        PASS [   0.115s] ( 718/1211) worker-processors email::processor::tests::aggregate_selection_prefers_the_least_utilised_ip
+        PASS [   0.009s] ( 719/1211) worker-processors email::processor::tests::claim_mints_a_fresh_lease_token_into_metadata
+        PASS [   0.008s] ( 720/1211) worker-processors email::processor::tests::claim_only_honors_pending_recipients_that_are_subset_of_envelope
+        PASS [   0.008s] ( 721/1211) worker-processors email::processor::tests::claim_takes_only_pending_or_expired_rows
+        PASS [   0.009s] ( 722/1211) worker-processors email::processor::tests::claim_time_suppression_caching_is_negative_only
+        PASS [   0.008s] ( 723/1211) worker-processors email::processor::tests::codeless_transport_errors_stay_generic
+        PASS [   0.008s] ( 724/1211) worker-processors email::processor::tests::consent_decisions_are_three_valued_not_option
+        PASS [   0.008s] ( 725/1211) worker-processors email::processor::tests::consent_queries_cover_both_dimensions
+        PASS [   0.468s] ( 726/1211) worker-processors email::processor::tests::check_send_admission_gates_on_config_rate_and_fails_open
+        PASS [   0.010s] ( 727/1211) worker-processors email::processor::tests::dedicated_route_without_a_dedicated_transport_fails_closed_before_submit
+        PASS [   0.009s] ( 728/1211) worker-processors email::processor::tests::dispatch_consent_gate_exits_immediately_on_deferral
+        PASS [   0.359s] ( 729/1211) worker-processors email::processor::tests::contract_customer_sends_advertise_rfc8058_one_click
+        PASS [   0.009s] ( 730/1211) worker-processors email::processor::tests::dispatch_time_suppression_recheck_reads_authoritative_state
+        PASS [   0.008s] ( 731/1211) worker-processors email::processor::tests::dlq_failure_only_marks_row_terminal_when_pending_set_empty
+        PASS [   0.008s] ( 732/1211) worker-processors email::processor::tests::domain_route_readiness_is_route_aware
+        PASS [   0.007s] ( 733/1211) worker-processors email::processor::tests::drained_statuses_are_zeroed_in_every_snapshot
+        PASS [   0.008s] ( 734/1211) worker-processors email::processor::tests::empty_queue_snapshots_all_zero
+        PASS [   0.008s] ( 735/1211) worker-processors email::processor::tests::expansion_counts_across_multiple_rows
+        PASS [   0.008s] ( 736/1211) worker-processors email::processor::tests::expansion_is_capped_to_available_slots
+        PASS [   0.008s] ( 737/1211) worker-processors email::processor::tests::expansion_with_zero_slots_yields_nothing
+        PASS [   0.111s] ( 738/1211) worker-processors email::processor::tests::exhausted_warming_pool_spills_to_an_active_ip
+        PASS [   0.009s] ( 739/1211) worker-processors email::processor::tests::get_domain_sql_consults_warming_and_active_dedicated_ips
+        PASS [   0.009s] ( 740/1211) worker-processors email::processor::tests::hard_bounce_suppression_covers_only_the_bounced_address
+        PASS [   0.009s] ( 741/1211) worker-processors email::processor::tests::hard_bounce_update_only_marks_row_terminal_when_pending_set_empty
+        PASS [   0.009s] ( 742/1211) worker-processors email::processor::tests::hybrid_dispatches_each_route_to_exactly_one_backend
+        PASS [   0.008s] ( 743/1211) worker-processors email::processor::tests::lease_token_of_reads_the_claim_minted_token
+        PASS [   0.009s] ( 744/1211) worker-processors email::processor::tests::legacy_string_classification_still_works
+        PASS [   0.009s] ( 745/1211) worker-processors email::processor::tests::logical_message_id_is_derived_from_the_platform_message_id
+        PASS [   0.008s] ( 746/1211) worker-processors email::processor::tests::messages_progress_update_is_set_derived_and_scoped
+        PASS [   0.008s] ( 747/1211) worker-processors email::processor::tests::metadata_writes_object_guard_non_object_metadata
+        PASS [   0.336s] ( 748/1211) worker-processors email::processor::tests::flat_queue_map_reply_to_survives_to_the_built_mime
+        PASS [   0.456s] ( 749/1211) worker-processors email::processor::tests::missing_tracking_secret_leaves_mail_untouched
+        PASS [   0.010s] ( 750/1211) worker-processors email::processor::tests::parent_progress_is_derived_from_the_complete_recipient_set
+        PASS [   0.010s] ( 751/1211) worker-processors email::processor::tests::possibly_sent_update_records_audit_trail_and_completes_row
+        PASS [   0.460s] ( 752/1211) worker-processors email::processor::tests::outgoing_mail_carries_a_v2_unsubscribe_link_with_message_identity
+        PASS [   0.476s] ( 753/1211) worker-processors email::processor::tests::prepare_email_blocks_the_whole_reserved_namespace
+        PASS [   0.474s] ( 754/1211) worker-processors email::processor::tests::prepare_email_campaign_headers_duplicates_and_attachments
+        PASS [   0.470s] ( 755/1211) worker-processors email::processor::tests::prepare_email_carries_preserved_mime_headers_per_copy
+        PASS [   2.641s] ( 756/1211) worker-processors email::processor::residual_arms_db_tests::zero_concurrency_loop_parks_and_stops_promptly
+        PASS [   2.292s] ( 757/1211) worker-processors email::processor::sales_feedback_db_tests::smtp_acceptance_produces_no_delivered_outcome
+        PASS [   0.011s] ( 758/1211) worker-processors email::processor::tests::recipient_provider_normalizes_to_a_canonical_slug
+        PASS [   0.012s] ( 759/1211) worker-processors email::processor::tests::recipient_provider_requires_valid_provenance_source
+        PASS [   0.012s] ( 760/1211) worker-processors email::processor::tests::recording_transport_contract_is_exercised
+        PASS [   0.012s] ( 761/1211) worker-processors email::processor::tests::relay_450_greylist_is_classified_soft_for_backoff_retry
+        PASS [   2.354s] ( 762/1211) worker-processors email::processor::sales_feedback_db_tests::queue_rows_without_sales_provenance_record_nothing
+        PASS [   0.011s] ( 763/1211) worker-processors email::processor::tests::relay_550_is_classified_hard_and_not_retried
+        PASS [   0.011s] ( 764/1211) worker-processors email::processor::tests::reply_code_outranks_free_text_markers
+        PASS [   0.011s] ( 765/1211) worker-processors email::processor::tests::restart_reconciliation_sweep_targets_all_terminal_children
+        PASS [   0.011s] ( 766/1211) worker-processors email::processor::tests::route_receipt_contract_note_records_but_never_retries
+        PASS [   0.011s] ( 767/1211) worker-processors email::processor::tests::route_send_rate_selects_the_transports_own_cap
+        PASS [   0.010s] ( 768/1211) worker-processors email::processor::tests::select_delivery_ip_clamps_clock_skew_to_day_zero
+        PASS [   0.010s] ( 769/1211) worker-processors email::processor::tests::select_delivery_ip_derives_the_canonical_day_and_limit
+        PASS [   0.010s] ( 770/1211) worker-processors email::processor::tests::select_delivery_ip_is_empty_without_dedicated_identities
+        PASS [   0.011s] ( 771/1211) worker-processors email::processor::tests::select_delivery_ip_keeps_graduated_ips_as_unthrottled_candidates
+        PASS [   2.814s] ( 772/1211) worker-processors email::processor::residual_arms_db_tests::unverifiable_dedicated_route_defers_with_the_named_reason
+        PASS [   0.010s] ( 773/1211) worker-processors email::processor::tests::select_delivery_ip_orders_warming_by_least_warmed_first
+        PASS [   0.468s] ( 774/1211) worker-processors email::processor::tests::prepare_email_strips_a_forged_route_header
+        PASS [   0.010s] ( 775/1211) worker-processors email::processor::tests::select_delivery_ip_refuses_unparseable_and_unthrottleable_warming_rows
+        PASS [   2.814s] ( 776/1211) worker-processors email::processor::residual_arms_db_tests::warming_pool_at_cap_defers_with_warmup_limit
+        PASS [   0.009s] ( 777/1211) worker-processors email::processor::tests::send_admission_keys_cover_tenant_domain_and_route
+        PASS [   0.010s] ( 778/1211) worker-processors email::processor::tests::send_unit_matches_the_queue_idempotency_identity
+        PASS [   0.010s] ( 779/1211) worker-processors email::processor::tests::ses_non_address_permanent_failures_do_not_suppress
+        PASS [   0.010s] ( 780/1211) worker-processors email::processor::tests::ses_permanent_failure_classifies_hard_for_suppression
+        PASS [   0.010s] ( 781/1211) worker-processors email::processor::tests::ses_transient_failure_classifies_soft_for_retry
+        PASS [   2.645s] ( 782/1211) worker-processors email::processor::sales_feedback_db_tests::hard_bounce_is_recorded_exactly_once_for_the_step_execution
+        PASS [   0.009s] ( 783/1211) worker-processors email::processor::tests::shared_route_without_ses_fails_closed_before_submit
+        PASS [   0.009s] ( 784/1211) worker-processors email::processor::tests::smtp_policy_rejection_phrases_do_not_suppress
+        PASS [   0.009s] ( 785/1211) worker-processors email::processor::tests::split_mime_headers_absent_metadata_is_all_empty
+        PASS [   0.009s] ( 786/1211) worker-processors email::processor::tests::split_mime_headers_legacy_flat_map_still_yields_custom_headers
+        PASS [   0.010s] ( 787/1211) worker-processors email::processor::tests::split_mime_headers_parses_legacy_comma_joined_strings
+        PASS [   0.011s] ( 788/1211) worker-processors email::processor::tests::split_mime_headers_reads_structured_server_shape
+        PASS [   0.010s] ( 789/1211) worker-processors email::processor::tests::supported_status_set_matches_the_schema_check_constraint
+        PASS [   0.011s] ( 790/1211) worker-processors email::processor::tests::suppressed_update_only_marks_row_terminal_when_pending_set_empty
+        PASS [   0.011s] ( 791/1211) worker-processors email::processor::tests::tenant_gate_reads_current_tenant_status
+        PASS [   0.114s] ( 792/1211) worker-processors email::processor::tests::send_admission_bucket_exhausts_then_refills
+        PASS [   0.115s] ( 793/1211) worker-processors email::processor::tests::send_admission_buckets_are_per_tenant_and_per_domain
+        PASS [   0.011s] ( 794/1211) worker-processors email::processor::tests::tenant_policy_gate_exits_on_every_non_allowed_policy
+        PASS [   0.010s] ( 795/1211) worker-processors email::processor::tests::terminal_writes_are_fenced_on_lease_token
+        PASS [   0.011s] ( 796/1211) worker-processors email::processor::tests::tenant_policy_reasons_map_to_deferral_reasons
+        PASS [   0.010s] ( 797/1211) worker-processors email::processor::tests::test_closed_to_open_after_threshold
+        PASS [   0.114s] ( 798/1211) worker-processors email::processor::tests::shared_and_dedicated_rate_buckets_are_independent
+        PASS [   0.010s] ( 799/1211) worker-processors email::processor::tests::test_closed_to_open_failure_count_reset
+        PASS [   0.011s] ( 800/1211) worker-processors email::processor::tests::test_concurrent_state_transitions
+        PASS [   0.010s] ( 801/1211) worker-processors email::processor::tests::test_envelope_domain
+        PASS [   0.010s] ( 802/1211) worker-processors email::processor::tests::test_error_rate_no_cooldown_below_threshold
+        PASS [   0.022s] ( 803/1211) worker-processors email::processor::tests::test_concurrent_success_and_failure
+        PASS [   0.011s] ( 804/1211) worker-processors email::processor::tests::test_error_rate_triggers_cooldown_at_threshold
+        PASS [   0.036s] ( 805/1211) worker-processors email::processor::tests::test_concurrent_is_allowed_and_record_failure
+        PASS [   0.010s] ( 806/1211) worker-processors email::processor::tests::test_error_rate_window_evicts_old_entries
+        PASS [   0.011s] ( 807/1211) worker-processors email::processor::tests::test_error_rate_window_tracks_20_outcomes
+        PASS [   0.010s] ( 808/1211) worker-processors email::processor::tests::test_exponential_backoff_formula
+        PASS [   0.011s] ( 809/1211) worker-processors email::processor::tests::test_exponential_backoff_in_context_of_handle_soft_bounce
+        PASS [   0.010s] ( 810/1211) worker-processors email::processor::tests::test_initial_failure_count_zero
+        PASS [   0.010s] ( 811/1211) worker-processors email::processor::tests::test_initial_last_failure_none
+        PASS [   0.036s] ( 812/1211) worker-processors email::processor::tests::test_half_open_to_closed_after_successes
+        PASS [   0.009s] ( 813/1211) worker-processors email::processor::tests::test_initial_state_closed
+        PASS [   0.035s] ( 814/1211) worker-processors email::processor::tests::test_half_open_to_closed_success_count_resets
+        PASS [   0.010s] ( 815/1211) worker-processors email::processor::tests::test_initial_success_count_zero
+        PASS [   0.008s] ( 816/1211) worker-processors email::processor::tests::test_jittered_backoff_stays_within_20_percent
+        PASS [   0.009s] ( 817/1211) worker-processors email::processor::tests::test_open_stays_open_before_duration_elapses
+        PASS [   0.374s] ( 818/1211) worker-processors email::processor::tests::prepared_email_carries_the_reserved_send_unit_identity
+        PASS [   0.009s] ( 819/1211) worker-processors email::processor::tests::test_permanent_rejections_do_not_trigger_transport_cooldown
+        PASS [   0.008s] ( 820/1211) worker-processors email::processor::tests::test_queued_row_empty_to_addresses_yields_no_jobs
+        PASS [   0.008s] ( 821/1211) worker-processors email::processor::tests::test_queued_row_null_to_addresses_falls_back_to_legacy_to
+        PASS [   0.057s] ( 822/1211) worker-processors email::processor::tests::test_half_open_to_open_on_failure
+        PASS [   0.008s] ( 823/1211) worker-processors email::processor::tests::test_queued_row_single_recipient_single_job
+        PASS [   0.009s] ( 824/1211) worker-processors email::processor::tests::test_queued_row_with_two_recipients_expands_to_two_jobs
+        PASS [   0.009s] ( 825/1211) worker-processors email::processor::tests::test_transport_provider_label_matches_delivery_analytics_buckets
+        PASS [   0.010s] ( 826/1211) worker-processors email::processor::tests::test_reputation_sent_key_format
+        PASS [   0.009s] ( 827/1211) worker-processors email::processor::tests::test_zero_failure_threshold
+        PASS [   0.029s] ( 828/1211) worker-processors email::processor::tests::test_open_to_half_open_after_duration
+        PASS [   0.010s] ( 829/1211) worker-processors email::processor::tests::transport_router_defines_no_second_transport_trait_or_send_path
+        PASS [   0.008s] ( 830/1211) worker-processors email::processor::tests::unexpected_statuses_are_appended_not_dropped
+        PASS [   0.010s] ( 831/1211) worker-processors email::processor::tests::unverifiable_dedicated_route_defers_before_submitting
+        PASS [   0.012s] ( 832/1211) worker-processors email::processor::tests::warmup_and_acceptance_have_one_production_entry_point_each
+        PASS [   0.010s] ( 833/1211) worker-processors email::processor::tests::warmup_gate_defaults_to_enabled
+        PASS [   0.010s] ( 834/1211) worker-processors email::processor::tests::warmup_selection_key_is_ip_scoped
+        PASS [   0.013s] ( 835/1211) worker-processors email::processor::tests::warmup_send_path_has_no_isp_catalog_or_provider_derived_cap
+        PASS [   0.011s] ( 836/1211) worker-processors email::processor::tests::worker_has_no_warmup_settlement_path
+        PASS [   0.011s] ( 837/1211) worker-processors email::tracking::adversarial_batch::pixel_skips_the_body_candidate_inside_a_script
+        PASS [   0.011s] ( 838/1211) worker-processors email::tracking::adversarial_batch::pixel_skips_the_body_candidate_inside_a_style
+        PASS [   0.011s] ( 839/1211) worker-processors email::tracking::adversarial_batch::pixel_walks_back_through_every_raw_text_decoy
+        PASS [   0.010s] ( 840/1211) worker-processors email::tracking::adversarial_batch::rewrite_href_spans_is_identity_when_nothing_matches
+        PASS [   0.011s] ( 841/1211) worker-processors email::tracking::adversarial_batch::rewrite_survives_a_dangling_href_and_an_unterminated_quote
+        PASS [   0.010s] ( 842/1211) worker-processors email::tracking::adversarial_rewrite_tests::decoy_body_tags_inside_script_and_style_are_skipped
+        PASS [   0.116s] ( 843/1211) worker-processors email::processor::tests::verified_outbound_mta_send_leaves_no_worker_side_warmup_writes
+        PASS [   0.011s] ( 844/1211) worker-processors email::tracking::adversarial_rewrite_tests::every_href_quoting_style_is_rewritten
+        PASS [   0.010s] ( 845/1211) worker-processors email::tracking::adversarial_rewrite_tests::hostile_and_excluded_hrefs_are_left_untouched
+        PASS [   0.116s] ( 846/1211) worker-processors email::processor::tests::warmup_selection_reads_the_cap_but_consumes_nothing
+        PASS [   0.010s] ( 847/1211) worker-processors email::tracking::adversarial_rewrite_tests::missing_secret_leaves_every_href_direct
+        PASS [   0.011s] ( 848/1211) worker-processors email::tracking::coverage_arms::link_rewriting_handles_all_href_quoting_forms
+        PASS [   0.010s] ( 849/1211) worker-processors email::tracking::coverage_arms::pixel_placement_ignores_body_tags_inside_script_or_style
+        PASS [   0.010s] ( 850/1211) worker-processors email::tracking::coverage_arms::unsubscribe_link_requires_a_secret_and_builds_the_url
+        PASS [   0.010s] ( 851/1211) worker-processors email::tracking::residual_arms::pixel_skips_a_trailing_body_decoy_inside_script
+        PASS [   0.010s] ( 852/1211) worker-processors email::tracking::residual_arms::pixel_skips_a_trailing_body_decoy_inside_style
+        PASS [   0.010s] ( 853/1211) worker-processors email::tracking::residual_arms::rewrite_scan_survives_an_href_equal_at_eof
+        PASS [   0.010s] ( 854/1211) worker-processors email::tracking::tests::build_payload_carries_raw_identifiers
+        PASS [   0.010s] ( 855/1211) worker-processors email::tracking::tests::default_tracking_hosts_are_unified
+        PASS [   0.009s] ( 856/1211) worker-processors email::tracking::tests::distinct_anchors_get_distinct_link_ids
+        PASS [   0.009s] ( 857/1211) worker-processors email::tracking::tests::encode_without_secret_is_refused_and_html_untouched
+        PASS [   0.010s] ( 858/1211) worker-processors email::tracking::tests::short_secret_is_refused
+        PASS [   0.011s] ( 859/1211) worker-processors email::tracking::tests::rewritten_click_tokens_carry_a_decodable_link_id
+        PASS [   0.010s] ( 860/1211) worker-processors email::tracking::tests::test_add_tracking_pixel
+        PASS [   0.010s] ( 861/1211) worker-processors email::tracking::tests::test_add_tracking_pixel_no_body
+        PASS [   0.010s] ( 862/1211) worker-processors email::tracking::tests::test_add_tracking_pixel_skips_script_body
+        PASS [   0.011s] ( 863/1211) worker-processors email::tracking::tests::test_add_tracking_pixel_skips_style_body
+        PASS [   0.010s] ( 864/1211) worker-processors email::tracking::tests::test_no_links_unchanged
+        PASS [   0.010s] ( 865/1211) worker-processors email::tracking::tests::test_rewrite_links
+        PASS [   0.010s] ( 866/1211) worker-processors email::tracking::tests::test_rewrite_links_multiple_anchors
+        PASS [   0.010s] ( 867/1211) worker-processors email::tracking::tests::test_skip_mailto_links
+        PASS [   0.010s] ( 868/1211) worker-processors email::tracking::tests::test_skip_tel_links
+        PASS [   0.010s] ( 869/1211) worker-processors email::tracking::tests::test_skip_unsubscribe_links
+        PASS [   0.010s] ( 870/1211) worker-processors email::tracking::tests::worker_open_token_decodes_in_tracking_service_codec
+        PASS [   0.011s] ( 871/1211) worker-processors email::tracking::tests::tracking_pixel_rescans_past_a_late_script_fake_body_close
+        PASS [   0.010s] ( 872/1211) worker-processors email::tracking::tests::worker_token_decodes_in_tracking_service_codec
+        PASS [   0.009s] ( 873/1211) worker-processors email::transport::adversarial_batch::folded_mime_header_values_are_unfolded
+        PASS [   0.010s] ( 874/1211) worker-processors email::tracking::tests::wrong_key_fails_decode_in_tracking_service_codec
+        PASS [   0.009s] ( 875/1211) worker-processors email::transport::adversarial_batch::hybrid_transport_names_its_backends_honestly
+        PASS [   0.010s] ( 876/1211) worker-processors email::transport::adversarial_batch::verp_return_path_refuses_malformed_identities
+        PASS [   0.011s] ( 877/1211) worker-processors email::transport::coverage_arms::dkim_signer_rejects_invalid_key_material
+        PASS [   0.010s] ( 878/1211) worker-processors email::transport::coverage_arms::ses_raw_mime_serializes_the_full_header_set
+        PASS [   0.011s] ( 879/1211) worker-processors email::transport::coverage_arms::smtp_message_builder_serializes_the_full_header_set
+        PASS [   0.019s] ( 880/1211) worker-processors email::transport::coverage_arms::ses_transport_constructs_from_the_test_env
+        PASS [   0.011s] ( 881/1211) worker-processors email::transport::reply_parsing_tests::auth_related_text_is_detected_and_redacted
+        PASS [   0.011s] ( 882/1211) worker-processors email::transport::reply_parsing_tests::long_non_base64_tokens_are_evidence_not_secrets_and_survive
+        PASS [   0.011s] ( 883/1211) worker-processors email::transport::reply_parsing_tests::parse_smtp_reply_handles_both_display_shapes
+        PASS [   0.011s] ( 884/1211) worker-processors email::transport::reply_parsing_tests::split_enhanced_code_only_accepts_x_n_n
+        PASS [   0.606s] ( 885/1211) worker-processors email::processor::tests::tracking_gate_disabled_leaves_html_untouched
+        PASS [   0.608s] ( 886/1211) worker-processors email::processor::tests::tracking_gate_enabled_rewrites_html
+        PASS [   0.011s] ( 887/1211) worker-processors email::transport::residual_transport_arms::verp_return_path_refuses_an_empty_message_id
+        PASS [   0.010s] ( 888/1211) worker-processors email::transport::ses_disposition_tests::only_address_shaped_failures_are_address_proving
+        PASS [   0.009s] ( 889/1211) worker-processors email::transport::ses_disposition_tests::throttle_codes_and_429_are_rate_limited_never_terminal
+        PASS [   0.009s] ( 890/1211) worker-processors email::transport::tests::concrete_backends_do_not_claim_verifiable_source_binding
+        PASS [   0.010s] ( 891/1211) worker-processors email::transport::tests::dedicated_route_header_wins_over_a_caller_supplied_one
+        PASS [   0.010s] ( 892/1211) worker-processors email::transport::tests::legacy_single_recipient_row_falls_back_to_the_envelope_destination
+        PASS [   0.009s] ( 893/1211) worker-processors email::transport::tests::mailbox_lists_render_as_separate_mailboxes_not_one_malformed_mailbox
+        PASS [   0.009s] ( 894/1211) worker-processors email::transport::tests::map_smtp_error_keeps_permanent_reply_code
+        PASS [   0.009s] ( 895/1211) worker-processors email::transport::tests::map_smtp_error_keeps_temporary_reply_code
+        PASS [   0.009s] ( 896/1211) worker-processors email::transport::tests::map_smtp_error_parses_mailsend_reply_display
+        PASS [   0.010s] ( 897/1211) worker-processors email::transport::tests::map_smtp_error_redaction_never_eats_the_code
+        PASS [   0.009s] ( 898/1211) worker-processors email::transport::tests::map_smtp_error_without_reply_code_stays_transport
+        PASS [   0.010s] ( 899/1211) worker-processors email::transport::tests::plaintext_without_credentials_still_connects
+        PASS [   0.009s] ( 900/1211) worker-processors email::transport::tests::ses_5xx_and_network_failures_are_transient
+        PASS [   0.010s] ( 901/1211) worker-processors email::transport::tests::ses_account_and_config_states_are_retryable_not_permanent
+        PASS [   0.010s] ( 902/1211) worker-processors email::transport::tests::ses_determinate_non_address_refusals_dead_letter_without_suppressing
+        PASS [   0.010s] ( 903/1211) worker-processors email::transport::tests::ses_http_4xx_retries_and_429_throttles
+        PASS [   0.010s] ( 904/1211) worker-processors email::transport::tests::ses_mailbox_does_not_exist_style_error_is_address_bounce
+        PASS [   0.010s] ( 905/1211) worker-processors email::transport::tests::ses_throttling_is_rate_limited_not_permanent
+        PASS [   0.010s] ( 906/1211) worker-processors email::transport::tests::ses_transport_refuses_a_dedicated_route
+        PASS [   0.010s] ( 907/1211) worker-processors email::transport::tests::ses_unknown_modeled_code_falls_back_to_http_status
+        PASS [   0.010s] ( 908/1211) worker-processors email::transport::tests::shared_route_emits_no_route_header
+        PASS [   0.010s] ( 909/1211) worker-processors email::transport::tests::smtp_builder_renders_the_same_structured_mailboxes
+        PASS [   0.548s] ( 910/1211) worker-processors email::transport::adversarial_batch::transport_factory_falls_back_to_relay_when_mta_is_unavailable
+        PASS [   0.010s] ( 911/1211) worker-processors email::transport::tests::smtp_relay_configured_requires_a_concrete_host
+        PASS [   0.009s] ( 912/1211) worker-processors email::transport::tests::smtp_transport_route_guard_accepts_shared_routes
+        PASS [   0.009s] ( 913/1211) worker-processors email::transport::tests::test_build_raw_mime_basic
+        PASS [   0.009s] ( 914/1211) worker-processors email::transport::tests::test_build_raw_mime_empty_body
+        PASS [   0.009s] ( 915/1211) worker-processors email::transport::tests::test_build_raw_mime_with_attachment
+        PASS [   0.017s] ( 916/1211) worker-processors email::transport::tests::test_create_transport_from_config_ses_without_relay_has_no_dedicated_slot
+        PASS [   0.010s] ( 917/1211) worker-processors email::transport::tests::test_create_transport_from_config_smtp_binds_shared_route_to_smtp
+        PASS [   0.010s] ( 918/1211) worker-processors email::transport::tests::test_create_transport_returns_smtp
+        PASS [   0.010s] ( 919/1211) worker-processors email::transport::tests::test_create_transport_from_config_smtp_without_host_fails_fast
+        PASS [   0.009s] ( 920/1211) worker-processors email::transport::tests::test_ses_config_defaults
+        PASS [   0.010s] ( 921/1211) worker-processors email::transport::tests::test_map_smtp_error_redacts_credentials
+        PASS [   0.009s] ( 922/1211) worker-processors email::transport::tests::test_smtp_builder_requires_complete_credentials
+        PASS [   0.010s] ( 923/1211) worker-processors email::transport::tests::test_smtp_builder_rejects_credentials_over_plaintext
+        PASS [   1.054s] ( 924/1211) worker-processors email::processor::tests::smtp_mode_shared_route_is_dkim_signed_on_the_wire
+        PASS [   0.008s] ( 925/1211) worker-processors email::transport::tests::test_transport_type_default_is_ses
+        PASS [   0.009s] ( 926/1211) worker-processors email::transport::tests::test_smtp_transport_name
+        PASS [   0.009s] ( 927/1211) worker-processors email::transport::tests::test_transport_type_from_env
+        PASS [   0.009s] ( 928/1211) worker-processors email::transport::tests::verp_return_path_for_requires_binding_message_id_and_secret
+        PASS [   0.010s] ( 929/1211) worker-processors email::transport::tests::verp_domain_env_gating
+        PASS [   0.009s] ( 930/1211) worker-processors email::transport::tests::verp_return_path_handles_subdomain_and_edge_locals
+        PASS [   0.009s] ( 931/1211) worker-processors email::transport::tests::verp_return_path_rejects_malformed_inputs
+        PASS [   0.010s] ( 932/1211) worker-processors email::transport::tests::verp_return_path_round_trips_through_v2_verifier
+        PASS [   0.010s] ( 933/1211) worker-processors email::transport::wire_and_ses_tests::smtp_relay_pins_the_envelope_for_preserved_headers
+        PASS [   0.019s] ( 934/1211) worker-processors email::transport::wire_and_ses_tests::ses_transport_classifies_a_modeled_400_from_the_mock_api
+        PASS [   0.022s] ( 935/1211) worker-processors email::transport::wire_and_ses_tests::ses_transport_verifies_and_sends_through_the_mock_api
+        PASS [   0.011s] ( 936/1211) worker-processors email::transport::wire_and_ses_tests::smtp_relay_submits_a_verp_envelope_for_attributable_mail
+        PASS [   0.011s] ( 937/1211) worker-processors email::transport::wire_and_ses_tests::smtp_relay_submits_the_derived_envelope_unsigned
+        PASS [   0.010s] ( 938/1211) worker-processors email::transport::wire_and_ses_tests::verp_return_path_requires_the_platform_message_id_header
+        PASS [   0.010s] ( 939/1211) worker-processors email::transport_router::tests::transport_kind_follows_the_resolved_route
+        PASS [   0.010s] ( 940/1211) worker-processors email::types::display_name_batch::split_display_name_refuses_degenerate_inputs
+        PASS [   0.010s] ( 941/1211) worker-processors email::types::tests::mailbox_list_parses_legacy_comma_joined
+        PASS [   0.010s] ( 942/1211) worker-processors email::types::tests::mailbox_list_parses_quoted_comma_name
+        PASS [   0.010s] ( 943/1211) worker-processors email::types::tests::mailbox_parse_refuses_unusable_angle_forms
+        PASS [   0.010s] ( 944/1211) worker-processors email::types::tests::mailbox_list_skips_droppable_segments_and_handles_escapes
+        PASS [   0.010s] ( 945/1211) worker-processors email::types::tests::mailbox_parses_display_name_forms
+        PASS [   0.011s] ( 946/1211) worker-processors email::types::tests::mailbox_parses_bare_address
+        PASS [   0.009s] ( 947/1211) worker-processors email::types::tests::mailbox_rejects_malformed
+        PASS [   0.011s] ( 948/1211) worker-processors fence::tests::a_gate_without_a_usable_url_fails_closed
+        PASS [   0.011s] ( 949/1211) worker-processors fence::tests::disabled_gate_never_refuses_and_never_touches_the_authority
+        PASS [   0.009s] ( 950/1211) worker-processors fence::tests::enabled_gate_allows_when_not_fenced
+        PASS [   0.011s] ( 951/1211) worker-processors fence::tests::enabled_gate_refuses_a_fenced_node
+        PASS [   0.011s] ( 952/1211) worker-processors fence::tests::enabled_gate_fails_closed_when_the_authority_is_unreadable
+        PASS [   0.009s] ( 953/1211) worker-processors fence::tests::fence_url_composes_the_ha_layout_from_host_parts
+        PASS [   0.010s] ( 954/1211) worker-processors fence::tests::env_flag_is_strict_opt_in
+        PASS [   0.011s] ( 955/1211) worker-processors reply_handler::ai::tests::ai_error_on_vaguely_positive_body_never_guesses
+        PASS [   0.011s] ( 956/1211) worker-processors reply_handler::ai::tests::ai_error_returns_unknown_zero_confidence_with_outage_reason
+        PASS [   0.342s] ( 957/1211) worker-processors email::transport::tests::outbound_mta_backed_dedicated_slot_claims_verifiable_source_binding
+        PASS [   0.011s] ( 958/1211) worker-processors reply_handler::ai::tests::ai_input_is_bounded
+        PASS [   0.011s] ( 959/1211) worker-processors reply_handler::ai::tests::config_with_llm_and_endpoint_yields_http
+        PASS [   0.010s] ( 960/1211) worker-processors reply_handler::ai::tests::config_with_llm_but_no_endpoint_yields_fallback
+        PASS [   0.009s] ( 961/1211) worker-processors reply_handler::ai::tests::empty_base_url_is_not_configured
+        PASS [   0.010s] ( 962/1211) worker-processors reply_handler::ai::tests::config_without_llm_yields_the_static_fallback
+        PASS [   0.011s] ( 963/1211) worker-processors reply_handler::ai::tests::full_classify_path_is_not_doubled
+        PASS [   0.010s] ( 964/1211) worker-processors reply_handler::ai::tests::healthy_ai_result_passes_through
+        PASS [   0.010s] ( 965/1211) worker-processors reply_handler::ai::tests::http_classifier_debug_redacts_the_api_key
+        PASS [   0.010s] ( 966/1211) worker-processors reply_handler::ai::tests::missing_confidence_is_an_error
+        PASS [   0.011s] ( 967/1211) worker-processors reply_handler::ai::tests::out_of_range_confidence_is_clamped
+        PASS [   0.012s] ( 968/1211) worker-processors reply_handler::ai::tests::nan_confidence_is_sanitized_to_zero
+        PASS [   0.011s] ( 969/1211) worker-processors reply_handler::ai::tests::parse_response_covers_the_error_arms
+        PASS [   0.010s] ( 970/1211) worker-processors reply_handler::ai::tests::parses_a_full_response
+        PASS [   0.011s] ( 971/1211) worker-processors reply_handler::ai::tests::parses_a_data_envelope
+        PASS [   0.010s] ( 972/1211) worker-processors reply_handler::ai::tests::sanitize_classification_clamps_confidence_and_zeroes_non_finite
+        PASS [   0.009s] ( 973/1211) worker-processors reply_handler::ai::tests::unconfigured_ai_returns_unknown_not_a_guess
+        PASS [   0.009s] ( 974/1211) worker-processors reply_handler::ai::tests::unknown_disposition_string_is_an_error_not_a_guess
+        PASS [   0.011s] ( 975/1211) worker-processors reply_handler::ai::tests::unreachable_service_errors_instead_of_panicking
+        PASS [   0.010s] ( 976/1211) worker-processors reply_handler::classifier::confidence_batch::classify_with_no_matching_patterns_scores_the_confidence_floor
+        PASS [   0.011s] ( 977/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::full_path_reports_the_deciding_layer
+        PASS [   0.011s] ( 978/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::inputs_without_quick_patterns_return_unknown_without_regex_work
+        PASS [   0.083s] ( 979/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::confidence_scales_with_the_number_of_actual_pattern_matches
+        PASS [   0.085s] ( 980/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::every_pattern_family_drives_its_classification
+        PASS [   0.010s] ( 981/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::suggested_actions_cover_every_disposition
+        PASS [   0.010s] ( 982/1211) worker-processors reply_handler::classifier::tests::deterministic_stop_request_wins_over_ai
+        PASS [   0.009s] ( 983/1211) worker-processors reply_handler::classifier::tests::full_classification_falls_back_to_unknown_on_ai_outage
+        PASS [   0.009s] ( 984/1211) worker-processors reply_handler::classifier::tests::input_cap_is_reexported
+        PASS [   0.017s] ( 985/1211) worker-processors reply_handler::classifier::tests::full_classification_uses_deterministic_first
+        PASS [   0.009s] ( 986/1211) worker-processors reply_handler::classifier::tests::legacy_result_projection_maps_every_disposition
+        PASS [   0.010s] ( 987/1211) worker-processors reply_handler::classifier::tests::low_confidence_ai_result_downgrades_in_the_full_path
+        PASS [   0.143s] ( 988/1211) worker-processors reply_handler::classifier::legacy_heuristic_tests::oversized_inputs_are_truncated_before_matching
+        PASS [   0.085s] ( 989/1211) worker-processors reply_handler::classifier::tests::test_classify_interested
+        PASS [   0.086s] ( 990/1211) worker-processors reply_handler::classifier::tests::test_classify_meeting_request
+        PASS [   0.010s] ( 991/1211) worker-processors reply_handler::classifier::tests::test_classify_unsubscribe
+        PASS [   0.017s] ( 992/1211) worker-processors reply_handler::deterministic::coverage_arms::extract_return_date_covers_every_format_arm
+        PASS [   0.009s] ( 993/1211) worker-processors reply_handler::deterministic::coverage_arms::list_unsubscribe_mailto_target_is_a_deterministic_unsubscribe
+        PASS [   0.086s] ( 994/1211) worker-processors reply_handler::classifier::tests::test_classify_not_interested
+        PASS [   0.017s] ( 995/1211) worker-processors reply_handler::deterministic::coverage_arms::ooo_verdicts_fire_on_headers_and_subjects
+        PASS [   0.010s] ( 996/1211) worker-processors reply_handler::deterministic::month_and_pattern_batch::month_number_maps_all_twelve_names_and_refuses_garbage
+        PASS [   0.009s] ( 997/1211) worker-processors reply_handler::deterministic::objection_family_tests::families_label_the_canonical_classes_deterministically
+        PASS [   0.009s] ( 998/1211) worker-processors reply_handler::deterministic::objection_family_tests::family_order_is_taxonomy_order_and_case_insensitive
+        PASS [   0.012s] ( 999/1211) worker-processors reply_handler::deterministic::return_date_tests::dsn_status_precedence_hard_soft_and_unstated
+        PASS [   0.085s] (1000/1211) worker-processors reply_handler::classifier::tests::test_classify_out_of_office
+        PASS [   0.017s] (1001/1211) worker-processors reply_handler::deterministic::return_date_tests::every_supported_date_format_is_parsed
+        PASS [   0.010s] (1002/1211) worker-processors reply_handler::deterministic::return_date_tests::final_recipient_is_extracted_from_the_dsn
+        PASS [   0.016s] (1003/1211) worker-processors reply_handler::deterministic::return_date_tests::implausible_years_and_dates_are_refused
+        PASS [   0.009s] (1004/1211) worker-processors reply_handler::deterministic::tests::a_body_with_every_stop_keyword_does_not_panic_and_is_unsubscribe
+        PASS [   0.017s] (1005/1211) worker-processors reply_handler::deterministic::return_date_tests::ooo_headers_and_one_click_unsubscribe_are_deterministic
+        PASS [   0.017s] (1006/1211) worker-processors reply_handler::deterministic::tests::auto_submitted_any_value_other_than_no_is_ooo
+        PASS [   0.010s] (1007/1211) worker-processors reply_handler::deterministic::tests::auto_submitted_no_is_not_ooo
+        PASS [   0.016s] (1008/1211) worker-processors reply_handler::deterministic::tests::auto_submitted_header_beats_vaguely_positive_body
+        PASS [   0.009s] (1009/1211) worker-processors reply_handler::deterministic::tests::dsn_final_recipient_is_extracted_for_linking
+        PASS [   0.010s] (1010/1211) worker-processors reply_handler::deterministic::tests::disposition_vocabulary_is_the_canonical_eleven
+        PASS [   0.016s] (1011/1211) worker-processors reply_handler::deterministic::tests::deeply_nested_mime_body_does_not_panic
+        PASS [   0.008s] (1012/1211) worker-processors reply_handler::deterministic::tests::emoji_only_subject_and_no_headers_is_not_guessed
+        PASS [   0.011s] (1013/1211) worker-processors reply_handler::deterministic::tests::dsn_with_final_recipient_but_no_content_type_is_still_a_bounce
+        PASS [   0.011s] (1014/1211) worker-processors reply_handler::deterministic::tests::hard_bounce_with_5xx_status_and_dsn_headers
+        PASS [   0.009s] (1015/1211) worker-processors reply_handler::deterministic::tests::human_prose_mentioning_bounce_does_not_classify_as_dsn
+        PASS [   0.009s] (1016/1211) worker-processors reply_handler::deterministic::tests::invalid_utf8_body_degrades_without_panicking
+        PASS [   0.010s] (1017/1211) worker-processors reply_handler::deterministic::tests::mailto_unsubscribe_target_is_deterministic
+        PASS [   0.010s] (1018/1211) worker-processors reply_handler::deterministic::tests::no_headers_and_empty_body_neither_panics_nor_guesses
+        PASS [   0.016s] (1019/1211) worker-processors reply_handler::deterministic::tests::nonsense_return_dates_are_rejected
+        PASS [   0.009s] (1020/1211) worker-processors reply_handler::deterministic::tests::one_click_unsubscribe_header_is_deterministic
+        PASS [   0.009s] (1021/1211) worker-processors reply_handler::deterministic::tests::ooo_resume_at_is_after_the_stated_return_date
+        PASS [   0.017s] (1022/1211) worker-processors reply_handler::deterministic::tests::one_megabyte_body_is_capped_and_classified
+        PASS [   0.011s] (1023/1211) worker-processors reply_handler::deterministic::tests::ooo_return_date_is_extracted_when_stated
+        PASS [   0.009s] (1024/1211) worker-processors reply_handler::deterministic::tests::smtp_550_in_diagnostic_code_is_a_hard_bounce
+        PASS [   0.016s] (1025/1211) worker-processors reply_handler::deterministic::tests::ooo_subject_conventions_are_ooo
+        PASS [   0.017s] (1026/1211) worker-processors reply_handler::deterministic::tests::ooo_return_date_supports_textual_months
+        PASS [   0.012s] (1027/1211) worker-processors reply_handler::deterministic::tests::soft_bounce_with_4xx_status
+        PASS [   0.009s] (1028/1211) worker-processors reply_handler::deterministic::tests::stop_request_tokens_cover_all_supported_languages
+        PASS [   0.009s] (1029/1211) worker-processors reply_handler::deterministic::tests::stop_token_evidence_is_exact
+        PASS [   0.010s] (1030/1211) worker-processors reply_handler::deterministic::tests::truncated_utf8_never_splits_a_multibyte_char
+        PASS [   0.010s] (1031/1211) worker-processors reply_handler::dsr::tests::detector_names_each_right_and_stays_narrow
+        PASS [   0.009s] (1032/1211) worker-processors reply_handler::dsr::tests::statutory_deadline_is_one_calendar_month
+        PASS [   0.016s] (1033/1211) worker-processors reply_handler::deterministic::tests::x_autoreply_and_x_autorespond_are_ooo
+        PASS [   0.010s] (1034/1211) worker-processors reply_handler::policy::coverage_arms::downgrade_reason_strings_cover_both_variants
+        PASS [   0.010s] (1035/1211) worker-processors reply_handler::policy::coverage_arms::enrollment_state_strings_cover_every_variant
+        PASS [   0.010s] (1036/1211) worker-processors reply_handler::policy::coverage_arms::non_finite_confidence_downgrades_with_the_invalid_reason
+        PASS [   0.010s] (1037/1211) worker-processors reply_handler::policy::tests::complaint_penalizes_sender_health_but_unsubscribe_does_not
+        PASS [   0.010s] (1038/1211) worker-processors reply_handler::policy::tests::every_decision_has_a_legacy_action_for_the_existing_path
+        PASS [   0.010s] (1039/1211) worker-processors reply_handler::policy::tests::every_disposition_maps_to_the_documented_action
+        PASS [   0.009s] (1040/1211) worker-processors reply_handler::policy::tests::low_confidence_downgrades_to_unknown_and_never_auto_acts
+        PASS [   0.009s] (1041/1211) worker-processors reply_handler::policy::tests::hard_bounce_invalidates_the_contact_point_and_soft_bounce_does_not
+        PASS [   0.009s] (1042/1211) worker-processors reply_handler::policy::tests::not_interested_stops_without_permanent_suppression
+        PASS [   0.009s] (1043/1211) worker-processors reply_handler::policy::tests::nan_and_infinite_confidence_downgrade
+        PASS [   0.009s] (1044/1211) worker-processors reply_handler::policy::tests::ooo_does_not_cancel_while_every_other_human_disposition_does
+        PASS [   0.010s] (1045/1211) worker-processors reply_handler::policy::tests::ooo_reschedules_after_the_stated_return_date
+        PASS [   0.009s] (1046/1211) worker-processors reply_handler::policy::tests::positive_categories_route_to_high_intent_and_stop_the_sequence
+        PASS [   0.009s] (1047/1211) worker-processors reply_handler::policy::tests::suggested_action_names_are_stable_and_distinct_per_disposition
+        PASS [   0.010s] (1048/1211) worker-processors reply_handler::policy::tests::suppression_reasons_are_exact
+        PASS [   0.009s] (1049/1211) worker-processors reply_handler::policy::tests::threshold_is_inclusive_and_documented
+        PASS [   0.009s] (1050/1211) worker-processors reply_handler::policy::tests::unknown_stops_the_next_touch_pending_classification
+        PASS [   0.011s] (1051/1211) worker-processors reply_handler::processor::orchestration_and_actions::enrollment_resolution_refuses_unlinkable_messages
+        PASS [   2.075s] (1052/1211) worker-processors email::processor::tests::provider_provenance_is_persisted_and_carried_through
+        PASS [   2.081s] (1053/1211) worker-processors email::processor::tests::smtp_dkim_configuration_requires_matching_key_pair
+        PASS [   0.012s] (1054/1211) worker-processors reply_handler::processor::orchestration_and_actions::reply_candidates_are_canonical_bounded_and_deduped
+        PASS [   1.641s] (1055/1211) worker-processors email::transport::residual_transport_arms::smtp_relay_signs_a_verp_envelope
+        PASS [   1.116s] (1056/1211) worker-processors reply_handler::handoff_outage_tests::loop_keeps_resetting_claims_while_the_analytics_store_is_down
+        PASS [   1.138s] (1057/1211) worker-processors reply_handler::processor::orchestration_and_actions::lock_enrollment_exits_cleanly_without_a_lockable_row
+        PASS [   2.589s] (1058/1211) worker-processors email::transport::residual_transport_arms::ses_transport_close_and_verify_failure_arms
+        PASS [   1.298s] (1059/1211) worker-processors reply_handler::processor::orchestration_and_actions::execute_action_covers_every_legacy_action
+        PASS [   0.010s] (1060/1211) worker-processors reply_handler::processor::tests::cancellation_covers_both_action_entity_keys
+        PASS [   0.010s] (1061/1211) worker-processors reply_handler::processor::tests::claim_is_timestamped
+        PASS [   0.010s] (1062/1211) worker-processors reply_handler::processor::tests::classification_dedupe_is_tenant_and_message_scoped
+        PASS [   0.012s] (1063/1211) worker-processors reply_handler::processor::tests::classifier_name_accessor_matches_the_configured_classifier
+        PASS [   0.011s] (1064/1211) worker-processors reply_handler::processor::tests::completion_and_reset_clear_the_claim_fully
+        PASS [   1.358s] (1065/1211) worker-processors reply_handler::processor::orchestration_and_actions::analytics_handoff_failure_fails_the_message_and_releases_the_claim
+        PASS [   2.101s] (1066/1211) worker-processors email::transport::wire_and_ses_tests::smtp_relay_signs_with_the_domain_key_before_sending
+        PASS [   1.541s] (1067/1211) worker-processors reply_handler::processor::orchestration_and_actions::start_processes_a_reply_and_stop_breaks_the_loop
+        PASS [   2.699s] (1068/1211) worker-processors reply_handler::processor::residual_arms::legacy_auto_suppress_executes_through_the_gate
+        PASS [   1.981s] (1069/1211) worker-processors reply_handler::processor::tests::live_claim_skips_mta_delivery_ledger_rows
+        PASS [   2.057s] (1070/1211) worker-processors reply_handler::processor::tests::live_claim_decodes_a_reply_row_with_null_to_email
+        PASS [   2.428s] (1071/1211) worker-processors reply_handler::processor::residual_arms::reply_loop_parks_at_zero_concurrency_then_stops
+        PASS [   2.179s] (1072/1211) worker-processors reply_handler::processor::tests::inbound_reply_ingests_exactly_one_analytics_event_under_retry
+        PASS [   2.210s] (1073/1211) worker-processors reply_handler::processor::tests::live_agent_drafted_rows_still_get_classified
+        PASS [   1.776s] (1074/1211) worker-processors reply_handler::processor::tests::live_deterministic_dsn_and_ooo_paths
+        PASS [   2.505s] (1075/1211) worker-processors reply_handler::processor::residual_arms::reply_loop_releases_claims_when_processing_fails
+        PASS [   0.010s] (1076/1211) worker-processors reply_handler::processor::tests::lock_outcome_description_names_every_effect
+        PASS [   0.010s] (1077/1211) worker-processors reply_handler::processor::tests::ooo_reschedule_pushes_work_forward_instead_of_cancelling
+        PASS [   2.012s] (1078/1211) worker-processors reply_handler::processor::tests::poll_loop_breaks_on_shutdown_when_queue_is_empty
+        PASS [   2.463s] (1079/1211) worker-processors reply_handler::processor::tests::live_low_confidence_reply_pauses_without_suppressing
+        PASS [   2.338s] (1080/1211) worker-processors reply_handler::processor::tests::live_reply_racing_a_queued_send_is_cancelled
+        PASS [   2.260s] (1081/1211) worker-processors reply_handler::processor::tests::live_unsubscribe_reply_suppresses_and_replay_is_a_noop
+        PASS [   0.010s] (1082/1211) worker-processors reply_handler::processor::tests::reply_handler_issues_no_runtime_schema_ddl
+        PASS [   2.394s] (1083/1211) worker-processors reply_handler::processor::tests::live_repeat_classification_and_operator_correction_are_first_class
+        PASS [   0.010s] (1084/1211) worker-processors reply_handler::processor::tests::reply_handler_writes_no_legacy_sales_leads_state
+        PASS [   2.533s] (1085/1211) worker-processors reply_handler::processor::tests::live_inbound_dsr_reaches_the_gdpr_automation_intake
+        PASS [   0.009s] (1086/1211) worker-processors reply_handler::processor::tests::resolution_is_canonical_only_and_never_reads_the_lead_bridge
+        PASS [   0.008s] (1087/1211) worker-processors reply_handler::processor::tests::stale_claims_are_reclaimed
+        PASS [   0.008s] (1088/1211) worker-processors reply_handler::processor::tests::unclaimed_rows_are_still_eligible
+        PASS [   0.008s] (1089/1211) worker-processors reply_handler::types::vocabulary_tests::classifier_kind_strings_are_canonical
+        PASS [   0.008s] (1090/1211) worker-processors reply_handler::types::vocabulary_tests::legacy_projection_covers_every_disposition
+        PASS [   0.009s] (1091/1211) worker-processors reply_handler::types::vocabulary_tests::operator_correction_note_names_both_sides
+        PASS [   0.008s] (1092/1211) worker-processors reply_handler::types::vocabulary_tests::reply_classification_round_trips_every_variant
+        PASS [   0.008s] (1093/1211) worker-processors reply_handler::types::vocabulary_tests::reply_disposition_round_trips_and_policies_are_complete
+        PASS [   0.008s] (1094/1211) worker-processors reply_handler::types::vocabulary_tests::reply_input_header_lookup_is_case_insensitive_and_lossy_safe
+        PASS [   0.008s] (1095/1211) worker-processors reply_handler::types::vocabulary_tests::suggested_action_default_is_conservative
+        PASS [   0.009s] (1096/1211) worker-processors test_support::configured_provisioning_failure_fails_the_suite
+        PASS [   0.214s] (1097/1211) worker-processors reply_handler::processor::tests::poll_loop_parks_when_capacity_is_exhausted
+        PASS [   2.620s] (1098/1211) worker-processors reply_handler::processor::tests::live_remaining_disposition_effects_match_the_policy
+        PASS [   3.133s] (1099/1211) worker-processors reply_handler::processor::tests::live_disposition_effects_match_the_policy_table
+        PASS [   2.034s] (1100/1211) worker-processors reply_handler::processor::tests::poll_loop_survives_fetch_errors_until_shutdown
+        PASS [   2.153s] (1101/1211) worker-processors reply_handler::processor::tests::reply_identity_resolves_canonically_without_the_lead_bridge
+        PASS [   2.148s] (1102/1211) worker-processors reply_handler::processor::tests::reply_lock_is_visible_through_the_derived_lead_view
+        PASS [   0.971s] (1103/1211) worker-processors webhook::processor::adversarial_tests::circuit_breaker_map_saturates_without_panicking
+        PASS [   2.996s] (1104/1211) worker-processors webhook::processor::adversarial_tests::breaker_map_evicts_only_stale_closed_entries
+        PASS [   2.997s] (1105/1211) worker-processors webhook::processor::adversarial_tests::budget_check_failure_reschedule_is_fenced_on_the_claim
+        PASS [   3.021s] (1106/1211) worker-processors webhook::processor::adversarial_tests::breaker_reschedule_with_a_stale_token_is_fenced_out
+        PASS [   2.874s] (1107/1211) worker-processors webhook::processor::adversarial_tests::budget_check_failure_still_schedules_a_retry
+        PASS [   0.886s] (1108/1211) worker-processors webhook::processor::adversarial_tests::dedup_key_is_unpredictable_with_hmac_and_legacy_without
+        PASS [   0.929s] (1109/1211) worker-processors webhook::processor::adversarial_tests::deliver_webhook_pins_dns_for_hostname_targets
+        PASS [   0.932s] (1110/1211) worker-processors webhook::processor::adversarial_tests::deliver_webhook_network_failure_is_retryable_without_status
+        PASS [   0.947s] (1111/1211) worker-processors webhook::processor::adversarial_tests::deliver_webhook_refuses_redirects_and_classifies_status_matrix
+        PASS [   4.167s] (1112/1211) worker-processors reply_handler::processor::tests::process_batch_classifies_messages_concurrently_and_independently
+        PASS [   0.834s] (1113/1211) worker-processors webhook::processor::adversarial_tests::deliver_webhook_signs_headers_and_truncates_oversized_response
+        PASS [   0.881s] (1114/1211) worker-processors webhook::processor::adversarial_tests::envelope_stored_secret_is_signed_with_the_decrypted_value
+        PASS [   3.167s] (1115/1211) worker-processors webhook::processor::adversarial_tests::dedup_cleanup_with_a_stale_token_is_fenced_out
+        PASS [   3.173s] (1116/1211) worker-processors webhook::processor::adversarial_tests::dead_letter_with_a_stale_claim_token_records_nothing
+        PASS [   2.790s] (1117/1211) worker-processors webhook::processor::adversarial_tests::dedup_hit_deletes_the_claimed_row_without_delivering
+        PASS [   2.616s] (1118/1211) worker-processors webhook::processor::adversarial_tests::failed_flush_transaction_requeues_pending_successes
+        PASS [   2.690s] (1119/1211) worker-processors webhook::processor::adversarial_tests::exhausted_and_non_retryable_failures_dead_letter_exactly_once
+        PASS [   1.983s] (1120/1211) worker-processors webhook::processor::adversarial_tests::fetch_jobs_claims_due_rows_and_skips_deferred_disabled_and_done
+        PASS [   2.771s] (1121/1211) worker-processors webhook::processor::adversarial_tests::empty_queue_parks_on_the_poll_interval_then_breaks_on_shutdown
+        PASS [   0.262s] (1122/1211) worker-processors webhook::processor::adversarial_tests::pinned_client_recipe_always_builds_where_the_shared_client_built
+        PASS [   2.095s] (1123/1211) worker-processors webhook::processor::adversarial_tests::flush_degrades_when_its_tables_are_unavailable
+        PASS [   2.533s] (1124/1211) worker-processors webhook::processor::adversarial_tests::fetch_outage_hits_the_loop_error_arm_and_keeps_polling
+        PASS [   2.591s] (1125/1211) worker-processors webhook::processor::adversarial_tests::flush_pending_successes_writes_deliveries_and_consumes_queue_rows
+        PASS [   2.279s] (1126/1211) worker-processors webhook::processor::adversarial_tests::job_processing_error_hits_the_loop_error_arm
+        PASS [   3.867s] (1127/1211) worker-processors webhook::processor::adversarial_tests::open_circuit_defers_without_consuming_an_attempt
+        PASS [   2.754s] (1128/1211) worker-processors webhook::processor::adversarial_tests::retry_after_seconds_header_sets_the_retry_delay
+        PASS [   3.906s] (1129/1211) worker-processors webhook::processor::adversarial_tests::legacy_plaintext_secret_still_signs_and_migrates_on_read
+        PASS [   3.171s] (1130/1211) worker-processors webhook::processor::adversarial_tests::retry_after_http_date_is_parsed_into_a_delay
+        PASS [   2.648s] (1131/1211) worker-processors webhook::processor::adversarial_tests::retry_budget_exhaustion_dead_letters_and_disabled_budget_always_allows
+        PASS [   0.278s] (1132/1211) worker-processors webhook::processor::adversarial_tests::sign_payload_is_hmac_sha256_over_timestamp_dot_payload
+        PASS [   4.168s] (1133/1211) worker-processors webhook::processor::adversarial_tests::oversized_payload_is_truncated_and_still_processed
+        PASS [   3.690s] (1134/1211) worker-processors webhook::processor::adversarial_tests::poll_loop_processes_a_claimable_job_until_stop
+        PASS [   5.485s] (1135/1211) worker-processors webhook::processor::adversarial_tests::pinned_delivery_with_no_resolved_ips_fails_explicitly
+        PASS [   3.645s] (1136/1211) worker-processors webhook::processor::adversarial_tests::retryable_failure_schedules_backoff_and_stale_token_cannot_reschedule
+        PASS [   3.643s] (1137/1211) worker-processors webhook::processor::adversarial_tests::ssrf_refusal_is_a_retry_and_never_a_success
+        PASS [   3.210s] (1138/1211) worker-processors webhook::processor::adversarial_tests::tampered_envelope_refuses_delivery_and_never_signs
+        PASS [   3.332s] (1139/1211) worker-processors webhook::processor::adversarial_tests::successful_delivery_records_the_breaker_and_the_dedup_key
+        PASS [   3.388s] (1140/1211) worker-processors webhook::processor::adversarial_tests::stop_flushes_pending_successes_and_clears_running_flag
+        PASS [   4.073s] (1141/1211) worker-processors webhook::processor::adversarial_tests::start_cycle_works_the_queue_and_stop_breaks_promptly
+        PASS [   4.074s] (1142/1211) worker-processors webhook::processor::adversarial_tests::start_stop_lifecycle_and_in_flight_wait
+        PASS [   0.539s] (1143/1211) worker-processors webhook::processor::adversarial_tests::webhook_poll_loop_survives_fetch_errors_until_shutdown
+        PASS [   0.684s] (1144/1211) worker-processors webhook::processor::adversarial_tests::webhook_poll_loop_parks_when_capacity_is_exhausted
+        PASS [   1.748s] (1145/1211) worker-processors webhook::processor::adversarial_tests::unresolvable_hostname_is_a_retryable_refusal
+        PASS [   3.467s] (1146/1211) worker-processors webhook::processor::adversarial_tests::tenant_concurrency_limit_reschedules_instead_of_dropping
+        PASS [   1.767s] (1147/1211) worker-processors webhook::processor::adversarial_tests::webhook_poll_loop_breaks_on_shutdown_when_queue_is_empty
+        PASS [   0.281s] (1148/1211) worker-processors webhook::ssrf::adversarial_tests::allow_http_is_value_parsed_and_false_never_opens_the_hatch
+        PASS [   2.013s] (1149/1211) worker-processors webhook::processor::residual_arms::breaker_map_evicts_stale_entries_under_pressure
+        PASS [   0.450s] (1150/1211) worker-processors webhook::ssrf::adversarial_tests::an_unresolvable_public_hostname_is_refused
+        PASS [   0.938s] (1151/1211) worker-processors webhook::ssrf::adversarial_tests::env_overrides_open_and_close_the_policy
+        PASS [   1.031s] (1152/1211) worker-processors webhook::ssrf::adversarial_tests::freshness_check_skips_ip_targets_and_detects_rebinding
+        PASS [   0.010s] (1153/1211) worker-processors webhook::ssrf::adversarial_tests::ipv6_mapped_and_embedded_private_ranges_are_refused
+        PASS [   3.104s] (1154/1211) worker-processors webhook::processor::residual_arms::finalize_success_records_breaker_dedup_and_success
+        PASS [   0.011s] (1155/1211) worker-processors webhook::ssrf::adversarial_tests::private_ipv4_range_boundaries_are_exact
+        PASS [   0.011s] (1156/1211) worker-processors webhook::ssrf::adversarial_tests::private_ipv6_encodings_are_blocked
+        PASS [   3.246s] (1157/1211) worker-processors webhook::processor::residual_arms::finalize_failure_records_breaker_and_schedules_retry
+        PASS [   3.719s] (1158/1211) worker-processors webhook::processor::adversarial_tests::truncated_response_body_degrades_to_none
+        PASS [   2.095s] (1159/1211) worker-processors webhook::processor::residual_arms::wait_for_queue_reports_false_at_the_deadline
+        PASS [   3.316s] (1160/1211) worker-processors webhook::processor::residual_arms::oversized_payload_is_truncated_in_the_full_path
+        PASS [   0.013s] (1161/1211) worker-processors webhook::ssrf::ipv6_embedded_batch::ipv4_compatible_and_nat64_embedded_privates_are_refused
+        PASS [   1.368s] (1162/1211) worker-processors webhook::ssrf::adversarial_tests::ip_literal_targets_are_classified_without_dns
+        PASS [   1.442s] (1163/1211) worker-processors webhook::ssrf::adversarial_tests::private_hostnames_fail_closed_even_when_resolution_is_unavailable
+        PASS [   1.598s] (1164/1211) worker-processors webhook::ssrf::adversarial_tests::resolution_freshness_detects_a_changed_binding
+        PASS [   1.635s] (1165/1211) worker-processors webhook::ssrf::adversarial_tests::private_targets_admitted_only_under_explicit_override
+        PASS [   0.012s] (1166/1211) worker-processors webhook::ssrf::residual_ip_literal_tests::teredo_embedded_ipv4_is_screened
+        PASS [   1.633s] (1167/1211) worker-processors webhook::ssrf::adversarial_tests::scheme_https_enforcement_and_hostile_urls
+        PASS [   0.012s] (1168/1211) worker-processors webhook::ssrf::tests::test_private_ipv4
+        PASS [   0.011s] (1169/1211) worker-processors webhook::ssrf::tests::test_private_ipv6
+        PASS [   3.785s] (1170/1211) worker-processors webhook::processor::residual_arms::success_flush_insert_and_commit_failures_degrade_then_recover
+        PASS [   1.691s] (1171/1211) worker-processors webhook::ssrf::adversarial_tests::validate_url_maps_to_the_resolve_variant
+        PASS [   0.013s] (1172/1211) worker-processors webhook::types::truncate_tests::truncate_payload_handles_multibyte_utf8_without_panic
+        PASS [   0.013s] (1173/1211) worker-processors webhook::types::truncate_tests::truncate_payload_leaves_small_payloads_untouched
+        PASS [   0.012s] (1174/1211) worker-processors webhook::types::truncate_tests::truncate_payload_recurses_into_arrays_of_objects
+        PASS [   0.012s] (1175/1211) worker-processors webhook::types::truncate_tests::truncate_payload_with_a_tiny_budget_never_panics
+        PASS [   1.708s] (1176/1211) worker-processors webhook::ssrf::residual_dns_tests::public_hostname_resolves_to_a_pinned_target
+        PASS [   1.507s] (1177/1211) worker-processors webhook::ssrf::residual_ip_literal_tests::default_delegates_to_new
+        PASS [   1.419s] (1178/1211) worker-processors webhook::ssrf::residual_ip_literal_tests::hostname_resolving_to_a_private_ip_is_refused_even_mixed_with_public
+        PASS [   1.270s] (1179/1211) worker-processors webhook::ssrf::residual_ip_literal_tests::private_ip_literal_is_refused_and_public_literal_is_pinned
+        PASS [   1.238s] (1180/1211) worker-processors webhook::ssrf::tests::test_blocked_hostname
+        PASS [   1.211s] (1181/1211) worker-processors webhook::ssrf::tests::test_validate_and_resolve_url_blocks_private_ip_target
+        PASS [   1.081s] (1182/1211) worker-processors webhook::ssrf::tests::test_validate_and_resolve_url_public_ip_target
+        PASS [   1.293s] (1183/1211) worker-processors::automations_execution crash_between_claim_and_any_effect_is_recovered_by_the_lease
+        PASS [   1.498s] (1184/1211) worker-processors::automations_execution crash_between_send_commit_and_bookkeeping_reuses_message_and_quota
+        PASS [   1.244s] (1185/1211) worker-processors::automations_execution half_executed_action_ladder_resumes_without_repeating_effects
+        PASS [   2.179s] (1186/1211) worker-processors::automations_execution non_matching_condition_records_skipped_run_without_sending
+        PASS [   1.871s] (1187/1211) worker-processors::automations_execution suppressed_recipient_is_a_terminal_skip_not_a_retry
+        PASS [   0.027s] (1188/1211) worker-processors::bin/worker tests::capabilities_reflect_enabled_processors
+        PASS [   0.018s] (1189/1211) worker-processors::bin/worker tests::connect_db_rejects_a_malformed_url_immediately
+        PASS [   2.386s] (1190/1211) worker-processors::automations_execution inbound_reply_trigger_sends_transactional
+        PASS [   0.011s] (1191/1211) worker-processors::bin/worker tests::connect_redis_rejects_a_malformed_url
+        PASS [   0.015s] (1192/1211) worker-processors::bin/worker tests::email_config_assembles_env_settings
+        PASS [   0.010s] (1193/1211) worker-processors::bin/worker tests::health_port_prefers_health_then_metrics_then_default
+        PASS [   1.304s] (1194/1211) worker-processors::automations_execution unsupported_trigger_and_action_kinds_are_reported
+        PASS [   0.018s] (1195/1211) worker-processors::bin/worker tests::init_tracing_falls_back_to_json_logging_without_otlp
+        PASS [   0.014s] (1196/1211) worker-processors::bin/worker tests::processor_liveness_registry_tracks_running_attempts
+        PASS [   0.048s] (1197/1211) worker-processors::bin/worker tests::connect_db_serves_queries_with_production_tunings
+        PASS [   0.010s] (1198/1211) worker-processors::bin/worker tests::smtp_host_resolution_arms
+        PASS [   0.018s] (1199/1211) worker-processors::bin/worker tests::supervise_catches_a_panicking_processor_and_restarts_it
+        PASS [   0.011s] (1200/1211) worker-processors::bin/worker tests::supervise_restarts_a_failed_processor_with_backoff
+        PASS [   2.308s] (1201/1211) worker-processors::automations_execution matching_trigger_enqueues_one_admission_gated_message
+        PASS [   0.011s] (1202/1211) worker-processors::bin/worker tests::supervise_returns_on_a_clean_shutdown_without_restarting
+        PASS [   0.010s] (1203/1211) worker-processors::bin/worker tests::unique_worker_id_is_host_pid_and_random
+        PASS [   0.010s] (1204/1211) worker-processors::bin/worker tests::verp_gate_refuses_production_email_without_the_shared_secret
+        PASS [   0.010s] (1205/1211) worker-processors::bin/worker tests::worker_settings_parse_every_env_arm
+        PASS [   2.302s] (1206/1211) worker-processors::automations_execution quota_refusal_defers_and_resumes_without_double_sending
+        PASS [   1.675s] (1207/1211) worker-processors::automations_execution tenant_a_rule_never_touches_tenant_b
+        PASS [   2.294s] (1208/1211) worker-processors::automations_execution replaying_the_same_event_never_sends_twice
+        PASS [   0.276s] (1209/1211) worker-processors::bin/worker tests::health_server_serves_health_and_prometheus_metrics
+        PASS [  11.655s] (1210/1211) worker-processors::bin/worker tests::run_worker_selective_flags_and_verp_refusal
+        PASS [  11.911s] (1211/1211) worker-processors::bin/worker tests::run_worker_starts_all_processors_and_shutdown_joins_them
+────────────
+     Summary [  96.356s] 1211 tests run: 1210 passed, 1 failed, 0 skipped
+        FAIL [   0.261s] ( 361/1211) ai-service routes::tests::chat_route_delivers_answer_and_persists_audit
+error: test run failed
+SUITES_BOTS3_EXIT=100

@@ -1,0 +1,11 @@
+PASS  mut-consent-refused :: status=400 body='{"error":{"code":"VALIDATION_ERROR","details":["marketing consent required for nocon-ceca5ea6@example.test: no marketing consent on file — recipient must opt in"],"message":"validation failed","reques' new_queue_rows=0 mailpit=0
+PASS  mut-consent-granted :: status=200 queued=1 mailpit=1
+FAIL  mut-approve-ordinary :: status=400 queue=[]
+PASS  mut-reject :: status=200 row={'pending_approval': False, 'done': True}
+PASS  mut-requeue-consumed-404 :: second reject status=404
+PASS  mut-double-approve-race :: statuses=[200, 404] queue_rows=1
+PASS  mut-approve-while-reject-race :: outcomes=[('reject', 404), ('approve', 200)] winner=['approve'] loser=['reject']
+
+=== 45 probes, 2 FAIL ===
+  FAIL tax:auto-list-unsubscribe-mailto :: disposition=BAD (observed='unknown' want=['unsubscribe']); classifier=BAD (observed='ai' want=['deterministic'])
+  FAIL mut-approve-ordinary :: status=400 queue=[]
